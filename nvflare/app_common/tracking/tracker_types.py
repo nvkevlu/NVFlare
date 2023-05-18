@@ -43,7 +43,8 @@ class TrackConst(object):
     PROJECT_TAGS = "project_name"
 
     EXPERIMENT_NAME = "experiment_name"
-    EXPERIMENT_TAG = "experiment_tag"
+    RUN_NAME = "run_name"
+    EXPERIMENT_TAGS = "experiment_tags"
     INIT_CONFIG = "init_config"
     RUN_TAGS = "run_tags"
 

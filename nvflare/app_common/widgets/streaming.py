@@ -66,7 +66,7 @@ def create_analytic_dxo(
         tag (str): the tag associated with this value.
         value: the analytic data.
         data_type: (AnalyticsDataType): analytic data type.
-        writer: (LogWriterName), syntax of the sender: such TensorBoard or MLflow
+        writer (LogWriterName): syntax of the sender: such TensorBoard or MLflow
         kwargs: additional arguments to be passed into the receiver side's function.
 
     Returns:
@@ -202,6 +202,8 @@ class AnalyticsReceiver(Widget, ABC):
     def initialize(self, fl_ctx: FLContext):
         """Initializes the receiver.
 
+        Called after EventType.START_RUN.
+
         Args:
             fl_ctx (FLContext): fl context.
         """
@@ -210,6 +212,8 @@ class AnalyticsReceiver(Widget, ABC):
     @abstractmethod
     def save(self, fl_ctx: FLContext, shareable: Shareable, record_origin: str):
         """Saves the received data.
+
+        Specific implementations of AnalyticsReceiver will implement save in their own way.
 
         Args:
             fl_ctx (FLContext): fl context.
@@ -221,6 +225,8 @@ class AnalyticsReceiver(Widget, ABC):
     @abstractmethod
     def finalize(self, fl_ctx: FLContext):
         """Finalizes the receiver.
+
+        Called after EventType.END_RUN.
 
         Args:
             fl_ctx (FLContext): fl context.
