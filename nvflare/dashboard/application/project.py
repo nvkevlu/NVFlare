@@ -38,7 +38,7 @@ def downloads_html():
 
 @app.route("/")
 def index_html():
-    return app.send_static_file("index.html")
+    return app.send_static_file("nvflare-dashboard/index.html")
 
 
 @app.route("/logout")
