@@ -13,7 +13,8 @@
 # limitations under the License.
 
 
-from flask import current_app as app
+import os
+from flask import current_app as app, send_from_directory
 from flask import jsonify, make_response, request
 from flask_jwt_extended import create_access_token, get_jwt, jwt_required
 
@@ -35,11 +36,20 @@ def application_config_html():
 def downloads_html():
     return app.send_static_file("downloads.html")
 
-
 @app.route("/")
 def index_html():
     return app.send_static_file("nvflare-dashboard/index.html")
 
+@app.route('/', defaults={'path': ''})
+@app.route('/<path:path>')
+def serve(path):
+    if path != "" and os.path.exists(app.static_folder + '/' + path):
+        if not path.endswith(".html"):
+            return send_from_directory(app.static_folder, path+".html")
+        else:
+            return send_from_directory(app.static_folder, path)
+    else:
+        return send_from_directory(app.static_folder, 'index.html')
 
 @app.route("/logout")
 def logout_html():
