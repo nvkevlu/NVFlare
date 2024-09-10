@@ -13,8 +13,7 @@
 # limitations under the License.
 
 
-import os
-from flask import current_app as app, send_from_directory
+from flask import current_app as app
 from flask import jsonify, make_response, request
 from flask_jwt_extended import create_access_token, get_jwt, jwt_required
 
@@ -27,63 +26,57 @@ def my_expired_token_callback(jwt_header, jwt_payload):
     return jsonify({"status": "unauthenticated"}), 401
 
 
-@app.route("/application-config")
+@app.route("/nvflare-dashboard/application-config")
 def application_config_html():
-    return app.send_static_file("application-config.html")
+    return app.send_static_file("nvflare-dashboard/application-config.html")
 
 
-@app.route("/downloads")
+@app.route("/nvflare-dashboard/downloads")
 def downloads_html():
-    return app.send_static_file("downloads.html")
+    return app.send_static_file("nvflare-dashboard/downloads.html")
+
+
+@app.route("/nvflare-dashboard")
+def index_html():
+    return app.send_static_file("nvflare-dashboard/index.html")
 
 @app.route("/")
 def index_html():
     return app.send_static_file("nvflare-dashboard/index.html")
 
-@app.route('/', defaults={'path': ''})
-@app.route('/<path:path>')
-def serve(path):
-    if path != "" and os.path.exists(app.static_folder + '/' + path):
-        if not path.endswith(".html"):
-            return send_from_directory(app.static_folder, path+".html")
-        else:
-            return send_from_directory(app.static_folder, path)
-    else:
-        return send_from_directory(app.static_folder, 'index.html')
-
-@app.route("/logout")
+@app.route("/nvflare-dashboard/logout")
 def logout_html():
-    return app.send_static_file("logout.html")
+    return app.send_static_file("nvflare-dashboard/logout.html")
 
 
-@app.route("/project-admin-dashboard")
+@app.route("/nvflare-dashboard/project-admin-dashboard")
 def project_admin_dashboard_html():
-    return app.send_static_file("project-admin-dashboard.html")
+    return app.send_static_file("nvflare-dashboard/project-admin-dashboard.html")
 
 
-@app.route("/project-configuration")
+@app.route("/nvflare-dashboard/project-configuration")
 def project_configuration_html():
-    return app.send_static_file("project-configuration.html")
+    return app.send_static_file("nvflare-dashboard/project-configuration.html")
 
 
-@app.route("/registration-form")
+@app.route("/nvflare-dashboard/registration-form")
 def registration_form_html():
-    return app.send_static_file("registration-form.html")
+    return app.send_static_file("nvflare-dashboard/registration-form.html")
 
 
-@app.route("/server-config")
+@app.route("/nvflare-dashboard/server-config")
 def server_config_html():
-    return app.send_static_file("server-config.html")
+    return app.send_static_file("nvflare-dashboard/server-config.html")
 
 
-@app.route("/site-dashboard")
+@app.route("/nvflare-dashboard/site-dashboard")
 def site_dashboard_html():
-    return app.send_static_file("site-dashboard.html")
+    return app.send_static_file("nvflare-dashboard/site-dashboard.html")
 
 
-@app.route("/user-dashboard")
+@app.route("/nvflare-dashboard/user-dashboard")
 def user_dashboard_html():
-    return app.send_static_file("user-dashboard.html")
+    return app.send_static_file("nvflare-dashboard/user-dashboard.html")
 
 
 @app.route("/api/v1/login", methods=["POST"])
