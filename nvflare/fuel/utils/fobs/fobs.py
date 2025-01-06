@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import builtins
 import importlib
 import inspect
 import logging
@@ -66,15 +67,12 @@ def _get_type_name(cls: Type) -> str:
 
 def _load_class(type_name: str):
     try:
-        parts = type_name.split(".")
-        if len(parts) == 1:
-            parts = ["builtins", type_name]
-
-        mod = __import__(parts[0])
-        for comp in parts[1:]:
-            mod = getattr(mod, comp)
-
-        return mod
+        if "." in type_name:
+            module_name, class_name = type_name.rsplit(".", 1)
+            module = importlib.import_module(module_name)
+            return getattr(module, class_name)
+        else:
+            return getattr(builtins, type_name)
     except Exception as ex:
         raise TypeError(f"Can't load class {type_name}: {ex}")
 
@@ -205,10 +203,10 @@ def register_enum_types(*enum_types: Type[Enum]) -> None:
 
 
 def auto_register_enum_types(enabled=True) -> None:
-    """Enable or disable auto registering of enum types
+    """Enable or disable the auto-registration of enum types.
 
     Args:
-        enabled: Auto-registering of enum classes is enabled if True
+        enabled: Auto-registration of enum classes is enabled if True.
     """
     global _enum_auto_registration
 
@@ -216,14 +214,14 @@ def auto_register_enum_types(enabled=True) -> None:
 
 
 def auto_register_data_classes(enabled=True) -> None:
-    """Enable or disable auto registering of data classes
+    """Enable or disable the auto-registration of data classes.
 
     Args:
-        enabled: Auto-registering of data classes is enabled if True
+        enabled: Auto-registration of data classes is enabled if True.
     """
     global _data_auto_registration
 
-    _enum_data_registration = enabled
+    _data_auto_registration = enabled
 
 
 def register_folder(folder: str, package: str):
@@ -243,7 +241,7 @@ def register_folder(folder: str, package: str):
                     # classes who are abstract or take extra args in __init__ can't be auto-registered
                     if issubclass(cls_obj, Decomposer) and not inspect.isabstract(cls_obj) and len(spec.args) == 1:
                         register(cls_obj)
-            except (ModuleNotFoundError, RuntimeError) as e:
+            except (ModuleNotFoundError, RuntimeError, ValueError) as e:
                 log.debug(
                     f"Try to import module {decomposers}, but failed: {secure_format_exception(e)}. "
                     f"Can't use name in config to refer to classes in module: {decomposers}."
@@ -275,7 +273,7 @@ def register_custom_folder(folder: str):
                                 log.warning(
                                     f"Invalid Decomposer from {module}: can't have argument in Decomposer's constructor"
                                 )
-                except (ModuleNotFoundError, RuntimeError):
+                except (ModuleNotFoundError, RuntimeError, ValueError):
                     pass
 
 

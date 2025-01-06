@@ -23,6 +23,7 @@ class ReturnCode(object):
     BAD_REQUEST_DATA = "BAD_REQUEST_DATA"
     BAD_TASK_DATA = "BAD_TASK_DATA"
     COMMUNICATION_ERROR = "COMMUNICATION_ERROR"
+    TIMEOUT = "TIMEOUT"
     ERROR = "ERROR"
     EXECUTION_EXCEPTION = "EXECUTION_EXCEPTION"
     EXECUTION_RESULT_ERROR = "EXECUTION_RESULT_ERROR"
@@ -104,6 +105,7 @@ class ReservedKey(object):
     JOB_IS_UNSAFE = "__job_is_unsafe__"
     CUSTOM_PROPS = "__custom_props__"
     EXCEPTIONS = "__exceptions__"
+    PROCESS_TYPE = "__process_type__"  # type of the current process (SP, CP, SJ, CJ)
 
 
 class FLContextKey(object):
@@ -160,6 +162,9 @@ class FLContextKey(object):
     AUTHORIZATION_REASON = "_authorization_reason"
     DISCONNECTED_CLIENT_NAME = "_disconnected_client_name"
     RECONNECTED_CLIENT_NAME = "_reconnected_client_name"
+    SITE_OBJ = "_site_obj_"
+    JOB_LAUNCHER = "_job_launcher"
+    SNAPSHOT = "job_snapshot"
 
     CLIENT_REGISTER_DATA = "_client_register_data"
     SECURITY_ITEMS = "_security_items"
@@ -178,6 +183,17 @@ class FLContextKey(object):
     FILTER_DIRECTION = "__filter_dir__"
     ROOT_URL = "__root_url__"  # the URL for accessing the FL Server
     NOT_READY_TO_END_RUN = "not_ready_to_end_run__"  # component sets this to indicate it's not ready to end run yet
+    CLIENT_CONFIG = "__client_config__"
+    SERVER_CONFIG = "__server_config__"
+    SERVER_HOST_NAME = "__server_host_name__"
+    PROCESS_TYPE = ReservedKey.PROCESS_TYPE
+
+
+class ProcessType:
+    SERVER_PARENT = "SP"
+    SERVER_JOB = "SJ"
+    CLIENT_PARENT = "CP"
+    CLIENT_JOB = "CJ"
 
 
 class ReservedTopic(object):
@@ -321,7 +337,7 @@ class SnapshotKey(object):
 class RunProcessKey(object):
     LISTEN_PORT = "_listen_port"
     CONNECTION = "_conn"
-    CHILD_PROCESS = "_child_process"
+    JOB_HANDLE = "_job_launcher"
     STATUS = "_status"
     JOB_ID = "_job_id"
     PARTICIPANTS = "_participants"
@@ -353,6 +369,10 @@ class JobConstants:
     CLIENT_JOB_CONFIG = "config_fed_client.json"
     META_FILE = "meta.json"
     META = "meta"
+    SITES = "sites"
+    JOB_IMAGE = "image"
+    JOB_ID = "job_id"
+    JOB_LAUNCHER = "job_launcher"
 
 
 class WorkspaceConstants:
@@ -362,10 +382,11 @@ class WorkspaceConstants:
     SITE_FOLDER_NAME = "local"
     CUSTOM_FOLDER_NAME = "custom"
 
-    LOGGING_CONFIG = "log.config"
+    LOGGING_CONFIG = "log_config.json"
     DEFAULT_LOGGING_CONFIG = LOGGING_CONFIG + ".default"
     AUDIT_LOG = "audit.log"
     LOG_FILE_NAME = "log.txt"
+    ERROR_LOG_FILE_NAME = "error_log.txt"
     STATS_POOL_SUMMARY_FILE_NAME = "stats_pool_summary.json"
     STATS_POOL_RECORDS_FILE_NAME = "stats_pool_records.csv"
 
@@ -393,6 +414,10 @@ class WorkspaceConstants:
     JOB_RESOURCES_CONFIG = "job_resources.json"
 
     ADMIN_STARTUP_CONFIG = "fed_admin.json"
+
+    RESOURCE_FILE_NAME_PATTERN = "*__resources.json"  # for both parent and job processes
+    JOB_RESOURCE_FILE_NAME_PATTERN = "*__j_resources.json"  # for job process only
+    PARENT_RESOURCE_FILE_NAME_PATTERN = "*__p_resources.json"  # for parent process only
 
 
 class SiteType:
@@ -428,6 +453,12 @@ class FLMetaKey:
     SITE_NAME = "site_name"
     PROCESS_RC_FILE = "_process_rc.txt"
     SUBMIT_MODEL_NAME = "submit_model_name"
+
+
+class StreamCtxKey:
+    JOB_ID = "job_id"
+    CLIENT_NAME = "client_name"
+    LOG_TYPE = "log_type"
 
 
 class FilterKey:
@@ -478,6 +509,9 @@ class ConfigVarName:
 
     # client and server: max amount of time to wait for communication cell to be created
     CELL_WAIT_TIMEOUT = "cell_wait_timeout"
+
+    # these vars are set in Server's startup config (fed_server.json)
+    MAX_REG_DURATION = "max_reg_duration"
 
 
 class SystemVarName:

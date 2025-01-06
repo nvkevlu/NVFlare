@@ -11,13 +11,14 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import logging
 import os
 
 from nvflare.apis.fl_constant import FLContextKey, SystemConfigs
 from nvflare.apis.fl_context import FLContext
 from nvflare.apis.workspace import Workspace
+from nvflare.fuel.f3.cellnet.fqcn import FQCN
 from nvflare.fuel.utils.config_service import ConfigService
+from nvflare.fuel.utils.log_utils import get_module_logger
 from nvflare.private.admin_defs import Message
 from nvflare.private.defs import CellChannel, EngineConstant, RequestHeader, TrainingTopic, new_cell_message
 from nvflare.private.fed.app.fl_conf import create_privacy_manager
@@ -33,7 +34,7 @@ from nvflare.private.privacy_manager import PrivacyService
 
 class ClientAppRunner(Runner):
 
-    logger = logging.getLogger("ClientAppRunner")
+    logger = get_module_logger(__module__, __qualname__)
 
     def __init__(self, time_out=60.0) -> None:
         super().__init__()
@@ -147,8 +148,11 @@ class ClientAppRunner(Runner):
         message.set_header(RequestHeader.JOB_ID, str(job_id))
         message.set_header(RequestHeader.JOB_STATUS, status)
 
+        my_fqcn = federated_client.cell.core_cell.get_fqcn()
+        cp_fqcn = FQCN.get_parent(my_fqcn)
+
         federated_client.cell.send_request(
-            target=federated_client.client_name,
+            target=cp_fqcn,
             channel=CellChannel.CLIENT_MAIN,
             topic=message.topic,
             request=new_cell_message({}, message),

@@ -14,7 +14,6 @@
 
 """FL Admin commands."""
 
-import logging
 import time
 from abc import ABC, abstractmethod
 from typing import List
@@ -30,6 +29,7 @@ from nvflare.apis.fl_constant import (
 from nvflare.apis.fl_context import FLContext
 from nvflare.apis.shareable import Shareable, make_reply
 from nvflare.apis.utils.fl_context_utils import gen_new_peer_ctx
+from nvflare.fuel.utils.log_utils import get_obj_logger
 from nvflare.private.defs import SpecialTaskName, TaskConstant
 from nvflare.security.logging import secure_format_exception, secure_format_traceback
 from nvflare.widgets.widget import WidgetID
@@ -41,7 +41,7 @@ class CommandProcessor(ABC):
     """The CommandProcessor is responsible for processing a command from parent process."""
 
     def __init__(self) -> None:
-        self.logger = logging.getLogger(self.__class__.__name__)
+        self.logger = get_obj_logger(self)
 
     @abstractmethod
     def get_command_name(self) -> str:
@@ -144,7 +144,7 @@ class GetTaskCommand(CommandProcessor, ServerStateCheck):
         return ServerCommandNames.GET_TASK
 
     def process(self, data: Shareable, fl_ctx: FLContext):
-        """Called to process the abort command.
+        """Called to process the GetTask command.
 
         Args:
             data: process data
@@ -190,7 +190,7 @@ class GetTaskCommand(CommandProcessor, ServerStateCheck):
                 f"return task to client.  client_name: {client.name}  task_name: {taskname}   task_id: {task_id}  "
                 f"sharable_header_task_id: {shareable.get_header(key=FLContextKey.TASK_ID)}"
             )
-        self.logger.debug(f"Get_task processing time: {time.time()-start_time} for client: {client.name}")
+        self.logger.debug(f"Get_task processing time: {time.time() - start_time} for client: {client.name}")
         return shareable
 
     def get_state_check(self, fl_ctx: FLContext) -> dict:
@@ -234,7 +234,7 @@ class SubmitUpdateCommand(CommandProcessor, ServerStateCheck):
         server_runner.process_submission(client, contribution_task_name, task_id, data, fl_ctx)
         self.logger.info(f"submit_update process. client_name:{client.name}   task_id:{task_id}")
 
-        self.logger.debug(f"Submit_result processing time: {time.time()-start_time} for client: {client.name}")
+        self.logger.debug(f"Submit_result processing time: {time.time() - start_time} for client: {client.name}")
         return ""
 
     def get_state_check(self, fl_ctx: FLContext) -> dict:

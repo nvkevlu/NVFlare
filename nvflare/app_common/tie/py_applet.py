@@ -12,14 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import multiprocessing
-import os
 import sys
 import threading
 import time
 from abc import ABC, abstractmethod
 
 from nvflare.apis.workspace import Workspace
-from nvflare.fuel.utils.log_utils import add_log_file_handler, configure_logging
+from nvflare.fuel.utils.log_utils import configure_logging
 from nvflare.security.logging import secure_format_exception, secure_log_traceback
 
 from .applet import Applet
@@ -27,7 +26,6 @@ from .defs import Constant
 
 
 class PyRunner(ABC):
-
     """
     A PyApplet must return a light-weight PyRunner object to run the Python code of the external app.
     Since the runner could be running in a separate subprocess, the runner object must be pickleable!
@@ -95,9 +93,7 @@ class _PyStarter:
             if not self.in_process:
                 # enable logging
                 run_dir = self.workspace.get_run_dir(self.job_id)
-                log_file_name = os.path.join(run_dir, "applet_log.txt")
-                configure_logging(self.workspace)
-                add_log_file_handler(log_file_name)
+                configure_logging(self.workspace, dir_path=run_dir, file_prefix="applet")
             self.runner.start(app_ctx)
 
             # Note: run_func does not return until it runs to completion!
@@ -211,7 +207,7 @@ class PyApplet(Applet, ABC):
                         while time.time() - start < timeout:
                             if p.exitcode is not None:
                                 # already stopped
-                                self.logger.info(f"applet stopped (rc={p.exitcode}) after {time.time()-start} secs")
+                                self.logger.info(f"applet stopped (rc={p.exitcode}) after {time.time() - start} secs")
                                 return p.exitcode
                             time.sleep(0.1)
                     self.logger.info("stopped applet by killing the process")

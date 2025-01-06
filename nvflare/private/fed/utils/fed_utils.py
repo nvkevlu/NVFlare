@@ -13,31 +13,31 @@
 # limitations under the License.
 import importlib
 import json
-import logging
-import logging.config
 import os
 import pkgutil
 import sys
 import warnings
-from logging.handlers import RotatingFileHandler
-from typing import List, Union
+from typing import Any, List, Union
 
 from nvflare.apis.app_validation import AppValidator
 from nvflare.apis.client import Client
 from nvflare.apis.event_type import EventType
 from nvflare.apis.fl_component import FLContext
-from nvflare.apis.fl_constant import ConfigVarName, FLContextKey, FLMetaKey, SiteType, SystemVarName, WorkspaceConstants
+from nvflare.apis.fl_constant import ConfigVarName, FLContextKey, FLMetaKey, JobConstants, SiteType, WorkspaceConstants
 from nvflare.apis.fl_exception import UnsafeComponentError
 from nvflare.apis.job_def import JobMetaKey
+from nvflare.apis.job_launcher_spec import JobLauncherSpec
 from nvflare.apis.utils.decomposers import flare_decomposers
 from nvflare.apis.workspace import Workspace
 from nvflare.app_common.decomposers import common_decomposers
+from nvflare.fuel.data_event.data_bus import DataBus
 from nvflare.fuel.f3.stats_pool import CsvRecordHandler, StatsPoolManager
 from nvflare.fuel.sec.audit import AuditService
 from nvflare.fuel.sec.authz import AuthorizationService
 from nvflare.fuel.sec.security_content_service import LoadResult, SecurityContentService
 from nvflare.fuel.utils import fobs
 from nvflare.fuel.utils.fobs.fobs import register_custom_folder
+from nvflare.fuel.utils.validation_utils import check_str
 from nvflare.private.defs import RequestHeader, SSLConstants
 from nvflare.private.event import fire_event
 from nvflare.private.fed.utils.decomposers import private_decomposers
@@ -47,15 +47,6 @@ from nvflare.security.security import EmptyAuthorizer, FLAuthorizer
 
 from ..simulator.simulator_const import SimulatorConstants
 from .app_authz import AppAuthzService
-
-
-def add_logfile_handler(log_file):
-    root_logger = logging.getLogger()
-    main_handler = root_logger.handlers[0]
-    file_handler = RotatingFileHandler(log_file, maxBytes=20 * 1024 * 1024, backupCount=10)
-    file_handler.setLevel(main_handler.level)
-    file_handler.setFormatter(main_handler.formatter)
-    root_logger.addHandler(file_handler)
 
 
 def _check_secure_content(site_type: str) -> List[str]:
@@ -89,6 +80,18 @@ def _check_secure_content(site_type: str) -> List[str]:
         data, sig = SecurityContentService.load_json(WorkspaceConstants.AUTHORIZATION_CONFIG)
         if sig != LoadResult.OK:
             insecure_list.append(WorkspaceConstants.AUTHORIZATION_CONFIG)
+
+    # every resource file in the startup must be signed and not tampered with!
+    bad_files = SecurityContentService.check_json_files(
+        [
+            WorkspaceConstants.RESOURCE_FILE_NAME_PATTERN,
+            WorkspaceConstants.PARENT_RESOURCE_FILE_NAME_PATTERN,
+            WorkspaceConstants.JOB_RESOURCE_FILE_NAME_PATTERN,
+        ]
+    )
+
+    if bad_files:
+        insecure_list.extend(bad_files)
 
     return insecure_list
 
@@ -145,6 +148,33 @@ def security_init(secure_train: bool, site_org: str, workspace: Workspace, app_v
         sys.exit(1)
 
 
+def security_init_for_job(secure_train: bool, workspace: Workspace, site_type: str):
+    """Initialize security processing for a job process (SJ or CJ).
+
+    Args:
+       secure_train (bool): if run in secure mode or not.
+       workspace: the workspace object.
+       site_type (str): server or client. fed_client.json or fed_server.json
+    """
+    # initialize the SecurityContentService.
+    # must do this before initializing other services since it may be needed by them!
+    startup_dir = workspace.get_startup_kit_dir()
+    SecurityContentService.initialize(content_folder=startup_dir)
+
+    if secure_train:
+        insecure_list = _check_secure_content(site_type=site_type)
+        if len(insecure_list):
+            print("The following files are not secure content.")
+            for item in insecure_list:
+                print(item)
+            sys.exit(1)
+
+    # initialize the AuditService, which is used by command processing.
+    # The Audit Service can be used in other places as well.
+    audit_file_name = workspace.get_audit_file_path()
+    AuditService.initialize(audit_file_name)
+
+
 def security_close():
     AuditService.close()
 
@@ -178,12 +208,6 @@ def create_job_processing_context_properties(workspace: Workspace, job_id: str) 
 
 def find_char_positions(s, ch):
     return [i for i, c in enumerate(s) if c == ch]
-
-
-def configure_logging(workspace: Workspace):
-    log_config_file_path = workspace.get_log_config_file_path()
-    assert os.path.isfile(log_config_file_path), f"missing log config file {log_config_file_path}"
-    logging.config.fileConfig(fname=log_config_file_path, disable_existing_loggers=False)
 
 
 def get_scope_info():
@@ -251,7 +275,7 @@ def register_decomposer_module(decomposer_module):
                 package_name = module_info.name
                 folder = os.path.join(folder_name, package_name.split(".")[-1])
                 fobs.register_folder(folder, package_name)
-    except (ModuleNotFoundError, RuntimeError) as e:
+    except (ModuleNotFoundError, RuntimeError, ValueError) as e:
         # logger.warning(f"Could not register decomposers from: {decomposer_module}")
         pass
 
@@ -370,7 +394,7 @@ def get_target_names(targets):
     return target_names
 
 
-def get_return_code(process, job_id, workspace, logger):
+def get_return_code(job_handle, job_id, workspace, logger):
     run_dir = os.path.join(workspace, job_id)
     rc_file = os.path.join(run_dir, FLMetaKey.PROCESS_RC_FILE)
     if os.path.exists(rc_file):
@@ -381,11 +405,11 @@ def get_return_code(process, job_id, workspace, logger):
         except Exception:
             logger.warning(
                 f"Could not get the return_code from {rc_file} of the job:{job_id}, "
-                f"Return the RC from the process:{process.pid}"
+                f"Return the RC from the job_handle:{job_handle}"
             )
-            return_code = process.poll()
+            return_code = job_handle.poll()
     else:
-        return_code = process.poll()
+        return_code = job_handle.poll()
     return return_code
 
 
@@ -393,9 +417,71 @@ def get_simulator_app_root(simulator_root, site_name):
     return os.path.join(simulator_root, site_name, SimulatorConstants.JOB_NAME, "app_" + site_name)
 
 
-def add_custom_dir_to_path(app_custom_folder, new_env):
-    path = new_env.get(SystemVarName.PYTHONPATH, "")
-    if path:
-        new_env[SystemVarName.PYTHONPATH] = path + os.pathsep + app_custom_folder
-    else:
-        new_env[SystemVarName.PYTHONPATH] = app_custom_folder
+def extract_participants(participants_list):
+    participants = []
+    for item in participants_list:
+        if isinstance(item, str):
+            participants.append(item)
+        elif isinstance(item, dict):
+            sites = item.get(JobConstants.SITES)
+            participants.extend(sites)
+        else:
+            raise ValueError(f"Must be tye of str or dict, but got {type(item)}")
+    return participants
+
+
+def _scope_prop_key(scope_name: str, key: str):
+    return f"{scope_name}::{key}"
+
+
+def set_scope_prop(scope_name: str, key: str, value: Any):
+    """Save the specified property of the specified scope (globally).
+
+    Args:
+        scope_name: name of the scope
+        key: key of the property to be saved
+        value: value of property
+
+    Returns: None
+
+    """
+    check_str("scope_name", scope_name)
+    check_str("key", key)
+    data_bus = DataBus()
+    data_bus.put_data(_scope_prop_key(scope_name, key), value)
+
+
+def get_scope_prop(scope_name: str, key: str) -> Any:
+    """Get the value of a specified property from the specified scope.
+
+    Args:
+        scope_name: name of the scope
+        key: key of the scope
+
+    Returns:
+
+    """
+    check_str("scope_name", scope_name)
+    check_str("key", key)
+    data_bus = DataBus()
+    return data_bus.get_data(_scope_prop_key(scope_name, key))
+
+
+def get_job_launcher(job_meta: dict, fl_ctx: FLContext) -> JobLauncherSpec:
+    engine = fl_ctx.get_engine()
+
+    with engine.new_context() as job_launcher_ctx:
+        # Remove the potential not cleaned up JOB_LAUNCHER
+        job_launcher_ctx.remove_prop(FLContextKey.JOB_LAUNCHER)
+        job_launcher_ctx.set_prop(FLContextKey.JOB_META, job_meta, private=True, sticky=False)
+        engine.fire_event(EventType.BEFORE_JOB_LAUNCH, job_launcher_ctx)
+
+        job_launcher = job_launcher_ctx.get_prop(FLContextKey.JOB_LAUNCHER)
+        if not (job_launcher and isinstance(job_launcher, list)):
+            raise RuntimeError(f"There's no job launcher can handle this job: {job_meta}.")
+
+    launcher = job_launcher[0]
+    if not isinstance(launcher, JobLauncherSpec):
+        raise RuntimeError(f"The job launcher must be JobLauncherSpec but got {type(launcher)}")
+
+    return job_launcher[0]

@@ -49,6 +49,7 @@ from nvflare.fuel.f3.endpoint import Endpoint, EndpointMonitor, EndpointState
 from nvflare.fuel.f3.message import Message
 from nvflare.fuel.f3.mpm import MainProcessMonitor
 from nvflare.fuel.f3.stats_pool import StatsPoolManager
+from nvflare.fuel.utils.log_utils import get_obj_logger
 from nvflare.security.logging import secure_format_exception, secure_format_traceback
 
 _CHANNEL = "cellnet.channel"
@@ -155,7 +156,7 @@ class _BulkSender:
         self.messages = []
         self.last_send_time = 0
         self.lock = threading.Lock()
-        self.logger = logging.getLogger(self.__class__.__name__)
+        self.logger = get_obj_logger(self)
 
     def queue_message(self, channel: str, topic: str, message: Message):
         if self.secure:
@@ -242,25 +243,21 @@ class CertificateExchanger:
             return cert
 
         cert = self.exchange_certificate(target)
-        self.credential_manager.save_certificate(target, cert)
-
         return cert
 
     def exchange_certificate(self, target: str) -> bytes:
-        root = FQCN.get_root(target)
-        req = self.credential_manager.create_request(root)
-        response = self.core_cell.send_request(_SM_CHANNEL, _SM_TOPIC, root, Message(None, req))
+        req = self.credential_manager.create_request()
+        response = self.core_cell.send_request(_SM_CHANNEL, _SM_TOPIC, target, Message(None, req))
         reply = response.payload
 
         if not reply:
             error_code = response.get_header(MessageHeaderKey.RETURN_CODE)
-            raise RuntimeError(f"Cert exchanged to {root} failed: {error_code}")
+            raise RuntimeError(f"Cert exchanged to {target} failed: {error_code}")
 
-        return self.credential_manager.process_response(reply)
+        return self.credential_manager.process_response(response)
 
     def _handle_cert_request(self, request: Message):
-
-        reply = self.credential_manager.process_request(request.payload)
+        reply = self.credential_manager.process_request(request)
         return Message(None, reply)
 
 
@@ -322,7 +319,7 @@ class CoreCell(MessageReceiver, EndpointMonitor):
 
         comm_configurator = CommConfigurator()
         self._name = self.__class__.__name__
-        self.logger = logging.getLogger(self._name)
+        self.logger = get_obj_logger(self)
         self.max_msg_size = comm_configurator.get_max_message_size()
         self.comm_configurator = comm_configurator
 
@@ -356,6 +353,9 @@ class CoreCell(MessageReceiver, EndpointMonitor):
                 self.logger.info(f"{self.my_info.fqcn}: use Root URL {root_url}")
             if not _validate_url(root_url):
                 raise ValueError(f"{self.my_info.fqcn}: invalid Root URL '{root_url}'")
+
+        if parent_url and not _validate_url(parent_url):
+            raise ValueError(f"{self.my_info.fqcn}: invalid Parent URL '{parent_url}'")
 
         self.root_url = root_url
         self.create_internal_listener = create_internal_listener

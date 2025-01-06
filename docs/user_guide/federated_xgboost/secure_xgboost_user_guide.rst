@@ -21,7 +21,7 @@ It supports federated training in the following 4 modes:
 When running with NVFlare, all the GRPC connections in XGBoost are local and the messages are forwarded to other clients through NVFlare's CellNet communication.
 The local GRPC ports are selected automatically by NVFlare.
 
-The encryption is handled in XGBoost by encryption plugins, which are external components that can be installed at runtime. The plugins are bundled with NVFlare.
+The encryption is handled in XGBoost by encryption plugins, which are external components that can be installed at runtime.
 
 Prerequisites
 =============
@@ -75,6 +75,15 @@ The following docker image is recommended for GPU training:
 ::
 
     nvcr.io/nvidia/pytorch:24.03-py3
+
+Building Encryption Plugins
+---------------------------
+
+The secure training requires encryption plugins, which need to be built from the source code
+for your specific environment.
+
+To build the plugins, check out the NVFlare source code from https://github.com/NVIDIA/NVFlare and following the
+instructions in :github_nvflare_link:`this document. <integration/xgboost/encryption_plugins/README.md>`
 
 .. _xgb_provisioning:
 
@@ -130,14 +139,14 @@ For vertical (column-split) training, the datasets on all clients contain differ
 XGBoost Plugin Configuration
 ============================
 XGBoost requires an encryption plugin to handle secure training.
-Two plugins are initially shipped with NVFlare,
 
 - **cuda_paillier**: The default plugin. This plugin uses GPU for cryptographic operations.
 - **nvflare**: This plugin forwards data locally to NVFlare process for encryption.
 
 .. note::
-   All clients must use the same plugin. When different plugins are used,
-   the XGBoost’s behavior is undetermined. It may cause the client to crash.
+
+   All clients must use the same plugin. When different plugins are used in different clients,
+   the behavior of federated XGBoost is undetermined, which can cause the job to crash.
 
 The **cuda_paillier** plugin requires NVIDIA GPUs that support compute capability 7.0 or higher. Also, CUDA
 12.2 or 12.4 must be installed. Please refer to https://developer.nvidia.com/cuda-gpus for more information.
@@ -181,7 +190,7 @@ The plugin can be configured in the ``local/resources.json`` file on clients:
     {
         "federated_plugin": {
             "name": "nvflare",
-            "path": "/tmp/libnvflare.so"
+            "path": "/opt/libs/libnvflare.so"
         }
     }
 
@@ -193,9 +202,10 @@ The following environment variables can be used to override the values in the JS
 .. code-block:: bash
 
     export NVFLARE_XGB_PLUGIN_NAME=nvflare
-    export NVFLARE_XGB_PLUGIN_PATH=/tmp/libnvflare.so
+    export NVFLARE_XGB_PLUGIN_PATH=/opt/libs/libnvflare.so
 
 .. note::
+
    When running with the NVFlare simulator, the plugin must be configured using environment variables,
    as it does not support resources.json.
 
@@ -220,14 +230,6 @@ For example,
     cp /tmp/poc_workspace/example_project/prod_00/site-1/startup/client_context.tenseal /tmp/simulator_workspace/startup
 
 The server_context.tenseal file is not needed.
-
-Building Encryption Plugins
-===========================
-
-In case the included plugin files don't work for your environment, the plugins can be built from the source code.
-
-To build the plugins, check out the NVFlare source code from https://github.com/NVIDIA/NVFlare and following the
-instructions in this document: https://github.com/NVIDIA/NVFlare/blob/main/integration/xgboost/encryption_plugins/README.md.
 
 Job Configuration
 =================
@@ -289,7 +291,8 @@ Vertical Training
 Here are the configuration files for a vertical secure training job. If encryption is not needed, just change the ``secure_training`` arg to false.
 
 .. code-block:: json
-   :caption: config_fed_server.json
+
+    :caption: config_fed_server.json
 
     {
         "format_version": 2,
@@ -325,7 +328,8 @@ Here are the configuration files for a vertical secure training job. If encrypti
 
 
 .. code-block:: json
-   :caption: config_fed_client.json
+
+    :caption: config_fed_client.json
 
     {
         "format_version": 2,

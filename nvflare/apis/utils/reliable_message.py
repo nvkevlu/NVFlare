@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import concurrent.futures
-import logging
 import threading
 import time
 import uuid
@@ -23,6 +22,7 @@ from nvflare.apis.shareable import ReservedHeaderKey, ReturnCode, Shareable, mak
 from nvflare.apis.signal import Signal
 from nvflare.apis.utils.fl_context_utils import generate_log_message
 from nvflare.fuel.utils.config_service import ConfigService
+from nvflare.fuel.utils.log_utils import get_module_logger
 from nvflare.fuel.utils.validation_utils import check_positive_number
 from nvflare.security.logging import secure_format_exception, secure_format_traceback
 
@@ -203,7 +203,7 @@ class _RequestReceiver:
         result.set_header(HEADER_OP, OP_REPLY)
         result.set_header(HEADER_TOPIC, self.topic)
         self.result = result
-        ReliableMessage.debug(fl_ctx, f"finished request handler in {time.time()-start_time} secs")
+        ReliableMessage.debug(fl_ctx, f"finished request handler in {time.time() - start_time} secs")
         self._try_reply(fl_ctx)
 
 
@@ -236,7 +236,7 @@ class ReliableMessage:
     _reply_receivers = {}  # tx id => receiver
     _tx_lock = threading.Lock()
     _shutdown_asked = False
-    _logger = logging.getLogger("ReliableMessage")
+    _logger = get_module_logger(__module__, __qualname__)
 
     @classmethod
     def register_request_handler(cls, topic: str, handler_f, fl_ctx: FLContext):
@@ -344,7 +344,7 @@ class ReliableMessage:
             cls.warning(fl_ctx, "received reply but we are no longer waiting for it")
         else:
             assert isinstance(receiver, _ReplyReceiver)
-            cls.debug(fl_ctx, f"received reply in {time.time()-receiver.tx_start_time} secs - set waiter")
+            cls.debug(fl_ctx, f"received reply in {time.time() - receiver.tx_start_time} secs - set waiter")
             receiver.process(request)
         return make_reply(ReturnCode.OK)
 
@@ -611,7 +611,7 @@ class ReliableMessage:
                     # the reply is already the result - we are done!
                     # this could happen when we didn't get positive ack for our first request, and the result was
                     # already produced when we did the 2nd request (this request).
-                    cls.debug(fl_ctx, f"C1: received result in {time.time()-receiver.tx_start_time} seconds; {rc=}")
+                    cls.debug(fl_ctx, f"C1: received result in {time.time() - receiver.tx_start_time} seconds; {rc=}")
                     return ack
 
                 # the ack is a status report - check status
@@ -668,7 +668,7 @@ class ReliableMessage:
                 # we already received result sent by the target.
                 # Note that we don't wait forever here - we only wait for _query_interval, so we could
                 # check other condition and/or send query to ask for result.
-                cls.debug(fl_ctx, f"C2: received result in {time.time()-receiver.tx_start_time} seconds")
+                cls.debug(fl_ctx, f"C2: received result in {time.time() - receiver.tx_start_time} seconds")
                 return receiver.result
 
             if abort_signal and abort_signal.triggered:
@@ -701,7 +701,7 @@ class ReliableMessage:
                 op = ack.get_header(HEADER_OP)
                 if op == OP_REPLY:
                     # the ack is result itself!
-                    cls.debug(fl_ctx, f"C3: received result in {time.time()-receiver.tx_start_time} seconds")
+                    cls.debug(fl_ctx, f"C3: received result in {time.time() - receiver.tx_start_time} seconds")
                     return ack
 
                 status = ack.get_header(HEADER_STATUS)

@@ -18,7 +18,15 @@ import time
 from nvflare.apis.event_type import EventType
 from nvflare.apis.executor import Executor
 from nvflare.apis.fl_component import FLComponent
-from nvflare.apis.fl_constant import ConfigVarName, FilterKey, FLContextKey, ReservedKey, ReservedTopic, ReturnCode
+from nvflare.apis.fl_constant import (
+    ConfigVarName,
+    FilterKey,
+    FLContextKey,
+    ReservedKey,
+    ReservedTopic,
+    ReturnCode,
+    SiteType,
+)
 from nvflare.apis.fl_context import FLContext
 from nvflare.apis.fl_exception import UnsafeJobError
 from nvflare.apis.shareable import ReservedHeaderKey, Shareable, make_reply
@@ -583,6 +591,7 @@ class ClientRunner(TBI):
         finally:
             self.end_run_events_sequence()
             ReliableMessage.shutdown()
+            self.engine.shutdown_streamer()
             with self.task_lock:
                 self.running_tasks = {}
 
@@ -595,7 +604,7 @@ class ClientRunner(TBI):
             var_name=ConfigVarName.MAX_RUNNER_SYNC_TIMEOUT,
             default=60.0,
         )
-        target = "server"
+        target = SiteType.SERVER
         synced = False
         sync_start = time.time()
         with self.engine.new_context() as fl_ctx:
@@ -630,7 +639,7 @@ class ClientRunner(TBI):
             if not synced:
                 raise RuntimeError(f"cannot sync with Server Runner after {max_sync_timeout} seconds")
 
-            self.log_info(fl_ctx, f"synced to Server Runner in {time.time()-sync_start} seconds")
+            self.log_info(fl_ctx, f"synced to Server Runner in {time.time() - sync_start} seconds")
             ReliableMessage.enable(fl_ctx)
             self.fire_event(EventType.ABOUT_TO_START_RUN, fl_ctx)
             fl_ctx.set_prop(FLContextKey.APP_ROOT, app_root, sticky=True)
@@ -704,7 +713,7 @@ class ClientRunner(TBI):
         return make_reply(ReturnCode.OK)
 
     def _handle_do_task(self, topic: str, request: Shareable, fl_ctx: FLContext) -> Shareable:
-        self.log_info(fl_ctx, "received aux request to do task")
+        self.log_info(fl_ctx, f"received aux request to do task '{topic}'")
         task_name = request.get_header(ReservedHeaderKey.TASK_NAME)
         task_id = request.get_header(ReservedHeaderKey.TASK_ID)
         task = TaskAssignment(name=task_name, task_id=task_id, data=request)
