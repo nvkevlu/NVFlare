@@ -50,12 +50,19 @@ class TrainerController(
             try {
                 runTrainingLoop()
             } catch (e: Exception) {
+                println("Training error: $e")
                 status = TrainingStatus.IDLE
-                throw e
+                // Don't rethrow the exception, just log it
             }
         }
         
-        currentTask?.join()
+        try {
+            currentTask?.join()
+        } catch (e: Exception) {
+            println("Task join error: $e")
+            status = TrainingStatus.IDLE
+            // Don't rethrow the exception, just log it
+        }
     }
     
     fun stopTraining() {
@@ -67,31 +74,54 @@ class TrainerController(
     
     private suspend fun runTrainingLoop() {
         var currentJob: Job? = null
+        var retryCount = 0
+        val maxRetries = Int.MAX_VALUE  // Effectively infinite retries
         
-        while (currentJob == null && currentTask?.isActive == true) {
+        while (currentJob == null && currentTask?.isActive == true && retryCount < maxRetries) {
             try {
+                println("Attempting to fetch job (attempt ${retryCount + 1})...")
                 val jobResponse = connection.fetchJob()
+                
                 if (jobResponse.status == "stopped") {
-                    throw NVFlareError.SERVER_REQUESTED_STOP
+                    println("Server requested stop")
+                    status = TrainingStatus.IDLE
+                    return
                 }
                 
                 val job = jobResponse.toJob()
                 val methodString = job.meta.method ?: ""
+                
                 if (MethodType.values().any { it.name.lowercase() == methodString } &&
                     supportedMethods.any { it.name.lowercase() == methodString }) {
+                    println("Found compatible job: ${job.id} with method: $methodString")
                     currentJob = job
                 } else {
                     println("Skipping job with unsupported or missing method: $methodString")
+                    println("Supported methods: ${supportedMethods.map { it.name.lowercase() }}")
+                    delay(5000)  // Wait 5 seconds before next attempt
+                    retryCount++
                     continue
                 }
             } catch (e: Exception) {
-                println("Failed to fetch job $e, retrying in 5 seconds...")
+                println("Failed to fetch job (attempt ${retryCount + 1}): $e")
+                println("Retrying in 5 seconds...")
                 delay(5000)
+                retryCount++
                 continue
             }
         }
         
-        val job = currentJob ?: throw NVFlareError.JOB_FETCH_FAILED
+        if (retryCount >= maxRetries) {
+            println("Reached maximum retry attempts, but will continue trying...")
+            retryCount = 0  // Reset counter and continue
+            return
+        }
+        
+        val job = currentJob ?: run {
+            println("No job found after all retries")
+            status = TrainingStatus.IDLE
+            return
+        }
         
         while (job.status == "running" && currentTask?.isActive == true) {
             try {

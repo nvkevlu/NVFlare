@@ -1,13 +1,17 @@
 package com.nvidia.nvflare.models
 
 import org.json.JSONObject
+import org.json.JSONArray
 
 data class JobResponse(
     val status: String,
     val message: String?,
     val retryWait: Int?,
     val jobId: String?,
-    val meta: Map<String, Any>?
+    val jobName: String?,
+    val jobMeta: Map<String, Any>?,
+    val method: String?,
+    val details: Map<String, String>?
 ) {
     companion object {
         fun fromJson(json: String): JobResponse {
@@ -17,25 +21,63 @@ data class JobResponse(
                 message = obj.optString("message"),
                 retryWait = obj.optInt("retry_wait").takeIf { it > 0 },
                 jobId = obj.optString("job_id").takeIf { it.isNotEmpty() },
-                meta = obj.optJSONObject("meta")?.toMap()
+                jobName = obj.optString("job_name").takeIf { it.isNotEmpty() },
+                jobMeta = obj.optJSONObject("job_meta")?.toMap(),
+                method = obj.optString("method").takeIf { it.isNotEmpty() },
+                details = obj.optJSONObject("details")?.toMap()?.mapValues { it.value.toString() }
             )
         }
     }
+}
+
+// Extension function to convert JSONObject to Map
+private fun JSONObject.toMap(): Map<String, Any> {
+    val map = mutableMapOf<String, Any>()
+    val keys = this.keys()
+    while (keys.hasNext()) {
+        val key = keys.next()
+        val value = this.get(key)
+        map[key] = when (value) {
+            is JSONObject -> value.toMap()
+            is JSONArray -> value.toList()
+            else -> value
+        }
+    }
+    return map
+}
+
+// Extension function to convert JSONArray to List
+private fun JSONArray.toList(): List<Any> {
+    val list = mutableListOf<Any>()
+    for (i in 0 until this.length()) {
+        val value = this.get(i)
+        list.add(when (value) {
+            is JSONObject -> value.toMap()
+            is JSONArray -> value.toList()
+            else -> value
+        })
+    }
+    return list
 }
 
 fun JobResponse.toJob(): Job {
     if (jobId == null) {
         throw NVFlareError.INVALID_METADATA("Missing job_id in response")
     }
-    if (meta == null) {
-        throw NVFlareError.INVALID_METADATA("Missing meta in response")
+    if (jobMeta == null) {
+        throw NVFlareError.INVALID_METADATA("Missing job_meta in response")
     }
+    
+    // Extract method from either direct method field or job_meta
+    val methodString = method ?: jobMeta["edge_method"] as? String
+        ?: throw NVFlareError.INVALID_METADATA("Missing method in job metadata")
+    
     return Job(
         id = jobId,
         status = status,
         meta = JobMeta(
-            method = meta["method"] as? String,
-            modelType = meta["model_type"] as? String
+            method = methodString,
+            modelType = jobMeta["model_type"] as? String
         )
     )
 }
@@ -109,32 +151,4 @@ fun TaskResponse.toTrainingTask(jobId: String): TrainingTask {
         name = taskName,
         modelData = data.mapValues { it.value.toString() }
     )
-}
-
-private fun JSONObject.toMap(): Map<String, Any> {
-    val map = mutableMapOf<String, Any>()
-    val keys = this.keys()
-    while (keys.hasNext()) {
-        val key = keys.next()
-        val value = this.get(key)
-        map[key] = when (value) {
-            is JSONObject -> value.toMap()
-            is org.json.JSONArray -> value.toList()
-            else -> value
-        }
-    }
-    return map
-}
-
-private fun org.json.JSONArray.toList(): List<Any> {
-    val list = mutableListOf<Any>()
-    for (i in 0 until this.length()) {
-        val value = this.get(i)
-        list.add(when (value) {
-            is JSONObject -> value.toMap()
-            is org.json.JSONArray -> value.toList()
-            else -> value
-        })
-    }
-    return list
 } 

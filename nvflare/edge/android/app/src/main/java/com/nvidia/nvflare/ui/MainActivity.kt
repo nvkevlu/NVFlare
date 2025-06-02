@@ -22,6 +22,7 @@ import com.nvidia.nvflare.training.TrainerType
 import com.nvidia.nvflare.training.DeviceStateMonitor
 import com.nvidia.nvflare.ui.theme.NVFlareTheme
 import kotlinx.coroutines.launch
+import java.net.NetworkInterface
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -49,6 +50,19 @@ fun MainScreen() {
     var hostnameText by remember { mutableStateOf(connection.hostname.value ?: "") }
     var portText by remember { mutableStateOf(connection.port.value?.toString() ?: "") }
     
+    // Get IP address
+    val ipAddress = remember {
+        try {
+            NetworkInterface.getNetworkInterfaces()
+                .asSequence()
+                .flatMap { it.inetAddresses.asSequence() }
+                .filter { !it.isLoopbackAddress && it.hostAddress.indexOf(':') < 0 }
+                .firstOrNull()?.hostAddress ?: "No IP found"
+        } catch (e: Exception) {
+            "Error getting IP"
+        }
+    }
+    
     // Update connection when text changes
     LaunchedEffect(hostnameText) {
         connection.hostname.value = hostnameText
@@ -64,6 +78,28 @@ fun MainScreen() {
             .verticalScroll(rememberScrollState()),
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
+        // IP Address Display
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(
+                containerColor = MaterialTheme.colorScheme.surfaceVariant
+            )
+        ) {
+            Column(
+                modifier = Modifier.padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                Text(
+                    text = "Device IP Address",
+                    style = MaterialTheme.typography.titleMedium
+                )
+                Text(
+                    text = ipAddress,
+                    style = MaterialTheme.typography.bodyLarge
+                )
+            }
+        }
+        
         // Hostname and Port Input
         OutlinedTextField(
             value = hostnameText,
