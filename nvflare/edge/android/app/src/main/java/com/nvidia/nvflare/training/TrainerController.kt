@@ -1,194 +1,165 @@
 package com.nvidia.nvflare.training
 
+import android.util.Log
+import androidx.lifecycle.LiveData
+import androidx.lifecycle.MutableLiveData
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.viewModelScope
 import com.nvidia.nvflare.connection.Connection
-import com.nvidia.nvflare.models.Job
-import com.nvidia.nvflare.models.JobMeta
-import com.nvidia.nvflare.models.NVFlareError
-import com.nvidia.nvflare.models.toJob
-import com.nvidia.nvflare.models.toTrainingTask
-import kotlinx.coroutines.Job as CoroutineJob
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.isActive
+import com.nvidia.nvflare.models.*
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.GlobalScope
-import kotlinx.coroutines.withContext
-import kotlinx.coroutines.Dispatchers
 
-class TrainerController(
-    private val connection: Connection,
-    private val deviceStateMonitor: DeviceStateMonitor
-) {
-    var status: TrainingStatus = TrainingStatus.IDLE
-    var trainerType: TrainerType = TrainerType.EXECUTORCH
-    var supportedMethods: Set<MethodType> = setOf(MethodType.CIFAR10, MethodType.XOR)
-    
-    private var currentTask: CoroutineJob? = null
-    
+enum class TrainerType {
+    EXECUTORCH
+}
+
+enum class MethodType(val displayName: String) {
+    CNN("cnn"),
+    XOR("xor");
+
+    val requiredDataset: String
+        get() = when (this) {
+            CNN -> "cifar10"
+            XOR -> "xor"
+        }
+}
+
+enum class TrainingStatus {
+    IDLE,
+    TRAINING,
+    STOPPING,
+    ERROR
+}
+
+class TrainerController(private val connection: Connection) : ViewModel() {
+    private val TAG = "TrainerController"
+    private val _status = MutableLiveData<TrainingStatus>(TrainingStatus.IDLE)
+    val status: LiveData<TrainingStatus> = _status
+
+    private val _trainerType = MutableLiveData<TrainerType>(TrainerType.EXECUTORCH)
+    val trainerType: LiveData<TrainerType> = _trainerType
+
+    private val _supportedMethods = MutableLiveData<Set<MethodType>>(setOf(MethodType.CNN, MethodType.XOR))
+    val supportedMethods: LiveData<Set<MethodType>> = _supportedMethods
+
+    private var currentTask: kotlinx.coroutines.Job? = null
+    private var currentJob: Job? = null
+
     val capabilities: Map<String, Any>
         get() = mapOf(
-            "methods" to supportedMethods.map { it.name.lowercase() }
+            "methods" to _supportedMethods.value?.map { it.name.lowercase() } ?: emptyList()
         )
-    
+
     init {
+        // Set initial capabilities
         connection.setCapabilities(capabilities)
     }
-    
+
     fun toggleMethod(method: MethodType) {
-        if (supportedMethods.contains(method)) {
-            supportedMethods = supportedMethods - method
+        val currentMethods = _supportedMethods.value ?: emptySet()
+        _supportedMethods.value = if (currentMethods.contains(method)) {
+            currentMethods - method
         } else {
-            supportedMethods = supportedMethods + method
+            currentMethods + method
         }
         connection.setCapabilities(capabilities)
     }
-    
-    suspend fun startTraining() {
-        if (status != TrainingStatus.IDLE) return
-        status = TrainingStatus.TRAINING
-        
-        currentTask = kotlinx.coroutines.GlobalScope.launch {
+
+    fun startTraining() {
+        if (_status.value == TrainingStatus.TRAINING) {
+            Log.w(TAG, "Training already in progress")
+            return
+        }
+
+        _status.value = TrainingStatus.TRAINING
+        currentTask = viewModelScope.launch {
             try {
                 runTrainingLoop()
             } catch (e: Exception) {
-                println("Training error: $e")
-                status = TrainingStatus.IDLE
-                // Don't rethrow the exception, just log it
+                Log.e(TAG, "Training failed", e)
+                if (_status.value != TrainingStatus.STOPPING) {
+                    _status.value = TrainingStatus.ERROR
+                }
             }
         }
-        
-        try {
-            currentTask?.join()
-        } catch (e: Exception) {
-            println("Task join error: $e")
-            status = TrainingStatus.IDLE
-            // Don't rethrow the exception, just log it
-        }
     }
-    
+
     fun stopTraining() {
-        status = TrainingStatus.STOPPING
+        _status.value = TrainingStatus.STOPPING
         currentTask?.cancel()
         currentTask = null
-        status = TrainingStatus.IDLE
+        _status.value = TrainingStatus.IDLE
+        connection.resetCookie()
     }
-    
+
     private suspend fun runTrainingLoop() {
-        var currentJob: Job? = null
-        var retryCount = 0
-        val maxRetries = Int.MAX_VALUE  // Effectively infinite retries
-        
-        while (currentJob == null && currentTask?.isActive == true && retryCount < maxRetries) {
+        while (true) {
             try {
-                println("Attempting to fetch job (attempt ${retryCount + 1})...")
+                // Fetch job
                 val jobResponse = connection.fetchJob()
-                
+                Log.d(TAG, "Job response: $jobResponse")
+
+                // Check if server requested stop
                 if (jobResponse.status == "stopped") {
-                    println("Server requested stop")
-                    status = TrainingStatus.IDLE
-                    return
+                    throw NVFlareError.SERVER_REQUESTED_STOP
                 }
-                
-                val job = jobResponse.toJob()
-                val methodString = job.meta.method ?: ""
-                
-                if (MethodType.values().any { it.name.lowercase() == methodString } &&
-                    supportedMethods.any { it.name.lowercase() == methodString }) {
-                    println("Found compatible job: ${job.id} with method: $methodString")
-                    currentJob = job
-                } else {
-                    println("Skipping job with unsupported or missing method: $methodString")
-                    println("Supported methods: ${supportedMethods.map { it.name.lowercase() }}")
-                    delay(5000)  // Wait 5 seconds before next attempt
-                    retryCount++
-                    continue
+
+                // Verify we support this job's method
+                val methodString = jobResponse.method ?: ""
+                val method = MethodType.values().find { it.name.equals(methodString, ignoreCase = true) }
+                if (method == null || !_supportedMethods.value!!.contains(method)) {
+                    Log.e(TAG, "Unsupported method: $methodString")
+                    throw NVFlareError.INVALID_METADATA("Unsupported method: $methodString")
                 }
-            } catch (e: Exception) {
-                println("Failed to fetch job (attempt ${retryCount + 1}): $e")
-                println("Retrying in 5 seconds...")
-                delay(5000)
-                retryCount++
-                continue
-            }
-        }
-        
-        if (retryCount >= maxRetries) {
-            println("Reached maximum retry attempts, but will continue trying...")
-            retryCount = 0  // Reset counter and continue
-            return
-        }
-        
-        val job = currentJob ?: run {
-            println("No job found after all retries")
-            status = TrainingStatus.IDLE
-            return
-        }
-        
-        while (job.status == "running" && currentTask?.isActive == true) {
-            try {
-                val taskResponse = connection.fetchTask(job.id)
-                
+
+                currentJob = jobResponse.toJob()
+
+                // Fetch task
+                val taskResponse = connection.fetchTask(currentJob!!.id)
+                Log.d(TAG, "Task response: $taskResponse")
+
+                // Check if we should continue training
                 if (!taskResponse.taskStatus.shouldContinueTraining) {
-                    println("Training finished - no more tasks")
+                    Log.d(TAG, "Training finished - no more tasks")
                     return
                 }
-                
-                println("task response: $taskResponse")
-                val task = taskResponse.toTrainingTask(job.id)
-                
-                val trainer = createTrainer(task.modelData, job.meta)
-                
-                // Check device state before training
-                if (!deviceStateMonitor.isReadyForTraining) {
-                    throw NVFlareError.TRAINING_FAILED("Device not ready")
-                }
-                
+
+                // Create trainer
+                val task = taskResponse.toTrainingTask(currentJob!!.id)
+                val trainer = createTrainer(task.modelData, task.trainingConfig)
+
                 // Train and get weight differences
-                val weightDiff = withContext(Dispatchers.Default) {
-                    try {
-                        trainer.train()
-                    } catch (e: Exception) {
-                        println("Training failed: $e")
-                        throw e
-                    }
-                }
-                
-                // Check device state again before sending results
-                if (!deviceStateMonitor.isReadyForTraining) {
-                    throw NVFlareError.TRAINING_FAILED("Device no longer ready")
-                }
-                
-                // Send results back
+                val weightDiff = trainer.train(task.trainingConfig)
+
+                // Send results
                 connection.sendResult(
-                    jobId = job.id,
+                    jobId = currentJob!!.id,
                     taskId = task.id,
                     taskName = task.name,
                     weightDiff = weightDiff
                 )
+
             } catch (e: Exception) {
-                println("Task execution failed: $e")
-                if (status != TrainingStatus.STOPPING) {
-                    status = TrainingStatus.IDLE
-                }
+                Log.e(TAG, "Error in training loop", e)
                 throw e
             }
         }
     }
-    
-    private fun createTrainer(modelData: Map<String, String>, meta: JobMeta): Trainer {
-        val methodString = meta.method ?: ""
-        val method = MethodType.values().find { it.name.lowercase() == methodString }
-            ?: throw NVFlareError.INVALID_METADATA("Missing or invalid method in job metadata")
-        
-        if (!supportedMethods.contains(method)) {
+
+    private fun createTrainer(modelData: String, config: TrainingConfig): Trainer {
+        // Get the method from the config
+        val methodString = config.method ?: ""
+        val method = MethodType.values().find { it.name.equals(methodString, ignoreCase = true) }
+            ?: throw NVFlareError.INVALID_METADATA("Missing or invalid method in config")
+
+        // Verify that we support this method
+        if (!_supportedMethods.value!!.contains(method)) {
             throw NVFlareError.INVALID_METADATA("Method $methodString is not supported by this client")
         }
-        
-        return when (trainerType) {
-            TrainerType.EXECUTORCH -> {
-                val modelString = modelData["model_buffer"]
-                    ?: throw NVFlareError.INVALID_MODEL_DATA("Missing model_buffer in model data")
-                ETTrainerWrapper(modelString, meta)
-            }
+
+        return when (_trainerType.value) {
+            TrainerType.EXECUTORCH -> ETTrainerWrapper(modelData, config)
+            else -> throw IllegalStateException("Unsupported trainer type")
         }
     }
 } 

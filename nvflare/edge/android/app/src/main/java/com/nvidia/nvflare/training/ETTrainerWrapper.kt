@@ -1,28 +1,32 @@
 package com.nvidia.nvflare.training
 
-import com.nvidia.nvflare.models.JobMeta
-import android.util.Base64
-import java.nio.ByteBuffer
-import java.nio.ByteOrder
+import android.util.Log
+import com.nvidia.nvflare.models.TrainingConfig
+import com.nvidia.nvflare.trainer.ETTrainer
 
-class ETTrainerWrapper(
-    private val modelBase64: String,
-    private val meta: JobMeta
-) : Trainer {
-    override suspend fun train(): FloatArray {
-        // Decode the base64 model data
-        val modelBytes = Base64.decode(modelBase64, Base64.DEFAULT)
+class ETTrainerWrapper : Trainer {
+    private val TAG = "ETTrainerWrapper"
+    private val trainer: ETTrainer
+
+    constructor(modelBase64: String, config: TrainingConfig) {
+        Log.d(TAG, "Initializing with model and config")
+        trainer = ETTrainer()
         
-        // Convert bytes to float array using ByteBuffer to handle endianness correctly
-        val buffer = ByteBuffer.wrap(modelBytes)
-        buffer.order(ByteOrder.LITTLE_ENDIAN) // PyTorch uses little-endian
-        
-        val floatArray = FloatArray(modelBytes.size / 4) // 4 bytes per float
-        for (i in floatArray.indices) {
-            floatArray[i] = buffer.float
+        if (!trainer.loadDataset(config.dataSetType)) {
+            throw RuntimeException("Failed to load dataset")
         }
         
-        // Return the same model data without actual training
-        return floatArray
+        if (!trainer.loadModel(modelBase64)) {
+            throw RuntimeException("Failed to load model")
+        }
+        
+        Log.d(TAG, "Initialization complete")
+    }
+
+    override suspend fun train(): Map<String, FloatArray> {
+        Log.d(TAG, "Starting train()")
+        val result = trainer.train(TrainingConfig())
+        Log.d(TAG, "train() completed with result keys: ${result.keys}")
+        return result
     }
 } 

@@ -2,31 +2,312 @@ package com.nvidia.nvflare.models
 
 import org.json.JSONObject
 import org.json.JSONArray
+import java.util.Base64
+import com.google.gson.annotations.SerializedName
 
-data class JobResponse(
+// Dataset Types
+object DatasetType {
+    const val CIFAR10 = "cifar10"
+    const val XOR = "xor"
+}
+
+// Meta Keys
+object MetaKey {
+    const val DATASET_TYPE = "dataset_type"
+    const val BATCH_SIZE = "batch_size"
+    const val LEARNING_RATE = "learning_rate"
+    const val TOTAL_EPOCHS = "total_epochs"
+    const val DATASET_SHUFFLE = "dataset_shuffle"
+}
+
+// Model Exchange Format Constants
+object ModelExchangeFormat {
+    const val MODEL_BUFFER = "model_buffer"
+    const val MODEL_BUFFER_TYPE = "model_buffer_type"
+    const val MODEL_BUFFER_NATIVE_FORMAT = "model_buffer_native_format"
+    const val MODEL_BUFFER_ENCODING = "model_buffer_encoding"
+}
+
+// Model Buffer Types
+enum class ModelBufferType {
+    EXECUTORCH,
+    PYTORCH,
+    TENSORFLOW,
+    UNKNOWN;
+
+    companion object {
+        fun fromString(value: String): ModelBufferType {
+            return try {
+                valueOf(value.uppercase())
+            } catch (e: IllegalArgumentException) {
+                UNKNOWN
+            }
+        }
+    }
+}
+
+// Model Native Formats
+enum class ModelNativeFormat {
+    BINARY,
+    JSON,
+    UNKNOWN;
+
+    companion object {
+        fun fromString(value: String): ModelNativeFormat {
+            return try {
+                valueOf(value.uppercase())
+            } catch (e: IllegalArgumentException) {
+                UNKNOWN
+            }
+        }
+    }
+}
+
+// Model Encodings
+enum class ModelEncoding {
+    BASE64,
+    RAW,
+    UNKNOWN;
+
+    companion object {
+        fun fromString(value: String): ModelEncoding {
+            return try {
+                valueOf(value.uppercase())
+            } catch (e: IllegalArgumentException) {
+                UNKNOWN
+            }
+        }
+    }
+}
+
+// JSON Value Types
+sealed class JSONValue {
+    data class StringValue(val value: String) : JSONValue()
+    data class IntValue(val value: Int) : JSONValue()
+    data class DoubleValue(val value: Double) : JSONValue()
+    data class BooleanValue(val value: Boolean) : JSONValue()
+    data class ArrayValue(val value: List<JSONValue>) : JSONValue()
+    data class ObjectValue(val value: Map<String, JSONValue>) : JSONValue()
+    object NullValue : JSONValue()
+
+    companion object {
+        fun fromJSONObject(json: JSONObject): ObjectValue {
+            val map = mutableMapOf<String, JSONValue>()
+            json.keys().forEach { key ->
+                map[key] = fromAny(json.get(key))
+            }
+            return ObjectValue(map)
+        }
+
+        fun fromJSONArray(json: JSONArray): ArrayValue {
+            val list = mutableListOf<JSONValue>()
+            for (i in 0 until json.length()) {
+                list.add(fromAny(json.get(i)))
+            }
+            return ArrayValue(list)
+        }
+
+        private fun fromAny(value: Any): JSONValue {
+            return when (value) {
+                is String -> StringValue(value)
+                is Int -> IntValue(value)
+                is Double -> DoubleValue(value)
+                is Boolean -> BooleanValue(value)
+                is JSONObject -> fromJSONObject(value)
+                is JSONArray -> fromJSONArray(value)
+                JSONObject.NULL -> NullValue
+                else -> NullValue
+            }
+        }
+    }
+}
+
+// Task Headers
+object TaskHeaderKey {
+    const val TASK_SEQ = "task_seq"
+    const val UPDATE_INTERVAL = "update_interval"
+    const val CURRENT_ROUND = "current_round"
+    const val NUM_ROUNDS = "num_rounds"
+    const val CONTRIBUTION_ROUND = "contribution_round"
+}
+
+// Task Response
+data class TaskResponse(
     val status: String,
     val message: String?,
+    val jobId: String?,
+    val taskId: String?,
+    val taskName: String?,
     val retryWait: Int?,
+    val taskData: TaskData?,
+    val cookie: JSONValue?,
+    val headers: Map<String, Any> = emptyMap()
+) {
+    data class TaskData(
+        val data: String,
+        val meta: JSONValue,
+        val kind: String
+    )
+
+    enum class TaskStatus(val value: String) {
+        OK("OK"),
+        DONE("DONE"),
+        ERROR("ERROR"),
+        RETRY("RETRY"),
+        UNKNOWN("UNKNOWN");
+
+        companion object {
+            fun fromString(value: String): TaskStatus {
+                return values().find { it.value == value } ?: UNKNOWN
+            }
+        }
+
+        val isSuccess: Boolean
+            get() = this == OK || this == DONE
+
+        val shouldContinueTraining: Boolean
+            get() = this == OK
+    }
+
+    val taskStatus: TaskStatus
+        get() = TaskStatus.fromString(status)
+
+    fun toTrainingTask(jobId: String): TrainingTask {
+        if (!taskStatus.shouldContinueTraining) {
+            throw NVFlareError.TaskFetchFailed(message ?: "Task status indicates training should not continue")
+        }
+
+        if (taskId == null || taskName == null || taskData == null) {
+            throw NVFlareError.TaskFetchFailed("Missing required task data")
+        }
+
+        val currentRound = headers[TaskHeaderKey.CURRENT_ROUND] as? Int ?: 0
+        val numRounds = headers[TaskHeaderKey.NUM_ROUNDS] as? Int ?: 1
+        val updateInterval = headers[TaskHeaderKey.UPDATE_INTERVAL] as? Float ?: 1.0f
+
+        return TrainingTask(
+            id = taskId,
+            name = taskName,
+            jobId = jobId,
+            modelData = taskData.data,
+            trainingConfig = TrainingConfig(),
+            currentRound = currentRound,
+            numRounds = numRounds,
+            updateInterval = updateInterval
+        )
+    }
+}
+
+// Job Response
+data class JobResponse(
+    val status: String,
     val jobId: String?,
     val jobName: String?,
-    val jobMeta: Map<String, Any>?,
+    val jobData: Map<String, Any>?,
     val method: String?,
+    val retryWait: Int?,
+    val message: String?,
+    val details: Map<String, String>?
+) {
+    fun toJob(): Job {
+        if (jobId == null) {
+            throw NVFlareError.InvalidRequest("Can't convert JobResponse to Job")
+        }
+        return Job(id = jobId, status = "running")
+    }
+}
+
+// Job
+data class Job(
+    val id: String,
+    val status: String
+)
+
+// Training Config
+data class TrainingConfig(
+    val totalEpochs: Int = 1,
+    val batchSize: Int = 4,
+    val learningRate: Float = 0.1f,
+    val method: String = "cnn",
+    val dataSetType: String = DatasetType.CIFAR10
+) {
+    companion object {
+        fun fromMap(data: Map<String, Any>): TrainingConfig {
+            return TrainingConfig(
+                totalEpochs = (data[MetaKey.TOTAL_EPOCHS] as? Number)?.toInt() ?: 1,
+                batchSize = (data[MetaKey.BATCH_SIZE] as? Number)?.toInt() ?: 4,
+                learningRate = (data[MetaKey.LEARNING_RATE] as? Number)?.toFloat() ?: 0.1f,
+                method = data["method"] as? String ?: "xor",
+                dataSetType = data[MetaKey.DATASET_TYPE] as? String ?: DatasetType.XOR
+            )
+        }
+    }
+
+    fun toMap(): Map<String, Any> = mapOf(
+        MetaKey.TOTAL_EPOCHS to totalEpochs,
+        MetaKey.BATCH_SIZE to batchSize,
+        MetaKey.LEARNING_RATE to learningRate,
+        "method" to method,
+        MetaKey.DATASET_TYPE to dataSetType
+    )
+}
+
+// Training Task
+data class TrainingTask(
+    val id: String,
+    val name: String,
+    val jobId: String,
+    val modelData: String,
+    val trainingConfig: TrainingConfig,
+    val currentRound: Int = 0,
+    val numRounds: Int = 1,
+    val updateInterval: Float = 1.0f
+)
+
+// Result Response
+data class ResultResponse(
+    val status: String,
+    val taskId: String?,
+    val taskName: String?,
+    val jobId: String?,
+    val message: String?,
     val details: Map<String, String>?
 ) {
     companion object {
-        fun fromJson(json: String): JobResponse {
-            val obj = JSONObject(json)
-            return JobResponse(
-                status = obj.getString("status"),
-                message = obj.optString("message"),
-                retryWait = obj.optInt("retry_wait").takeIf { it > 0 },
-                jobId = obj.optString("job_id").takeIf { it.isNotEmpty() },
-                jobName = obj.optString("job_name").takeIf { it.isNotEmpty() },
-                jobMeta = obj.optJSONObject("job_meta")?.toMap(),
-                method = obj.optString("method").takeIf { it.isNotEmpty() },
-                details = obj.optJSONObject("details")?.toMap()?.mapValues { it.value.toString() }
+        fun fromJSON(json: JSONObject): ResultResponse {
+            return ResultResponse(
+                status = json.getString("status"),
+                taskId = json.optString("task_id"),
+                taskName = json.optString("task_name"),
+                jobId = json.optString("job_id"),
+                message = json.optString("message"),
+                details = json.optJSONObject("details")?.let { details ->
+                    val map = mutableMapOf<String, String>()
+                    details.keys().forEach { key ->
+                        map[key] = details.getString(key)
+                    }
+                    map
+                }
             )
         }
+    }
+}
+
+// NVFlare Error
+sealed class NVFlareError : Exception() {
+    // Network related
+    data class JobFetchFailed(override val message: String = "Failed to fetch job") : NVFlareError()
+    data class TaskFetchFailed(override val message: String) : NVFlareError()
+    data class InvalidRequest(override val message: String) : NVFlareError()
+    data class AuthError(override val message: String) : NVFlareError()
+    data class ServerError(override val message: String) : NVFlareError()
+
+    // Training related
+    data class InvalidMetadata(override val message: String) : NVFlareError()
+    data class InvalidModelData(override val message: String) : NVFlareError()
+    data class TrainingFailed(override val message: String) : NVFlareError()
+    object ServerRequestedStop : NVFlareError() {
+        override val message: String = "Server requested stop"
     }
 }
 
@@ -58,97 +339,4 @@ private fun JSONArray.toList(): List<Any> {
         })
     }
     return list
-}
-
-fun JobResponse.toJob(): Job {
-    if (jobId == null) {
-        throw NVFlareError.INVALID_METADATA("Missing job_id in response")
-    }
-    if (jobMeta == null) {
-        throw NVFlareError.INVALID_METADATA("Missing job_meta in response")
-    }
-    
-    // Extract method from either direct method field or job_meta
-    val methodString = method ?: jobMeta["edge_method"] as? String
-        ?: throw NVFlareError.INVALID_METADATA("Missing method in job metadata")
-    
-    return Job(
-        id = jobId,
-        status = status,
-        meta = JobMeta(
-            method = methodString,
-            modelType = jobMeta["model_type"] as? String
-        )
-    )
-}
-
-data class TaskStatus(
-    val shouldContinueTraining: Boolean
-)
-
-data class TaskResponse(
-    val status: String,
-    val message: String?,
-    val retryWait: Int?,
-    val taskId: String?,
-    val taskName: String?,
-    val data: Map<String, Any>?,
-    val taskStatus: TaskStatus
-) {
-    companion object {
-        fun fromJson(json: String): TaskResponse {
-            val obj = JSONObject(json)
-            val taskStatusObj = obj.optJSONObject("task_status") ?: JSONObject()
-            return TaskResponse(
-                status = obj.getString("status"),
-                message = obj.optString("message"),
-                retryWait = obj.optInt("retry_wait").takeIf { it > 0 },
-                taskId = obj.optString("task_id").takeIf { it.isNotEmpty() },
-                taskName = obj.optString("task_name").takeIf { it.isNotEmpty() },
-                data = obj.optJSONObject("data")?.toMap(),
-                taskStatus = TaskStatus(
-                    shouldContinueTraining = taskStatusObj.optBoolean("should_continue_training", true)
-                )
-            )
-        }
-    }
-}
-
-data class ResultResponse(
-    val status: String,
-    val message: String?
-) {
-    companion object {
-        fun fromJson(json: String): ResultResponse {
-            val obj = JSONObject(json)
-            return ResultResponse(
-                status = obj.getString("status"),
-                message = obj.optString("message")
-            )
-        }
-    }
-}
-
-data class TrainingTask(
-    val id: String,
-    val name: String,
-    val modelData: Map<String, String>
-)
-
-fun TaskResponse.toTrainingTask(jobId: String): TrainingTask {
-    if (taskId == null) {
-        throw NVFlareError.INVALID_METADATA("Missing task_id in response")
-    }
-    if (taskName == null) {
-        throw NVFlareError.INVALID_METADATA("Missing task_name in response")
-    }
-    if (data == null) {
-        throw NVFlareError.INVALID_METADATA("Missing data in response")
-    }
-    
-    return TrainingTask(
-        id = taskId,
-        name = taskName,
-        modelData = data.mapValues { it.value.toString() }
-    )
 } 
