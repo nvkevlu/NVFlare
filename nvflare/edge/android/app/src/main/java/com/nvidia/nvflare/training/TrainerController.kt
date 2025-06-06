@@ -8,6 +8,7 @@ import androidx.lifecycle.viewModelScope
 import com.nvidia.nvflare.connection.Connection
 import com.nvidia.nvflare.models.*
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.delay
 
 enum class TrainerType {
     EXECUTORCH
@@ -22,13 +23,18 @@ enum class MethodType(val displayName: String) {
             CNN -> "cifar10"
             XOR -> "xor"
         }
+
+    companion object {
+        fun fromString(value: String): MethodType? {
+            return values().find { it.displayName.equals(value, ignoreCase = true) }
+        }
+    }
 }
 
 enum class TrainingStatus {
     IDLE,
     TRAINING,
-    STOPPING,
-    ERROR
+    STOPPING
 }
 
 class TrainerController(private val connection: Connection) : ViewModel() {
@@ -47,7 +53,7 @@ class TrainerController(private val connection: Connection) : ViewModel() {
 
     val capabilities: Map<String, Any>
         get() = mapOf(
-            "methods" to _supportedMethods.value?.map { it.name.lowercase() } ?: emptyList()
+            "methods" to _supportedMethods.value?.map { it.displayName } ?: emptyList()
         )
 
     init {
@@ -78,8 +84,9 @@ class TrainerController(private val connection: Connection) : ViewModel() {
             } catch (e: Exception) {
                 Log.e(TAG, "Training failed", e)
                 if (_status.value != TrainingStatus.STOPPING) {
-                    _status.value = TrainingStatus.ERROR
+                    _status.value = TrainingStatus.IDLE
                 }
+                throw e
             }
         }
     }
@@ -93,73 +100,104 @@ class TrainerController(private val connection: Connection) : ViewModel() {
     }
 
     private suspend fun runTrainingLoop() {
-        while (true) {
+        var currentJob: Job? = null
+        
+        // Job fetching loop
+        while (currentJob == null && !currentTask?.isCancelled!!) {
             try {
-                // Fetch job
+                Log.d(TAG, "Fetching job...")
                 val jobResponse = connection.fetchJob()
                 Log.d(TAG, "Job response: $jobResponse")
 
-                // Check if server requested stop
                 if (jobResponse.status == "stopped") {
+                    Log.d(TAG, "Server requested stop")
                     throw NVFlareError.SERVER_REQUESTED_STOP
                 }
 
-                // Verify we support this job's method
+                val job = jobResponse.toJob()
                 val methodString = jobResponse.method ?: ""
-                val method = MethodType.values().find { it.name.equals(methodString, ignoreCase = true) }
+                val method = MethodType.fromString(methodString)
+                
                 if (method == null || !_supportedMethods.value!!.contains(method)) {
-                    Log.e(TAG, "Unsupported method: $methodString")
-                    throw NVFlareError.INVALID_METADATA("Unsupported method: $methodString")
+                    Log.e(TAG, "Skipping job with unsupported or missing method: $methodString")
+                    continue
                 }
 
-                currentJob = jobResponse.toJob()
+                currentJob = job
+                Log.d(TAG, "Starting job: ${currentJob!!.id}")
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to fetch job", e)
+                Log.d(TAG, "Retrying job fetch in 5 seconds...")
+                delay(5000)
+                continue
+            }
+        }
 
-                // Fetch task
-                val taskResponse = connection.fetchTask(currentJob!!.id)
+        guard let job = currentJob else {
+            Log.e(TAG, "No valid job found")
+            throw NVFlareError.JOB_FETCH_FAILED
+        }
+
+        // Task execution loop
+        while (job.status == "running" && !currentTask?.isCancelled!!) {
+            try {
+                Log.d(TAG, "Fetching task for job: ${job.id}")
+                val taskResponse = connection.fetchTask(job.id)
                 Log.d(TAG, "Task response: $taskResponse")
 
-                // Check if we should continue training
                 if (!taskResponse.taskStatus.shouldContinueTraining) {
                     Log.d(TAG, "Training finished - no more tasks")
                     return
                 }
 
-                // Create trainer
-                val task = taskResponse.toTrainingTask(currentJob!!.id)
+                Log.d(TAG, "Creating trainer for task: ${taskResponse.taskId}")
+                val task = taskResponse.toTrainingTask(job.id)
                 val trainer = createTrainer(task.modelData, task.trainingConfig)
+                Log.d(TAG, "Trainer created successfully")
 
-                // Train and get weight differences
+                Log.d(TAG, "Starting training for task: ${task.id}")
                 val weightDiff = trainer.train(task.trainingConfig)
+                Log.d(TAG, "Training completed for task: ${task.id}")
 
-                // Send results
+                Log.d(TAG, "Sending results for task: ${task.id}")
                 connection.sendResult(
-                    jobId = currentJob!!.id,
+                    jobId = job.id,
                     taskId = task.id,
                     taskName = task.name,
                     weightDiff = weightDiff
                 )
+                Log.d(TAG, "Results sent successfully for task: ${task.id}")
 
             } catch (e: Exception) {
-                Log.e(TAG, "Error in training loop", e)
+                Log.e(TAG, "Task execution failed", e)
+                if (_status.value != TrainingStatus.STOPPING) {
+                    _status.value = TrainingStatus.IDLE
+                }
                 throw e
             }
         }
     }
 
-    private fun createTrainer(modelData: String, config: TrainingConfig): Trainer {
-        // Get the method from the config
-        val methodString = config.method ?: ""
-        val method = MethodType.values().find { it.name.equals(methodString, ignoreCase = true) }
-            ?: throw NVFlareError.INVALID_METADATA("Missing or invalid method in config")
+    private fun createTrainer(modelData: String, meta: TrainingConfig): Trainer {
+        val methodString = meta.method ?: ""
+        val method = MethodType.fromString(methodString)
+        
+        if (method == null) {
+            Log.e(TAG, "Missing or invalid method in job metadata")
+            throw NVFlareError.INVALID_METADATA("Missing or invalid method in job metadata")
+        }
 
-        // Verify that we support this method
         if (!_supportedMethods.value!!.contains(method)) {
+            Log.e(TAG, "Method $methodString is not supported by this client")
             throw NVFlareError.INVALID_METADATA("Method $methodString is not supported by this client")
         }
 
         return when (_trainerType.value) {
-            TrainerType.EXECUTORCH -> ETTrainerWrapper(modelData, config)
-            else -> throw IllegalStateException("Unsupported trainer type")
+            TrainerType.EXECUTORCH -> {
+                Log.d(TAG, "Creating ETTrainerWrapper")
+                ETTrainerWrapper(modelData, meta)
+            }
+            else -> throw NVFlareError.INVALID_METADATA("Unsupported trainer type")
         }
     }
 } 

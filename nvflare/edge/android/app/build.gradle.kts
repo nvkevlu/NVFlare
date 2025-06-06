@@ -76,6 +76,7 @@ dependencies {
     
     // JSON parsing
     implementation("org.json:json:20231013")
+    implementation("com.google.code.gson:gson:2.10.1")
     
     // Coroutines for async operations
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")

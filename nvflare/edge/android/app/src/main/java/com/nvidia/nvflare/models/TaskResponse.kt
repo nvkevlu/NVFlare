@@ -1,25 +1,42 @@
 package com.nvidia.nvflare.models
 
 import com.google.gson.annotations.SerializedName
+import com.google.gson.JsonObject
+import com.google.gson.JsonElement
 
 data class TaskResponse(
+    @SerializedName("status")
     val status: String,
+    
+    @SerializedName("message")
     val message: String?,
+    
     @SerializedName("job_id")
     val jobId: String?,
+    
     @SerializedName("task_id")
     val taskId: String?,
+    
     @SerializedName("task_name")
     val taskName: String?,
+    
     @SerializedName("retry_wait")
     val retryWait: Int?,
+    
     @SerializedName("task_data")
     val taskData: TaskData?,
-    val cookie: JSONValue?
+    
+    @SerializedName("cookie")
+    val cookie: JsonObject?
 ) {
     data class TaskData(
+        @SerializedName("data")
         val data: String,
-        val meta: JSONValue,
+        
+        @SerializedName("meta")
+        val meta: JsonElement?,
+        
+        @SerializedName("kind")
         val kind: String
     )
 
@@ -55,14 +72,12 @@ data class TaskResponse(
             throw NVFlareError.TASK_FETCH_FAILED("Missing required task data")
         }
 
-        val trainingConfig = TrainingConfig()
-
         return TrainingTask(
             id = taskId,
             name = taskName,
             jobId = jobId,
             modelData = taskData.data,
-            trainingConfig = trainingConfig
+            trainingConfig = TrainingConfig()
         )
     }
 } 

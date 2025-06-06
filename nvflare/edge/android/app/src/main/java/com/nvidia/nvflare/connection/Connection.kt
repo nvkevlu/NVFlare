@@ -21,30 +21,77 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import java.io.IOException
+import com.google.gson.Gson
+import com.google.gson.JsonObject
+import com.nvidia.nvflare.models.*
+import okhttp3.RequestBody
+import okhttp3.MediaType
+import java.util.*
+import okhttp3.HttpUrl
 
-class Connection(
-    private val baseUrl: String,
-    private val clientId: String,
-    private val clientName: String
-) {
+class Connection(private val context: Context) {
     private val TAG = "Connection"
-    private var currentCookie: String? = null
+    private var currentCookie: JsonObject? = null
     private var capabilities: Map<String, Any> = mapOf("methods" to emptyList<String>())
-    
-    private val client = OkHttpClient.Builder()
-        .connectTimeout(30, TimeUnit.SECONDS)
-        .readTimeout(30, TimeUnit.SECONDS)
-        .writeTimeout(30, TimeUnit.SECONDS)
-        .build()
+    private val gson = Gson()
+    private val httpClient = OkHttpClient()
+
+    // Add hostname and port properties to match iOS
+    var hostname: String = ""
+    var port: Int = 0
+
+    val isValid: Boolean
+        get() = hostname.isNotEmpty() && port > 0 && port <= 65535
+
+    // Device info matching iOS exactly
+    private val deviceId: String = context.packageManager.getPackageInfo(context.packageName, 0).longVersionCode.toString()
+    private val deviceInfo: Map<String, String> = mapOf(
+        "device_id" to deviceId,
+        "platform" to "android",
+        "app_version" to context.packageManager.getPackageInfo(context.packageName, 0).versionName
+    )
+
+    enum class TaskStatus(val value: String) {
+        OK("OK"),
+        DONE("DONE"),
+        ERROR("ERROR"),
+        RETRY("RETRY"),
+        UNKNOWN("UNKNOWN");
+
+        companion object {
+            fun fromString(value: String): TaskStatus {
+                return values().find { it.value == value } ?: UNKNOWN
+            }
+        }
+
+        val isSuccess: Boolean
+            get() = this == OK || this == DONE
+
+        val shouldContinueTraining: Boolean
+            get() = this == OK
+    }
 
     fun setCapabilities(capabilities: Map<String, Any>) {
         this.capabilities = capabilities
     }
 
+    fun resetCookie() {
+        currentCookie = null
+    }
+
+    private fun infoToQueryString(info: Map<String, String>): String {
+        return info.map { (key, value) -> "$key=$value" }.joinToString("&")
+    }
+
     suspend fun fetchJob(): JobResponse = withContext(Dispatchers.IO) {
-        val url = "$baseUrl/job"
-        
-        // Prepare request body with capabilities
+        val url = HttpUrl.Builder()
+            .scheme("http")
+            .host(hostname)
+            .port(port)
+            .addPathSegment("job")
+            .build()
+
+        // Prepare request body
         val requestBody = JSONObject().apply {
             put("capabilities", JSONObject(capabilities))
         }
@@ -52,174 +99,219 @@ class Connection(
         val request = Request.Builder()
             .url(url)
             .post(requestBody.toString().toRequestBody("application/json".toMediaType()))
-            .header("X-Flare-Device-ID", clientId)
-            .header("X-Flare-Device-Info", "{}")
-            .header("X-Flare-User-Info", "{}")
+            .header("X-Flare-Device-ID", deviceId)
+            .header("X-Flare-Device-Info", infoToQueryString(deviceInfo))
+            .header("X-Flare-User-Info", "")
             .build()
 
+        Log.d(TAG, "Sending request: ${request.method} ${request.url}")
+        Log.d(TAG, "Headers: ${request.headers}")
+        Log.d(TAG, "Request body: $requestBody")
+
         try {
-            val response = client.newCall(request).execute()
+            val response = httpClient.newCall(request).execute()
+            val responseBody = response.body?.string()
+            Log.d(TAG, "Response Status Code: ${response.code}")
+            Log.d(TAG, "Response Headers: ${response.headers}")
+            Log.d(TAG, "Response body: $responseBody")
+
             if (!response.isSuccessful) {
-                throw NVFlareError.NETWORK_ERROR("Failed to fetch job: ${response.code}")
+                when (response.code) {
+                    400 -> throw NVFlareError.INVALID_REQUEST("Invalid request")
+                    403 -> throw NVFlareError.AUTH_ERROR("Authentication error")
+                    500 -> throw NVFlareError.SERVER_ERROR("Server error")
+                    else -> throw NVFlareError.JOB_FETCH_FAILED
+                }
             }
 
-            val responseBody = response.body?.string()
-                ?: throw NVFlareError.NETWORK_ERROR("Empty response body")
-            Log.d(TAG, "Job response: $responseBody")
-
-            // Parse response
-            val json = JSONObject(responseBody)
-            val jobResponse = JobResponse(
-                jobId = json.optString("job_id").takeIf { it.isNotEmpty() },
-                status = json.getString("status"),
-                method = json.optString("method").takeIf { it.isNotEmpty() }
-            )
-
-            // Handle retry logic
+            val jobResponse = gson.fromJson(responseBody, JobResponse::class.java)
             when (jobResponse.status) {
                 "OK" -> jobResponse
                 "RETRY" -> {
-                    val retryWait = json.optInt("retry_wait")
-                    if (retryWait > 0) {
-                        delay(retryWait.toLong())
-                        fetchJob()
-                    } else {
-                        throw NVFlareError.NETWORK_ERROR("Retry failed")
-                    }
+                    val retryWait = jobResponse.retryWait ?: 5000
+                    Log.d(TAG, "Retrying job fetch after $retryWait ms")
+                    kotlinx.coroutines.delay(retryWait.toLong())
+                    fetchJob()
                 }
-                else -> throw NVFlareError.NETWORK_ERROR("Invalid job status: ${jobResponse.status}")
+                else -> throw NVFlareError.JOB_FETCH_FAILED
             }
         } catch (e: IOException) {
             Log.e(TAG, "Network error fetching job", e)
-            throw NVFlareError.NETWORK_ERROR("Failed to fetch job: ${e.message}")
+            throw NVFlareError.JOB_FETCH_FAILED
         }
     }
 
     suspend fun fetchTask(jobId: String): TaskResponse = withContext(Dispatchers.IO) {
-        val url = "$baseUrl/task"
-        
-        // Create request body with cookie
-        val requestBody = JSONObject().apply {
-            if (currentCookie != null) {
-                put("cookie", currentCookie)
+        val url = HttpUrl.Builder()
+            .scheme("http")
+            .host(hostname)
+            .port(port)
+            .addPathSegment("task")
+            .addQueryParameter("job_id", jobId)
+            .build()
+
+        // Prepare request body with cookie
+        val requestBody = if (currentCookie != null) {
+            JSONObject().apply {
+                put("cookie", JSONObject(currentCookie.toString()))
             }
-            // Empty JSON object if no cookie
+        } else {
+            JSONObject() // Empty JSON object like iOS
         }
 
         val request = Request.Builder()
             .url(url)
             .post(requestBody.toString().toRequestBody("application/json".toMediaType()))
-            .header("X-Flare-Device-ID", clientId)
-            .header("X-Flare-Device-Info", "{}")
+            .header("X-Flare-Device-ID", deviceId)
+            .header("X-Flare-Device-Info", infoToQueryString(deviceInfo))
             .header("X-Flare-User-Info", "{}")
             .build()
 
+        Log.d(TAG, "Sending request: ${request.method} ${request.url}")
+        Log.d(TAG, "Headers: ${request.headers}")
+        Log.d(TAG, "Request body: $requestBody")
+
         try {
-            val response = client.newCall(request).execute()
-            if (!response.isSuccessful) {
-                throw NVFlareError.NETWORK_ERROR("Failed to fetch task: ${response.code}")
-            }
-
+            val response = httpClient.newCall(request).execute()
             val responseBody = response.body?.string()
-                ?: throw NVFlareError.NETWORK_ERROR("Empty response body")
-            Log.d(TAG, "Task response: $responseBody")
+            Log.d(TAG, "Response Status Code: ${response.code}")
+            Log.d(TAG, "Response Headers: ${response.headers}")
+            Log.d(TAG, "Response body: $responseBody")
 
-            // Parse response
-            val json = JSONObject(responseBody)
-            val taskResponse = TaskResponse(
-                taskId = json.getString("task_id"),
-                name = json.getString("name"),
-                status = json.getString("status"),
-                modelData = json.getString("model_data"),
-                trainingConfig = parseTrainingConfig(json.getJSONObject("training_config"))
-            )
-
-            // Update cookie if present
-            json.optString("cookie").takeIf { it.isNotEmpty() }?.let {
-                currentCookie = it
+            if (!response.isSuccessful) {
+                when (response.code) {
+                    400 -> throw NVFlareError.INVALID_REQUEST("Invalid request")
+                    403 -> throw NVFlareError.AUTH_ERROR("Authentication error")
+                    500 -> throw NVFlareError.SERVER_ERROR("Server error")
+                    else -> throw NVFlareError.TASK_FETCH_FAILED("Task fetch failed")
+                }
             }
 
-            // Handle retry logic
-            when (taskResponse.status) {
-                "OK", "DONE" -> taskResponse
-                "RETRY", "NO_TASK" -> {
-                    val retryWait = json.optInt("retry_wait")
-                    if (retryWait > 0) {
-                        delay(retryWait.toLong())
-                        fetchTask(jobId)
-                    } else {
-                        throw NVFlareError.NETWORK_ERROR("Retry failed")
-                    }
+            val taskResponse = gson.fromJson(responseBody, TaskResponse::class.java)
+            
+            // Update cookie if present
+            taskResponse.cookie?.let { currentCookie = it }
+
+            // Check task status using enum
+            val taskStatus = TaskStatus.fromString(taskResponse.status)
+            if (!taskStatus.shouldContinueTraining) {
+                throw NVFlareError.TASK_FETCH_FAILED(taskResponse.message ?: "Task status indicates training should not continue")
+            }
+
+            when (taskStatus) {
+                TaskStatus.OK -> taskResponse
+                TaskStatus.RETRY -> {
+                    val retryWait = taskResponse.retryWait ?: 5000
+                    Log.d(TAG, "Retrying task fetch after $retryWait ms")
+                    kotlinx.coroutines.delay(retryWait.toLong())
+                    fetchTask(jobId)
                 }
-                else -> throw NVFlareError.NETWORK_ERROR("Invalid task status: ${taskResponse.status}")
+                else -> throw NVFlareError.TASK_FETCH_FAILED(taskResponse.message ?: "Task fetch failed")
             }
         } catch (e: IOException) {
             Log.e(TAG, "Network error fetching task", e)
-            throw NVFlareError.NETWORK_ERROR("Failed to fetch task: ${e.message}")
+            throw NVFlareError.TASK_FETCH_FAILED("Network error")
         }
     }
 
-    suspend fun sendResult(jobId: String, taskId: String, taskName: String, weightDiff: Map<String, FloatArray>) = withContext(Dispatchers.IO) {
-        val url = "$baseUrl/result"
-        
-        // Create request body with cookie and result
+    suspend fun sendResult(jobId: String, taskId: String, taskName: String, weightDiff: String): ResultResponse = withContext(Dispatchers.IO) {
+        val url = HttpUrl.Builder()
+            .scheme("http")
+            .host(hostname)
+            .port(port)
+            .addPathSegment("result")
+            .build()
+
+        // Prepare request body
         val requestBody = JSONObject().apply {
-            put("result", JSONObject(weightDiff.mapValues { it.value.toList() }))
+            put("job_id", jobId)
+            put("task_id", taskId)
+            put("task_name", taskName)
+            put("result", weightDiff)
             if (currentCookie != null) {
-                put("cookie", currentCookie)
+                put("cookie", JSONObject(currentCookie.toString()))
             }
-            // Empty JSON object if no cookie
         }
 
         val request = Request.Builder()
             .url(url)
             .post(requestBody.toString().toRequestBody("application/json".toMediaType()))
-            .header("X-Flare-Device-ID", clientId)
-            .header("X-Flare-Device-Info", "{}")
+            .header("X-Flare-Device-ID", deviceId)
+            .header("X-Flare-Device-Info", infoToQueryString(deviceInfo))
             .header("X-Flare-User-Info", "{}")
             .build()
 
+        Log.d(TAG, "Sending request: ${request.method} ${request.url}")
+        Log.d(TAG, "Headers: ${request.headers}")
+        Log.d(TAG, "Request body: $requestBody")
+
         try {
-            val response = client.newCall(request).execute()
+            val response = httpClient.newCall(request).execute()
+            val responseBody = response.body?.string()
+            Log.d(TAG, "Response Status Code: ${response.code}")
+            Log.d(TAG, "Response Headers: ${response.headers}")
+            Log.d(TAG, "Response body: $responseBody")
+
             if (!response.isSuccessful) {
-                throw NVFlareError.NETWORK_ERROR("Failed to send result: ${response.code}")
+                when (response.code) {
+                    400 -> throw NVFlareError.INVALID_REQUEST("Invalid request")
+                    403 -> throw NVFlareError.AUTH_ERROR("Authentication error")
+                    500 -> throw NVFlareError.SERVER_ERROR("Server error")
+                    else -> throw NVFlareError.RESULT_SEND_FAILED("Result send failed")
+                }
             }
 
-            val responseBody = response.body?.string()
-                ?: throw NVFlareError.NETWORK_ERROR("Empty response body")
-            Log.d(TAG, "Result response: $responseBody")
-
-            // Parse response
-            val json = JSONObject(responseBody)
-            val resultResponse = ResultResponse(
-                status = json.getString("status"),
-                message = json.optString("message").takeIf { it.isNotEmpty() }
-            )
-
-            // Handle response status
+            val resultResponse = gson.fromJson(responseBody, ResultResponse::class.java)
             when (resultResponse.status) {
-                "OK" -> Unit // Success
-                "INVALID" -> throw NVFlareError.TRAINING_FAILED(resultResponse.message ?: "Invalid result")
-                else -> throw NVFlareError.TRAINING_FAILED("Unknown status")
+                "OK" -> resultResponse
+                else -> throw NVFlareError.RESULT_SEND_FAILED(resultResponse.message ?: "Unknown error")
             }
         } catch (e: IOException) {
             Log.e(TAG, "Network error sending result", e)
-            throw NVFlareError.NETWORK_ERROR("Failed to send result: ${e.message}")
+            throw NVFlareError.RESULT_SEND_FAILED("Network error")
         }
     }
 
-    fun resetCookie() {
-        currentCookie = null
+    suspend fun getCapabilities(): Map<String, Any> = withContext(Dispatchers.IO) {
+        val request = Request.Builder()
+            .url("$baseUrl/capabilities")
+            .addHeader("X-Client-ID", clientId)
+            .addHeader("X-Client-Name", clientName)
+            .addHeader("X-Client-Token", clientToken)
+            .build()
+
+        try {
+            val response = httpClient.newCall(request).execute()
+            if (!response.isSuccessful) {
+                throw NVFlareError.NETWORK_ERROR
+            }
+
+            val responseBody = response.body?.string() ?: throw NVFlareError.NETWORK_ERROR
+            val jsonObject = gson.fromJson(responseBody, JsonObject::class.java)
+            jsonObject.asMap()
+        } catch (e: IOException) {
+            throw NVFlareError.NETWORK_ERROR
+        }
     }
 
-    private fun parseTrainingConfig(json: JSONObject): TrainingConfig {
-        return TrainingConfig(
-            method = json.getString("method"),
-            epochs = json.getInt("epochs"),
-            batchSize = json.getInt("batch_size"),
-            learningRate = json.getDouble("learning_rate").toFloat(),
-            momentum = json.getDouble("momentum").toFloat(),
-            weightDecay = json.getDouble("weight_decay").toFloat()
-        )
+    private fun JsonObject.asMap(): Map<String, Any> {
+        val map = mutableMapOf<String, Any>()
+        entrySet().forEach { (key, value) ->
+            map[key] = when {
+                value.isJsonPrimitive -> value.asJsonPrimitive.asString
+                value.isJsonObject -> value.asJsonObject.asMap()
+                value.isJsonArray -> value.asJsonArray.map { it.asString }
+                else -> value.toString()
+            }
+        }
+        return map
+    }
+
+    private fun JSONObject.toMap(): Map<String, Any> {
+        val map = mutableMapOf<String, Any>()
+        keys().forEach { key ->
+            map[key] = get(key)
+        }
+        return map
     }
 }

@@ -4,7 +4,10 @@ import android.util.Log
 import com.nvidia.nvflare.models.TrainingConfig
 import com.nvidia.nvflare.trainer.ETTrainer
 
-class ETTrainerWrapper : Trainer {
+class ETTrainerWrapper(
+    private val modelData: String,
+    private val config: TrainingConfig
+) : Trainer {
     private val TAG = "ETTrainerWrapper"
     private val trainer: ETTrainer
 
@@ -23,10 +26,8 @@ class ETTrainerWrapper : Trainer {
         Log.d(TAG, "Initialization complete")
     }
 
-    override suspend fun train(): Map<String, FloatArray> {
-        Log.d(TAG, "Starting train()")
-        val result = trainer.train(TrainingConfig())
-        Log.d(TAG, "train() completed with result keys: ${result.keys}")
-        return result
+    override suspend fun train(): FloatArray {
+        // TODO: Implement actual training logic
+        return FloatArray(0) // Placeholder
     }
 } 
