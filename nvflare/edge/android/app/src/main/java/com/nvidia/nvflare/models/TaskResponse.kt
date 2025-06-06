@@ -2,7 +2,8 @@ package com.nvidia.nvflare.models
 
 import com.google.gson.annotations.SerializedName
 import com.google.gson.JsonObject
-import com.google.gson.JsonElement
+import com.google.gson.JsonPrimitive
+import com.google.gson.JsonArray
 
 data class TaskResponse(
     @SerializedName("status")
@@ -34,7 +35,7 @@ data class TaskResponse(
         val data: String,
         
         @SerializedName("meta")
-        val meta: JsonElement?,
+        val meta: JsonObject?,
         
         @SerializedName("kind")
         val kind: String
@@ -65,19 +66,36 @@ data class TaskResponse(
 
     fun toTrainingTask(jobId: String): TrainingTask {
         if (!taskStatus.shouldContinueTraining) {
-            throw NVFlareError.TASK_FETCH_FAILED(message ?: "Task status indicates training should not continue")
+            throw NVFlareError.TaskFetchFailed(message ?: "Task status indicates training should not continue")
         }
 
         if (taskId == null || taskName == null || taskData == null) {
-            throw NVFlareError.TASK_FETCH_FAILED("Missing required task data")
+            throw NVFlareError.TaskFetchFailed("Missing required task data")
         }
+
+        // Convert meta JsonObject to Map<String, Any>
+        val metaMap = taskData.meta?.let { meta ->
+            meta.entrySet().associate { (key, value) ->
+                key to when (value) {
+                    is JsonPrimitive -> when {
+                        value.isString -> value.asString
+                        value.isNumber -> value.asNumber
+                        value.isBoolean -> value.asBoolean
+                        else -> null
+                    }
+                    is JsonObject -> value.asMap()
+                    is JsonArray -> value.asList()
+                    else -> null
+                }
+            }
+        } ?: emptyMap()
 
         return TrainingTask(
             id = taskId,
             name = taskName,
             jobId = jobId,
             modelData = taskData.data,
-            trainingConfig = TrainingConfig()
+            trainingConfig = TrainingConfig.fromMap(metaMap)
         )
     }
 } 

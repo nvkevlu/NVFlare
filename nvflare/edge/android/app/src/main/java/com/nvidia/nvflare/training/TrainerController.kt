@@ -52,9 +52,10 @@ class TrainerController(private val connection: Connection) : ViewModel() {
     private var currentJob: Job? = null
 
     val capabilities: Map<String, Any>
-        get() = mapOf(
-            "methods" to _supportedMethods.value?.map { it.displayName } ?: emptyList()
-        )
+        get() {
+            val methods = _supportedMethods.value?.map { it.displayName } ?: emptyList()
+            return mapOf("methods" to methods)
+        }
 
     init {
         // Set initial capabilities
@@ -111,7 +112,7 @@ class TrainerController(private val connection: Connection) : ViewModel() {
 
                 if (jobResponse.status == "stopped") {
                     Log.d(TAG, "Server requested stop")
-                    throw NVFlareError.SERVER_REQUESTED_STOP
+                    throw NVFlareError.ServerRequestedStop
                 }
 
                 val job = jobResponse.toJob()
@@ -133,9 +134,9 @@ class TrainerController(private val connection: Connection) : ViewModel() {
             }
         }
 
-        guard let job = currentJob else {
+        val job = currentJob ?: run {
             Log.e(TAG, "No valid job found")
-            throw NVFlareError.JOB_FETCH_FAILED
+            throw NVFlareError.JobFetchFailed("Job fetch failed")
         }
 
         // Task execution loop
@@ -184,12 +185,12 @@ class TrainerController(private val connection: Connection) : ViewModel() {
         
         if (method == null) {
             Log.e(TAG, "Missing or invalid method in job metadata")
-            throw NVFlareError.INVALID_METADATA("Missing or invalid method in job metadata")
+            throw NVFlareError.InvalidMetadata("Missing or invalid method in job metadata")
         }
 
         if (!_supportedMethods.value!!.contains(method)) {
             Log.e(TAG, "Method $methodString is not supported by this client")
-            throw NVFlareError.INVALID_METADATA("Method $methodString is not supported by this client")
+            throw NVFlareError.InvalidMetadata("Method $methodString is not supported by this client")
         }
 
         return when (_trainerType.value) {
@@ -197,7 +198,7 @@ class TrainerController(private val connection: Connection) : ViewModel() {
                 Log.d(TAG, "Creating ETTrainerWrapper")
                 ETTrainerWrapper(modelData, meta)
             }
-            else -> throw NVFlareError.INVALID_METADATA("Unsupported trainer type")
+            else -> throw NVFlareError.InvalidMetadata("Unsupported trainer type")
         }
     }
 } 

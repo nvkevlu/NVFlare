@@ -1,7 +1,7 @@
 package com.nvidia.nvflare.models
 
 import com.google.gson.annotations.SerializedName
-import com.google.gson.JsonElement
+import com.google.gson.JsonObject
 
 data class JobResponse(
     @SerializedName("status")
@@ -14,7 +14,7 @@ data class JobResponse(
     val jobName: String?,
     
     @SerializedName("job_data")
-    val jobData: Map<String, JsonElement>?,
+    val jobData: JsonObject?,
     
     @SerializedName("method")
     val method: String?,
@@ -30,7 +30,7 @@ data class JobResponse(
 ) {
     fun toJob(): Job {
         if (jobId == null) {
-            throw NVFlareError.INVALID_REQUEST("Can't convert JobResponse to Job")
+            throw NVFlareError.InvalidRequest("Can't convert JobResponse to Job")
         }
         return Job(id = jobId, status = "running")
     }

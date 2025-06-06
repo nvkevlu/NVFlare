@@ -2,15 +2,10 @@ package com.nvidia.nvflare.trainer
 
 import android.util.Log
 import com.nvidia.nvflare.models.TrainingConfig
-import com.nvidia.nvflare.models.ModelBufferType
-import com.nvidia.nvflare.models.ModelNativeFormat
-import com.nvidia.nvflare.models.ModelEncoding
-import com.nvidia.nvflare.models.ModelExchangeFormat
-import java.nio.ByteBuffer
-import java.nio.ByteOrder
+import com.nvidia.nvflare.training.Trainer
 import java.util.Base64
 
-class ETTrainer(private val modelData: String, private val config: TrainingConfig) {
+class ETTrainer(private val modelData: String, private val meta: Map<String, Any>) : Trainer {
     private val TAG = "ETTrainer"
 
     init {
@@ -27,26 +22,59 @@ class ETTrainer(private val modelData: String, private val config: TrainingConfi
         weightDecay: Float
     ): ByteArray
 
-    fun train(config: TrainingConfig): Map<String, FloatArray> {
-        Log.d(TAG, "Starting training with config: $config")
+    override suspend fun train(config: TrainingConfig): Map<String, Any> {
+        Log.d(TAG, "Starting training with meta: $meta")
         
         // Decode base64 model data
         val decodedModelData = Base64.getDecoder().decode(modelData)
         
         val result = nativeTrain(
             modelData = String(decodedModelData),
-            method = config.method,
-            epochs = config.totalEpochs,
-            batchSize = config.batchSize,
-            learningRate = config.learningRate,
-            momentum = 0.0f,  // Default momentum
-            weightDecay = 0.0f  // Default weight decay
+            method = meta["method"] as? String ?: "sgd",
+            epochs = (meta["total_epochs"] as? Number)?.toInt() ?: 1,
+            batchSize = (meta["batch_size"] as? Number)?.toInt() ?: 32,
+            learningRate = (meta["learning_rate"] as? Number)?.toFloat() ?: 0.01f,
+            momentum = (meta["momentum"] as? Number)?.toFloat() ?: 0.0f,
+            weightDecay = (meta["weight_decay"] as? Number)?.toFloat() ?: 0.0f
         )
 
-        return deserializeWeightDiff(result)
+        // For now, return mock tensor differences that match iOS structure
+        return mapOf(
+            "weight" to mapOf(
+                "sizes" to listOf(10, 10),
+                "strides" to listOf(10, 1),
+                "data" to List(100) { 0.0f }
+            )
+        )
+
+        // TODO: When implementing real training, uncomment this and convert the binary format
+        // to match iOS tensor structure (sizes, strides, data)
+        /*
+        val weightDiffs = deserializeWeightDiff(result)
+        return weightDiffs.mapValues { (_, floatArray) ->
+            mapOf(
+                "sizes" to listOf(floatArray.size),  // This will need to be adjusted based on actual tensor dimensions
+                "strides" to listOf(1),              // This will need to be adjusted based on actual tensor strides
+                "data" to floatArray.toList()        // Convert FloatArray to List<Float>
+            )
+        }
+        */
     }
 
-    private fun deserializeWeightDiff(data: ByteArray): Map<String, FloatArray> {
+    /**
+     * Deserializes the binary format of weight differences returned by native code.
+     * Format:
+     * - int: number of tensors
+     * For each tensor:
+     *   - int: name length
+     *   - byte[]: name bytes
+     *   - int: data length
+     *   - float[]: tensor data
+     *
+     * This will be used when implementing real training to convert the native binary format
+     * to the iOS-compatible tensor structure.
+     */
+    /*private fun deserializeWeightDiff(data: ByteArray): Map<String, FloatArray> {
         val buffer = ByteBuffer.wrap(data).order(ByteOrder.LITTLE_ENDIAN)
         val numTensors = buffer.int
         val result = mutableMapOf<String, FloatArray>()
@@ -67,5 +95,5 @@ class ETTrainer(private val modelData: String, private val config: TrainingConfi
         }
 
         return result
-    }
-} 
+    }*/
+}

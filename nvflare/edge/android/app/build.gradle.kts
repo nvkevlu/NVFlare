@@ -75,7 +75,6 @@ dependencies {
     implementation("com.squareup.okhttp3:logging-interceptor:4.12.0")
     
     // JSON parsing
-    implementation("org.json:json:20231013")
     implementation("com.google.code.gson:gson:2.10.1")
     
     // Coroutines for async operations
