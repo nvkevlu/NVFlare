@@ -72,6 +72,10 @@ class TrainerController(private val connection: Connection) : ViewModel() {
         connection.setCapabilities(capabilities)
     }
 
+    fun setTrainerType(type: TrainerType) {
+        _trainerType.value = type
+    }
+
     fun startTraining() {
         if (_status.value == TrainingStatus.TRAINING) {
             Log.w(TAG, "Training already in progress")
@@ -104,7 +108,7 @@ class TrainerController(private val connection: Connection) : ViewModel() {
         var currentJob: Job? = null
         
         // Job fetching loop
-        while (currentJob == null && !currentTask?.isCancelled!!) {
+        while (currentJob == null && currentTask?.isCancelled != true) {
             try {
                 Log.d(TAG, "Fetching job...")
                 val jobResponse = connection.fetchJob()
@@ -119,16 +123,16 @@ class TrainerController(private val connection: Connection) : ViewModel() {
                 val methodString = jobResponse.method ?: ""
                 val method = MethodType.fromString(methodString)
                 
-                if (method == null || !_supportedMethods.value!!.contains(method)) {
-                    Log.e(TAG, "Skipping job with unsupported or missing method: $methodString")
+                if (method == null || !(_supportedMethods.value?.contains(method) ?: false)) {
+                    Log.d(TAG, "Skipping job with unsupported or missing method: $methodString")
+                    delay(5000) // Add delay before retry
                     continue
                 }
 
                 currentJob = job
-                Log.d(TAG, "Starting job: ${currentJob!!.id}")
+                Log.d(TAG, "Starting job: ${currentJob.id}")
             } catch (e: Exception) {
-                Log.e(TAG, "Failed to fetch job", e)
-                Log.d(TAG, "Retrying job fetch in 5 seconds...")
+                Log.d(TAG, "Failed to fetch job, retrying in 5 seconds...", e)
                 delay(5000)
                 continue
             }
@@ -140,19 +144,23 @@ class TrainerController(private val connection: Connection) : ViewModel() {
         }
 
         // Task execution loop
-        while (job.status == "running" && !currentTask?.isCancelled!!) {
+        while (job.status == "running" && currentTask?.isCancelled != true) {
             try {
                 Log.d(TAG, "Fetching task for job: ${job.id}")
                 val taskResponse = connection.fetchTask(job.id)
                 Log.d(TAG, "Task response: $taskResponse")
 
+                // Don't exit on model version 0 or no tasks, just retry
                 if (!taskResponse.taskStatus.shouldContinueTraining) {
-                    Log.d(TAG, "Training finished - no more tasks")
-                    return
+                    Log.d(TAG, "No tasks available or model not ready, retrying in 5 seconds...")
+                    delay(5000)
+                    continue
                 }
 
                 Log.d(TAG, "Creating trainer for task: ${taskResponse.taskId}")
                 val task = taskResponse.toTrainingTask(job.id)
+                Log.d(TAG, "Creating trainer for task: ${task.id}")
+                
                 val trainer = createTrainer(task.modelData, task.trainingConfig)
                 Log.d(TAG, "Trainer created successfully")
 
@@ -170,21 +178,22 @@ class TrainerController(private val connection: Connection) : ViewModel() {
                 Log.d(TAG, "Results sent successfully for task: ${task.id}")
 
             } catch (e: Exception) {
-                Log.e(TAG, "Task execution failed", e)
+                Log.e(TAG, "Task execution failed, retrying in 5 seconds...", e)
                 if (_status.value != TrainingStatus.STOPPING) {
                     _status.value = TrainingStatus.IDLE
                 }
-                throw e
+                delay(5000)
+                continue
             }
         }
     }
 
     private fun createTrainer(modelData: String, meta: TrainingConfig): Trainer {
-        val methodString = meta.method ?: ""
+        val methodString = meta.method ?: "cnn"  // Default to cnn if method is null
         val method = MethodType.fromString(methodString)
         
         if (method == null) {
-            Log.e(TAG, "Missing or invalid method in job metadata")
+            Log.e(TAG, "Missing or invalid method in job metadata: $methodString")
             throw NVFlareError.InvalidMetadata("Missing or invalid method in job metadata")
         }
 

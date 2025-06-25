@@ -2,17 +2,25 @@ package com.nvidia.nvflare.trainer
 
 import android.util.Log
 import com.nvidia.nvflare.models.TrainingConfig
+import com.nvidia.nvflare.models.DXO
+import com.nvidia.nvflare.models.DataKind
 import com.nvidia.nvflare.training.Trainer
 import java.util.Base64
+import java.io.File
 
 class ETTrainer(private val modelData: String, private val meta: Map<String, Any>) : Trainer {
     private val TAG = "ETTrainer"
+    private var trainingModule: Long = 0  // Handle to native training module
 
     init {
-        System.loadLibrary("executorch_training")
+        // TODO: When implementing real training, uncomment this
+        // System.loadLibrary("executorch_training")
+        // initializeTrainingModule()
     }
 
-    private external fun nativeTrain(
+    // private external fun nativeInitializeTrainingModule(modelPath: String): Long
+
+    /*private external fun nativeTrain(
         modelData: String,
         method: String,
         epochs: Int,
@@ -20,45 +28,77 @@ class ETTrainer(private val modelData: String, private val meta: Map<String, Any
         learningRate: Float,
         momentum: Float,
         weightDecay: Float
-    ): ByteArray
+    ): ByteArray*/
+
+    /**
+     * Initializes the native training module with the provided model.
+     * This will be used when implementing real training.
+     * 
+     * The process:
+     * 1. Decodes base64 model data
+     * 2. Writes to temporary .pte file (PyTorch ExecuTorch format)
+     * 3. Initializes native training module with the file
+     * 4. Cleans up temporary file
+     */
+    /*private fun initializeTrainingModule() {
+        try {
+            // Decode base64 model data
+            val decodedModelData = Base64.getDecoder().decode(modelData)
+            
+            // Write to temporary file
+            val tempFile = File.createTempFile("model", ".pte")
+            tempFile.writeBytes(decodedModelData)
+            
+            // Initialize native training module
+            // trainingModule = nativeInitializeTrainingModule(tempFile.absolutePath)
+            
+            // Clean up temp file
+            tempFile.delete()
+            
+            //if (trainingModule == 0L) {
+            //    throw RuntimeException("Failed to initialize training module")
+            //}
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to initialize training module", e)
+            throw e
+        }
+    }*/
 
     override suspend fun train(config: TrainingConfig): Map<String, Any> {
         Log.d(TAG, "Starting training with meta: $meta")
+        Log.d(TAG, "Training method: ${config.method}")
         
-        // Decode base64 model data
-        val decodedModelData = Base64.getDecoder().decode(modelData)
-        
-        val result = nativeTrain(
-            modelData = String(decodedModelData),
-            method = meta["method"] as? String ?: "sgd",
-            epochs = (meta["total_epochs"] as? Number)?.toInt() ?: 1,
-            batchSize = (meta["batch_size"] as? Number)?.toInt() ?: 32,
-            learningRate = (meta["learning_rate"] as? Number)?.toFloat() ?: 0.01f,
-            momentum = (meta["momentum"] as? Number)?.toFloat() ?: 0.0f,
-            weightDecay = (meta["weight_decay"] as? Number)?.toFloat() ?: 0.0f
-        )
-
-        // For now, return mock tensor differences that match iOS structure
-        return mapOf(
-            "weight" to mapOf(
-                "sizes" to listOf(10, 10),
-                "strides" to listOf(10, 1),
-                "data" to List(100) { 0.0f }
-            )
-        )
-
-        // TODO: When implementing real training, uncomment this and convert the binary format
-        // to match iOS tensor structure (sizes, strides, data)
-        /*
-        val weightDiffs = deserializeWeightDiff(result)
-        return weightDiffs.mapValues { (_, floatArray) ->
-            mapOf(
-                "sizes" to listOf(floatArray.size),  // This will need to be adjusted based on actual tensor dimensions
-                "strides" to listOf(1),              // This will need to be adjusted based on actual tensor strides
-                "data" to floatArray.toList()        // Convert FloatArray to List<Float>
-            )
+        val trainingResult = when (config.method) {
+            "cnn" -> {
+                // Return tensor format for CNN, exactly matching iOS
+                mapOf(
+                    "layer1" to listOf(1.0f, 1.0f, 1.0f),
+                    "layer2" to listOf(2.0f, 2.0f, 2.0f)
+                )
+            }
+            "xor" -> {
+                // Return number format for XOR, exactly matching iOS
+                mapOf(
+                    "value" to 0.0,
+                    "count" to 1
+                )
+            }
+            else -> throw IllegalArgumentException("Unsupported method: ${config.method}")
         }
-        */
+
+        // Wrap the result in DXO format
+        val dxo = DXO(
+            kind = DataKind.MODEL,
+            data = trainingResult,
+            meta = mapOf(
+                "learning_rate" to (config.learningRate ?: 0.0001),
+                "batch_size" to (config.batchSize ?: 4),
+                "method" to config.method
+            )
+        )
+
+        Log.d(TAG, "Training completed, returning DXO: ${dxo.toMap()}")
+        return dxo.toMap()
     }
 
     /**

@@ -168,4 +168,81 @@ data class TrainingTask(
     val currentRound: Int = 0,
     val numRounds: Int = 1,
     val updateInterval: Float = 1.0f
-) 
+)
+
+// DXO Data Kinds
+object DataKind {
+    const val FL_MODEL = "FL_MODEL"
+    const val WEIGHTS = "WEIGHTS"
+    const val WEIGHT_DIFF = "WEIGHT_DIFF"
+    const val METRICS = "METRICS"
+    const val ANALYTIC = "ANALYTIC"
+    const val COLLECTION = "COLLECTION"
+    const val STATISTICS = "STATISTICS"
+    const val PSI = "PSI"
+    const val APP_DEFINED = "APP_DEFINED"
+    const val MODEL = "model"
+    const val EXECUTORCH_PTE = "executorch_pte"
+}
+
+// DXO Structure
+data class DXO(
+    val kind: String,
+    val data: Map<String, Any>,
+    val meta: Map<String, Any> = emptyMap()
+) {
+    fun toMap(): Map<String, Any> {
+        return mapOf(
+            "kind" to kind,
+            "data" to data,
+            "meta" to meta
+        )
+    }
+
+    companion object {
+        fun fromMap(map: Map<String, Any>): DXO {
+            return DXO(
+                kind = map["kind"] as? String ?: "",
+                data = map["data"] as? Map<String, Any> ?: emptyMap(),
+                meta = map["meta"] as? Map<String, Any> ?: emptyMap()
+            )
+        }
+    }
+}
+
+// Extension functions for JSON conversion
+fun JsonObject.asMap(): Map<String, Any> {
+    val map = mutableMapOf<String, Any>()
+    entrySet().forEach { (key, value) ->
+        map[key] = when (value) {
+            is JsonPrimitive -> when {
+                value.isString -> value.asString
+                value.isNumber -> value.asNumber
+                value.isBoolean -> value.asBoolean
+                else -> null
+            }
+            is JsonObject -> value.asMap()
+            is JsonArray -> value.asList()
+            else -> null
+        } ?: Unit
+    }
+    return map
+}
+
+fun JsonArray.asList(): List<Any> {
+    val list = mutableListOf<Any>()
+    forEach { element ->
+        list.add(when (element) {
+            is JsonPrimitive -> when {
+                element.isString -> element.asString
+                element.isNumber -> element.asNumber
+                element.isBoolean -> element.asBoolean
+                else -> null
+            }
+            is JsonObject -> element.asMap()
+            is JsonArray -> element.asList()
+            else -> null
+        } ?: Unit)
+    }
+    return list
+} 

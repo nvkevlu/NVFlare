@@ -19,7 +19,6 @@ import com.nvidia.nvflare.training.MethodType
 import com.nvidia.nvflare.training.TrainerController
 import com.nvidia.nvflare.training.TrainingStatus
 import com.nvidia.nvflare.training.TrainerType
-import com.nvidia.nvflare.training.DeviceStateMonitor
 import com.nvidia.nvflare.ui.theme.NVFlareTheme
 import kotlinx.coroutines.launch
 import java.net.NetworkInterface
@@ -44,7 +43,7 @@ class MainActivity : ComponentActivity() {
 fun MainScreen() {
     val context = LocalContext.current
     val connection = remember { Connection(context) }
-    val trainerController = remember { TrainerController(connection, DeviceStateMonitor(context)) }
+    val trainerController = remember { TrainerController(connection) }
     val scope = rememberCoroutineScope()
     
     var hostnameText by remember { mutableStateOf(connection.hostname.value ?: "") }
@@ -131,8 +130,8 @@ fun MainScreen() {
         ) {
             TrainerType.values().forEach { type ->
                 FilterChip(
-                    selected = trainerController.trainerType == type,
-                    onClick = { trainerController.trainerType = type },
+                    selected = trainerController.trainerType.value == type,
+                    onClick = { trainerController.setTrainerType(type) },
                     label = { Text(type.name) },
                     modifier = Modifier.weight(1f)
                 )
@@ -170,7 +169,7 @@ fun MainScreen() {
                         ) {
                             Text(method.displayName)
                             Switch(
-                                checked = trainerController.supportedMethods.contains(method),
+                                checked = trainerController.supportedMethods.value?.contains(method) ?: false,
                                 onCheckedChange = { trainerController.toggleMethod(method) }
                             )
                         }
@@ -182,7 +181,7 @@ fun MainScreen() {
         // Training Button
         Button(
             onClick = {
-                if (trainerController.status == TrainingStatus.TRAINING) {
+                if (trainerController.status.value == TrainingStatus.TRAINING) {
                     trainerController.stopTraining()
                 } else {
                     scope.launch {
@@ -191,16 +190,17 @@ fun MainScreen() {
                 }
             },
             modifier = Modifier.fillMaxWidth(),
-            enabled = trainerController.status != TrainingStatus.STOPPING &&
-                     trainerController.supportedMethods.isNotEmpty()
+            enabled = trainerController.status.value != TrainingStatus.STOPPING &&
+                     (trainerController.supportedMethods.value?.isNotEmpty() ?: false) &&
+                     connection.isValid
         ) {
             Text(
-                if (trainerController.status == TrainingStatus.TRAINING) "Stop Training" else "Start Training"
+                if (trainerController.status.value == TrainingStatus.TRAINING) "Stop Training" else "Start Training"
             )
         }
         
         // Progress Indicator
-        if (trainerController.status == TrainingStatus.TRAINING) {
+        if (trainerController.status.value == TrainingStatus.TRAINING) {
             CircularProgressIndicator(
                 modifier = Modifier.align(Alignment.CenterHorizontally)
             )

@@ -32,10 +32,12 @@ class Connection(private val context: Context) {
     val port = MutableLiveData<Int>(0)
 
     val isValid: Boolean
-        get() = hostname.value?.isNotEmpty() == true && (port.value ?: 0) > 0 && (port.value ?: 0) <= 65535
+        get() = hostname.value?.isNotEmpty() == true && (port.value ?: 0) > 0 && (port.value
+            ?: 0) <= 65535
 
     // Device info matching iOS exactly
-    private val deviceId: String = context.packageManager.getPackageInfo(context.packageName, 0).longVersionCode.toString()
+    private val deviceId: String =
+        context.packageManager.getPackageInfo(context.packageName, 0).longVersionCode.toString()
     private val deviceInfo: Map<String, String> = mapOf(
         "device_id" to deviceId,
         "platform" to "android",
@@ -55,6 +57,10 @@ class Connection(private val context: Context) {
     }
 
     suspend fun fetchJob(): JobResponse = withContext(Dispatchers.IO) {
+        if (!isValid) {
+            throw NVFlareError.InvalidRequest("Invalid hostname or port")
+        }
+
         val url = HttpUrl.Builder()
             .scheme("http")
             .host(hostname.value ?: "")
@@ -98,9 +104,11 @@ class Connection(private val context: Context) {
                             delay(retryWait.toLong())
                             fetchJob()
                         }
+
                         else -> throw NVFlareError.JobFetchFailed("Job fetch failed")
                     }
                 }
+
                 400 -> throw NVFlareError.InvalidRequest("Invalid request")
                 403 -> throw NVFlareError.AuthError("Authentication error")
                 500 -> throw NVFlareError.ServerError("Server error")
@@ -113,6 +121,10 @@ class Connection(private val context: Context) {
     }
 
     suspend fun fetchTask(jobId: String): TaskResponse = withContext(Dispatchers.IO) {
+        if (!isValid) {
+            throw NVFlareError.InvalidRequest("Invalid hostname or port")
+        }
+
         val url = HttpUrl.Builder()
             .scheme("http")
             .host(hostname.value ?: "")
@@ -153,18 +165,16 @@ class Connection(private val context: Context) {
             when (response.code) {
                 200 -> {
                     val taskResponse = gson.fromJson(responseBody, TaskResponse::class.java)
+                    Log.d(TAG, "Parsed TaskResponse: $taskResponse")
                     
                     // Update cookie if present - convert JsonObject to JSONValue
                     taskResponse.cookie?.let { cookie ->
                         currentCookie = JSONValue.fromJsonElement(cookie)
+                        Log.d(TAG, "Updated cookie: $cookie")
                     }
 
                     // Check task status using enum
                     val taskStatus = taskResponse.taskStatus
-                    if (!taskStatus.shouldContinueTraining) {
-                        throw NVFlareError.TaskFetchFailed("Task fetch failed")
-                    }
-
                     when (taskStatus) {
                         TaskResponse.TaskStatus.OK -> taskResponse
                         TaskResponse.TaskStatus.RETRY -> {
@@ -173,9 +183,15 @@ class Connection(private val context: Context) {
                             delay(retryWait.toLong())
                             fetchTask(jobId)
                         }
-                        else -> throw NVFlareError.TaskFetchFailed("Task fetch failed")
+                        else -> {
+                            if (!taskStatus.shouldContinueTraining) {
+                                throw NVFlareError.TaskFetchFailed("Task fetch failed")
+                            }
+                            taskResponse
+                        }
                     }
                 }
+
                 400 -> throw NVFlareError.InvalidRequest("Invalid request")
                 403 -> throw NVFlareError.AuthError("Authentication error")
                 500 -> throw NVFlareError.ServerError("Server error")
@@ -187,7 +203,16 @@ class Connection(private val context: Context) {
         }
     }
 
-    suspend fun sendResult(jobId: String, taskId: String, taskName: String, weightDiff: Map<String, Any>): ResultResponse = withContext(Dispatchers.IO) {
+    suspend fun sendResult(
+        jobId: String,
+        taskId: String,
+        taskName: String,
+        weightDiff: Map<String, Any>
+    ): ResultResponse = withContext(Dispatchers.IO) {
+        if (!isValid) {
+            throw NVFlareError.InvalidRequest("Invalid hostname or port")
+        }
+
         val url = HttpUrl.Builder()
             .scheme("http")
             .host(hostname.value ?: "")
@@ -195,12 +220,25 @@ class Connection(private val context: Context) {
             .addPathSegment("result")
             .build()
 
+        // Ensure weightDiff is in DXO format
+        val resultData = if (weightDiff.containsKey("kind") && weightDiff.containsKey("data")) {
+            // Already in DXO format
+            weightDiff
+        } else {
+            // Wrap in DXO format if not already
+            mapOf(
+                "kind" to "model",
+                "data" to weightDiff,
+                "meta" to emptyMap<String, Any>()
+            )
+        }
+
         // Prepare request body
         val requestBody = JsonObject().apply {
             addProperty("job_id", jobId)
             addProperty("task_id", taskId)
             addProperty("task_name", taskName)
-            add("result", gson.toJsonTree(weightDiff))
+            add("result", gson.toJsonTree(resultData))
             if (currentCookie != null) {
                 add("cookie", gson.toJsonTree(currentCookie?.toAny()))
             }
@@ -231,9 +269,12 @@ class Connection(private val context: Context) {
                     val resultResponse = gson.fromJson(responseBody, ResultResponse::class.java)
                     when (resultResponse.status) {
                         "OK" -> resultResponse
-                        else -> throw NVFlareError.TrainingFailed(resultResponse.message ?: "Unknown error")
+                        else -> throw NVFlareError.TrainingFailed(
+                            resultResponse.message ?: "Unknown error"
+                        )
                     }
                 }
+
                 400 -> throw NVFlareError.InvalidRequest("Invalid request")
                 403 -> throw NVFlareError.AuthError("Authentication error")
                 500 -> throw NVFlareError.ServerError("Server error")

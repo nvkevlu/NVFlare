@@ -4,6 +4,7 @@ import com.google.gson.annotations.SerializedName
 import com.google.gson.JsonObject
 import com.google.gson.JsonPrimitive
 import com.google.gson.JsonArray
+import com.google.gson.JsonElement
 
 data class TaskResponse(
     @SerializedName("status")
@@ -31,15 +32,39 @@ data class TaskResponse(
     val cookie: JsonObject?
 ) {
     data class TaskData(
+        @SerializedName("kind")
+        val kind: String,
+        
         @SerializedName("data")
-        val data: String,
+        val data: JsonElement,
         
         @SerializedName("meta")
-        val meta: JsonObject?,
-        
-        @SerializedName("kind")
-        val kind: String
-    )
+        val meta: JsonObject?
+    ) {
+        fun toDXO(): DXO {
+            // Convert data JsonElement to Map<String, Any>
+            val dataMap = when (data) {
+                is JsonObject -> data.asMap()
+                is JsonPrimitive -> mapOf("value" to when {
+                    data.isString -> data.asString
+                    data.isNumber -> data.asNumber
+                    data.isBoolean -> data.asBoolean
+                    else -> null
+                })
+                is JsonArray -> mapOf("array" to data.asList())
+                else -> emptyMap()
+            }
+            
+            // Convert meta JsonObject to Map<String, Any>
+            val metaMap = meta?.asMap() ?: emptyMap()
+            
+            return DXO(
+                kind = kind,
+                data = dataMap,
+                meta = metaMap
+            )
+        }
+    }
 
     enum class TaskStatus(val value: String) {
         OK("OK"),
@@ -73,29 +98,41 @@ data class TaskResponse(
             throw NVFlareError.TaskFetchFailed("Missing required task data")
         }
 
-        // Convert meta JsonObject to Map<String, Any>
-        val metaMap = taskData.meta?.let { meta ->
-            meta.entrySet().associate { (key, value) ->
-                key to when (value) {
-                    is JsonPrimitive -> when {
-                        value.isString -> value.asString
-                        value.isNumber -> value.asNumber
-                        value.isBoolean -> value.asBoolean
-                        else -> null
-                    }
-                    is JsonObject -> value.asMap()
-                    is JsonArray -> value.asList()
-                    else -> null
+        // Convert task data to DXO format
+        val dxo = taskData.toDXO()
+        
+        // Extract model data from DXO based on kind
+        val modelData = when (dxo.kind) {
+            DataKind.EXECUTORCH_PTE -> {
+                // For Executorch models, data should contain the model buffer
+                when (val modelBuffer = dxo.data["model_buffer"]) {
+                    is String -> modelBuffer
+                    else -> throw NVFlareError.TaskFetchFailed("Invalid model buffer format for Executorch PTE")
                 }
             }
-        } ?: emptyMap()
+            DataKind.MODEL -> {
+                // For regular models, convert data to JSON string
+                com.google.gson.Gson().toJson(dxo.data)
+            }
+            DataKind.WEIGHTS, DataKind.WEIGHT_DIFF -> {
+                // For weight data, convert to JSON string
+                com.google.gson.Gson().toJson(dxo.data)
+            }
+            else -> {
+                // Default case, convert data to JSON string
+                com.google.gson.Gson().toJson(dxo.data)
+            }
+        }
+
+        // Use meta from DXO for training config
+        val trainingConfig = TrainingConfig.fromMap(dxo.meta)
 
         return TrainingTask(
             id = taskId,
             name = taskName,
             jobId = jobId,
-            modelData = taskData.data,
-            trainingConfig = TrainingConfig.fromMap(metaMap)
+            modelData = modelData,
+            trainingConfig = trainingConfig
         )
     }
 } 
