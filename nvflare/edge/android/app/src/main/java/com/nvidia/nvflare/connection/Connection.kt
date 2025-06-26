@@ -220,25 +220,12 @@ class Connection(private val context: Context) {
             .addPathSegment("result")
             .build()
 
-        // Ensure weightDiff is in DXO format
-        val resultData = if (weightDiff.containsKey("kind") && weightDiff.containsKey("data")) {
-            // Already in DXO format
-            weightDiff
-        } else {
-            // Wrap in DXO format if not already
-            mapOf(
-                "kind" to "model",
-                "data" to weightDiff,
-                "meta" to emptyMap<String, Any>()
-            )
-        }
-
         // Prepare request body
         val requestBody = JsonObject().apply {
             addProperty("job_id", jobId)
             addProperty("task_id", taskId)
             addProperty("task_name", taskName)
-            add("result", gson.toJsonTree(resultData))
+            add("result", gson.toJsonTree(weightDiff))
             if (currentCookie != null) {
                 add("cookie", gson.toJsonTree(currentCookie?.toAny()))
             }

@@ -32,39 +32,15 @@ data class TaskResponse(
     val cookie: JsonObject?
 ) {
     data class TaskData(
-        @SerializedName("kind")
-        val kind: String,
-        
         @SerializedName("data")
         val data: JsonElement,
         
         @SerializedName("meta")
-        val meta: JsonObject?
-    ) {
-        fun toDXO(): DXO {
-            // Convert data JsonElement to Map<String, Any>
-            val dataMap = when (data) {
-                is JsonObject -> data.asMap()
-                is JsonPrimitive -> mapOf("value" to when {
-                    data.isString -> data.asString
-                    data.isNumber -> data.asNumber
-                    data.isBoolean -> data.asBoolean
-                    else -> null
-                })
-                is JsonArray -> mapOf("array" to data.asList())
-                else -> emptyMap()
-            }
-            
-            // Convert meta JsonObject to Map<String, Any>
-            val metaMap = meta?.asMap() ?: emptyMap()
-            
-            return DXO(
-                kind = kind,
-                data = dataMap,
-                meta = metaMap
-            )
-        }
-    }
+        val meta: JsonObject?,
+        
+        @SerializedName("kind")
+        val kind: String
+    )
 
     enum class TaskStatus(val value: String) {
         OK("OK"),
@@ -98,41 +74,37 @@ data class TaskResponse(
             throw NVFlareError.TaskFetchFailed("Missing required task data")
         }
 
-        // Convert task data to DXO format
-        val dxo = taskData.toDXO()
-        
-        // Extract model data from DXO based on kind
-        val modelData = when (dxo.kind) {
-            DataKind.EXECUTORCH_PTE -> {
-                // For Executorch models, data should contain the model buffer
-                when (val modelBuffer = dxo.data["model_buffer"]) {
-                    is String -> modelBuffer
-                    else -> throw NVFlareError.TaskFetchFailed("Invalid model buffer format for Executorch PTE")
+        // Convert meta JsonObject to Map<String, Any>
+        val metaMap = taskData.meta?.let { meta ->
+            meta.entrySet().mapNotNull { (key, value) ->
+                val convertedValue = when (value) {
+                    is JsonPrimitive -> when {
+                        value.isString -> value.asString
+                        value.isNumber -> value.asNumber
+                        value.isBoolean -> value.asBoolean
+                        else -> null
+                    }
+                    is JsonObject -> value.asMap()
+                    is JsonArray -> value.asList()
+                    else -> null
                 }
-            }
-            DataKind.MODEL -> {
-                // For regular models, convert data to JSON string
-                com.google.gson.Gson().toJson(dxo.data)
-            }
-            DataKind.WEIGHTS, DataKind.WEIGHT_DIFF -> {
-                // For weight data, convert to JSON string
-                com.google.gson.Gson().toJson(dxo.data)
-            }
-            else -> {
-                // Default case, convert data to JSON string
-                com.google.gson.Gson().toJson(dxo.data)
-            }
-        }
+                if (convertedValue != null) key to convertedValue else null
+            }.toMap()
+        } ?: emptyMap()
 
-        // Use meta from DXO for training config
-        val trainingConfig = TrainingConfig.fromMap(dxo.meta)
+        // Handle both string and object data cases
+        val modelData = when (taskData.data) {
+            is JsonPrimitive -> taskData.data.asString
+            is JsonObject -> taskData.data.toString()
+            else -> throw NVFlareError.TaskFetchFailed("Unsupported data type in task_data.data")
+        }
 
         return TrainingTask(
             id = taskId,
             name = taskName,
             jobId = jobId,
             modelData = modelData,
-            trainingConfig = trainingConfig
+            trainingConfig = TrainingConfig.fromMap(metaMap)
         )
     }
 } 

@@ -189,11 +189,11 @@ class TrainerController(private val connection: Connection) : ViewModel() {
     }
 
     private fun createTrainer(modelData: String, meta: TrainingConfig): Trainer {
-        val methodString = meta.method ?: "cnn"  // Default to cnn if method is null
+        val methodString = meta.method ?: ""
         val method = MethodType.fromString(methodString)
         
         if (method == null) {
-            Log.e(TAG, "Missing or invalid method in job metadata: $methodString")
+            Log.e(TAG, "Missing or invalid method in job metadata")
             throw NVFlareError.InvalidMetadata("Missing or invalid method in job metadata")
         }
 

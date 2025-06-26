@@ -2,8 +2,6 @@ package com.nvidia.nvflare.trainer
 
 import android.util.Log
 import com.nvidia.nvflare.models.TrainingConfig
-import com.nvidia.nvflare.models.DXO
-import com.nvidia.nvflare.models.DataKind
 import com.nvidia.nvflare.training.Trainer
 import java.util.Base64
 import java.io.File
@@ -68,12 +66,15 @@ class ETTrainer(private val modelData: String, private val meta: Map<String, Any
         Log.d(TAG, "Starting training with meta: $meta")
         Log.d(TAG, "Training method: ${config.method}")
         
-        val trainingResult = when (config.method) {
+        return when (config.method) {
             "cnn" -> {
                 // Return tensor format for CNN, exactly matching iOS
                 mapOf(
-                    "layer1" to listOf(1.0f, 1.0f, 1.0f),
-                    "layer2" to listOf(2.0f, 2.0f, 2.0f)
+                    "weight" to mapOf(
+                        "sizes" to listOf(4, 3, 32, 32),
+                        "strides" to listOf(3072, 1024, 32, 1),
+                        "data" to List(4 * 3 * 32 * 32) { 0.0f }
+                    )
                 )
             }
             "xor" -> {
@@ -85,20 +86,6 @@ class ETTrainer(private val modelData: String, private val meta: Map<String, Any
             }
             else -> throw IllegalArgumentException("Unsupported method: ${config.method}")
         }
-
-        // Wrap the result in DXO format
-        val dxo = DXO(
-            kind = DataKind.MODEL,
-            data = trainingResult,
-            meta = mapOf(
-                "learning_rate" to (config.learningRate ?: 0.0001),
-                "batch_size" to (config.batchSize ?: 4),
-                "method" to config.method
-            )
-        )
-
-        Log.d(TAG, "Training completed, returning DXO: ${dxo.toMap()}")
-        return dxo.toMap()
     }
 
     /**
