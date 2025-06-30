@@ -66,7 +66,7 @@ class ETTrainer(private val modelData: String, private val meta: Map<String, Any
         Log.d(TAG, "Starting training with meta: $meta")
         Log.d(TAG, "Training method: ${config.method}")
         
-        return when (config.method) {
+        val trainingResult = when (config.method) {
             "cnn" -> {
                 // Return tensor format for CNN, exactly matching iOS
                 mapOf(
@@ -86,6 +86,20 @@ class ETTrainer(private val modelData: String, private val meta: Map<String, Any
             }
             else -> throw IllegalArgumentException("Unsupported method: ${config.method}")
         }
+
+        // Wrap in DXO format with correct data_kind
+        val dxo = mapOf(
+            "kind" to "number",
+            "data" to trainingResult,
+            "meta" to mapOf(
+                "learning_rate" to (config.learningRate ?: 0.0001),
+                "batch_size" to (config.batchSize ?: 4),
+                "method" to config.method
+            )
+        )
+
+        Log.d(TAG, "Training completed, returning DXO: $dxo")
+        return dxo
     }
 
     /**

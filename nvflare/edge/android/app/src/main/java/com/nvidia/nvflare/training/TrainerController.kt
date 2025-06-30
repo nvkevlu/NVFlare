@@ -121,10 +121,11 @@ class TrainerController(private val connection: Connection) : ViewModel() {
 
                 val job = jobResponse.toJob()
                 val methodString = jobResponse.method ?: ""
-                val method = MethodType.fromString(methodString)
+                val method = if (methodString.isNotEmpty()) MethodType.fromString(methodString) else MethodType.CNN
                 
-                if (method == null || !(_supportedMethods.value?.contains(method) ?: false)) {
-                    Log.d(TAG, "Skipping job with unsupported or missing method: $methodString")
+                // Only skip if a method is specified but not supported
+                if (methodString.isNotEmpty() && !(_supportedMethods.value?.contains(method) ?: false)) {
+                    Log.d(TAG, "Skipping job with unsupported method: $methodString")
                     delay(5000) // Add delay before retry
                     continue
                 }

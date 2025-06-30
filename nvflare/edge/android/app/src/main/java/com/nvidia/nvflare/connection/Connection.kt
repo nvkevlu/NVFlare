@@ -40,8 +40,15 @@ class Connection(private val context: Context) {
         context.packageManager.getPackageInfo(context.packageName, 0).longVersionCode.toString()
     private val deviceInfo: Map<String, String> = mapOf(
         "device_id" to deviceId,
+        "app_name" to "test",
+        "app_version" to context.packageManager.getPackageInfo(context.packageName, 0).versionName,
         "platform" to "android",
-        "app_version" to context.packageManager.getPackageInfo(context.packageName, 0).versionName
+        "platform_version" to "1.2.2"
+    )
+    
+    // User info to match protocol test configuration
+    private val userInfo: Map<String, String> = mapOf(
+        "user_id" to "xyz"
     )
 
     fun setCapabilities(capabilities: Map<String, Any>) {
@@ -78,7 +85,7 @@ class Connection(private val context: Context) {
             .post(requestBody.toString().toRequestBody("application/json".toMediaType()))
             .header("X-Flare-Device-ID", deviceId)
             .header("X-Flare-Device-Info", infoToQueryString(deviceInfo))
-            .header("X-Flare-User-Info", "")
+            .header("X-Flare-User-Info", infoToQueryString(userInfo))
             .build()
 
         Log.d(TAG, "Sending request: ${request.method} ${request.url}")
@@ -147,7 +154,7 @@ class Connection(private val context: Context) {
             .post(requestBody.toString().toRequestBody("application/json".toMediaType()))
             .header("X-Flare-Device-ID", deviceId)
             .header("X-Flare-Device-Info", infoToQueryString(deviceInfo))
-            .header("X-Flare-User-Info", "{}")
+            .header("X-Flare-User-Info", infoToQueryString(userInfo))
             .build()
 
         Log.d(TAG, "Sending request: ${request.method} ${request.url}")
@@ -236,7 +243,7 @@ class Connection(private val context: Context) {
             .post(requestBody.toString().toRequestBody("application/json".toMediaType()))
             .header("X-Flare-Device-ID", deviceId)
             .header("X-Flare-Device-Info", infoToQueryString(deviceInfo))
-            .header("X-Flare-User-Info", "{}")
+            .header("X-Flare-User-Info", infoToQueryString(userInfo))
             .build()
 
         Log.d(TAG, "Sending request: ${request.method} ${request.url}")
