@@ -5,7 +5,8 @@ data class TrainingConfig(
     val batchSize: Int = 4,
     val learningRate: Float = 0.1f,
     val method: String = "cnn",
-    val dataSetType: String = DatasetType.CIFAR10
+    val dataSetType: String = DatasetType.CIFAR10,
+    val kind: String? = null
 ) {
     companion object {
         fun fromMap(data: Map<String, Any>): TrainingConfig {
@@ -14,7 +15,8 @@ data class TrainingConfig(
                 batchSize = (data[MetaKey.BATCH_SIZE] as? Number)?.toInt() ?: 4,
                 learningRate = (data[MetaKey.LEARNING_RATE] as? Number)?.toFloat() ?: 0.1f,
                 method = data["method"] as? String ?: "xor",
-                dataSetType = data[MetaKey.DATASET_TYPE] as? String ?: DatasetType.XOR
+                dataSetType = data[MetaKey.DATASET_TYPE] as? String ?: DatasetType.XOR,
+                kind = data["kind"] as? String
             )
         }
     }
@@ -24,6 +26,7 @@ data class TrainingConfig(
         MetaKey.BATCH_SIZE to batchSize,
         MetaKey.LEARNING_RATE to learningRate,
         "method" to method,
-        MetaKey.DATASET_TYPE to dataSetType
+        MetaKey.DATASET_TYPE to dataSetType,
+        "kind" to kind
     )
 }

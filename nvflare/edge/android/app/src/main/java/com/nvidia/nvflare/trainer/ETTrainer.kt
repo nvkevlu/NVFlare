@@ -65,6 +65,7 @@ class ETTrainer(private val modelData: String, private val meta: Map<String, Any
     override suspend fun train(config: TrainingConfig): Map<String, Any> {
         Log.d(TAG, "Starting training with meta: $meta")
         Log.d(TAG, "Training method: ${config.method}")
+        Log.d(TAG, "Config kind: ${config.kind}")
         
         val trainingResult = when (config.method) {
             "cnn" -> {
@@ -87,9 +88,13 @@ class ETTrainer(private val modelData: String, private val meta: Map<String, Any
             else -> throw IllegalArgumentException("Unsupported method: ${config.method}")
         }
 
-        // Wrap in DXO format with correct data_kind
+        // Get the expected kind from config, default to "number" for backward compatibility
+        val expectedKind = config.kind ?: "number"
+        Log.d(TAG, "Expected kind from config: $expectedKind")
+        
+        // Wrap in DXO format with the expected data_kind
         val dxo = mapOf(
-            "kind" to "number",
+            "kind" to expectedKind,
             "data" to trainingResult,
             "meta" to mapOf(
                 "learning_rate" to (config.learningRate ?: 0.0001),

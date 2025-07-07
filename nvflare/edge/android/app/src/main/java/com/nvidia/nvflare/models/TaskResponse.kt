@@ -92,6 +92,10 @@ data class TaskResponse(
             }.toMap()
         } ?: emptyMap()
 
+        // Add kind to meta data
+        val metaWithKind = metaMap.toMutableMap()
+        metaWithKind["kind"] = taskData.kind
+
         // Handle both string and object data cases
         val modelData = when (taskData.data) {
             is JsonPrimitive -> taskData.data.asString
@@ -104,7 +108,7 @@ data class TaskResponse(
             name = taskName,
             jobId = jobId,
             modelData = modelData,
-            trainingConfig = TrainingConfig.fromMap(metaMap)
+            trainingConfig = TrainingConfig.fromMap(metaWithKind)
         )
     }
 } 
