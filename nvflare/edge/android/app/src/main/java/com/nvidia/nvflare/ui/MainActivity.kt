@@ -16,7 +16,7 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import com.nvidia.nvflare.connection.Connection
 import com.nvidia.nvflare.training.MethodType
-import com.nvidia.nvflare.training.TrainerController
+import com.nvidia.nvflare.sdk.FlareRunnerController
 import com.nvidia.nvflare.training.TrainingStatus
 import com.nvidia.nvflare.training.TrainerType
 import com.nvidia.nvflare.ui.theme.NVFlareTheme
@@ -43,7 +43,7 @@ class MainActivity : ComponentActivity() {
 fun MainScreen() {
     val context = LocalContext.current
     val connection = remember { Connection(context) }
-    val trainerController = remember { TrainerController(connection) }
+    val flareRunnerController = remember { FlareRunnerController(context, connection) }
     val scope = rememberCoroutineScope()
     
     var hostnameText by remember { mutableStateOf(connection.hostname.value ?: "") }
@@ -130,8 +130,8 @@ fun MainScreen() {
         ) {
             TrainerType.values().forEach { type ->
                 FilterChip(
-                    selected = trainerController.trainerType.value == type,
-                    onClick = { trainerController.setTrainerType(type) },
+                    selected = flareRunnerController.trainerType.value == type,
+                    onClick = { flareRunnerController.setTrainerType(type) },
                     label = { Text(type.name) },
                     modifier = Modifier.weight(1f)
                 )
@@ -169,8 +169,8 @@ fun MainScreen() {
                         ) {
                             Text(method.displayName)
                             Switch(
-                                checked = trainerController.supportedMethods.value?.contains(method) ?: false,
-                                onCheckedChange = { trainerController.toggleMethod(method) }
+                                checked = flareRunnerController.supportedMethods.value?.contains(method) ?: false,
+                                onCheckedChange = { flareRunnerController.toggleMethod(method) }
                             )
                         }
                     }
@@ -181,26 +181,26 @@ fun MainScreen() {
         // Training Button
         Button(
             onClick = {
-                if (trainerController.status.value == TrainingStatus.TRAINING) {
-                    trainerController.stopTraining()
+                if (flareRunnerController.status.value == TrainingStatus.TRAINING) {
+                    flareRunnerController.stopTraining()
                 } else {
                     scope.launch {
-                        trainerController.startTraining()
+                        flareRunnerController.startTraining()
                     }
                 }
             },
             modifier = Modifier.fillMaxWidth(),
-            enabled = trainerController.status.value != TrainingStatus.STOPPING &&
-                     (trainerController.supportedMethods.value?.isNotEmpty() ?: false) &&
+            enabled = flareRunnerController.status.value != TrainingStatus.STOPPING &&
+                     (flareRunnerController.supportedMethods.value?.isNotEmpty() ?: false) &&
                      connection.isValid
         ) {
             Text(
-                if (trainerController.status.value == TrainingStatus.TRAINING) "Stop Training" else "Start Training"
+                if (flareRunnerController.status.value == TrainingStatus.TRAINING) "Stop Training" else "Start Training"
             )
         }
         
         // Progress Indicator
-        if (trainerController.status.value == TrainingStatus.TRAINING) {
+        if (flareRunnerController.status.value == TrainingStatus.TRAINING) {
             CircularProgressIndicator(
                 modifier = Modifier.align(Alignment.CenterHorizontally)
             )

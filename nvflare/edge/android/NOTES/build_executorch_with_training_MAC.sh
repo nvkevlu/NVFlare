@@ -51,7 +51,7 @@ export PATH=$PATH:$ANDROID_HOME/tools:$ANDROID_HOME/platform-tools
 export EXECUTORCH_ROOT=/Users/kevlu/workspace/repos/mobile/executorch
 export ANDROID_ABIS=arm64-v8a
 export EXECUTORCH_CMAKE_BUILD_TYPE=Release
-export BUILD_AAR_DIR=/Users/kevlu/workspace/repos/mobile/executorch/aar-out
+export BUILD_AAR_DIR=/Users/kevlu/workspace/repos/mobile/executorch/aar-out2
 
 # Verify NDK toolchain file exists
 if [ ! -f "$ANDROID_NDK/build/cmake/android.toolchain.cmake" ]; then
@@ -142,6 +142,12 @@ cp extension/module/*.h extension/android/executorch_android/src/main/jni/includ
 export ANDROID_SDK=/Users/kevlu/Library/Android/sdk
 ./scripts/build_android_library.sh
 
+sh executorch_android/android_test_setup.sh
+./gradlew :executorch_android:testDebugUnitTest
+
+./gradlew :executorch_android:connectedAndroidTest
+
+adb logcat | grep -E XOR
 # ls -lh executorch/extension/android/executorch_android/build/outputs/aar/
 
 # Create app libs directory

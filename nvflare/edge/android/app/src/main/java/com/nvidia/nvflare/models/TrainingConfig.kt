@@ -26,7 +26,12 @@ data class TrainingConfig(
         MetaKey.BATCH_SIZE to batchSize,
         MetaKey.LEARNING_RATE to learningRate,
         "method" to method,
-        MetaKey.DATASET_TYPE to dataSetType,
-        "kind" to kind
-    )
+        MetaKey.DATASET_TYPE to dataSetType
+    ).let { map ->
+        if (kind != null) {
+            map + ("kind" to kind)
+        } else {
+            map
+        }
+    }
 }

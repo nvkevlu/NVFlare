@@ -4,6 +4,7 @@ import android.util.Log
 import com.nvidia.nvflare.sdk.defs.Context
 import com.nvidia.nvflare.sdk.defs.Filter
 import com.nvidia.nvflare.sdk.defs.EventHandler
+import com.nvidia.nvflare.sdk.AndroidExecutorFactory
 
 /**
  * Configuration keys used in training configuration.
@@ -140,11 +141,27 @@ private fun processComponents(
         val resolver = object : ComponentResolver(compType, name, args) {
             override fun resolve(): Any? {
                 return try {
-                    clazz.getDeclaredConstructor().newInstance()
+                    // Special handling for executor type to use AndroidExecutorFactory
+                    if (compType == "executor") {
+                        resolveExecutor(args)
+                    } else {
+                        // Default: create instance using reflection
+                        clazz.getDeclaredConstructor().newInstance()
+                    }
                 } catch (e: Exception) {
                     Log.e(TAG, "Failed to create instance of $compType", e)
                     null
                 }
+            }
+            
+            private fun resolveExecutor(args: Map<String, Any>?): Any? {
+                // Extract required arguments for AndroidExecutorFactory
+                val method = args?.get("method") as? String ?: "cnn"
+                val modelData = args?.get("model_data") as? String ?: ""
+                val meta = args?.get("meta") as? Map<String, Any> ?: emptyMap()
+                
+                // Use AndroidExecutorFactory to create the executor
+                return AndroidExecutorFactory.createExecutor(method, modelData, meta)
             }
         }
 

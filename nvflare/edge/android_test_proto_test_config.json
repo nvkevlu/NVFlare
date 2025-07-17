@@ -1,0 +1,118 @@
+{
+  "headers": {
+    "device_info": {
+      "device_id": "1",
+      "app_name": "test",
+      "app_version": "1.0",
+      "platform": "android",
+      "platform_version": "1.2.2"
+    },
+    "user_info": {
+      "user_id": "xyz"
+    }
+  },
+  "steps": [
+    {
+      "job": {
+        "capabilities": {
+          "methods": ["cnn", "xor"]
+        }
+      },
+      "response": {
+        "status": "RETRY"
+      }
+    },
+    {
+      "job": {
+        "capabilities": {
+          "methods": ["cnn", "xor"]
+        }
+      },
+      "response": {
+        "status": "RETRY"
+      }
+    },
+    {
+      "job": {
+        "capabilities": {
+          "methods": ["cnn", "xor"]
+        }
+      },
+      "response": {
+        "status": "OK",
+        "job_id": "12345"
+      }
+    },
+    {
+      "task": {
+        "job_id": "12345"
+      },
+      "response": {
+        "status": "RETRY",
+        "job_id": "12345",
+        "retry_wait": 2
+      }
+    },
+    {
+      "task": {
+        "job_id": "12345"
+      },
+      "response": {
+        "status": "OK",
+        "job_id": "12345",
+        "task_id": "task12345",
+        "task_name": "train",
+        "task_data": {
+          "kind": "model",
+          "data": {
+            "layer1": [0, 0, 0],
+            "layer2": [1, 1, 1]
+          },
+          "meta": {
+            "learning_rate": 0.0001
+          }
+        },
+        "cookie": {
+          "model_version": 1,
+          "selection_id": 101
+        }
+      }
+    },
+    {
+      "report": {
+        "job_id": "12345",
+        "task_id": "task12345",
+        "task_name": "train",
+        "status": "OK",
+        "result": {
+          "kind": "model",
+          "data": {
+            "layer1": [0.0, 0.0, 0.0],
+            "layer2": [1.0, 1.0, 1.0]
+          }
+        },
+        "cookie": {
+          "model_version": 1,
+          "selection_id": 101
+        }
+      },
+      "response": {
+        "status": "OK",
+        "task_id": "task12345",
+        "task_name": "train"
+      }
+    },
+    {
+      "task": {
+        "job_id": "12345",
+        "cookie": {
+          "model_version": 1,
+          "selection_id": 101
+        }
+      },
+      "response": {
+        "status": "DONE"
+      }
+    }
+  ]
+}
