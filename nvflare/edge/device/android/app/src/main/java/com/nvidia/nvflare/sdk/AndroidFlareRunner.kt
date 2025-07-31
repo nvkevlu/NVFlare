@@ -56,6 +56,7 @@ class AndroidFlareRunner(
         // Follow the Python pattern: component_type -> class_reference
         resolverRegistryMap.putAll(mapOf(
             "Executor.AndroidExecutor" to AndroidExecutor::class.java,
+            "Trainer.DLTrainer" to AndroidExecutor::class.java,  // Map Trainer.DLTrainer to AndroidExecutor
             "Filter.NoOpFilter" to NoOpFilter::class.java,
             "EventHandler.NoOpEventHandler" to NoOpEventHandler::class.java,
             "Transform.NoOpTransform" to NoOpTransform::class.java,

@@ -143,12 +143,18 @@ private fun processComponents(
         val resolver = object : ComponentResolver(compType, name, args) {
             override fun resolve(): Any? {
                 return try {
-                    // Special handling for executor type to use AndroidExecutorFactory
-                    if (compType.startsWith("Executor.")) {
-                        resolveExecutor(args)
-                    } else {
-                        // Default: create instance using reflection
-                        clazz.getDeclaredConstructor().newInstance()
+                    // Special handling for executor and trainer types
+                    when {
+                        compType.startsWith("Executor.") -> {
+                            resolveExecutor(args)
+                        }
+                        compType.startsWith("Trainer.") -> {
+                            resolveTrainer(args)
+                        }
+                        else -> {
+                            // Default: create instance using reflection
+                            clazz.getDeclaredConstructor().newInstance()
+                        }
                     }
                 } catch (e: Exception) {
                     Log.e(TAG, "Failed to create instance of $compType", e)
@@ -164,6 +170,26 @@ private fun processComponents(
                 
                 // Use AndroidExecutorFactory to create the executor
                 return AndroidExecutorFactory.createExecutor(context, method, modelData, meta)
+            }
+            
+            private fun resolveTrainer(args: Map<String, Any>?): Any? {
+                // Map Trainer.DLTrainer to Android executor
+                // Extract training parameters from args
+                val epoch = args?.get("epoch") as? Int ?: 5
+                val lr = args?.get("lr") as? Double ?: 0.0001
+                val optimizer = args?.get("optimizer") as? String ?: "sgd"
+                val loss = args?.get("loss") as? String ?: "bce"
+                
+                // Create meta configuration for the trainer
+                val meta = mapOf(
+                    "epoch" to epoch,
+                    "learning_rate" to lr,
+                    "optimizer" to optimizer,
+                    "loss" to loss
+                )
+                
+                // Use AndroidExecutorFactory with default method
+                return AndroidExecutorFactory.createExecutor(context, "cnn", "", meta)
             }
         }
 
