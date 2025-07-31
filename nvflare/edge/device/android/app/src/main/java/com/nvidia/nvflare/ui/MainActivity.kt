@@ -14,11 +14,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
-import com.nvidia.nvflare.sdk.network.Connection
-import com.nvidia.nvflare.sdk.utils.MethodType
 import com.nvidia.nvflare.app.controllers.FlareRunnerController
-import com.nvidia.nvflare.sdk.utils.TrainingStatus
-import com.nvidia.nvflare.sdk.utils.TrainerType
+import com.nvidia.nvflare.app.controllers.TrainingStatus
+import com.nvidia.nvflare.app.controllers.SupportedJob
 import com.nvidia.nvflare.ui.theme.NVFlareTheme
 import kotlinx.coroutines.launch
 import java.net.NetworkInterface
@@ -42,12 +40,13 @@ class MainActivity : ComponentActivity() {
 @Composable
 fun MainScreen() {
     val context = LocalContext.current
-    val connection = remember { Connection(context) }
-    val flareRunnerController = remember { FlareRunnerController(context, connection) }
+    val flareRunnerController = remember { FlareRunnerController(context) }
     val scope = rememberCoroutineScope()
     
-    var hostnameText by remember { mutableStateOf(connection.hostname.value ?: "") }
-    var portText by remember { mutableStateOf(connection.port.value?.toString() ?: "") }
+    var hostnameText by remember { mutableStateOf(flareRunnerController.serverHost) }
+    var portText by remember { mutableStateOf(flareRunnerController.serverPort.toString()) }
+    var status by remember { mutableStateOf(TrainingStatus.IDLE) }
+    var errorMessage by remember { mutableStateOf<String?>(null) }
     
     // Get IP address
     val ipAddress = remember {
@@ -62,12 +61,12 @@ fun MainScreen() {
         }
     }
     
-    // Update connection when text changes
+    // Update controller when text changes
     LaunchedEffect(hostnameText) {
-        connection.hostname.value = hostnameText
+        flareRunnerController.serverHost = hostnameText
     }
     LaunchedEffect(portText) {
-        connection.port.value = portText.toIntOrNull() ?: 0
+        flareRunnerController.serverPort = portText.toIntOrNull() ?: 4321
     }
     
     Column(
@@ -98,51 +97,12 @@ fun MainScreen() {
                 )
             }
         }
-        
-        // Hostname and Port Input
-        OutlinedTextField(
-            value = hostnameText,
-            onValueChange = { hostnameText = it },
-            label = { Text("Hostname") },
-            modifier = Modifier.fillMaxWidth(),
-            singleLine = true
-        )
-        
-        OutlinedTextField(
-            value = portText,
-            onValueChange = { portText = it },
-            label = { Text("Port") },
-            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-            modifier = Modifier.fillMaxWidth(),
-            singleLine = true
-        )
-        
-        // Trainer Type Selection
-        Text(
-            text = "Trainer Type",
-            style = MaterialTheme.typography.titleMedium,
-            modifier = Modifier.padding(top = 8.dp)
-        )
-        
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            TrainerType.values().forEach { type ->
-                FilterChip(
-                    selected = flareRunnerController.trainerType.value == type,
-                    onClick = { flareRunnerController.setTrainerType(type) },
-                    label = { Text(type.name) },
-                    modifier = Modifier.weight(1f)
-                )
-            }
-        }
-        
-        // Supported Methods Section
+
+        // Server Configuration
         Card(
             modifier = Modifier.fillMaxWidth(),
             colors = CardDefaults.cardColors(
-                containerColor = MaterialTheme.colorScheme.surface
+                containerColor = MaterialTheme.colorScheme.surfaceVariant
             )
         ) {
             Column(
@@ -150,60 +110,137 @@ fun MainScreen() {
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 Text(
-                    text = "Supported Methods",
+                    text = "Server Configuration",
                     style = MaterialTheme.typography.titleMedium
                 )
                 
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .heightIn(max = 200.dp)
-                        .verticalScroll(rememberScrollState()),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    MethodType.values().forEach { method ->
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.SpaceBetween
-                        ) {
-                            Text(method.displayName)
-                            Switch(
-                                checked = flareRunnerController.supportedMethods.value?.contains(method) ?: false,
-                                onCheckedChange = { flareRunnerController.toggleMethod(method) }
-                            )
-                        }
+                OutlinedTextField(
+                    value = hostnameText,
+                    onValueChange = { hostnameText = it },
+                    label = { Text("Hostname") },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true
+                )
+                
+                OutlinedTextField(
+                    value = portText,
+                    onValueChange = { portText = it },
+                    label = { Text("Port") },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number)
+                )
+            }
+        }
+
+        // Supported Jobs
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(
+                containerColor = MaterialTheme.colorScheme.surfaceVariant
+            )
+        ) {
+            Column(
+                modifier = Modifier.padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Text(
+                    text = "Supported Jobs",
+                    style = MaterialTheme.typography.titleMedium
+                )
+                
+                SupportedJob.values().forEach { job ->
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(job.displayName)
+                        Switch(
+                            checked = flareRunnerController.supportedJobs.contains(job),
+                            onCheckedChange = { checked ->
+                                flareRunnerController.toggleJob(job)
+                            }
+                        )
                     }
                 }
             }
         }
-        
-        // Training Button
-        Button(
-            onClick = {
-                if (flareRunnerController.status.value == TrainingStatus.TRAINING) {
-                    flareRunnerController.stopTraining()
-                } else {
-                    scope.launch {
-                        flareRunnerController.startTraining()
+
+        // Training Control
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(
+                containerColor = MaterialTheme.colorScheme.surfaceVariant
+            )
+        ) {
+            Column(
+                modifier = Modifier.padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Text(
+                    text = "Training Control",
+                    style = MaterialTheme.typography.titleMedium
+                )
+                
+                // Status Display
+                Text(
+                    text = "Status: ${status.name}",
+                    style = MaterialTheme.typography.bodyMedium
+                )
+                
+                // Error Display
+                errorMessage?.let { error ->
+                    Text(
+                        text = "Error: $error",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.error
+                    )
+                }
+                
+                // Control Buttons
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Button(
+                        onClick = {
+                            scope.launch {
+                                flareRunnerController.startTraining(
+                                    onStatusUpdate = { newStatus ->
+                                        status = newStatus
+                                        errorMessage = null
+                                    },
+                                    onError = { error ->
+                                        status = TrainingStatus.IDLE
+                                        errorMessage = error.message ?: "Unknown error"
+                                    },
+                                    onSuccess = {
+                                        status = TrainingStatus.IDLE
+                                        errorMessage = null
+                                    }
+                                )
+                            }
+                        },
+                        enabled = status == TrainingStatus.IDLE,
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text("Start Training")
+                    }
+                    
+                    Button(
+                        onClick = {
+                            flareRunnerController.stopTraining()
+                            status = TrainingStatus.IDLE
+                            errorMessage = null
+                        },
+                        enabled = status == TrainingStatus.TRAINING,
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text("Stop Training")
                     }
                 }
-            },
-            modifier = Modifier.fillMaxWidth(),
-            enabled = flareRunnerController.status.value != TrainingStatus.STOPPING &&
-                     (flareRunnerController.supportedMethods.value?.isNotEmpty() ?: false) &&
-                     connection.isValid
-        ) {
-            Text(
-                if (flareRunnerController.status.value == TrainingStatus.TRAINING) "Stop Training" else "Start Training"
-            )
-        }
-        
-        // Progress Indicator
-        if (flareRunnerController.status.value == TrainingStatus.TRAINING) {
-            CircularProgressIndicator(
-                modifier = Modifier.align(Alignment.CenterHorizontally)
-            )
+            }
         }
     }
 } 
