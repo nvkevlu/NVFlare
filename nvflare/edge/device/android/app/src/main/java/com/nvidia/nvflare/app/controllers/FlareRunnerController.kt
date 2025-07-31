@@ -126,6 +126,7 @@ class FlareRunnerController(
             currentFlareRunner = AndroidFlareRunner(
                 context = context,
                 connection = connection,
+                jobName = "android_fl_job",  // Add job_name parameter
                 dataSource = dataSource,
                 deviceInfo = deviceInfo,
                 userInfo = userInfo,

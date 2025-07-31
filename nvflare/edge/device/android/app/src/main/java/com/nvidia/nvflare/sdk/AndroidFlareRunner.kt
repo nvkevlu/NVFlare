@@ -30,6 +30,7 @@ import kotlinx.coroutines.delay
 class AndroidFlareRunner(
     private val context: AndroidContext,
     private val connection: Connection,
+    jobName: String,  // Add job_name parameter
     dataSource: DataSource,
     deviceInfo: Map<String, String>,
     userInfo: Map<String, String>,
@@ -38,6 +39,7 @@ class AndroidFlareRunner(
     outFilters: List<Filter>? = null,
     resolverRegistry: Map<String, Class<*>>? = null
 ) : FlareRunner(
+    jobName = jobName,  // Pass job_name to parent
     dataSource = dataSource,
     deviceInfo = deviceInfo,
     userInfo = userInfo,
@@ -48,7 +50,6 @@ class AndroidFlareRunner(
 ) {
     private val TAG = "AndroidFlareRunner"
     private var currentJobId: String? = null
-    private var currentJobName: String? = null
 
     override fun addBuiltinResolvers() {
         // Add Android-specific component resolvers here
@@ -91,7 +92,7 @@ class AndroidFlareRunner(
             
             try {
                 val jobResponse = runBlocking {
-                    connection.fetchJob()
+                    connection.fetchJob(jobName)  // Pass job_name to fetchJob
                 }
 
                 when (jobResponse.status) {
@@ -101,12 +102,11 @@ class AndroidFlareRunner(
                     }
                     "OK" -> {
                         currentJobId = jobResponse.jobId
-                        currentJobName = jobResponse.jobName
                         
                         // Convert JobResponse to the format expected by FlareRunner
                         return mapOf(
                             "job_id" to (jobResponse.jobId ?: ""),
-                            "job_name" to (jobResponse.jobName ?: ""),
+                            "job_name" to jobName,
                             "job_data" to (jobResponse.jobData?.asMap() ?: emptyMap<String, Any>())
                         )
                     }

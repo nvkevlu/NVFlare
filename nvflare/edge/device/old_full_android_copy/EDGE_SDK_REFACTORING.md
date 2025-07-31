@@ -265,6 +265,7 @@ val userInfo = mapOf("user_id" to "user123")
 val flareRunner = AndroidFlareRunner(
     context = context,
     connection = connection,
+    jobName = "my_fl_job",  // Add job_name parameter
     dataSource = dataSource,
     deviceInfo = deviceInfo,
     userInfo = userInfo,
