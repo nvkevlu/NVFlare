@@ -34,13 +34,11 @@ import java.util.HashMap
  * filtering, and event handling. Consolidates all FL functionality into a single class.
  */
 class AndroidFlareRunner(
-    private val context: AndroidContext,
-    private val connection: Connection,
+    private val context: android.content.Context,
     private val jobName: String,
     private val dataSource: DataSource,
-    private val deviceInfo: Map<String, String>,
-    private val userInfo: Map<String, String>,
-    private val jobTimeout: Float,
+    private val serverHost: String,
+    private val serverPort: Int,
     private val inFilters: List<Filter>? = null,
     private val outFilters: List<Filter>? = null,
     private val resolverRegistry: Map<String, Class<*>>? = null
@@ -50,6 +48,12 @@ class AndroidFlareRunner(
     private var jobId: String? = null
     private var cookie: Any? = null
     private var currentJobId: String? = null
+
+    // Internal properties generated automatically
+    private val connection: Connection by lazy { createConnection() }
+    private val deviceInfo: Map<String, String> by lazy { generateDeviceInfo() }
+    private val userInfo: Map<String, String> by lazy { generateUserInfo() }
+    private val jobTimeout: Float = 86400.0f  // 24 hours default
 
     private val resolverRegistryMap: MutableMap<String, Class<*>> = HashMap()
 
@@ -504,5 +508,60 @@ class AndroidFlareRunner(
             }
         }
         return result
+    }
+
+    /**
+     * Create connection internally using server config.
+     */
+    private fun createConnection(): Connection {
+        val connection = Connection(context)
+        connection.hostname.value = serverHost
+        connection.port.value = serverPort
+        
+        // Set capabilities based on available jobs
+        val capabilities = mapOf(
+            "supported_jobs" to listOf(jobName),
+            "methods" to listOf("cnn", "xor")
+        )
+        connection.setCapabilities(capabilities)
+        
+        // Set user info
+        val userId = android.provider.Settings.Secure.getString(
+            context.contentResolver, 
+            android.provider.Settings.Secure.ANDROID_ID
+        ) ?: "unknown_user"
+        connection.setUserInfo(mapOf("user_id" to userId))
+        
+        return connection
+    }
+
+    /**
+     * Generate device info automatically.
+     */
+    private fun generateDeviceInfo(): Map<String, String> {
+        val deviceId = android.provider.Settings.Secure.getString(
+            context.contentResolver, 
+            android.provider.Settings.Secure.ANDROID_ID
+        ) ?: "unknown"
+        
+        val packageInfo = context.packageManager.getPackageInfo(context.packageName, 0)
+        
+        return mapOf(
+            "device_id" to deviceId,
+            "platform" to "android",
+            "app_version" to packageInfo.versionName
+        )
+    }
+
+    /**
+     * Generate user info automatically.
+     */
+    private fun generateUserInfo(): Map<String, String> {
+        val userId = android.provider.Settings.Secure.getString(
+            context.contentResolver, 
+            android.provider.Secure.ANDROID_ID
+        ) ?: "unknown_user"
+        
+        return mapOf("user_id" to userId)
     }
 } 

@@ -126,9 +126,13 @@ class TrainingArtifacts(private val context: Context) {
     
     /**
      * Get the initial model file (.pte) from an artifacts directory.
+     * 
+     * @param artifactsDir The artifacts directory to search in
+     * @param filename The model filename (defaults to "initial_model.pte")
+     * @return The model file if it exists, null otherwise
      */
-    fun getInitialModelFile(artifactsDir: File): File? {
-        val modelFile = File(artifactsDir, "models/initial_model.pte")
+    fun getInitialModelFile(artifactsDir: File, filename: String = "initial_model.pte"): File? {
+        val modelFile = File(artifactsDir, "models/$filename")
         return if (modelFile.exists()) modelFile else null
     }
     
