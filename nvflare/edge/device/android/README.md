@@ -6,8 +6,7 @@ This directory should contain the ExecuTorch Android libraries (.aar files) that
 
 Based on the CIFAR-10 ExecuTorch example, you need to add the following libraries:
 
-1. **executorch.aar** - Main ExecuTorch library
-2. **executorch_training.aar** - ExecuTorch training library (if separate)
+1. **executorch.aar** - Main ExecuTorch library (required)
 
 ## How to Obtain
 
@@ -29,6 +28,8 @@ implementation(fileTree(mapOf("dir" to "libs", "include" to listOf("*.jar", "*.a
 ```
 
 This will automatically include all .jar and .aar files in this directory.
+
+**Important**: The `executorch-sources.jar` is optional and only needed for IDE support. If you don't have it, the app will still build and run, but you may see build warnings.
 
 ## Current Status
 
@@ -53,6 +54,9 @@ mkdir -p nvflare/edge/device/android/app/libs
 
 # Copy the ExecuTorch AAR - make sure the app directory is what you are actually using
 cp ./extension/android/executorch_android/build/outputs/aar/executorch_android-debug.aar nvflare/edge/device/android/app/libs/executorch.aar
+
+# Note: The sources JAR location may vary depending on your ExecuTorch build
+# You may need to search for it or build it separately
 
 Copy nvflare/edge/ios/NVFlareMobile/NVFlareMobile/Assets.xcassets/cifar10/data_batch_1.dataset/data_batch_1.bin to nvflare/edge/device/android/app/src/main/assets/data_batch_1.bin
 
