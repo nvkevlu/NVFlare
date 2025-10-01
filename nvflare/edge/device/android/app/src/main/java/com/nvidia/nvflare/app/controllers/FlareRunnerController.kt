@@ -11,6 +11,7 @@ import com.nvidia.nvflare.sdk.core.Context as FlareContext
 import com.nvidia.nvflare.sdk.core.DataSource
 import com.nvidia.nvflare.sdk.core.Signal
 import com.nvidia.nvflare.sdk.core.Dataset
+import com.nvidia.nvflare.sdk.core.NVFlareError
 
 
 import kotlinx.coroutines.CoroutineScope
@@ -218,12 +219,67 @@ class FlareRunnerController(
                 
             } catch (e: Exception) {
                 Log.e(TAG, "FlareRunnerController: Training failed with error: $e")
-                withContext(Dispatchers.Main) {
-                    Log.d(TAG, "FlareRunnerController: Clearing dataset reference due to error")
-                    currentDataset = null // Release dataset reference on error too
-                    status = TrainingStatus.IDLE
-                    onStatusUpdate(status)
-                    onError(e)
+                
+                // Handle specific error types with appropriate strategies
+                when (e) {
+                    is NVFlareError.ServerRequestedStop -> {
+                        Log.i(TAG, "Server requested stop - graceful shutdown")
+                        withContext(Dispatchers.Main) {
+                            currentDataset = null
+                            status = TrainingStatus.IDLE
+                            onStatusUpdate(status)
+                            onSuccess() // Treat as success since server requested stop
+                        }
+                    }
+                    is NVFlareError.NetworkError -> {
+                        Log.e(TAG, "Network error during training: ${e.message}")
+                        // Network errors might be transient - could implement retry logic here
+                        withContext(Dispatchers.Main) {
+                            currentDataset = null
+                            status = TrainingStatus.IDLE
+                            onStatusUpdate(status)
+                            onError(e)
+                        }
+                    }
+                    is NVFlareError.AuthError -> {
+                        Log.e(TAG, "Authentication error during training: ${e.message}")
+                        // Auth errors are usually not recoverable - stop training
+                        withContext(Dispatchers.Main) {
+                            currentDataset = null
+                            status = TrainingStatus.IDLE
+                            onStatusUpdate(status)
+                            onError(e)
+                        }
+                    }
+                    is NVFlareError.TrainingFailed -> {
+                        Log.e(TAG, "Training failed: ${e.message}")
+                        // Training errors are not recoverable - stop training
+                        withContext(Dispatchers.Main) {
+                            currentDataset = null
+                            status = TrainingStatus.IDLE
+                            onStatusUpdate(status)
+                            onError(e)
+                        }
+                    }
+                    is NVFlareError.ServerError -> {
+                        Log.e(TAG, "Server error during training: ${e.message}")
+                        // Server errors might be transient - could implement retry logic here
+                        withContext(Dispatchers.Main) {
+                            currentDataset = null
+                            status = TrainingStatus.IDLE
+                            onStatusUpdate(status)
+                            onError(e)
+                        }
+                    }
+                    else -> {
+                        Log.e(TAG, "Unexpected error during training: ${e.message}")
+                        withContext(Dispatchers.Main) {
+                            currentDataset = null
+                            status = TrainingStatus.IDLE
+                            onStatusUpdate(status)
+                            onError(e)
+                        }
+                    }
                 }
             }
         }

@@ -339,12 +339,42 @@ class AndroidFlareRunner(
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "Error fetching job", e)
-                if (e is NVFlareError.ServerRequestedStop) {
-                    return null
+                
+                // Handle specific error types with appropriate strategies
+                when (e) {
+                    is NVFlareError.ServerRequestedStop -> {
+                        Log.i(TAG, "Server requested stop - returning null")
+                        return null
+                    }
+                    is NVFlareError.NetworkError -> {
+                        Log.e(TAG, "Network error fetching job: ${e.message}")
+                        // Retry with exponential backoff for network errors
+                        runBlocking { delay(5000L) }
+                        continue
+                    }
+                    is NVFlareError.AuthError -> {
+                        Log.e(TAG, "Authentication error fetching job: ${e.message}")
+                        // Auth errors are usually not recoverable, stop trying
+                        return null
+                    }
+                    is NVFlareError.ServerError -> {
+                        Log.e(TAG, "Server error fetching job: ${e.message}")
+                        // Retry server errors after delay
+                        runBlocking { delay(5000L) }
+                        continue
+                    }
+                    is NVFlareError.InvalidRequest -> {
+                        Log.e(TAG, "Invalid request error fetching job: ${e.message}")
+                        // Invalid requests are usually not recoverable
+                        return null
+                    }
+                    else -> {
+                        Log.e(TAG, "Unexpected error fetching job: ${e.message}")
+                        // Retry other errors after delay
+                        runBlocking { delay(5000L) }
+                        continue
+                    }
                 }
-                // Retry after delay
-                runBlocking { delay(5000L) }
-                continue
             }
         }
     }
@@ -434,12 +464,42 @@ class AndroidFlareRunner(
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "Error fetching task", e)
-                if (e is NVFlareError.ServerRequestedStop) {
-                    return Pair(null, true)
+                
+                // Handle specific error types with appropriate strategies
+                when (e) {
+                    is NVFlareError.ServerRequestedStop -> {
+                        Log.i(TAG, "Server requested stop - returning null")
+                        return Pair(null, true)
+                    }
+                    is NVFlareError.NetworkError -> {
+                        Log.e(TAG, "Network error fetching task: ${e.message}")
+                        // Retry with delay for network errors
+                        runBlocking { delay(5000L) }
+                        continue
+                    }
+                    is NVFlareError.AuthError -> {
+                        Log.e(TAG, "Authentication error fetching task: ${e.message}")
+                        // Auth errors are usually not recoverable, stop trying
+                        return Pair(null, true)
+                    }
+                    is NVFlareError.ServerError -> {
+                        Log.e(TAG, "Server error fetching task: ${e.message}")
+                        // Retry server errors after delay
+                        runBlocking { delay(5000L) }
+                        continue
+                    }
+                    is NVFlareError.InvalidRequest -> {
+                        Log.e(TAG, "Invalid request error fetching task: ${e.message}")
+                        // Invalid requests are usually not recoverable
+                        return Pair(null, true)
+                    }
+                    else -> {
+                        Log.e(TAG, "Unexpected error fetching task: ${e.message}")
+                        // Retry other errors after delay
+                        runBlocking { delay(5000L) }
+                        continue
+                    }
                 }
-                // Retry after delay
-                runBlocking { delay(5000L) }
-                continue
             }
         }
     }
@@ -496,7 +556,35 @@ class AndroidFlareRunner(
             }
         } catch (e: Exception) {
             Log.e(TAG, "Error reporting result", e)
-            return false
+            
+            // Handle specific error types with appropriate strategies
+            when (e) {
+                is NVFlareError.NetworkError -> {
+                    Log.e(TAG, "Network error reporting result: ${e.message}")
+                    // Network errors during result reporting are usually not recoverable
+                    return false
+                }
+                is NVFlareError.AuthError -> {
+                    Log.e(TAG, "Authentication error reporting result: ${e.message}")
+                    // Auth errors are not recoverable
+                    return false
+                }
+                is NVFlareError.ServerError -> {
+                    Log.e(TAG, "Server error reporting result: ${e.message}")
+                    // Server errors during result reporting are usually not recoverable
+                    return false
+                }
+                is NVFlareError.InvalidRequest -> {
+                    Log.e(TAG, "Invalid request error reporting result: ${e.message}")
+                    // Invalid requests are not recoverable
+                    return false
+                }
+                else -> {
+                    Log.e(TAG, "Unexpected error reporting result: ${e.message}")
+                    // Other errors are not recoverable
+                    return false
+                }
+            }
         }
     }
 

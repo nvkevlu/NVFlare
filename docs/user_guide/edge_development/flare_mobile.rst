@@ -411,10 +411,15 @@ Performance Optimization
 Error Handling
 --------------
 
-1. **Network Errors**: Implement retry logic for network failures
-2. **Model Errors**: Handle model loading and training errors gracefully
-3. **Data Errors**: Validate data before training
-4. **Timeout Handling**: Implement appropriate timeouts
+The mobile SDKs provide sophisticated error handling with specific recovery strategies:
+
+1. **Server Requested Stop**: Graceful shutdown (treated as success)
+2. **Network Errors**: Retry logic at SDK level, graceful error reporting at app level
+3. **Authentication Errors**: Graceful handling with user notification (usually not recoverable)
+4. **Server Errors**: Retry logic at SDK level, graceful error reporting at app level
+5. **Model Errors**: Handle model loading and training errors gracefully
+6. **Data Errors**: Validate data before training
+7. **Timeout Handling**: Implement appropriate timeouts
 
 Security Considerations
 -----------------------

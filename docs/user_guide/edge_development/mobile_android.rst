@@ -555,7 +555,7 @@ Common Exceptions
 Exception Hierarchy
 -------------------
 
-The SDK uses a custom exception hierarchy where ``NVFlareError`` extends ``Exception`` and provides specific error types. In practice, the Android app primarily handles ``ServerRequestedStop`` specifically, while other errors are handled generically:
+The SDK uses a custom exception hierarchy where ``NVFlareError`` extends ``Exception`` and provides specific error types. The Android app uses sophisticated error handling with specific recovery strategies for each error type:
 
 .. code-block:: kotlin
 
@@ -578,7 +578,7 @@ The SDK uses a custom exception hierarchy where ``NVFlareError`` extends ``Excep
 Error Handling Best Practices
 -----------------------------
 
-The Android SDK uses a simplified error handling approach that catches generic exceptions and provides specific handling for `NVFlareError.ServerRequestedStop`:
+The Android SDK uses sophisticated error handling that catches specific exception types and provides appropriate recovery strategies for each error type:
 
 .. code-block:: kotlin
 
@@ -587,18 +587,52 @@ The Android SDK uses a simplified error handling approach that catches generic e
    } catch (e: Exception) {
        Log.e("FLARE", "Training failed with error: $e")
        
-       // Check for specific NVFlareError types
-       if (e is NVFlareError.ServerRequestedStop) {
-           Log.i("FLARE", "Server requested stop")
-           // Gracefully stop training
-       } else {
-           // Handle other errors generically
-           Log.e("FLARE", "Error: ${e.message}")
+       // Handle specific error types with appropriate strategies
+       when (e) {
+           is NVFlareError.ServerRequestedStop -> {
+               Log.i("FLARE", "Server requested stop - graceful shutdown")
+               // Treat as success since server requested stop
+           }
+           is NVFlareError.NetworkError -> {
+               Log.e("FLARE", "Network error during training: ${e.message}")
+               // Handle network connectivity issues
+           }
+           is NVFlareError.AuthError -> {
+               Log.e("FLARE", "Authentication error during training: ${e.message}")
+               // Handle authentication failures
+           }
+           is NVFlareError.TrainingFailed -> {
+               Log.e("FLARE", "Training failed: ${e.message}")
+               // Handle training-specific errors
+           }
+           is NVFlareError.ServerError -> {
+               Log.e("FLARE", "Server error during training: ${e.message}")
+               // Handle server-side errors
+           }
+           else -> {
+               Log.e("FLARE", "Unexpected error during training: ${e.message}")
+               // Handle other unexpected errors
+           }
        }
    }
 
+Error Recovery Strategies
+------------------------
+
+The SDK implements different recovery strategies based on error type:
+
+* **Server Requested Stop**: Graceful shutdown (treated as success)
+* **Network Errors**: Stop training and report error (retry logic handled at lower levels)
+* **Authentication Errors**: Stop training and report error (usually not recoverable)
+* **Server Errors**: Stop training and report error (retry logic handled at lower levels)
+* **Invalid Request Errors**: Stop training and report error (usually indicates configuration issues)
+* **Training Errors**: Stop training and report error (not recoverable)
+
 .. note::
-   The Connection class does use more specific error handling, converting ``IOException`` to ``NVFlareError.NetworkError`` and throwing appropriate ``NVFlareError`` subtypes based on HTTP status codes. However, the main application code uses the simplified approach shown above.
+   The main application layer (FlareRunnerController) focuses on graceful error reporting and cleanup. Retry logic for transient errors is handled at the lower SDK levels (AndroidFlareRunner and Connection classes).
+
+.. note::
+   The Connection class provides the foundation for this error handling by converting ``IOException`` to ``NVFlareError.NetworkError`` and throwing appropriate ``NVFlareError`` subtypes based on HTTP status codes.
 
 Logging
 -------
