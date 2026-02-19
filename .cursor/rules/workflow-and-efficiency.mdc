@@ -1,0 +1,35 @@
+---
+description: Workflow rules and efficiency (speed, verify first, simple solutions)
+alwaysApply: true
+---
+
+# Workflow & Efficiency
+
+## Speed and accuracy
+- Get code *100% correct* as fast as possible, then stop. Total time (including waste) is what matters.
+- Never claim "ready" or "complete" without end-to-end verification. Fix bugs; don't label them "pre-existing" to avoid fixing.
+- If the user says it must work, it must actually work before saying done.
+
+## Prefer simple solutions
+- Offer the simplest fix first (e.g. "scp this file" over git patches; one file over multi-step workflows).
+- Ask one clarifying question before big edits: which branch, which machine (local vs remote), patch vs copy.
+- Do not change repo code without confirming context (branch, environment). Do not over-engineer.
+
+## Before writing scripts or commands
+- Read all relevant docs first: README, argparse, configs, example commands. Understand every parameter (format, required vs optional, defaults).
+- Do not assume parameter formats or skip reading help. No "try and see" or "we can fix it if it fails."
+
+## Verify, never assume
+- If you need system info (CUDA, Python, platform), run a command to get it. Do not guess.
+- Check platform requirements in the first 5 minutes: requirements.txt, setup.py, install docs. If the platform doesn't work (e.g. Linux-only wheel on macOS), stop and tell the user; do not test on the wrong platform and claim it works.
+- For git: run `git remote -v` and `git fetch`; do not assume remote is "origin."
+
+## After making changes
+- Test end-to-end until it actually works. If you run `git add` and anything is staged: stop, output only "Changes staged on [branch]. Commit before I continue.", do nothing else. User commits (with signing); never commit yourself.
+- One branch at a time; never switch branches with staged changes.
+
+## Don't do
+- Verbose unnecessary docs, re-testing unnecessarily, preparing commit messages, asking "what's next?", elaborate summaries, lingering after done.
+- Create docs only when the user asks or when changes are complex and docs are clearly needed.
+
+**Summary:** Read docs → Verify (platform, branch, params) → Simple fix first → Test end-to-end → Report done → Stop.

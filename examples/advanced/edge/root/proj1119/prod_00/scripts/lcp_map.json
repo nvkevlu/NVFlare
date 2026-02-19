@@ -1,0 +1,34 @@
+{
+    "C111": {
+        "host": "localhost",
+        "port": 9004
+    },
+    "C112": {
+        "host": "localhost",
+        "port": 9005
+    },
+    "C121": {
+        "host": "localhost",
+        "port": 9007
+    },
+    "C122": {
+        "host": "localhost",
+        "port": 9008
+    },
+    "C211": {
+        "host": "localhost",
+        "port": 9011
+    },
+    "C212": {
+        "host": "localhost",
+        "port": 9012
+    },
+    "C221": {
+        "host": "localhost",
+        "port": 9014
+    },
+    "C222": {
+        "host": "localhost",
+        "port": 9015
+    }
+}

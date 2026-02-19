@@ -1,0 +1,10 @@
+{
+  "format_version": 2,
+  "relay_config": {
+    "scheme": "tcp",
+    "identity": "R2",
+    "address": "localhost:9009",
+    "fqcn": "R2",
+    "connection_security": "clear"
+  }
+}

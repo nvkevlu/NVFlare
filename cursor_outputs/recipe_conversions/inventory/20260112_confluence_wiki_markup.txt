@@ -1,0 +1,615 @@
+h1. NVFlare Recipe Conversion: Status & Consistency Audit
+
+{panel:title=Executive Summary|borderStyle=solid|borderColor=#ccc|titleBGColor=#4A90E2|bgColor=#E8F4FF}
+*Date:* January 12, 2026
+*Status:* 20/48 Examples Converted (42%)
+*Timeline:* 20-26 weeks (5-6 months)
+*Priority:* CRITICAL - Computer Vision & XGBoost gaps identified
+{panel}
+
+----
+
+h2. 📊 Overall Progress Dashboard
+
+{info:title=Progress Overview}
+*Current Status:* 20 out of 48 examples converted to Recipe API (42%)
+*Remaining Work:* 28 examples need conversion
+*Consistency Score:* 44% across all dimensions
+{info}
+
+|| Category || Total || ✅ Converted || ⚠️ Remaining || % Complete || Status ||
+| Hello World | 9 | 9 | 0 | 100% | {status:colour=Green|title=COMPLETE|subtle=false} |
+| Sklearn | 3 | 3 | 0 | 100% | {status:colour=Green|title=COMPLETE|subtle=false} |
+| Experiment Tracking | 5 | 5 | 0 | 100% | {status:colour=Green|title=COMPLETE|subtle=false} |
+| XGBoost | 4 | 1 | 3 | 25% | {status:colour=Yellow|title=NEEDS WORK|subtle=false} |
+| Computer Vision | 6 | 0 | 6 | 0% | {status:colour=Red|title=CRITICAL|subtle=false} |
+| NLP | 2 | 0 | 2 | 0% | {status:colour=Red|title=CRITICAL|subtle=false} |
+| Statistics | 6 | 2 | 4 | 33% | {status:colour=Yellow|title=NEEDS WORK|subtle=false} |
+| Specialized | 13 | 0 | 13 | 0% | {status:colour=Yellow|title=LOW PRIORITY|subtle=false} |
+| *TOTAL* | *48* | *20* | *28* | *42%* | {status:colour=Yellow|title=IN PROGRESS|subtle=false} |
+
+{tip:title=Resources Required}
+* 8 New Recipes to Create
+* 28 Examples to Convert
+* ~200 Files to Delete (legacy configs)
+* ~50 Files to Rename (standardization)
+* ~150 Files to Update (conversions & docs)
+{tip}
+
+----
+
+h2. 🔥 Top 5 Critical Issues
+
+{expand:title=Issue #1: CIFAR-10 Still Using Legacy JSON Configs}
+{panel:borderColor=#d04437|bgColor=#ffe7e7}
+*Impact:* {status:colour=Red|title=CRITICAL|subtle=false} - Most popular CV example
+*Examples Affected:*
+* cifar10-sim (5 separate jobs)
+* cifar10-real-world
+
+*Problem:*
+* Still using legacy JSON configuration files
+* No Recipe API implementation
+* Client code in {{learners/}} directory
+* Model code in {{networks/}} directory
+
+*Solution:*
+* Create 4 new recipes: {{FedOptRecipe}}, {{FedProxRecipe}}, {{ScaffoldRecipe}}, {{CentralRecipe}}
+* Convert all 5 jobs to single {{job.py}} with recipe selection
+* Move client code to {{client.py}}
+* Move model code to {{model.py}}
+* Remove all {{jobs/}} directories
+
+*Effort:* 6-8 weeks
+*Priority:* 🔴 HIGHEST
+{panel}
+{expand}
+
+{expand:title=Issue #2: XGBoost Examples Not Converted}
+{panel:borderColor=#f79232|bgColor=#fff4e6}
+*Impact:* {status:colour=Red|title=HIGH|subtle=false} - Critical for tabular data
+*Examples Affected:*
+* xgboost/fedxgb (horizontal)
+* xgboost/fedxgb (vertical)
+* xgboost/fedxgb_secure
+
+*Problem:*
+* Using FedJob API instead of Recipe API
+* Multiple job files: {{xgb_fl_job_horizontal.py}}, {{xgb_fl_job_vertical.py}}
+* No standardized recipes
+
+*Solution:*
+* Create {{XGBHistogramRecipe}} for horizontal FL
+* Create {{XGBVerticalRecipe}} for vertical FL
+* Rename all job files to {{job.py}}
+* Convert to Recipe API
+
+*Effort:* 4-6 weeks
+*Priority:* 🔴 HIGH
+{panel}
+{expand}
+
+{expand:title=Issue #3: File Naming Inconsistency}
+{panel:borderColor=#f79232|bgColor=#fff4e6}
+*Impact:* {status:colour=Yellow|title=HIGH|subtle=false} - User confusion
+*Files Affected:* ~50 files need renaming
+
+*Problem:*
+* Job files: 22 examples use wrong names
+** 12 files named {{fl_job.py}}
+** 6 files named {{\{example\}_job.py}}
+** 3 files named {{xgb_fl_job_*.py}}
+* Client files: 7 examples use wrong names
+** 5 files named {{train.py}}
+** 15 examples have client code in {{src/}} or {{learners/}}
+
+*Solution:*
+✅ Rename ALL to standard names: {{job.py}}, {{client.py}}, {{model.py}}
+❌ Eliminate: {{fl_job.py}}, {{*_job.py}}, {{train.py}}, {{*_model.py}}
+
+*Effort:* 1-2 weeks
+*Priority:* 🟡 HIGH
+{panel}
+{expand}
+
+{expand:title=Issue #4: Client Code Location Inconsistency}
+{panel:borderColor=#f79232|bgColor=#fff4e6}
+*Impact:* {status:colour=Yellow|title=HIGH|subtle=false} - Hard to find code
+*Examples Affected:* 15 examples
+
+*Problem:*
+* Client code scattered in different locations:
+** {{src/}} directory (8 examples)
+** {{learners/}} directory (CIFAR-10 examples)
+** Various other locations
+* Using legacy Executor/Learner pattern instead of Flare API
+
+*Solution:*
+* Move ALL client code to root {{client.py}}
+* Convert ALL to Flare API pattern
+* Remove {{src/}}, {{learners/}} directories
+
+*Effort:* 2-3 weeks
+*Priority:* 🟡 HIGH
+{panel}
+{expand}
+
+{expand:title=Issue #5: Documentation Outdated}
+{panel:borderColor=#59afe1|bgColor=#e6f7ff}
+*Impact:* {status:colour=Yellow|title=MEDIUM|subtle=false} - Users follow wrong instructions
+*Files Affected:* 28 READMEs need updates
+
+*Problem:*
+* Still reference old JSON config submission
+* Show {{nvflare}} CLI commands instead of Recipe API
+* Missing "How It Works" sections
+* Inconsistent structure and format
+
+*Solution:*
+* Apply standard README template to all examples
+* Add Recipe API usage examples
+* Remove outdated CLI instructions
+* Add consistent sections: Installation, Quick Start, How It Works, Customization
+
+*Effort:* 4-6 weeks
+*Priority:* 🟡 MEDIUM
+{panel}
+{expand}
+
+----
+
+h2. 📋 Consistency Audit Results
+
+{note}
+Audit performed across 8 dimensions as requested:
+# Download Data
+# Prepare Data
+# Model Code
+# Code Structure
+# Client-Side Code
+# Server-Side Code (Job Recipe)
+# File Naming
+# Documentation
+{note}
+
+|| Dimension || ✅ Pass || ❌ Fail || Score || Target ||
+| Job File Naming | 31 | 17 | 65% | 100% |
+| Download Data Pattern | 19 | 29 | 39% | 100% |
+| Prepare Data Pattern | 19 | 29 | 39% | 100% |
+| Model Code Location | 20 | 28 | 42% | 100% |
+| Code Structure | 20 | 28 | 42% | 100% |
+| Client Code (Flare API) | 20 | 28 | 42% | 100% |
+| Server Code (Recipe) | 20 | 28 | 42% | 100% |
+| README Documentation | 20 | 28 | 42% | 100% |
+| *OVERALL* | *169* | *215* | *44%* | *100%* |
+
+{warning:title=Consistency Gap}
+Currently only 44% consistent across all dimensions. Target is 100% consistency.
+This represents ~215 files/examples that need standardization work.
+{warning}
+
+----
+
+h2. 🎯 Example Priority Matrix
+
+h3. 🔴 Critical Priority (8 examples - Must Fix)
+
+{color:#d04437}*These examples MUST be converted first*{color}
+
+{panel:borderColor=#d04437}
+# *cifar10-sim* - Legacy JSON → Recipe API
+** Most popular computer vision example
+** Requires 4 new recipes
+** Effort: 6-8 weeks
+# *cifar10-real-world* - Legacy JSON → Recipe API
+** Production use case with HE
+** Effort: 2-3 weeks
+# *xgboost/fedxgb (horizontal)* - FedJob → Recipe API
+** Needs {{XGBHistogramRecipe}}
+** Effort: 3-4 weeks
+# *xgboost/fedxgb (vertical)* - FedJob → Recipe API
+** Needs {{XGBVerticalRecipe}}
+** Effort: 3-4 weeks
+# *nlp-ner* - FedJob → Recipe API
+** Needs {{TransformerRecipe}}
+** Effort: 2-3 weeks
+# *prostate* - Legacy JSON → Recipe API
+** Medical imaging use case
+** Effort: 2-3 weeks
+# *brats18* - Legacy JSON → Recipe API
+** Medical imaging (3D)
+** Effort: 2-3 weeks
+# *llm_hf* - Standardize existing recipe
+** LLM fine-tuning
+** Effort: 1 week
+{panel}
+
+h3. 🟡 High Priority (6 examples)
+
+{expand:title=Click to see high priority examples}
+* cifar10/tf
+* xgboost/fedxgb_secure
+* hierarchical_stats
+* finance
+* vertical_federated_learning
+* gnn
+{expand}
+
+h3. 🟢 Medium/Low Priority (14+ examples)
+
+{expand:title=Click to see medium/low priority examples}
+Various specialized and research examples, plus infrastructure examples that should remain as-is.
+{expand}
+
+----
+
+h2. 📅 Phased Action Plan
+
+{panel:title=Timeline Overview|bgColor=#f0f0f0}
+*Total Duration:* 20-26 weeks (5-6 months)
+*Start Date:* Week of Jan 15, 2026
+*Target Completion:* June-July 2026
+{panel}
+
+{composition-setup-macro}
+
+h3. Phase 1: Create Missing Recipes (4-6 weeks)
+
+{status:colour=Blue|title=PLANNING|subtle=false}
+
+|| Week || Deliverable || Complexity || Status ||
+| 1-2 | {{FedOptRecipe}}, {{FedProxRecipe}} | Medium | {status:colour=Grey|title=PENDING|subtle=false} |
+| 3-4 | {{ScaffoldRecipe}}, {{XGBHistogramRecipe}} | High | {status:colour=Grey|title=PENDING|subtle=false} |
+| 5-6 | {{XGBVerticalRecipe}}, {{TransformerRecipe}} | High | {status:colour=Grey|title=PENDING|subtle=false} |
+
+{tip}
+*Deliverables:*
+* 6 new recipes implemented
+* Unit tests for each
+* Integration tests for each
+* Documentation for each
+{tip}
+
+{expand:title=Detailed Recipe Requirements}
+h4. FedOptRecipe
+* Federated Adam/Yogi/Adagrad optimizers
+* Server-side optimizer state management
+* Compatible with existing FedAvg patterns
+
+h4. FedProxRecipe
+* Adds proximal term to FedAvg
+* Configurable mu parameter
+* Reduces client drift
+
+h4. ScaffoldRecipe
+* Control variates implementation
+* Most complex of the algorithms
+* Variance reduction for non-IID data
+
+h4. XGBHistogramRecipe
+* Histogram-based federated XGBoost
+* Horizontal federated learning
+* Secure aggregation support
+
+h4. XGBVerticalRecipe
+* Vertical federated learning
+* Split learning integration
+* Privacy-preserving gradients
+
+h4. TransformerRecipe
+* Generic BERT/GPT/transformer support
+* Model loading and tokenization
+* Compatible with HuggingFace models
+{expand}
+
+----
+
+h3. Phase 2: Convert Critical Examples (6-8 weeks)
+
+{status:colour=Yellow|title=NOT STARTED|subtle=false}
+
+|| Weeks || Focus || Examples || Status ||
+| 7-10 | CIFAR-10 Conversion | 4 examples | {status:colour=Grey|title=PENDING|subtle=false} |
+| 11-12 | XGBoost Conversion | 3 examples | {status:colour=Grey|title=PENDING|subtle=false} |
+| 13-14 | NLP & Medical | 3 examples | {status:colour=Grey|title=PENDING|subtle=false} |
+
+{tip}
+*Deliverables:*
+* 10 critical examples converted
+* All legacy JSON configs removed
+* All examples using Recipe API
+* Integration tests for converted examples
+{tip}
+
+{expand:title=Conversion Details by Week}
+*Week 7-8: CIFAR-10-sim*
+* Convert 5 separate jobs to single {{job.py}}
+* Implement recipe selection via CLI
+* Move {{learners/}} → {{client.py}}
+* Move {{networks/}} → {{model.py}}
+* Remove all {{jobs/}} directories
+
+*Week 9-10: CIFAR-10-real-world, cifar10/tf*
+* Add HE support to real-world
+* TensorFlow variant conversion
+* Update documentation
+
+*Week 11-12: XGBoost horizontal & vertical*
+* Apply new XGBHistogramRecipe
+* Apply new XGBVerticalRecipe
+* Restructure code
+* Update documentation
+
+*Week 13-14: NLP-NER, Medical Imaging*
+* Apply TransformerRecipe to NLP-NER
+* Convert prostate, brats18 to Recipe API
+* Create medical imaging utilities
+{expand}
+
+----
+
+h3. Phase 3: Standardize File Structure (4-6 weeks)
+
+{status:colour=Grey|title=NOT STARTED|subtle=false}
+
+|| Weeks || Activity || Files Affected || Status ||
+| 15-16 | File Renaming | ~50 files | {status:colour=Grey|title=PENDING|subtle=false} |
+| 17-18 | Directory Restructuring | ~30 examples | {status:colour=Grey|title=PENDING|subtle=false} |
+| 19-20 | Data Prep Standardization | ~30 examples | {status:colour=Grey|title=PENDING|subtle=false} |
+
+{tip}
+*Deliverables:*
+* All files follow naming conventions
+* All directories follow standard structure
+* All data prep follows standard pattern
+* All examples have consistent structure
+{tip}
+
+{expand:title=Standardization Checklist}
+h4. File Renaming Tasks
+{code}
+# Job files
+*_job.py → job.py         (22 files)
+fl_job.py → job.py        (12 files)
+xgb_*_job.py → job.py    (3 files)
+
+# Client files
+train.py → client.py      (5 files)
+*_client.py → client.py   (2 files)
+
+# Model files
+*_model.py → model.py     (3 files)
+*_nets.py → model.py      (2 files)
+{code}
+
+h4. Directory Restructuring Tasks
+* Move all client code from {{src/}}, {{learners/}} → root {{client.py}}
+* Move all model code from {{networks/}}, {{src/}} → root {{model.py}}
+* Consolidate utilities into {{utils/}} subdirectory
+* Remove empty {{src/}}, {{learners/}}, {{networks/}} directories
+* Remove all {{jobs/}} directories
+
+h4. Data Prep Standardization
+* Create {{download_data.sh}} for all examples needing downloads
+* Create {{prepare_data.sh}} wrapper for all examples
+* Move {{prepare_data.py}} to {{utils/}} subdirectory
+* Standardize CLI arguments: {{--n_clients}}, {{--split_mode}}, {{--data_root}}
+{expand}
+
+----
+
+h3. Phase 4: Update Documentation (4-6 weeks)
+
+{status:colour=Grey|title=NOT STARTED|subtle=false}
+
+|| Weeks || Activity || Files || Status ||
+| 21-23 | Update READMEs | 48 files | {status:colour=Grey|title=PENDING|subtle=false} |
+| 24-25 | Add Docstrings | ~150 files | {status:colour=Grey|title=PENDING|subtle=false} |
+| 26 | Create Master Docs | 3 docs | {status:colour=Grey|title=PENDING|subtle=false} |
+
+{tip}
+*Deliverables:*
+* All READMEs updated and consistent
+* All code has proper docstrings
+* Master index created
+* Migration guide published
+{tip}
+
+{expand:title=README Template Structure}
+All READMEs will follow this standard structure:
+
+{code:title=Standard README Sections}
+# Example Title
+
+## What You'll Learn
+## Installation
+  ### Prerequisites
+  ### Data Preparation
+## Quick Start
+## How It Works
+  ### Recipe API
+  ### Client Training
+  ### Data Flow
+## Customization
+  ### Adjust Training Parameters
+  ### Use Different Model
+  ### Change Data Split
+## Advanced Usage
+  ### Run in POC Mode
+  ### Run in Production
+  ### Add Experiment Tracking
+## Results
+## Files in This Example
+## Next Steps
+## References
+{code}
+{expand}
+
+----
+
+h3. Phase 5: Testing & Validation (2-3 weeks)
+
+{status:colour=Grey|title=NOT STARTED|subtle=false}
+
+|| Weeks || Activity || Coverage || Status ||
+| 27-28 | Testing | All 48 examples | {status:colour=Grey|title=PENDING|subtle=false} |
+| 29 | Final Validation | Complete review | {status:colour=Grey|title=PENDING|subtle=false} |
+
+{tip}
+*Deliverables:*
+* All examples tested and working
+* All linter errors fixed
+* All documentation verified
+* Ready for release
+{tip}
+
+----
+
+h2. 📊 Tracking Metrics
+
+h3. Current State (Jan 12, 2026)
+
+|| Metric || Current || Target || Progress ||
+| Examples Converted | 20/48 | 48/48 | 42% {color:#d04437}▼{color} |
+| Recipes Created | 10/18 | 18/18 | 56% {color:#f79232}▼{color} |
+| File Naming Consistent | 31/48 | 48/48 | 65% {color:#f79232}▼{color} |
+| Structure Consistent | 20/48 | 48/48 | 42% {color:#d04437}▼{color} |
+| Documentation Updated | 20/48 | 48/48 | 42% {color:#d04437}▼{color} |
+| Legacy JSON Eliminated | 41/48 | 48/48 | 85% {color:#59afe1}▲{color} |
+
+h3. Milestone Targets
+
+{panel:title=Phase Completion Targets|bgColor=#e6f7ff}
+*End of Phase 1 (Week 6):*
+* Recipes Created: 16/18 (89%)
+
+*End of Phase 2 (Week 14):*
+* Examples Converted: 30/48 (63%)
+* Legacy JSON Eliminated: 48/48 (100%) ✅
+
+*End of Phase 3 (Week 20):*
+* File Naming Consistent: 48/48 (100%) ✅
+* Structure Consistent: 48/48 (100%) ✅
+
+*End of Phase 4 (Week 26):*
+* Documentation Updated: 48/48 (100%) ✅
+
+*End of Phase 5 (Week 29):*
+* Examples Converted: 48/48 (100%) ✅
+* Recipes Created: 18/18 (100%) ✅
+* ALL METRICS: 100% ✅
+{panel}
+
+----
+
+h2. 🎯 Success Criteria
+
+{panel:title=Recipe Conversion Complete When|borderColor=#36b37e|bgColor=#e3fcef}
+✅ All 48 examples use Recipe API (no FedJob, no JSON)
+✅ All 18 recipes created and tested
+✅ All examples follow standard file structure
+✅ All files use standard naming conventions
+✅ All READMEs follow standard template
+✅ All examples have integration tests
+✅ All linter errors resolved
+✅ Zero regression in functionality
+{panel}
+
+{panel:title=Consistency Achieved When|borderColor=#36b37e|bgColor=#e3fcef}
+✅ 100% of examples use Recipe API
+✅ 100% of job files named {{job.py}}
+✅ 100% of client files named {{client.py}}
+✅ 100% of model files named {{model.py}}
+✅ 100% of data prep uses standard pattern
+✅ 100% of READMEs follow template
+✅ 0% legacy JSON configs remain
+✅ 0% linter errors
+{panel}
+
+----
+
+h2. 👥 Resource Requirements
+
+{panel:title=Team Composition|bgColor=#f0f0f0}
+*Personnel Needed:*
+* 1-2 Senior Engineers (Recipe creation, complex conversions)
+* 1-2 Mid-level Engineers (Example conversions, testing)
+* 1 Technical Writer (Documentation)
+* 1 QA Engineer (Testing, validation)
+
+*Effort Estimate:*
+* Phase 1: 4-6 weeks
+* Phase 2: 6-8 weeks
+* Phase 3: 4-6 weeks
+* Phase 4: 4-6 weeks
+* Phase 5: 2-3 weeks
+* *TOTAL: 20-29 weeks (5-7 months)*
+{panel}
+
+{warning:title=Risk Factors}
+* Recipe complexity may be higher than estimated
+* Legacy code may have hidden dependencies
+* Testing may reveal issues requiring rework
+* Documentation may take longer than estimated
+
+*Mitigation:*
+* Start with simpler recipes to build patterns
+* Thorough code review before conversion
+* Continuous testing throughout phases
+* Parallel documentation work
+{warning}
+
+----
+
+h2. 📞 Contacts & Next Steps
+
+{info:title=Document Information}
+*Owner:* NVFlare Team
+*Last Updated:* January 12, 2026
+*Next Review:* January 19, 2026
+*Review Cadence:* Weekly
+{info}
+
+h3. Related Documents
+
+* [Full Audit|20260112_comprehensive_status_and_consistency_audit.md] - Complete detailed analysis
+* [Status Tracker|20251212_recipe_conversion_status_tracker.md] - Previous status document
+* [Experiment Tracking Summary|20251218_MASTER_SUMMARY.md] - Recent completed work
+
+h3. Immediate Next Steps
+
+{panel:title=This Week's Actions|borderColor=#0052cc|bgColor=#deebff}
+# {color:#0052cc}*Review and approve this plan*{color}
+# Assign team members to phases
+# Set up project tracking (Jira/Confluence)
+# Begin Phase 1: FedOptRecipe design
+# Schedule kickoff meeting
+{panel}
+
+{panel:title=Short Term (Weeks 1-6)|borderColor=#00875a|bgColor=#e3fcef}
+# Create FedOptRecipe, FedProxRecipe
+# Create ScaffoldRecipe, XGBHistogramRecipe
+# Create XGBVerticalRecipe, TransformerRecipe
+# Unit tests for all new recipes
+# Integration tests for all new recipes
+{panel}
+
+----
+
+{panel:title=Questions or Concerns?|bgColor=#f4f5f7}
+* Check existing documentation first
+* Review completed examples for patterns
+* Review test files for usage examples
+* Contact: NVFlare Team
+
+*For Updates:*
+* Update this page weekly
+* Track metrics in project management tool
+* Report blockers immediately
+{panel}
+
+----
+
+_Last updated: January 12, 2026_
+_Document version: 1.0_
+_Status: {status:colour=Blue|title=READY FOR REVIEW|subtle=false}_

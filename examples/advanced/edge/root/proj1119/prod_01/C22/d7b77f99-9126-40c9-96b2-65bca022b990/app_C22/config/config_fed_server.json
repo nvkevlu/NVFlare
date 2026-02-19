@@ -1,0 +1,68 @@
+{
+    "format_version": 2,
+    "workflows": [
+        {
+            "id": "sage",
+            "path": "nvflare.edge.controllers.sage.ScatterAndGatherForEdge",
+            "args": {
+                "num_rounds": 5,
+                "assessor_id": "wf_assessor"
+            }
+        }
+    ],
+    "components": [
+        {
+            "id": "evaluator",
+            "path": "nvflare.edge.widgets.evaluator.GlobalEvaluator",
+            "args": {
+                "model_path": {
+                    "path": "cifar10_model.Cifar10ConvNet",
+                    "args": {}
+                },
+                "torchvision_dataset": {
+                    "name": "CIFAR10",
+                    "path": "/tmp/nvflare/cifar10"
+                }
+            }
+        },
+        {
+            "id": "persistor",
+            "path": "nvflare.app_opt.pt.file_model_persistor.PTFileModelPersistor",
+            "args": {
+                "model": {
+                    "path": "cifar10_model.Cifar10ConvNet",
+                    "args": {}
+                }
+            }
+        },
+        {
+            "id": "model_manager",
+            "path": "nvflare.edge.assessors.buff_model_manager.BuffModelManager",
+            "args": {
+                "num_updates_for_model": 1,
+                "max_model_history": 10,
+                "global_lr": 0.0001
+            }
+        },
+        {
+            "id": "device_manager",
+            "path": "nvflare.edge.assessors.buff_device_manager.BuffDeviceManager",
+            "args": {
+                "device_selection_size": 1,
+                "min_hole_to_fill": 1
+            }
+        },
+        {
+            "id": "wf_assessor",
+            "path": "nvflare.edge.assessors.model_update.ModelUpdateAssessor",
+            "args": {
+                "persistor_id": "persistor",
+                "model_manager_id": "model_manager",
+                "device_manager_id": "device_manager",
+                "max_model_version": 10
+            }
+        }
+    ],
+    "task_data_filters": [],
+    "task_result_filters": []
+}

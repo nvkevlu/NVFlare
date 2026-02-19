@@ -1,0 +1,1 @@
+python -m nvflare.edge.simulation.run_device_simulator simulation_config.json

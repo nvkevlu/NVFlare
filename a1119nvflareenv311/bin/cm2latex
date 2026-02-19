@@ -1,0 +1,7 @@
+#!/Users/kevlu/workspace/repos/secondcopynvflare/a1119nvflareenv311/bin/python
+import sys
+from recommonmark.scripts import cm2latex
+if __name__ == '__main__':
+    if sys.argv[0].endswith('.exe'):
+        sys.argv[0] = sys.argv[0][:-4]
+    sys.exit(cm2latex())

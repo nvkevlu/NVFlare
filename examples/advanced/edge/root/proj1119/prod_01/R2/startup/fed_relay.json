@@ -1,0 +1,13 @@
+{
+  "format_version": 2,
+  "project_name": "proj1119",
+  "identity": "R2",
+  "server_identity": "server",
+  "connect_to": {
+    "scheme": "grpc",
+    "identity": "server",
+    "address": "localhost:8002",
+    "fqcn": "server",
+    "connection_security": "clear"
+  }
+}

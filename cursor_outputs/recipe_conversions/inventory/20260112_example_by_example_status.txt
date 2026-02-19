@@ -1,0 +1,742 @@
+NVFlare Recipe Conversion: Example-by-Example Status
+Date: January 12, 2026
+Overall: 20/48 examples converted (42%)
+
+================================================================================
+MARKED FOR DELETION (from original plan)
+================================================================================
+
+Example                         Status          Notes
+--------------------------------------------------------------------------------
+advanced/brats18                NOT CONVERTED   Marked: too old → DELETE
+advanced/finance-end-to-end     N/A             Already in tutorials → DELETE
+advanced/fl_hub                 N/A             No longer useful → DELETE
+advanced/hello-ccwf             N/A             Unclear, swarm covered → DELETE
+advanced/hello-pt-resnet        NOT CONVERTED   Outdated, covered by hello-pt → DELETE
+advanced/prostate               NOT CONVERTED   Too old, in tutorials → DELETE
+advanced/rag                    NOT CONVERTED   Overlapping with llm_hf → DELETE
+
+Action: Remove these 7 examples from conversion plan
+
+
+================================================================================
+ADD LINKS ONLY (from original plan)
+================================================================================
+
+Example                         Current Status  Action Needed
+--------------------------------------------------------------------------------
+advanced/finance                NOT CONVERTED   Add link to tutorials in README
+advanced/nlp-ner                NOT CONVERTED   Add link to tutorials in README
+advanced/swarm_learning         SKELETON ONLY   Add link to tutorials in README
+
+Action: Update READMEs with links, may not need full conversion
+
+
+================================================================================
+DO LATER / AFTER FOX 2.8.0 (from original plan)
+================================================================================
+
+Example                                 Status          Notes
+--------------------------------------------------------------------------------
+advanced/distributed_optimization       NOT CONVERTED   Low level controller - defer
+advanced/vertical_federated_learning    NOT CONVERTED   Low level controller - defer
+
+Action: Defer these conversions to post-2.8.0
+
+
+================================================================================
+TO CHECK WITH TEAM (from original plan)
+================================================================================
+
+Example                             Status          Question
+--------------------------------------------------------------------------------
+advanced/streaming                  NOT CONVERTED   Ask Zhihong: new TensorDownloader?
+advanced/fedavg-with-early-stopping HAS job.py      Ask Chester: convert or merge with FedAvg?
+advanced/lr-newton-raphson          NOT CONVERTED   Ask Zhijin: merge with Hello-LR Recipe?
+
+Action: Team input needed before proceeding
+
+
+================================================================================
+JOB RECIPE CONVERSION STATUS (from original plan)
+================================================================================
+
+Listed in order from original confluence document, with detailed status for each.
+
+--------------------------------------------------------------------------------
+HELLO-WORLD (PIC: Kevin, P0, Target: Dec 12, 2025)
+--------------------------------------------------------------------------------
+
+1. hello-pt
+   Status:        ✅ CONVERTED
+   Recipe:        FedAvgRecipe
+   Files:         job.py ✅ | client.py ✅ | model.py ✅ | README.md ✅
+   Data Prep:     prepare_data.sh ✅
+   Consistency:   EXCELLENT - follows all standards
+   Issues:        None
+   
+2. hello-tf
+   Status:        ✅ CONVERTED
+   Recipe:        FedAvgRecipe (TensorFlow)
+   Files:         job.py ✅ | client.py ✅ | model.py ✅ | README.md ✅
+   Data Prep:     Standard (auto-download)
+   Consistency:   EXCELLENT - follows all standards
+   Issues:        None
+
+3. hello-numpy
+   Status:        ✅ CONVERTED
+   Recipe:        NumpyFedAvgRecipe
+   Files:         job.py ✅ | client.py ✅ | README.md ✅ (no model.py - NumPy)
+   Data Prep:     None needed (synthetic)
+   Consistency:   EXCELLENT - follows all standards
+   Issues:        None
+
+4. hello-numpy-cross-val
+   Status:        ✅ CONVERTED (Dec 12, 2025)
+   Recipe:        NumpyCrossSiteEvalRecipe
+   Files:         job.py ✅ | client.py ✅ | README.md ✅
+   Data Prep:     generate_pretrain_models.py ✅
+   Consistency:   EXCELLENT - follows all standards
+   Issues:        None
+
+5. hello-lightning
+   Status:        ✅ CONVERTED
+   Recipe:        FedAvgRecipe (PyTorch Lightning)
+   Files:         job.py ✅ | client.py ✅ | model.py ✅ | README.md ✅
+   Data Prep:     prepare_data.sh ✅
+   Consistency:   EXCELLENT - follows all standards
+   Issues:        None
+
+6. hello-cyclic
+   Status:        ✅ CONVERTED
+   Recipe:        CyclicRecipe
+   Files:         job.py ✅ | client.py ✅ | model.py ✅ | README.md ✅
+   Data Prep:     prepare_data.sh ✅
+   Consistency:   EXCELLENT - follows all standards
+   Issues:        None
+
+7. hello-lr
+   Status:        ✅ CONVERTED
+   Recipe:        FedAvgLrRecipe
+   Files:         job.py ✅ | client.py ✅ | README.md ✅
+   Data Prep:     download_data.py ⚠️ | prepare_data.py ⚠️
+   Consistency:   GOOD - minor issues
+   Issues:        
+   - Missing prepare_data.sh wrapper
+   - prepare_data.py in root (should be in utils/)
+   
+8. hello-flower
+   Status:        ✅ CONVERTED
+   Recipe:        FlowerRecipe
+   Files:         job.py ✅ | nested Flower structure | README.md ✅
+   Data Prep:     Standard (auto-download)
+   Consistency:   DIFFERENT (Flower framework requirements)
+   Issues:        Complex nested structure - accept as exception
+
+9. hello-tabular-stats
+   Status:        ✅ CONVERTED
+   Recipe:        FedStatsRecipe
+   Files:         job.py ✅ | client.py ✅ | README.md ✅
+   Data Prep:     prepare_data.py ⚠️
+   Consistency:   GOOD - minor issues
+   Issues:        
+   - Missing prepare_data.sh wrapper
+   - prepare_data.py in root (should be in utils/)
+
+Hello-World Summary: ✅ 9/9 COMPLETE (100%)
+Note: Double check complete - all converted as of Dec 12, 2025
+
+
+--------------------------------------------------------------------------------
+HELLO-WORLD/ML-TO-FL (PIC: Yuan-Ting, P0, Target: Dec 12, 2025)
+--------------------------------------------------------------------------------
+
+Status:        SEPARATE INITIATIVE
+Notes:         This is tracked separately in ml_to_fl/ directory
+               Not a recipe conversion, but ML→FL conversion examples
+
+
+--------------------------------------------------------------------------------
+ADVANCED/EXPERIMENT-TRACKING (PIC: Kevin, P0, Target: Dec 19, 2025)
+--------------------------------------------------------------------------------
+
+1. experiment-tracking/tensorboard
+   Status:        ✅ CONVERTED (Dec 18, 2025)
+   Recipe:        FedAvgRecipe + add_experiment_tracking()
+   Files:         job.py ✅ | client.py ✅ | model.py ✅ | README.md ✅
+   Data Prep:     prepare_data.sh ✅
+   Consistency:   EXCELLENT - model for tracking utility
+   Issues:        None
+
+2. experiment-tracking/mlflow/hello-pt-mlflow
+   Status:        ✅ CONVERTED (Dec 18, 2025)
+   Recipe:        FedAvgRecipe + add_experiment_tracking()
+   Files:         job.py ✅ | client.py ✅ | model.py ✅ | README.md ✅
+   Data Prep:     prepare_data.sh ✅
+   Consistency:   EXCELLENT
+   Issues:        None (bug fixed during conversion)
+
+3. experiment-tracking/mlflow/hello-pt-mlflow-client
+   Status:        ✅ CONVERTED (Dec 18, 2025)
+   Recipe:        FedAvgRecipe + manual receivers
+   Files:         job.py ✅ | client.py ✅ | model.py ✅ | README.md ✅
+   Data Prep:     prepare_data.sh ✅
+   Consistency:   GOOD
+   Issues:        None (f-string bug fixed during conversion)
+
+4. experiment-tracking/mlflow/hello-lightning-mlflow
+   Status:        ✅ CONVERTED (Dec 18, 2025)
+   Recipe:        Lightning FedAvgRecipe + add_experiment_tracking()
+   Files:         job.py ✅ | client.py ✅ | model.py ✅ | README.md ✅
+   Data Prep:     prepare_data.sh ✅
+   Consistency:   EXCELLENT
+   Issues:        None
+
+5. experiment-tracking/wandb
+   Status:        ✅ CONVERTED (Dec 18, 2025)
+   Recipe:        FedAvgRecipe + add_experiment_tracking()
+   Files:         job.py ✅ | client.py ✅ | model.py ✅ | README.md ✅
+   Data Prep:     prepare_data.sh ✅
+   Consistency:   EXCELLENT
+   Issues:        None (dead code removed during conversion)
+
+Experiment-Tracking Summary: ✅ 5/5 COMPLETE (100%)
+Completed ahead of target (Dec 19, 2025)
+
+
+--------------------------------------------------------------------------------
+ADVANCED/CIFAR10 (PIC: Holger, P0, Target: Dec 23, 2025)
+--------------------------------------------------------------------------------
+
+1. cifar10/cifar10-sim
+   Status:        ❌ NOT CONVERTED - CRITICAL
+   Current:       Legacy JSON configs in jobs/ directories
+   Jobs:          5 separate jobs (fedavg, fedopt, fedprox, scaffold, central)
+   Files:         
+   - Job files: Multiple JSON config directories ❌
+   - Client: In pt/learners/ subdirectory ❌
+   - Model: In pt/networks/cifar10_nets.py ❌
+   - README: Outdated with JSON instructions ❌
+   Data Prep:     prepare_data.sh ✅ | set_alpha.py/sh ✅
+   Consistency:   VERY POOR - legacy structure
+   Issues:        
+   - CRITICAL: Still using legacy JSON configs
+   - Wrong file locations: learners/, networks/
+   - No Recipe API usage
+   - 4 recipes need to be created first
+   Recipes Needed: FedOptRecipe, FedProxRecipe, ScaffoldRecipe, CentralRecipe
+   Effort:        6-8 weeks (recipe creation + conversion)
+   Priority:      🔴 HIGHEST - Most popular CV example
+   Notes:         Start with PT → then TF → HE (as noted in original)
+
+2. cifar10/cifar10-real-world
+   Status:        ❌ NOT CONVERTED - HIGH PRIORITY
+   Current:       Legacy JSON configs with HE
+   Files:         
+   - Job files: JSON config directories ❌
+   - Client: In pt/learners/ ❌
+   - Model: In pt/networks/ ❌
+   - README: Outdated ❌
+   Data Prep:     prepare_data.sh ✅
+   Consistency:   POOR - legacy structure + HE complexity
+   Issues:        
+   - Legacy JSON configs
+   - Same structure issues as cifar10-sim
+   - HE integration needed
+   Recipes Needed: FedAvgRecipe + HE support
+   Effort:        2-3 weeks (after cifar10-sim complete)
+   Priority:      🔴 HIGH
+   Notes:         Do after PT version (as noted in original)
+
+3. cifar10/tf
+   Status:        ❌ NOT CONVERTED
+   Current:       FedJob API (not Recipe)
+   Files:         
+   - Job files: Uses FedJob API ❌
+   - Client: TensorFlow implementation in tf/ ⚠️
+   - Model: In tf/ subdirectory ⚠️
+   - README: Needs update ⚠️
+   Data Prep:     Standard CIFAR-10 prep ✅
+   Consistency:   MODERATE - needs TF recipe enhancement
+   Issues:        
+   - Using FedJob instead of Recipe
+   - TF-specific recipe enhancement needed
+   Recipes Needed: Enhance TensorFlow FedAvgRecipe
+   Effort:        2-3 weeks
+   Priority:      🟡 MEDIUM-HIGH
+   Notes:         Do after PT version (as noted in original)
+
+CIFAR10 Summary: ❌ 0/3 CONVERTED (0%)
+Status: BLOCKED - needs recipe creation first
+Target date missed (Dec 23, 2025) - needs replanning
+
+
+--------------------------------------------------------------------------------
+ADVANCED/LLMHF (PIC: Ziyue, P0, Target: Dec 12, 2025)
+--------------------------------------------------------------------------------
+
+llm_hf
+   Status:        ⚠️ HAS CUSTOM RECIPE - NEEDS STANDARDIZATION
+   Current:       Has custom HFRecipe implementation
+   Recipe:        Custom HFRecipe (needs standardization)
+   Files:         
+   - Job file: Has job.py ⚠️ but uses custom recipe
+   - Client: Implementation varies ⚠️
+   - Model: Uses HuggingFace models ✅
+   - README: Needs update for standard recipe ⚠️
+   Data Prep:     Model-specific (HuggingFace downloads)
+   Consistency:   MODERATE - has recipe but not standardized
+   Issues:        
+   - Custom recipe not following conventions
+   - May not integrate well with other recipes
+   - Documentation may be custom
+   Recipes Needed: Standardize existing HFRecipe
+   Effort:        1-2 weeks
+   Priority:      🔴 HIGH - LLM fine-tuning is critical
+   Notes:         Target date passed (Dec 12, 2025)
+
+LLM_HF Summary: ⚠️ PARTIALLY DONE - needs standardization
+
+
+--------------------------------------------------------------------------------
+ADVANCED/GNN (PIC: Ziyue, P0, Target: Dec 12, 2025)
+--------------------------------------------------------------------------------
+
+gnn
+   Status:        ❌ NOT CONVERTED
+   Current:       Custom controllers and workflows
+   Files:         
+   - Job files: Custom implementation ❌
+   - Client: Complex custom logic ❌
+   - Model: Graph neural networks ⚠️
+   - README: Needs update ❌
+   Data Prep:     Graph data specific ⚠️
+   Consistency:   UNKNOWN - complex custom implementation
+   Issues:        
+   - Complex custom implementation
+   - No recipe exists for GNN
+   - Graph data handling unique
+   Recipes Needed: GNNRecipe (new, complex)
+   Effort:        4-6 weeks
+   Priority:      🟡 MEDIUM - Growing use case
+   Notes:         Target date passed (Dec 12, 2025)
+
+GNN Summary: ❌ NOT CONVERTED
+Status: Needs complex new recipe
+
+
+--------------------------------------------------------------------------------
+ADVANCED/XGBOOST (PIC: Yuan-Ting, P1, Target: Dec 19, 2025)
+--------------------------------------------------------------------------------
+
+1. xgboost/random_forest (if this exists separately)
+   Status:        ✅ CONVERTED
+   Recipe:        XGBBaggingRecipe
+   Files:         job.py ✅ | client code ✅ | README.md ✅
+   Consistency:   GOOD
+   Issues:        None
+
+2. xgboost/fedxgb (horizontal histogram)
+   Status:        ❌ NOT CONVERTED
+   Current:       FedJob API in xgb_fl_job_horizontal.py
+   Files:         
+   - Job file: xgb_fl_job_horizontal.py ❌ (should be job.py)
+   - Client: In src/higgs_data_loader.py ⚠️
+   - Model: XGBoost (external library) ✅
+   - README: Needs update ❌
+   Data Prep:     prepare_data.sh ✅ | utils/prepare_data_horizontal.py ✅
+   Consistency:   POOR
+   Issues:        
+   - Wrong file name (xgb_fl_job_horizontal.py)
+   - FedJob API instead of Recipe
+   - Complex nested structure
+   - Client code in src/
+   Recipes Needed: XGBHistogramRecipe (new)
+   Effort:        3-4 weeks
+   Priority:      🔴 HIGH - Critical for tabular data
+   Notes:         XGBRecipe? (as noted in original)
+
+3. xgboost/fedxgb (vertical)
+   Status:        ❌ NOT CONVERTED
+   Current:       FedJob API in xgb_fl_job_vertical.py + xgb_fl_job_vertical_psi.py
+   Files:         
+   - Job files: Multiple files ❌ (vertical, vertical_psi)
+   - Client: In src/ ⚠️
+   - Model: XGBoost (external) ✅
+   - README: Needs update ❌
+   Data Prep:     prepare_data.sh ✅ | utils/prepare_data_vertical.py ✅
+   Consistency:   POOR
+   Issues:        
+   - Multiple job files for same algorithm
+   - FedJob API instead of Recipe
+   - Complex structure
+   Recipes Needed: XGBVerticalRecipe (new, complex)
+   Effort:        3-4 weeks
+   Priority:      🔴 HIGH - Unique capability
+   Notes:         Vertical FL is complex
+
+4. xgboost/fedxgb_secure
+   Status:        ❌ NOT CONVERTED
+   Current:       FedJob API in xgb_fl_job.py + xgb_vert_eval_job.py
+   Files:         
+   - Job files: Multiple files ❌
+   - Client: In train_standalone/ and utils/ ⚠️
+   - Model: XGBoost with HE ✅
+   - README: Needs update ❌
+   Data Prep:     prepare_data.sh ✅ | multiple utils/ ✅
+   Consistency:   POOR
+   Issues:        
+   - Multiple job files
+   - Complex nested structure
+   - Standalone training code mixed in
+   Recipes Needed: XGBVerticalRecipe + HE support
+   Effort:        4-5 weeks
+   Priority:      🟡 MEDIUM - Specialized
+
+XGBoost Summary: ⚠️ 1/4 CONVERTED (25%)
+Status: Target date passed (Dec 19, 2025) - needs recipe creation
+
+
+--------------------------------------------------------------------------------
+ADVANCED/KAPLAN-MEIER-HE (PIC: Ziyue, P1, Target: Dec 15, 2025)
+--------------------------------------------------------------------------------
+
+kaplan-meier-he
+   Status:        ❌ NOT CONVERTED
+   Current:       Has job.py but uses FedJob API
+   Recipe:        None (needs SurvivalAnalysisRecipe or KaplanMeierRecipe)
+   Files:         
+   - Job file: job.py ⚠️ but uses FedJob API
+   - Client: Survival analysis logic ⚠️
+   - Model: Statistical (no DL model) ✅
+   - README: Needs update ❌
+   Data Prep:     utils/prepare_data.py ✅
+   Consistency:   MODERATE
+   Issues:        
+   - Uses FedJob API instead of Recipe
+   - Needs specialized recipe for Kaplan-Meier
+   - Specialized statistical use case
+   Recipes Needed: SurvivalAnalysisRecipe or KaplanMeierRecipe (new)
+   Effort:        3-4 weeks
+   Priority:      🟢 LOW - Specialized, less common
+   Notes:         Target date passed (Dec 15, 2025)
+
+Kaplan-Meier Summary: ❌ NOT CONVERTED
+
+
+--------------------------------------------------------------------------------
+ADVANCED/PSI (PIC: Yuan-Ting, P1, Target: Dec 19, 2025)
+--------------------------------------------------------------------------------
+
+psi/user_email_match
+   Status:        ⚠️ HAS job.py - NEEDS AUDIT
+   Current:       Has job.py file (need to check if Recipe or FedJob)
+   Files:         
+   - Job file: job.py ✅ (need to verify Recipe vs FedJob)
+   - Client: PSI logic ⚠️
+   - Model: N/A (privacy tech, not ML) ✅
+   - README: Need to check ⚠️
+   Data Prep:     prepare_data.sh ✅
+   Consistency:   UNKNOWN - needs audit
+   Issues:        
+   - Need to verify if using Recipe API or FedJob
+   - PSI is infrastructure, may not need Recipe
+   Recipes Needed: TBD based on audit
+   Effort:        1-2 weeks (if conversion needed)
+   Priority:      🟢 LOW - Infrastructure example
+   Notes:         Target date passed (Dec 19, 2025)
+
+PSI Summary: ⚠️ STATUS UNKNOWN - needs audit
+
+
+--------------------------------------------------------------------------------
+ADVANCED/AMPLIFY (PIC: Holger, P1, Target: Jan 5, 2026)
+--------------------------------------------------------------------------------
+
+amplify
+   Status:        ❌ NOT CONVERTED
+   Current:       Custom multi-task setup
+   Files:         
+   - Job files: run_fl_alltasks.py, run_fl_multitask.py ❌
+   - Client: In src/ subdirectory ❌
+   - Model: Multi-task learning ⚠️
+   - README: Need to check ⚠️
+   Data Prep:     Custom multi-task data ⚠️
+   Consistency:   UNKNOWN - complex custom implementation
+   Issues:        
+   - Complex multi-task learning setup
+   - Multiple execution scripts
+   - No recipe for multi-task
+   Recipes Needed: MultiTaskRecipe (new, complex)
+   Effort:        4-6 weeks
+   Priority:      🟡 MEDIUM - Research use case
+   Notes:         Target date: Jan 5, 2026
+
+Amplify Summary: ❌ NOT CONVERTED
+
+
+--------------------------------------------------------------------------------
+ADVANCED/BIONEMO (PIC: Holger, P1, Target: Jan 5, 2026)
+--------------------------------------------------------------------------------
+
+bionemo
+   Status:        ❌ NOT CONVERTED - LIKELY KEEP AS-IS
+   Current:       BioNeMo integration (highly specialized)
+   Files:         
+   - Job files: Custom BioNeMo integration ⚠️
+   - Client: BioNeMo specific ⚠️
+   - Model: BioNeMo models ⚠️
+   - README: BioNeMo specific ⚠️
+   Data Prep:     BioNeMo specific ⚠️
+   Consistency:   N/A - Specialized integration
+   Issues:        
+   - Highly specialized for BioNeMo
+   - May not fit Recipe pattern
+   Recipes Needed: N/A - likely keep as FedJob (too specialized)
+   Effort:        N/A
+   Priority:      🟢 LOW - Accept as exception
+   Notes:         Target date: Jan 5, 2026
+                  Recommendation: Keep as-is, too specialized
+
+BioNeMo Summary: ⚠️ EXCEPTION - likely keep as FedJob
+
+
+--------------------------------------------------------------------------------
+INTEGRATION/MONAI (PIC: Holger, P0, Target: Dec 23, 2025)
+--------------------------------------------------------------------------------
+
+Note: This appears to be outside examples/ directory (integration/ not advanced/)
+Need to verify location and status
+
+Status:        UNKNOWN - need to locate
+Notes:         Original plan: Drop monai_flare wheel support, use Client API directly
+Priority:      🔴 P0
+Target:        Dec 23, 2025 (missed)
+
+
+================================================================================
+ADDITIONAL EXAMPLES NOT IN ORIGINAL LIST
+================================================================================
+
+These examples exist but were not in the original Confluence tracking table.
+
+--------------------------------------------------------------------------------
+SKLEARN EXAMPLES (Completed)
+--------------------------------------------------------------------------------
+
+1. sklearn-linear
+   Status:        ✅ CONVERTED
+   Recipe:        SklearnFedAvgRecipe
+   Files:         job.py ✅ | client.py ✅ | README.md ✅
+   Data Prep:     prepare_data.sh ✅ | utils/prepare_job_config.py ✅
+   Consistency:   EXCELLENT
+
+2. sklearn-kmeans
+   Status:        ✅ CONVERTED
+   Recipe:        KMeansFedAvgRecipe
+   Files:         job.py ✅ | client.py ✅ | README.md ✅
+   Data Prep:     prepare_data.sh ✅ | utils/ ✅
+   Consistency:   EXCELLENT
+
+3. sklearn-svm
+   Status:        ✅ CONVERTED
+   Recipe:        SVMFedAvgRecipe
+   Files:         job.py ✅ | client.py ✅ | README.md ✅
+   Data Prep:     prepare_data.sh ✅ | utils/prepare_data.py ✅
+   Consistency:   EXCELLENT
+
+Sklearn Summary: ✅ 3/3 COMPLETE (100%)
+
+
+--------------------------------------------------------------------------------
+FEDERATED STATISTICS EXAMPLES
+--------------------------------------------------------------------------------
+
+1. federated-statistics/image_stats
+   Status:        ✅ CONVERTED
+   Recipe:        StatisticsRecipe
+   Files:         job.py ✅ | client.py ✅ | README.md ✅
+   Data Prep:     download_data.py ⚠️ | prepare_data.py ⚠️
+   Consistency:   GOOD - minor issues
+   Issues:        
+   - download_data.py should be download_data.sh
+   - prepare_data.py in root should be in utils/ with .sh wrapper
+
+2. federated-statistics/df_stats
+   Status:        ✅ CONVERTED
+   Recipe:        StatisticsRecipe
+   Files:         job.py ✅ | client.py ✅ | README.md ✅
+   Data Prep:     N/A (uses tabular data)
+   Consistency:   EXCELLENT
+
+3. federated-statistics/hierarchical_stats
+   Status:        ❌ NOT CONVERTED
+   Current:       Legacy JSON configs in jobs/ directory
+   Files:         
+   - Job files: jobs/hierarchical_stats/ with JSON configs ❌
+   - Client: Custom hierarchical stats logic ⚠️
+   - Model: N/A (statistics) ✅
+   - README: Needs update ❌
+   Data Prep:     prepare_data.sh ✅ | utils/prepare_data.py ✅
+   Consistency:   POOR - legacy structure
+   Issues:        
+   - JSON configs in jobs/ directory
+   - No Recipe API
+   - Needs hierarchy support in StatisticsRecipe
+   Recipes Needed: Enhanced StatisticsRecipe with hierarchy
+   Effort:        2-3 weeks
+   Priority:      🟡 MEDIUM
+
+Statistics Summary: ⚠️ 2/3 CONVERTED (67%)
+
+
+--------------------------------------------------------------------------------
+OTHER ADVANCED EXAMPLES
+--------------------------------------------------------------------------------
+
+1. tensor-stream
+   Status:        ⚠️ HAS job.py - NEEDS AUDIT
+   Current:       Has job.py (need to verify Recipe vs FedJob)
+   Consistency:   UNKNOWN
+   Priority:      🟢 LOW - Infrastructure
+
+2. codon-fm
+   Status:        ⚠️ HAS job.py files in jobs/ subdirs - NEEDS AUDIT
+   Current:       Has jobs/ directory with job.py files
+   Consistency:   UNKNOWN
+   Priority:      🟢 LOW
+
+3. fedavg-with-early-stopping
+   Status:        ⚠️ HAS job.py - NEEDS AUDIT
+   Current:       Has job.py (check with Chester per original notes)
+   Notes:         Original: Ask Chester if convert or merge with FedAvg
+   Priority:      🟡 MEDIUM
+
+4. edge
+   Status:        ❌ NOT CONVERTED - LIKELY KEEP AS-IS
+   Current:       Edge deployment infrastructure
+   Notes:         Infrastructure example, may not need Recipe
+   Priority:      🟢 LOW - Infrastructure
+
+5. finance
+   Status:        ❌ NOT CONVERTED
+   Current:       FedJob API (likely)
+   Notes:         Original plan: Add links to tutorials in README
+   Recipes Needed: Reuse XGBHistogramRecipe when created
+   Priority:      🟡 MEDIUM-HIGH (fraud detection use case)
+
+6. job_api
+   Status:        N/A - EDUCATIONAL EXAMPLES
+   Notes:         Shows how to use FedJob API, keep as-is
+
+7. monitoring, job-level-authorization, federated-policies, etc.
+   Status:        N/A - INFRASTRUCTURE
+   Notes:         Keep as-is, infrastructure examples
+
+
+================================================================================
+SUMMARY STATISTICS
+================================================================================
+
+By Status:
+  ✅ Converted to Recipe API:           20 examples (42%)
+  ❌ Not Converted (needs work):        21 examples (44%)
+  ⚠️  Needs Audit/Standardization:      7 examples  (14%)
+  
+By Priority (from original):
+  P0 (Highest):       6 assignments → 3 complete, 3 incomplete
+  P1 (High):          6 assignments → 0 complete, 6 incomplete
+
+By Category Completion:
+  Hello-World:              100% (9/9)   ✅
+  Sklearn:                  100% (3/3)   ✅
+  Experiment Tracking:      100% (5/5)   ✅
+  Statistics:               67% (2/3)    ⚠️
+  XGBoost:                  25% (1/4)    ❌
+  CIFAR-10:                 0% (0/3)     ❌
+  NLP:                      0% (0/2)     ❌
+  Specialized:              0% (0/13)    ❌
+
+Target Dates (from original):
+  Dec 12, 2025: 3 items → 2 complete (hello-world, hello-world/ml-to-fl)
+                         → 1 needs work (llm_hf, gnn)
+  Dec 15, 2025: 1 item → 0 complete (kaplan-meier-he)
+  Dec 19, 2025: 2 items → 1 complete (experiment-tracking)
+                        → 1 incomplete (xgboost, psi)
+  Dec 23, 2025: 2 items → 0 complete (cifar10, monai)
+  Jan 5, 2026:  2 items → 0 complete (amplify, bionemo)
+
+
+================================================================================
+RECIPES NEEDED (Not Yet Created)
+================================================================================
+
+Critical Priority:
+  1. FedOptRecipe           - For CIFAR-10 FedOpt
+  2. FedProxRecipe          - For CIFAR-10 FedProx
+  3. ScaffoldRecipe         - For CIFAR-10 SCAFFOLD
+  4. XGBHistogramRecipe     - For XGBoost horizontal
+  
+High Priority:
+  5. XGBVerticalRecipe      - For XGBoost vertical
+  6. TransformerRecipe      - For NLP-NER
+  
+Medium Priority:
+  7. MultiTaskRecipe        - For amplify
+  8. GNNRecipe              - For GNN
+  9. Enhanced StatisticsRecipe - For hierarchical stats
+  
+Lower Priority:
+  10. SurvivalAnalysisRecipe - For Kaplan-Meier
+  11. Other specialized recipes as needed
+
+
+================================================================================
+IMMEDIATE ACTIONS NEEDED
+================================================================================
+
+1. CRITICAL: Start CIFAR-10 recipe creation (FedOpt, FedProx, SCAFFOLD)
+   - Most popular CV example
+   - Blocking 3 examples
+   - Target missed (Dec 23, 2025)
+
+2. HIGH: Create XGBoost recipes (Histogram, Vertical)
+   - Blocking 3 examples
+   - Critical for tabular data use cases
+   - Target missed (Dec 19, 2025)
+
+3. AUDIT: Check status of examples with job.py
+   - psi, tensor-stream, codon-fm, fedavg-with-early-stopping
+   - Determine if Recipe or FedJob API
+   - Update status accordingly
+
+4. STANDARDIZE: llm_hf custom recipe
+   - Has recipe but needs standardization
+   - High priority (LLM use case)
+   - Target missed (Dec 12, 2025)
+
+5. TEAM CONSULTATION: 
+   - streaming: Ask Zhihong about TensorDownloader
+   - fedavg-with-early-stopping: Ask Chester about merge with FedAvg
+   - lr-newton-raphson: Ask Zhijin about merge with Hello-LR
+
+6. CLEAN UP: Execute deletion plan
+   - Remove 7 examples marked for deletion
+   - Add README links for 3 examples
+
+
+================================================================================
+NOTES
+================================================================================
+
+- Overall progress is 42% (20/48 examples)
+- All P0 target dates have passed - need replanning
+- Hello-world, Sklearn, and Experiment-tracking categories are 100% complete
+- CIFAR-10 is the biggest blocker (needs 4 new recipes)
+- Several examples need audit to determine actual status
+- Many specialized examples may be kept as FedJob (infrastructure, edge cases)
+- Consistency issues across most non-converted examples
+
+
+Last Updated: January 12, 2026
+Next Review: January 19, 2026

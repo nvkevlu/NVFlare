@@ -1,0 +1,60 @@
+{
+    "name": "cifar10_et",
+    "resource_spec": {},
+    "min_clients": 1,
+    "deploy_map": {
+        "app": [
+            "@ALL"
+        ]
+    },
+    "edge_method": "edge",
+    "byoc": true,
+    "submitter_name": "admin@nvidia.com",
+    "submitter_org": "nvidia",
+    "submitter_role": "project_admin",
+    "job_folder_name": "cifar10_et",
+    "job_id": "affc7685-ae76-4b15-8de3-28a5bc54568b",
+    "submit_time": 1763751668.603261,
+    "submit_time_iso": "2025-11-21T14:01:08.603261-05:00",
+    "start_time": "",
+    "duration": "N/A",
+    "data_storage_format": 2,
+    "status": "SUBMITTED",
+    "schedule_history": [
+        "2025-11-21 14:01:09: scheduled"
+    ],
+    "schedule_count": 1,
+    "last_schedule_time": 1763751669.448496,
+    "job_clients": [
+        {
+            "name": "C1",
+            "fqcn": "R1.C1",
+            "is_leaf": false
+        },
+        {
+            "name": "C2",
+            "fqcn": "R2.C2",
+            "is_leaf": false
+        },
+        {
+            "name": "C11",
+            "fqcn": "R1.C11",
+            "fqsn": "C1.C11"
+        },
+        {
+            "name": "C12",
+            "fqcn": "R1.C12",
+            "fqsn": "C1.C12"
+        },
+        {
+            "name": "C21",
+            "fqcn": "R2.C21",
+            "fqsn": "C2.C21"
+        },
+        {
+            "name": "C22",
+            "fqcn": "R2.C22",
+            "fqsn": "C2.C22"
+        }
+    ]
+}

@@ -1,0 +1,1 @@
+python -m nvflare.edge.web.routing_proxy 4321 lcp_map.json rootCA.pem

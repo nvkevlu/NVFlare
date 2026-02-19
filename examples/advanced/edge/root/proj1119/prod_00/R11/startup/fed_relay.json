@@ -1,0 +1,13 @@
+{
+  "format_version": 2,
+  "project_name": "proj1119",
+  "identity": "R11",
+  "server_identity": "server",
+  "connect_to": {
+    "scheme": "tcp",
+    "identity": "R1",
+    "address": "localhost:9002",
+    "fqcn": "R1",
+    "connection_security": "clear"
+  }
+}

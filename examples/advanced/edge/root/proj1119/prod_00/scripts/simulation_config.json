@@ -1,0 +1,13 @@
+{
+    "job_name": "edge_job",
+    "endpoint": "http://localhost:4321",
+    "num_devices": 10000,
+    "num_workers": 30,
+    "processor": {
+        "path": "nvflare.edge.simulation.devices.num.NumProcessor",
+        "args": {
+            "min_train_time": 0.2,
+            "max_train_time": 1.0
+        }
+    }
+}

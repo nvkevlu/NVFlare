@@ -1,0 +1,643 @@
+================================================================================
+NVFLARE RECIPE CONVERSION: STATUS & CONSISTENCY AUDIT
+================================================================================
+Date: January 12, 2026
+Status: 20/48 Examples Converted (42%)
+Priority: CRITICAL - Computer Vision & XGBoost gaps identified
+
+================================================================================
+EXECUTIVE DASHBOARD
+================================================================================
+
+OVERALL PROGRESS: ████████░░░░░░░░░░░░ 42%
+
+┌─────────────────────────────────────────────────────────────────────────┐
+│ CATEGORY BREAKDOWN                                                      │
+├──────────────────────┬───────┬────────────┬──────────┬──────────────────┤
+│ Category             │ Total │ Converted  │ Remaining│ Status           │
+├──────────────────────┼───────┼────────────┼──────────┼──────────────────┤
+│ Hello World          │   9   │     9      │    0     │ ✅ 100% COMPLETE │
+│ Sklearn              │   3   │     3      │    0     │ ✅ 100% COMPLETE │
+│ Experiment Tracking  │   5   │     5      │    0     │ ✅ 100% COMPLETE │
+│ XGBoost              │   4   │     1      │    3     │ ⚠️  25% - NEEDS WORK │
+│ Computer Vision      │   6   │     0      │    6     │ 🔴 0% - CRITICAL │
+│ NLP                  │   2   │     0      │    2     │ 🔴 0% - CRITICAL │
+│ Statistics           │   6   │     2      │    4     │ ⚠️  33% - NEEDS WORK │
+│ Specialized          │  13   │     0      │   13     │ ⚠️  0% - LOW PRIORITY │
+├──────────────────────┼───────┼────────────┼──────────┼──────────────────┤
+│ TOTAL                │  48   │    20      │   28     │ ⚙️  42% IN PROGRESS │
+└──────────────────────┴───────┴────────────┴──────────┴──────────────────┘
+
+RESOURCES REQUIRED:
+• 8 New Recipes to Create
+• 28 Examples to Convert
+• ~200 Files to Delete (legacy JSON configs)
+• ~50 Files to Rename (standardization)
+• ~150 Files to Update (conversions & docs)
+
+TIMELINE ESTIMATE: 20-26 weeks (5-6 months)
+
+================================================================================
+TOP 5 CRITICAL ISSUES
+================================================================================
+
+🔥 ISSUE #1: CIFAR-10 Still Using Legacy JSON Configs
+   Impact:      CRITICAL - Most popular CV example
+   Examples:    cifar10-sim (5 jobs), cifar10-real-world
+   Solution:    Create 4 new recipes (FedOpt, FedProx, SCAFFOLD, Central)
+   Effort:      6-8 weeks
+   Priority:    🔴 HIGHEST
+
+🔥 ISSUE #2: XGBoost Examples Not Converted
+   Impact:      HIGH - Critical for tabular data use cases
+   Examples:    fedxgb horizontal, fedxgb vertical, fedxgb_secure
+   Solution:    Create XGBHistogramRecipe, XGBVerticalRecipe
+   Effort:      4-6 weeks
+   Priority:    🔴 HIGH
+
+⚠️  ISSUE #3: File Naming Inconsistency
+   Impact:      HIGH - User confusion, maintenance burden
+   Examples:    22 files named *_job.py instead of job.py
+   Solution:    Systematic rename operation
+   Effort:      1-2 weeks
+   Priority:    🟡 HIGH
+
+⚠️  ISSUE #4: Client Code Location Inconsistency
+   Impact:      HIGH - Hard to find, inconsistent patterns
+   Examples:    15 examples have client code in src/ or learners/
+   Solution:    Move all to root client.py
+   Effort:      2-3 weeks
+   Priority:    🟡 HIGH
+
+⚠️  ISSUE #5: Documentation Outdated
+   Impact:      MEDIUM - Users follow wrong instructions
+   Examples:    28 examples have outdated READMEs
+   Solution:    Update all READMEs with standard template
+   Effort:      4-6 weeks
+   Priority:    🟡 MEDIUM
+
+================================================================================
+CONSISTENCY AUDIT RESULTS
+================================================================================
+
+AUDIT ACROSS 8 DIMENSIONS:
+
+┌────────────────────────────┬───────────┬───────────┬──────────┐
+│ Dimension                  │ Pass      │ Fail      │ Score    │
+├────────────────────────────┼───────────┼───────────┼──────────┤
+│ 1. Job File Naming         │    31     │    17     │   65%    │
+│ 2. Download Data Pattern   │    19     │    29     │   39%    │
+│ 3. Prepare Data Pattern    │    19     │    29     │   39%    │
+│ 4. Model Code Location     │    20     │    28     │   42%    │
+│ 5. Code Structure          │    20     │    28     │   42%    │
+│ 6. Client Code (Flare API) │    20     │    28     │   42%    │
+│ 7. Server Code (Recipe)    │    20     │    28     │   42%    │
+│ 8. README Documentation    │    20     │    28     │   42%    │
+├────────────────────────────┼───────────┼───────────┼──────────┤
+│ OVERALL CONSISTENCY        │    169    │    215    │   44%    │
+└────────────────────────────┴───────────┴───────────┴──────────┘
+
+🎯 TARGET: 100% consistency across all dimensions
+
+================================================================================
+DETAILED FINDINGS BY DIMENSION
+================================================================================
+
+1. DOWNLOAD DATA CONSISTENCY
+   ────────────────────────────────────────────────────────────────
+   Current State:  ⚠️  3 different patterns found
+   
+   Pattern A: download_data.py (2 examples)
+   Pattern B: Inline in prepare_data.sh (15 examples)  
+   Pattern C: Manual README instructions only (31 examples)
+   
+   Issues:
+   • No standard file naming
+   • Different execution methods (.py vs .sh vs manual)
+   • Different default paths
+   
+   Recommendation:
+   ✅ Standard: download_data.sh for ALL examples
+   ✅ Location: /tmp/nvflare/raw_data/{example_name}/
+   
+   Impact: 29 examples need updates
+
+2. PREPARE DATA CONSISTENCY
+   ────────────────────────────────────────────────────────────────
+   Current State:  ⚠️  4 different patterns found
+   
+   Pattern A: prepare_data.sh (19 examples) ✅ GOOD
+   Pattern B: prepare_data.py in root (3 examples) ❌ WRONG
+   Pattern C: utils/prepare_data.py (13 examples) ✅ GOOD
+   Pattern D: Multiple specialized scripts (5 examples) ⚠️  VARIES
+   
+   Issues:
+   • Inconsistent CLI arguments: --site_num vs --n_clients vs --num_sites
+   • Different output directories
+   • Some in root, some in utils/
+   
+   Recommendation:
+   ✅ Standard: prepare_data.sh wrapper + utils/prepare_data.py implementation
+   ✅ CLI args: --n_clients, --split_mode, --data_root, --output_dir
+   
+   Impact: 30 examples need standardization
+
+3. MODEL CODE CONSISTENCY
+   ────────────────────────────────────────────────────────────────
+   Current State:  ⚠️  4 different patterns found
+   
+   Pattern A: model.py in root (8 examples) ✅ EXCELLENT
+   Pattern B: No model file - inline (12 examples) ✅ OK for NumPy/sklearn
+   Pattern C: Model in src/ or networks/ (10 examples) ❌ WRONG
+   Pattern D: No model - external libs (18 examples) ✅ OK for XGBoost
+   
+   Issues:
+   • Models in src/, networks/, learners/ subdirectories
+   • Inconsistent naming: model.py vs {example}_nets.py
+   • Mixed with training logic in some cases
+   
+   Recommendation:
+   ✅ Standard: model.py in root for DL examples
+   ✅ Exception: OK to skip for NumPy/sklearn/XGBoost
+   
+   Impact: 10 examples need restructuring
+
+4. CODE STRUCTURE CONSISTENCY
+   ────────────────────────────────────────────────────────────────
+   Current State:  ⚠️  4 different patterns found
+   
+   Pattern A: Flat structure (20 examples) ✅ EXCELLENT
+      job.py, client.py, model.py, README.md
+   
+   Pattern B: With utils/ subdirectory (15 examples) ✅ GOOD
+      job.py, client.py, model.py, utils/, README.md
+   
+   Pattern C: Legacy jobs/ with JSON configs (7 examples) ❌ CRITICAL
+      jobs/job_name/config/*.json
+   
+   Pattern D: Complex nested (6 examples) ❌ POOR
+      Multiple levels, src/, learners/, etc.
+   
+   Recommendation:
+   ✅ Standard: Flat structure with optional utils/
+   ❌ Eliminate: jobs/ directories, deep nesting, src/, learners/
+   
+   Impact: 28 examples need restructuring
+
+5. CLIENT CODE CONSISTENCY
+   ────────────────────────────────────────────────────────────────
+   Current State:  ⚠️  3 different patterns found
+   
+   Pattern A: client.py with Flare API (20 examples) ✅ EXCELLENT
+      Uses flare.init(), client.get_model(), client.send_model()
+   
+   Pattern B: Legacy Executor/Learner classes (8 examples) ❌ LEGACY
+      In src/ or learners/ subdirectories
+   
+   Pattern C: ScriptRunner pattern (20 examples) ⚠️  VARIES
+      Training logic in separate scripts
+   
+   Issues:
+   • Wrong location: 15 examples have client code NOT in client.py
+   • Wrong API: 8 examples use legacy Executor/Learner pattern
+   • Inconsistent naming: client.py vs train.py vs learner classes
+   
+   Recommendation:
+   ✅ Standard: client.py in root using Flare API
+   ✅ Structure: load_data(), train_one_epoch(), evaluate(), main()
+   
+   Impact: 28 examples need conversion or restructuring
+
+6. SERVER CODE (JOB RECIPE) CONSISTENCY
+   ────────────────────────────────────────────────────────────────
+   Current State:  ⚠️  4 different APIs found
+   
+   Pattern A: Recipe API (20 examples) ✅ EXCELLENT
+      Uses FedAvgRecipe, SklearnRecipe, etc.
+   
+   Pattern B: FedJob API (21 examples) ❌ NEEDS CONVERSION
+      Manual component configuration with FedJob
+   
+   Pattern C: Legacy JSON configs (7 examples) ❌ CRITICAL
+      jobs/ directories with config files
+   
+   Issues:
+   • File naming: 22 files NOT named job.py
+      - fl_job.py (12 files)
+      - {example}_job.py (6 files)
+      - xgb_fl_job_*.py (3 files)
+   • Wrong API: 28 examples not using Recipe API
+   
+   Recommendation:
+   ✅ Standard: job.py using Recipe API
+   ✅ Pattern: define_parser(), main(), recipe.run()
+   
+   Impact: 28 examples need conversion
+
+7. FILE NAMING CONSISTENCY
+   ────────────────────────────────────────────────────────────────
+   Current State:  ⚠️  Multiple naming conventions
+   
+   JOB FILES:
+   ✅ job.py: 31 examples (CORRECT)
+   ❌ fl_job.py: 12 examples (WRONG)
+   ❌ {example}_job.py: 6 examples (WRONG)
+   ❌ xgb_fl_job_*.py: 3 examples (WRONG)
+   
+   CLIENT FILES:
+   ✅ client.py: 20 examples (CORRECT)
+   ❌ train.py: 5 examples (WRONG)
+   ❌ In src/ or learners/: 15 examples (WRONG)
+   
+   MODEL FILES:
+   ✅ model.py: 8 examples (CORRECT)
+   ❌ {example}_model.py: 3 examples (WRONG)
+   ❌ {example}_nets.py: 2 examples (WRONG)
+   ❌ In networks/ or src/: 4 examples (WRONG)
+   
+   Recommendation:
+   ✅ MANDATORY: job.py, client.py, model.py
+   ❌ FORBIDDEN: *_job.py, fl_job.py, train.py, *_model.py
+   
+   Impact: ~50 files need renaming
+
+8. DOCUMENTATION CONSISTENCY
+   ────────────────────────────────────────────────────────────────
+   Current State:  ⚠️  2 different documentation styles
+   
+   Pattern A: Recipe API documentation (20 examples) ✅ EXCELLENT
+      - Installation
+      - Quick start with job.py
+      - How it works (Recipe explanation)
+      - Customization
+      - Advanced usage
+   
+   Pattern B: Legacy documentation (28 examples) ❌ OUTDATED
+      - Manual job submission
+      - nvflare CLI commands
+      - JSON config references
+   
+   Issues:
+   • Inconsistent structure
+   • Outdated execution instructions
+   • Missing "How it works" sections
+   • Different code block formats
+   
+   Recommendation:
+   ✅ Standard: Use README template for ALL examples
+   ✅ Sections: Title, Installation, Quick Start, How It Works, 
+                Customization, Advanced, Next Steps
+   
+   Impact: 28 READMEs need updates
+
+================================================================================
+EXAMPLE-BY-EXAMPLE PRIORITY MATRIX
+================================================================================
+
+🔴 CRITICAL PRIORITY (Must Fix - 8 examples)
+─────────────────────────────────────────────────────────────────────
+
+1. cifar10-sim                    [Legacy JSON → Recipe API]
+   • 5 separate jobs (fedavg, fedopt, fedprox, scaffold, central)
+   • Needs: 4 new recipes created
+   • Effort: 6-8 weeks
+   • Impact: 🔥 HIGHEST - Most popular CV example
+
+2. cifar10-real-world             [Legacy JSON → Recipe API]
+   • HE integration needed
+   • Effort: 2-3 weeks
+   • Impact: 🔥 HIGH - Production use case
+
+3. xgboost/fedxgb (horizontal)    [FedJob → Recipe API]
+   • Needs: XGBHistogramRecipe
+   • Effort: 3-4 weeks
+   • Impact: 🔥 HIGH - Tabular data
+
+4. xgboost/fedxgb (vertical)      [FedJob → Recipe API]
+   • Needs: XGBVerticalRecipe
+   • Effort: 3-4 weeks
+   • Impact: 🔥 HIGH - Unique capability
+
+5. nlp-ner                        [FedJob → Recipe API]
+   • Needs: TransformerRecipe
+   • Effort: 2-3 weeks
+   • Impact: 🔥 HIGH - NLP use case
+
+6. prostate                       [Legacy JSON → Recipe API]
+   • Medical imaging
+   • Effort: 2-3 weeks
+   • Impact: 🔥 HIGH - Medical use case
+
+7. brats18                        [Legacy JSON → Recipe API]
+   • Medical imaging (3D)
+   • Effort: 2-3 weeks
+   • Impact: 🔥 HIGH - Medical use case
+
+8. llm_hf                         [Standardize existing recipe]
+   • Already has recipe, needs standardization
+   • Effort: 1 week
+   • Impact: 🔥 HIGH - LLM fine-tuning
+
+🟡 HIGH PRIORITY (Should Fix - 6 examples)
+─────────────────────────────────────────────────────────────────────
+
+9. cifar10/tf                     [FedJob → Recipe API]
+10. xgboost/fedxgb_secure         [FedJob → Recipe API]
+11. hierarchical_stats            [Legacy JSON → Recipe API]
+12. finance                       [FedJob → Recipe API]
+13. vertical_federated_learning   [Legacy JSON → Recipe API]
+14. gnn                          [Custom → Recipe API]
+
+🟢 MEDIUM PRIORITY (Nice to Have - 8 examples)
+─────────────────────────────────────────────────────────────────────
+
+15-22. Various specialized and research examples
+
+⚪ LOW PRIORITY (Infrastructure - 6 examples)
+─────────────────────────────────────────────────────────────────────
+
+Keep as-is:
+• monitoring, job-level-authorization, federated-policies
+• keycloak-site-authentication, custom_authentication, streaming
+
+================================================================================
+PHASED ACTION PLAN
+================================================================================
+
+PHASE 1: CREATE MISSING RECIPES (4-6 weeks)
+─────────────────────────────────────────────────────────────────────
+
+Week 1-2:  Create FedOptRecipe, FedProxRecipe
+           • Critical for CIFAR-10 FedOpt and FedProx jobs
+           • Medium complexity
+           • Expected: 2 recipes complete
+
+Week 3-4:  Create ScaffoldRecipe, XGBHistogramRecipe
+           • High complexity (SCAFFOLD)
+           • Critical for XGBoost horizontal
+           • Expected: 2 recipes complete
+
+Week 5-6:  Create XGBVerticalRecipe, TransformerRecipe
+           • High complexity both
+           • Critical for XGBoost vertical and NLP
+           • Expected: 2 recipes complete
+
+Deliverables:
+✅ 6 new recipes implemented and tested
+✅ Unit tests for each recipe
+✅ Integration tests for each recipe
+✅ Documentation for each recipe
+
+PHASE 2: CONVERT CRITICAL EXAMPLES (6-8 weeks)
+─────────────────────────────────────────────────────────────────────
+
+Week 7-10: Convert CIFAR-10 examples (4 examples)
+           • cifar10-sim: 5 jobs → 1 job.py with recipe selection
+           • cifar10-real-world: Add HE support
+           • cifar10/tf: TensorFlow variant
+           • Remove all JSON configs
+
+Week 11-12: Convert XGBoost examples (3 examples)
+            • fedxgb horizontal
+            • fedxgb vertical
+            • fedxgb_secure
+
+Week 13-14: Convert NLP and Medical examples (3 examples)
+            • nlp-ner
+            • prostate
+            • brats18 (if exists)
+
+Deliverables:
+✅ 10 critical examples converted
+✅ All legacy JSON configs removed
+✅ All examples using Recipe API
+✅ Integration tests for converted examples
+
+PHASE 3: STANDARDIZE FILE STRUCTURE (4-6 weeks)
+─────────────────────────────────────────────────────────────────────
+
+Week 15-16: Rename files (~50 files)
+            • All *_job.py → job.py
+            • All train.py → client.py
+            • All *_model.py → model.py
+
+Week 17-18: Restructure directories (~30 examples)
+            • Move client code to root client.py
+            • Move model code to root model.py
+            • Move utilities to utils/
+            • Remove src/, learners/, networks/ directories
+
+Week 19-20: Standardize data preparation (~30 examples)
+            • Create download_data.sh where needed
+            • Create prepare_data.sh wrappers
+            • Move prepare_data.py to utils/
+            • Standardize CLI argument names
+
+Deliverables:
+✅ All files follow naming conventions
+✅ All directories follow standard structure
+✅ All data prep follows standard pattern
+✅ All examples have consistent structure
+
+PHASE 4: UPDATE DOCUMENTATION (4-6 weeks)
+─────────────────────────────────────────────────────────────────────
+
+Week 21-23: Update all 48 READMEs
+            • Apply standard template
+            • Remove outdated instructions
+            • Add Recipe API examples
+            • Add "How It Works" sections
+
+Week 24-25: Add docstrings (~150 files)
+            • Module docstrings for all job.py
+            • Function docstrings for all client.py
+            • Class docstrings for all model.py
+
+Week 26:    Create master documentation
+            • Example index with descriptions
+            • Recipe catalog
+            • Migration guide
+
+Deliverables:
+✅ All READMEs updated and consistent
+✅ All code has proper docstrings
+✅ Master index created
+✅ Migration guide published
+
+PHASE 5: TESTING & VALIDATION (2-3 weeks)
+─────────────────────────────────────────────────────────────────────
+
+Week 27-28: Testing
+            • Run all 48 examples
+            • Verify all instructions work
+            • Run linter and fix issues
+            • Performance benchmarks
+
+Week 29:    Final validation
+            • Code review
+            • Documentation review
+            • User acceptance testing
+
+Deliverables:
+✅ All examples tested and working
+✅ All linter errors fixed
+✅ All documentation verified
+✅ Ready for release
+
+================================================================================
+TRACKING METRICS
+================================================================================
+
+CURRENT STATE (Jan 12, 2026):
+  Examples Converted:         20/48    (42%)
+  Recipes Created:            10/18    (56%)
+  File Naming Consistent:     31/48    (65%)
+  Structure Consistent:       20/48    (42%)
+  Documentation Updated:      20/48    (42%)
+  Legacy JSON Eliminated:     41/48    (85%)
+
+MILESTONE TARGETS:
+
+End of Phase 1 (Week 6):
+  Recipes Created:            16/18    (89%)
+
+End of Phase 2 (Week 14):
+  Examples Converted:         30/48    (63%)
+  Legacy JSON Eliminated:     48/48    (100%)  ✅
+
+End of Phase 3 (Week 20):
+  File Naming Consistent:     48/48    (100%)  ✅
+  Structure Consistent:       48/48    (100%)  ✅
+
+End of Phase 4 (Week 26):
+  Documentation Updated:      48/48    (100%)  ✅
+
+End of Phase 5 (Week 29):
+  Examples Converted:         48/48    (100%)  ✅
+  Recipes Created:            18/18    (100%)  ✅
+  All Metrics:               100%      ✅
+
+FINAL TARGET:
+  All 48 examples using Recipe API
+  All files following naming conventions
+  All directories following standard structure
+  All documentation consistent and up-to-date
+  Zero legacy JSON configs
+  Zero linter errors
+
+================================================================================
+RESOURCE REQUIREMENTS
+================================================================================
+
+PERSONNEL:
+  • 1-2 Senior Engineers (Recipe creation, complex conversions)
+  • 1-2 Mid-level Engineers (Example conversions, testing)
+  • 1 Technical Writer (Documentation)
+  • 1 QA Engineer (Testing, validation)
+
+EFFORT ESTIMATE:
+  Phase 1: 4-6 weeks  (Recipe creation)
+  Phase 2: 6-8 weeks  (Critical conversions)
+  Phase 3: 4-6 weeks  (Standardization)
+  Phase 4: 4-6 weeks  (Documentation)
+  Phase 5: 2-3 weeks  (Testing)
+  ──────────────────────────────────────
+  TOTAL:   20-29 weeks (5-7 months)
+
+RISK FACTORS:
+  • Recipe complexity may be higher than estimated
+  • Legacy code may have hidden dependencies
+  • Testing may reveal issues requiring rework
+  • Documentation may take longer than estimated
+
+MITIGATION:
+  • Start with simpler recipes to build patterns
+  • Thorough code review before conversion
+  • Continuous testing throughout phases
+  • Parallel documentation work
+
+================================================================================
+SUCCESS CRITERIA
+================================================================================
+
+Recipe Conversion Complete When:
+  ✅ All 48 examples use Recipe API (no FedJob, no JSON)
+  ✅ All 18 recipes created and tested
+  ✅ All examples follow standard file structure
+  ✅ All files use standard naming conventions
+  ✅ All READMEs follow standard template
+  ✅ All examples have integration tests
+  ✅ All linter errors resolved
+  ✅ Zero regression in functionality
+
+Consistency Achieved When:
+  ✅ 100% of examples use Recipe API
+  ✅ 100% of job files named job.py
+  ✅ 100% of client files named client.py
+  ✅ 100% of model files named model.py (where applicable)
+  ✅ 100% of data prep uses standard pattern
+  ✅ 100% of READMEs follow template
+  ✅ 0% legacy JSON configs remain
+  ✅ 0% linter errors
+
+Quality Gates:
+  • Each phase must complete before next begins
+  • All tests must pass before merging
+  • Documentation must be reviewed and approved
+  • Performance must not degrade
+
+================================================================================
+NEXT STEPS
+================================================================================
+
+IMMEDIATE ACTIONS (This Week):
+  1. Review and approve this plan
+  2. Assign team members to phases
+  3. Set up project tracking (Jira/Confluence)
+  4. Begin Phase 1: FedOptRecipe design
+
+SHORT TERM (Weeks 1-6):
+  1. Create FedOptRecipe, FedProxRecipe
+  2. Create ScaffoldRecipe, XGBHistogramRecipe
+  3. Create XGBVerticalRecipe, TransformerRecipe
+  4. Unit tests for all new recipes
+
+MEDIUM TERM (Weeks 7-14):
+  1. Convert CIFAR-10 examples (4 examples)
+  2. Convert XGBoost examples (3 examples)
+  3. Convert NLP and Medical examples (3 examples)
+  4. Remove all legacy JSON configs
+
+LONG TERM (Weeks 15-29):
+  1. Standardize all file structures
+  2. Update all documentation
+  3. Complete testing and validation
+  4. Release consistent API
+
+================================================================================
+CONTACTS & RESOURCES
+================================================================================
+
+Document Owner:      NVFlare Team
+Last Updated:        January 12, 2026
+Next Review:         January 19, 2026
+Review Cadence:      Weekly
+
+Related Documents:
+  • Full Audit: 20260112_comprehensive_status_and_consistency_audit.md
+  • Status Tracker: 20251212_recipe_conversion_status_tracker.md
+  • Experiment Tracking: 20251218_MASTER_SUMMARY.md
+
+For Questions:
+  • Check existing documentation first
+  • Review completed examples for patterns
+  • Review test files for usage examples
+
+For Updates:
+  • Update this document weekly
+  • Track metrics in project management tool
+  • Report blockers immediately
+
+================================================================================
+END OF REPORT
+================================================================================

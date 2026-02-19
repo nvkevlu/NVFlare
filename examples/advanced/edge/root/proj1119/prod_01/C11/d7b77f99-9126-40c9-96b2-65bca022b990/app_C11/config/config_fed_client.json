@@ -1,0 +1,45 @@
+{
+    "format_version": 2,
+    "executors": [
+        {
+            "tasks": [
+                "train"
+            ],
+            "executor": {
+                "path": "nvflare.edge.executors.et_edge_model_executor.ETEdgeModelExecutor",
+                "args": {
+                    "et_model": {
+                        "path": "cifar10_model.TrainingNet",
+                        "args": {}
+                    },
+                    "input_shape": [
+                        4,
+                        3,
+                        32,
+                        32
+                    ],
+                    "output_shape": [
+                        4
+                    ],
+                    "aggr_factory_id": "aggr_factory",
+                    "max_model_versions": 3,
+                    "update_timeout": 1000.0
+                }
+            }
+        }
+    ],
+    "components": [
+        {
+            "id": "edge_task_receiver",
+            "path": "nvflare.edge.widgets.etr.EdgeTaskReceiver",
+            "args": {}
+        },
+        {
+            "id": "aggr_factory",
+            "path": "nvflare.edge.aggregators.model_update_dxo_factory.ModelUpdateDXOAggrFactory",
+            "args": {}
+        }
+    ],
+    "task_data_filters": [],
+    "task_result_filters": []
+}

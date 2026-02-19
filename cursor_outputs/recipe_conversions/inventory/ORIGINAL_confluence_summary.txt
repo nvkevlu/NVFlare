@@ -1,0 +1,122 @@
+
+
+
+Deprecation? or Deletion?
+what about all the job_templates???
+
+examples	Notes	
+
+advanced/brats18	too old	delete
+advanced/finance-end-to-end	already in tutorials 	delete
+advanced/finance	already in tutorials. – Link to tutorials (Finance), Link to end-to-end finance 	add links in readme
+advanced/fl_hub	no longer useful	delete
+advanced/hello-ccwf	unclear, swarm is covered in tutorials in more details	delete
+advanced/hello-pt-resnet	outdated, not used, covered by hello-pt	delete
+advanced/nlp-ner	already in tutorials	add link in README
+advanced/prostate	too old, already in tutorials, covered in monai example	delete
+advanced/rag	embedding training is overlapping with llm_hf example, lets add it back IF we have fed-rag	delete
+advanced/swarm_learning	already in tutorials	add Link in README
+
+
+
+
+
+
+
+Don't change, do after FOX, 2.8.0:
+
+examples	Notes	
+
+advanced/distributed_optimization	low level controller involved	
+
+advanced/vertical_federated_learning	low level controller involved	
+
+
+
+
+
+To check with team:
+
+examples	Note
+advanced/streaming	Ask Zhihong if this needs to be converted to show the new TensorDownloader stuff
+advanced/fedavg-with-early-stopping	Ask Chester if this needs to be converted or after FOX, — Merge with FedAvg
+advanced/lr-newton-raphson	Hello-LR, asking Zhijin Li to merge Hello-LR Receipe 
+
+
+
+
+
+
+
+Job Recipe Conversion:
+
+examples	PIC	Priority	Target Date	notes
+hello-world	Kevin	P0	
+
+12 Dec 2025 
+
+	Double check on if all converted
+hello-world/ml-to-fl	Yuan-Ting	P0	
+
+12 Dec 2025 
+
+	
+
+advanced/amplify	Holger	P1	
+
+05 Jan 2026 
+
+	
+
+advanced/bionemo	Holger	P1	
+
+05 Jan 2026 
+
+	
+
+advanced/experiment-tracking	Kevin 	P0	
+
+19 Dec 2025 
+
+	
+
+advanced/cifar10	Holger	P0	
+
+23 Dec 2025 
+
+	Starts PT → then TF → HE
+advanced/xgboost	Yuan-Ting	P1	
+
+19 Dec 2025 
+
+	XGBRecipe?
+advanced/llm_hf	Ziyue	P0	
+
+12 Dec 2025 
+
+	
+
+advanced/gnn	Ziyue	P0	
+
+12 Dec 2025 
+
+	
+
+advanced/kaplan-meier-he	Ziyue	P1	
+
+15 Dec 2025 
+
+	
+
+advanced/psi	Yuan-Ting	P1	
+
+19 Dec 2025 
+
+	
+
+integration/monai	Holger	P0	
+
+23 Dec 2025 
+
+	Drop monai_flare wheel support
+use Client API directly
