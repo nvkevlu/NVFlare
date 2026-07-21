@@ -7,17 +7,21 @@ training plumbing needed for a real-model client. A new implementation should
 reuse the Client API rank contract, external `torchrun` launch, Hugging Face
 training examples, Qwen rank coordination, and the existing Slurm wrapper.
 
-The repository does **not** contain an FSDP-specific NVFlare state bridge. A
-search of the current tree and git history found no use of
-`FullyShardedDataParallel`, FSDP full-state-dict APIs, `rank0_only`, or FSDP
-CPU-offloaded state gathering. That narrow boundary remains new work:
+The feature worktree now contains an FSDP2-specific NVFlare state bridge in
+`nvflare/app_opt/pt/fsdp2_state_bridge.py`. It implements the narrow boundary
+that was missing from the repository:
 
 1. Load the full NVFlare state into an FSDP model without broadcasting a full
    application object to every rank.
 2. Gather a CPU full state on rank zero after training without creating full
    copies on every rank.
-3. Keep the rank-zero state alive until the FLARE transfer is terminal, then
-   release it deterministically.
+3. Return explicit state size and duration telemetry to the client so it can
+   retain the rank-zero export through the FLARE send and then release it
+   deterministically.
+
+The remaining work is client integration: connect this bridge to rank-zero
+Client API receive/send, the selected Hugging Face training loop, and explicit
+post-send cleanup.
 
 ## Existing Building Blocks
 
@@ -86,9 +90,9 @@ The earlier list overstated the amount of new work. The revised scope is:
 | `torchrun`, NCCL, rank ownership, stop/error propagation | Existing; reuse |
 | Slurm multi-node wrapper | Existing; adapt |
 | FSDP wrapping policy and activation checkpointing | New model-specific configuration |
-| NVFlare full state to FSDP load | New |
-| FSDP rank-zero CPU full-state gather to NVFlare | New |
-| Memory-safe lifecycle around gather/send | New |
+| NVFlare full state to FSDP load | Implemented and tested locally in the FSDP2 state bridge |
+| FSDP rank-zero CPU full-state gather to NVFlare | Implemented and tested locally in the FSDP2 state bridge |
+| Memory-safe lifecycle around gather/send | Bridge avoids tensor clones and clears its load working dict; client send/cleanup remains |
 | Deterministic correctness and GPU-memory metrics | Extend existing metrics |
 | Pyxis integration | Conditional on the target cluster |
 
@@ -110,6 +114,27 @@ Once this passes at 1B--3B, scale the same adapter to 14B and then 32B. LoRA is
 an easier real-training milestone but does not validate the full-state server
 path because it exchanges a much smaller payload.
 
+## Current Bridge Verification and GPU Gate
+
+The local bridge gate is complete:
+
+- 12 focused unit tests cover process-group and FSDP2 enforcement, rank-zero
+  ownership, strict wrapper-prefix conversion, CPU-only full states,
+  synchronized validation failures, full-state options, and telemetry.
+- A real two-rank CPU/Gloo integration test applies `fully_shard` bottom-up,
+  loads a full state supplied only on rank zero, and gathers an identical CPU
+  full state only on rank zero.
+- The full `tests/unit_test/app_opt/pt` area passes with the bridge included.
+
+The provisioned four-GPU host is the next gate. Run the same integration path
+under `torchrun --nproc_per_node=4` with NCCL, first with the tiny test model and
+then with a 1B--3B text model. Record per-rank peak GPU memory and CPU RSS during
+load and export, assert that nonzero ranks never own an exported full state,
+perform at least one real optimizer step, and verify both finite loss and a
+known parameter change. Only after that gate passes should the client attempt a
+14B full-model round; host RAM and rank-zero export headroom must also be checked
+before that run.
+
 ## Evidence Paths
 
 - Client API global-rank contract: `nvflare/client/api.py`
@@ -123,3 +148,6 @@ path because it exchanges a much smaller payload.
 - Lightning rank integration: `nvflare/app_opt/lightning/api.py`
 - BioNeMo trainer integration: `examples/tutorials/self-paced-training/part-5_federated_learning_applications_in_industries/chapter-11_federated_learning_in_healthcare_lifescience/11.2_drug_discovery/11.2.1_drug_discovery_bionemo`
 - Multi-process/HPC design contract: `docs/design/client_api_execution_modes.md`
+- FSDP2 full-state bridge: `nvflare/app_opt/pt/fsdp2_state_bridge.py`
+- FSDP2 unit coverage: `tests/unit_test/app_opt/pt/fsdp2_state_bridge_test.py`
+- FSDP2 two-rank collective coverage: `tests/integration_test/fsdp2_state_bridge_test.py`
