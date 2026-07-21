@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "name": "falcon3-10b-shape-1r",
+  "description": "One-round capacity-risk synthetic payload for the Falcon3 10B class.",
+  "model": {
+    "name": "Falcon3-10B-Base",
+    "parameter_count": 10000000000,
+    "dtype": "bfloat16",
+    "tensor_shard_mib": 128
+  },
+  "federation": {
+    "clients": ["site-1", "site-2"],
+    "rounds": 1,
+    "simulator_threads": 2,
+    "launch_external_process": true,
+    "server_memory_gc_rounds": 1,
+    "client_memory_gc_rounds": 1
+  },
+  "transport": {
+    "enable_tensor_disk_offload": true,
+    "tensor_download_chunk_size": 2097152,
+    "streaming_per_request_timeout": 900,
+    "tensor_min_download_timeout": 900,
+    "get_task_timeout": 1800,
+    "submit_task_result_timeout": 1800,
+    "max_resends": 3
+  },
+  "monitoring": {
+    "sample_interval_seconds": 0.5,
+    "gpu_sample_interval_seconds": 1.0
+  },
+  "success_criteria": {
+    "require_job_success": true,
+    "require_monitor_samples": true,
+    "minimum_monitor_coverage": 0.9,
+    "require_sentinel_checks": true,
+    "max_peak_process_tree_rss_gib": null,
+    "max_server_round_end_growth_percent": 10.0,
+    "live_model_copy_factor": 6.0,
+    "simulation_client_copy_factor": 2.5,
+    "fixed_server_overhead_gib": 1.0,
+    "fixed_client_overhead_gib": 0.5,
+    "fixed_simulation_overhead_gib": 2.0,
+    "disk_payload_factor": 5.0,
+    "free_memory_reserve_fraction": 0.2,
+    "required_artifacts": [
+      "manifest.json",
+      "scenario.json",
+      "events.jsonl",
+      "metrics/process_samples.csv",
+      "result.json"
+    ]
+  }
+}

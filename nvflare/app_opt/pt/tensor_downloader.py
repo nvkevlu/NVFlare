@@ -16,7 +16,9 @@ import os
 import struct
 import tempfile
 import threading
+import time
 import weakref
+from datetime import datetime, timezone
 from typing import Any, List, Optional, Tuple
 
 import torch
@@ -32,6 +34,7 @@ from nvflare.fuel.f3.streaming.obj_downloader import ObjectDownloader
 from .lazy_tensor_dict import LazyTensorDict, _cleanup_temp_dir
 
 _TWO_MB = 2 * 1024 * 1024
+TENSOR_OFFLOAD_METRICS_PREFIX = "[TENSOR_OFFLOAD_METRICS]"
 _ACTIVE_DISK_TENSOR_CONSUMERS = weakref.WeakSet()
 _ACTIVE_DISK_TENSOR_CONSUMERS_LOCK = threading.Lock()
 
@@ -185,8 +188,36 @@ class DiskTensorConsumer(ItemConsumer):
         self._temp_dir = temp_dir
         self._cleaned = False
         self._file_counter = 0
+        self._started_at = time.perf_counter()
+        self._item_count = 0
+        self._tensor_key_count = 0
+        self._bytes_written = 0
+        self._header_parse_seconds = 0.0
+        self._disk_write_seconds = 0.0
+        self._metrics_logged = False
         with _ACTIVE_DISK_TENSOR_CONSUMERS_LOCK:
             _ACTIVE_DISK_TENSOR_CONSUMERS.add(self)
+
+    def get_offload_metrics(self) -> dict:
+        return {
+            "event": "tensor_offload_download",
+            "source": "tensor_offload",
+            "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+            "item_count": self._item_count,
+            "tensor_key_count": self._tensor_key_count,
+            "bytes_written": self._bytes_written,
+            "header_parse_seconds": self._header_parse_seconds,
+            "disk_write_seconds": self._disk_write_seconds,
+            "elapsed_seconds": time.perf_counter() - self._started_at,
+        }
+
+    def _log_offload_metrics(self, ref_id: str, status: str, reason: Optional[str] = None) -> None:
+        if self._metrics_logged:
+            return
+        self._metrics_logged = True
+        metrics = self.get_offload_metrics()
+        metrics.update({"ref_id": ref_id, "status": status, "reason": reason})
+        self.logger.info(f"{TENSOR_OFFLOAD_METRICS_PREFIX}{json.dumps(metrics, sort_keys=True)}")
 
     def release(self) -> None:
         with _ACTIVE_DISK_TENSOR_CONSUMERS_LOCK:
@@ -209,11 +240,18 @@ class DiskTensorConsumer(ItemConsumer):
             result = {}
 
         for item in items:
+            parse_started_at = time.perf_counter()
             keys = _extract_safetensors_keys(item)
+            self._header_parse_seconds += time.perf_counter() - parse_started_at
             file_path = os.path.join(self._temp_dir, f"chunk_{self._file_counter}.safetensors")
             self._file_counter += 1
+            write_started_at = time.perf_counter()
             with open(file_path, "wb") as f:
                 f.write(item)
+            self._disk_write_seconds += time.perf_counter() - write_started_at
+            self._item_count += 1
+            self._tensor_key_count += len(keys)
+            self._bytes_written += len(item)
             for key in keys:
                 if key in result:
                     raise ValueError(
@@ -224,8 +262,13 @@ class DiskTensorConsumer(ItemConsumer):
 
         return result
 
+    def download_completed(self, ref_id: str):
+        super().download_completed(ref_id)
+        self._log_offload_metrics(ref_id=ref_id, status="completed")
+
     def download_failed(self, ref_id, reason: str):
         super().download_failed(ref_id, reason)
+        self._log_offload_metrics(ref_id=ref_id, status="failed", reason=reason)
         # Eager cleanup on download callback error; the outer caller may also
         # attempt cleanup via consumer.error path. Double cleanup is intentional
         # and safe because _cleanup_temp_dir handles already-removed paths.

@@ -36,6 +36,13 @@ README in each subfolder for setup, data, and run instructions.
   an autoresearch-style control plane, CIFAR-10 simulation harness, bounded
   mutation workflow, and reporting tools for agent-assisted FL experiments.
 
+## Benchmark and Stress Tooling
+
+- [LLM Federated Server Stress Harness](./llm_fl_stress/README.md) provides
+  exact-size synthetic 135M through 72B payload scenarios, process and phase
+  telemetry, failure evidence collection, local baseline results, and an
+  expedited machine-sizing plan.
+
 ## Shared Data and Task Support
 
 - [Prostate multi-source data preparation](./prostate/README.md) contains

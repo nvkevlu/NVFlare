@@ -50,7 +50,7 @@ class TestLazyRef:
     def test_materialize_loads_tensor(self, temp_safetensors):
         key_to_file, temp_dir, tensors = temp_safetensors
         file_path, st_key = key_to_file["layer1.weight"]
-        ref = _LazyRef(file_path=file_path, key=st_key, temp_ref=_TempDirRef(temp_dir))
+        ref = _LazyRef(file_path=file_path, key=st_key, temp_ref=_TempDirRef(temp_dir, {file_path}))
 
         result = ref.materialize()
         assert torch.allclose(result, tensors["layer1.weight"])
@@ -58,7 +58,7 @@ class TestLazyRef:
     def test_repr(self, temp_safetensors):
         key_to_file, temp_dir, _ = temp_safetensors
         file_path, st_key = key_to_file["layer1.bias"]
-        ref = _LazyRef(file_path=file_path, key=st_key, temp_ref=_TempDirRef(temp_dir))
+        ref = _LazyRef(file_path=file_path, key=st_key, temp_ref=_TempDirRef(temp_dir, {file_path}))
         assert "layer1.bias" in repr(ref)
 
 
@@ -66,7 +66,7 @@ class TestTempDirRef:
     def test_cleanup_on_del(self):
         temp_dir = tempfile.mkdtemp(prefix="nvflare_test_")
         assert os.path.exists(temp_dir)
-        ref = _TempDirRef(temp_dir)
+        ref = _TempDirRef(temp_dir, set())
         del ref
         assert not os.path.exists(temp_dir)
 
@@ -88,7 +88,7 @@ class TestTempDirRef:
     def test_cleanup_logs_warning_on_error(self, monkeypatch, caplog, tmp_path):
         temp_dir = tmp_path / "nvflare_test_cleanup_warn"
         temp_dir.mkdir()
-        ref = _TempDirRef(str(temp_dir))
+        ref = _TempDirRef(str(temp_dir), set())
 
         def raise_cleanup_error(_):
             raise PermissionError("permission denied")
@@ -161,6 +161,18 @@ class TestLazyTensorDict:
         assert os.path.exists(temp_dir)
         ltd.cleanup()
         assert not os.path.exists(temp_dir)
+
+    def test_materialization_metrics(self, temp_safetensors):
+        key_to_file, temp_dir, tensors = temp_safetensors
+        ltd = LazyTensorDict(key_to_file=key_to_file, temp_dir=temp_dir)
+
+        tensor = ltd["layer1.weight"]
+        metrics = ltd._temp_ref.get_metrics()
+
+        assert metrics["file_count"] == len(tensors)
+        assert metrics["on_disk_bytes"] > 0
+        assert metrics["materialization_count"] == 1
+        assert metrics["materialized_bytes"] == tensor.numel() * tensor.element_size()
 
     def test_getitem_raises_keyerror(self, temp_safetensors):
         key_to_file, temp_dir, _ = temp_safetensors

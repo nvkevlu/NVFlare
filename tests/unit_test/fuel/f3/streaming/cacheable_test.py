@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import threading
 from typing import Any, List
 
 import pytest
@@ -49,6 +50,19 @@ class MockItemConsumer(ItemConsumer):
         result.extend(items)
         self.consumed_items.extend(items)
         return result
+
+
+class ConcurrentMockCacheableObject(CacheableObject):
+    def __init__(self):
+        self.barrier = threading.Barrier(2)
+        super().__init__([b"payload"], max_chunk_size=100)
+
+    def get_item_count(self) -> int:
+        return 1
+
+    def produce_item(self, index: int) -> bytes:
+        self.barrier.wait()
+        return self.base_obj[index]
 
 
 class TestCacheableObject:
@@ -140,6 +154,29 @@ class TestCacheableObject:
         rc2, data2, state2 = obj.produce({}, "receiver2")
         assert rc2 == ProduceRC.OK
         assert data2 == data1  # Same data from cache
+        metrics = obj.get_cache_metrics()
+        assert metrics["production_attempts"] == 2
+        assert metrics["unique_cache_fills"] == 2
+        assert metrics["cache_hits"] == 2
+        assert metrics["serialized_bytes"] == sum(len(item) for item in data1)
+        assert metrics["cached_bytes_peak"] == sum(len(item) for item in data1)
+
+    def test_cacheable_object_counts_concurrent_duplicate_production(self):
+        obj = ConcurrentMockCacheableObject()
+        results = []
+        threads = [threading.Thread(target=lambda: results.append(obj._get_item(0, "receiver"))) for _ in range(2)]
+
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        metrics = obj.get_cache_metrics()
+        assert results == [b"payload", b"payload"]
+        assert metrics["production_attempts"] == 2
+        assert metrics["unique_cache_fills"] == 1
+        assert metrics["duplicate_productions"] == 1
+        assert metrics["duplicate_serialized_bytes"] == len(b"payload")
 
     def test_cacheable_object_cache_clearing_per_item(self, cell):
         """Test that cache is cleared for each item after all receivers get it."""
@@ -174,6 +211,11 @@ class TestCacheableObject:
             assert obj.cache[1][0] is None
             assert obj.cache[0][1] == 2  # num_received counter
             assert obj.cache[1][1] == 2
+
+        metrics = obj.get_cache_metrics()
+        assert metrics["cache_evictions"] == 2
+        assert metrics["cached_bytes_current"] == 0
+        assert metrics["receiver_ack_items"] == 4
 
         # Cleanup
         DownloadService.delete_transaction(tx_id)

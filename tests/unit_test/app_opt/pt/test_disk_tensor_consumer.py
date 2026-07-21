@@ -89,6 +89,13 @@ class TestDiskTensorConsumer:
         for file_path, key in result.values():
             assert os.path.exists(file_path)
 
+        metrics = consumer.get_offload_metrics()
+        assert metrics["item_count"] == 2
+        assert metrics["tensor_key_count"] == 2
+        assert metrics["bytes_written"] == sum(len(item) for item in items)
+        assert metrics["header_parse_seconds"] >= 0
+        assert metrics["disk_write_seconds"] >= 0
+
     def test_key_to_file_mapping(self, temp_dir):
         consumer = DiskTensorConsumer(temp_dir)
 

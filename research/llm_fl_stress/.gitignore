@@ -1,0 +1,23 @@
+runs/
+__pycache__/
+.pytest_cache/
+
+# Local access/session material. Ignore rules are defense in depth; private keys
+# and NVFlare startup kits should still live outside the repository.
+.local/
+secrets/
+startup-kits/
+provisioning-private/
+prod_*/
+*.key
+*.pem
+*.p12
+*.pfx
+*.request.zip
+*.signed.zip
+id_rsa
+id_ecdsa
+id_ed25519
+id_mldsa*
+known_hosts*
+ssh_config.local

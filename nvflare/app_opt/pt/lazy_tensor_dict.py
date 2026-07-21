@@ -23,12 +23,18 @@ This keeps peak memory lower for large models while still allowing deterministic
 explicit cleanup via `cleanup()`, with GC as a fallback through `_TempDirRef`.
 """
 
+import json
 import logging
+import os
 import shutil
+import threading
+import time
+from datetime import datetime, timezone
 
 from safetensors import safe_open
 
 logger = logging.getLogger(__name__)
+TENSOR_OFFLOAD_METRICS_PREFIX = "[TENSOR_OFFLOAD_METRICS]"
 
 
 def _cleanup_temp_dir(path: str) -> None:
@@ -47,14 +53,44 @@ class _TempDirRef:
     The directory is deleted only when ALL holders are garbage collected.
     """
 
-    def __init__(self, temp_dir: str):
+    def __init__(self, temp_dir: str, file_paths: set[str]):
         self.path = temp_dir
         self._deleted = False
+        self._lock = threading.Lock()
+        self._started_at = time.perf_counter()
+        self._file_count = len(file_paths)
+        self._on_disk_bytes = sum(os.path.getsize(path) for path in file_paths)
+        self._materialization_count = 0
+        self._materialized_bytes = 0
+        self._materialization_seconds = 0.0
+
+    def record_materialization(self, tensor, elapsed_seconds: float) -> None:
+        with self._lock:
+            self._materialization_count += 1
+            self._materialized_bytes += tensor.numel() * tensor.element_size()
+            self._materialization_seconds += elapsed_seconds
+
+    def get_metrics(self) -> dict:
+        with self._lock:
+            return {
+                "event": "tensor_offload_lifecycle",
+                "source": "tensor_offload",
+                "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+                "file_count": self._file_count,
+                "on_disk_bytes": self._on_disk_bytes,
+                "materialization_count": self._materialization_count,
+                "materialized_bytes": self._materialized_bytes,
+                "materialization_seconds": self._materialization_seconds,
+                "lifetime_seconds": time.perf_counter() - self._started_at,
+            }
 
     def cleanup(self):
-        if not self._deleted:
+        with self._lock:
+            if self._deleted:
+                return
             self._deleted = True
-            _cleanup_temp_dir(self.path)
+        logger.info("%s%s", TENSOR_OFFLOAD_METRICS_PREFIX, json.dumps(self.get_metrics(), sort_keys=True))
+        _cleanup_temp_dir(self.path)
 
     def __del__(self):
         self.cleanup()
@@ -76,8 +112,11 @@ class _LazyRef:
 
     def materialize(self):
         """Load tensor from safetensors file. Opens mmap, copies data out, closes mmap."""
+        started_at = time.perf_counter()
         with safe_open(self.file_path, framework="pt") as f:
-            return f.get_tensor(self.key)
+            tensor = f.get_tensor(self.key)
+        self._temp_ref.record_materialization(tensor, time.perf_counter() - started_at)
+        return tensor
 
     def __repr__(self):
         return f"_LazyRef({self.file_path!r}, key={self.key!r})"
@@ -92,12 +131,15 @@ class LazyTensorDict:
 
     def __init__(self, key_to_file: dict[str, tuple[str, str]], temp_dir: str):
         self._key_to_file = key_to_file
-        self._temp_ref = _TempDirRef(temp_dir)
+        self._temp_ref = _TempDirRef(temp_dir, {file_path for file_path, _ in key_to_file.values()})
 
     def __getitem__(self, key):
         file_path, st_key = self._key_to_file[key]
+        started_at = time.perf_counter()
         with safe_open(file_path, framework="pt") as f:
-            return f.get_tensor(st_key)
+            tensor = f.get_tensor(st_key)
+        self._temp_ref.record_materialization(tensor, time.perf_counter() - started_at)
+        return tensor
 
     def get(self, key, default=None):
         try:

@@ -1,0 +1,41 @@
+api_version: 3
+name: llm_stress_three_clients
+description: Temporary four-host LLM server stress federation
+connection_security: tls
+
+participants:
+  - name: flare-server
+    type: server
+    org: stress_test
+    default_host: REPLACE_SERVER_HOST
+    host_names:
+      - REPLACE_SERVER_HOST
+    fed_learn_port: 8002
+    admin_port: 8003
+  - name: site-1
+    type: client
+    org: stress_test
+  - name: site-2
+    type: client
+    org: stress_test
+  - name: site-3
+    type: client
+    org: stress_test
+  - name: admin@nvidia.com
+    type: admin
+    org: stress_test
+    role: project_admin
+
+builders:
+  - path: nvflare.lighter.impl.workspace.WorkspaceBuilder
+  - path: nvflare.lighter.impl.static_file.StaticFileBuilder
+    args:
+      config_folder: config
+      scheme: grpc
+      overseer_agent:
+        path: nvflare.ha.dummy_overseer_agent.DummyOverseerAgent
+        overseer_exists: false
+        args:
+          sp_end_point: REPLACE_SERVER_HOST:8002:8003
+  - path: nvflare.lighter.impl.cert.CertBuilder
+  - path: nvflare.lighter.impl.signature.SignatureBuilder

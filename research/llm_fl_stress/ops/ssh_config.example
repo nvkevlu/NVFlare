@@ -1,0 +1,36 @@
+Host flare-server
+    HostName REPLACE_SERVER_ADDRESS
+    Port 22
+
+Host flare-site-1
+    HostName REPLACE_SITE_1_ADDRESS
+    Port 22
+
+Host flare-site-2
+    HostName REPLACE_SITE_2_ADDRESS
+    Port 22
+
+Host flare-site-3
+    HostName REPLACE_SITE_3_ADDRESS
+    Port 22
+
+Host flare-server flare-site-1 flare-site-2 flare-site-3
+    User REPLACE_SSH_USER
+    IdentityFile ${HOME}/.ssh/flare-stress-access
+    IdentitiesOnly yes
+    PubkeyAuthentication yes
+    PasswordAuthentication no
+    KbdInteractiveAuthentication no
+    BatchMode yes
+    AddKeysToAgent no
+    ForwardAgent no
+    ForwardX11 no
+    ClearAllForwardings yes
+    ControlMaster no
+    StrictHostKeyChecking yes
+    CheckHostIP yes
+    UserKnownHostsFile ${HOME}/.ssh/known_hosts_flare_stress
+    UpdateHostKeys no
+    ConnectTimeout 10
+    ServerAliveInterval 30
+    ServerAliveCountMax 3
