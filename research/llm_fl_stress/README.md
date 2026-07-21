@@ -134,6 +134,26 @@ after the machine or allocation is stable:
 PYTHONPATH=research/llm_fl_stress python3 -m harness.finalize <run-directory>
 ```
 
+## FSDP2 GPU Qualification Gate
+
+Before downloading a Hugging Face model or starting NVFLARE services, validate
+the FSDP2 full-state boundary on every GPU in a prospective training host:
+
+```bash
+python -m torch.distributed.run \
+  --standalone \
+  --nproc_per_node=4 \
+  research/llm_fl_stress/fsdp2_gpu_gate.py
+```
+
+The gate uses a small deterministic model and NCCL. It loads a CPU full state
+held only by rank zero into FSDP2 shards, gathers and verifies a rank-zero-only
+CPU full state, performs one real sharded optimizer step, verifies that a known
+parameter changed, and repeats the full-state gather. Its single JSON result
+includes PyTorch/CUDA/NCCL versions plus per-rank loss, CPU RSS, peak GPU memory,
+and load/export durations. It does not contact the Hugging Face Hub, allocate an
+NVFLARE job, or modify system packages.
+
 ## Model Tiers
 
 One model family keeps architecture and dtype differences out of the first
