@@ -190,8 +190,16 @@ def _cgroup_metrics(path: Path) -> Dict[str, Any]:
         "memory_stat_kernel_bytes",
         "memory_stat_sock_bytes",
         "memory_stat_shmem_bytes",
+        "memory_stat_file_mapped_bytes",
+        "memory_stat_file_dirty_bytes",
+        "memory_stat_file_writeback_bytes",
+        "memory_stat_inactive_file_bytes",
+        "memory_stat_active_file_bytes",
+        "memory_stat_kernel_stack_bytes",
         "memory_stat_pagetables_bytes",
         "memory_stat_slab_bytes",
+        "memory_stat_slab_reclaimable_bytes",
+        "memory_stat_slab_unreclaimable_bytes",
     )
     counter_fields = (
         "memory_events_low",
@@ -200,6 +208,8 @@ def _cgroup_metrics(path: Path) -> Dict[str, Any]:
         "memory_events_oom",
         "memory_events_oom_kill",
         "memory_events_oom_group_kill",
+        "memory_stat_pgfault",
+        "memory_stat_pgmajfault",
         "pressure_some_total_usec",
         "pressure_full_total_usec",
     )

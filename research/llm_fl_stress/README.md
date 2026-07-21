@@ -30,6 +30,9 @@ The detailed 32B round-two RAM trace is in
 [server memory attribution](docs/server-memory-attribution.md).
 The measured one/two/three-client server-memory curve and shareable explanation
 are in the [client-count memory brief](docs/client-count-memory-brief-2026-07-21.md).
+The [real GPU training reuse audit](docs/real-training-reuse-audit-2026-07-21.md)
+identifies the existing Hugging Face, torchrun, Qwen, Lightning, and Slurm
+building blocks and isolates the remaining FSDP-specific work.
 The prepared one-server/three-client follow-up is in the
 [three-client 32B runbook](docs/three-client-32b-run.md).
 
@@ -324,7 +327,9 @@ validate the harness and relative scaling, then use separate hosts for final
 
 - Process-tree and per-role RSS/VMS, CPU, threads, and read/write bytes.
 - System available memory, swap, filesystem free space, cgroup limit/peak,
-  anonymous/file/kernel memory, pressure, and per-run OOM counter deltas.
+  anonymous/file/kernel memory, clean versus dirty/writeback file cache,
+  active/inactive file cache, reclaimable/unreclaimable slab, page faults,
+  pressure, and per-run OOM counter deltas.
 - Server memory before/after aggregation and persistence for every round.
 - Client memory and duration around receive and send operations.
 - F3 cache hits, duplicate serializations, serialization bytes/time, and peak

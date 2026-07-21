@@ -29,7 +29,7 @@ from research.llm_fl_stress.harness.evidence import (
     collect_workspace_evidence,
 )
 from research.llm_fl_stress.harness.finalize import finalize_run
-from research.llm_fl_stress.harness.report import generate_summary
+from research.llm_fl_stress.harness.report import _cgroup_metrics, generate_summary
 
 PROJECT_DIR = Path(__file__).resolve().parents[1]
 
@@ -104,6 +104,48 @@ class ReportingTest(unittest.TestCase):
                     "cgroup_oom_kill_events": oom_kill_values[1],
                 }
             )
+
+    def test_cgroup_metrics_separate_gauge_peaks_and_counter_deltas(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            path = Path(temporary_directory) / "cgroup_samples.csv"
+            fieldnames = [
+                "sample_index",
+                "elapsed_seconds",
+                "memory_stat_file_dirty_bytes",
+                "memory_stat_slab_reclaimable_bytes",
+                "memory_stat_pgfault",
+                "memory_stat_pgmajfault",
+            ]
+            with path.open("w", encoding="utf-8", newline="") as file:
+                writer = csv.DictWriter(file, fieldnames=fieldnames)
+                writer.writeheader()
+                writer.writerow(
+                    {
+                        "sample_index": 0,
+                        "elapsed_seconds": 0,
+                        "memory_stat_file_dirty_bytes": 10,
+                        "memory_stat_slab_reclaimable_bytes": 20,
+                        "memory_stat_pgfault": 100,
+                        "memory_stat_pgmajfault": 3,
+                    }
+                )
+                writer.writerow(
+                    {
+                        "sample_index": 1,
+                        "elapsed_seconds": 1,
+                        "memory_stat_file_dirty_bytes": 15,
+                        "memory_stat_slab_reclaimable_bytes": 18,
+                        "memory_stat_pgfault": 140,
+                        "memory_stat_pgmajfault": 5,
+                    }
+                )
+
+            metrics = _cgroup_metrics(path)
+
+            self.assertEqual(15, metrics["peaks"]["memory_stat_file_dirty_bytes"])
+            self.assertEqual(20, metrics["peaks"]["memory_stat_slab_reclaimable_bytes"])
+            self.assertEqual(40, metrics["counter_deltas"]["memory_stat_pgfault"])
+            self.assertEqual(2, metrics["counter_deltas"]["memory_stat_pgmajfault"])
 
     def test_evidence_collector_imports_markers_and_failure_details(self):
         with tempfile.TemporaryDirectory() as temporary_directory:

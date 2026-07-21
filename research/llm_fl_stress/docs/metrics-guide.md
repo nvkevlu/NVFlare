@@ -79,6 +79,10 @@ the machine request.
 | `cgroup_oom_event_delta` | Did the cgroup record a new OOM event during this run? | Must remain zero for a baseline pass. |
 | `cgroup.peaks.memory_stat_anon_bytes` | How much anonymous memory did the constrained workload charge? | Best cgroup input for selecting a hard OOM threshold; unlike file cache, it is not normally reclaimable. |
 | `cgroup.peaks.memory_stat_file_bytes` | How much page cache did the workload charge? | Explains why cgroup current can greatly exceed process RSS without exhausting host memory. |
+| `cgroup.peaks.memory_stat_file_dirty_bytes` / `memory_stat_file_writeback_bytes` | How much cached file data still required storage writeback? | Separates cheaply discardable clean cache from dirty cache that can stall reclaim. |
+| `cgroup.peaks.memory_stat_active_file_bytes` / `memory_stat_inactive_file_bytes` | How was file cache distributed across the reclaim lists? | A large inactive-file pool is the best candidate for prompt reclaim under `memory.high`. |
+| `cgroup.peaks.memory_stat_slab_reclaimable_bytes` / `memory_stat_slab_unreclaimable_bytes` | How much kernel slab could Linux reclaim? | Prevents treating the whole kernel/slab charge as permanently required memory. |
+| `cgroup.counter_deltas.memory_stat_pgfault` / `memory_stat_pgmajfault` | How many page faults occurred during the run? | Rising major faults indicate storage-backed refaults and help explain reclaim-induced slowdown. |
 | `cgroup.counter_deltas.memory_events_high` | How often did allocation cross `memory.high` and enter reclaim/throttling? | Large growth with no OOM indicates a soft-pressure or stall lane. |
 | `cgroup.counter_deltas.memory_events_max` | How often did allocation reach the hard limit? | Use with OOM counters and pressure; retries can make this much larger than one. |
 | `pressure_some_total_usec` / `pressure_full_total_usec` | How long were some or all cgroup tasks stalled on memory? | Distinguishes useful reclaim from a pressure-induced livelock or timeout. |

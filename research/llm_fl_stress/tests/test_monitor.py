@@ -31,7 +31,11 @@ class CgroupMonitorTest(unittest.TestCase):
             (root / "memory.swap.max").write_text("0\n", encoding="utf-8")
             (root / "memory.events").write_text("low 0\nhigh 3\nmax 2\noom 1\noom_kill 1\n", encoding="utf-8")
             (root / "memory.stat").write_text(
-                "anon 80\nfile 10\nkernel 5\nsock 2\nshmem 1\npagetables 3\nslab 4\n",
+                "anon 80\nfile 10\nkernel 5\nsock 2\nshmem 1\n"
+                "file_mapped 6\nfile_dirty 7\nfile_writeback 8\n"
+                "inactive_file 9\nactive_file 11\nkernel_stack 12\n"
+                "pagetables 3\nslab 4\nslab_reclaimable 13\nslab_unreclaimable 14\n"
+                "pgfault 15\npgmajfault 16\n",
                 encoding="utf-8",
             )
             (root / "memory.pressure").write_text(
@@ -44,6 +48,14 @@ class CgroupMonitorTest(unittest.TestCase):
 
             self.assertEqual(80, snapshot["memory_stat_anon_bytes"])
             self.assertEqual(10, snapshot["memory_stat_file_bytes"])
+            self.assertEqual(7, snapshot["memory_stat_file_dirty_bytes"])
+            self.assertEqual(8, snapshot["memory_stat_file_writeback_bytes"])
+            self.assertEqual(9, snapshot["memory_stat_inactive_file_bytes"])
+            self.assertEqual(11, snapshot["memory_stat_active_file_bytes"])
+            self.assertEqual(13, snapshot["memory_stat_slab_reclaimable_bytes"])
+            self.assertEqual(14, snapshot["memory_stat_slab_unreclaimable_bytes"])
+            self.assertEqual(15, snapshot["memory_stat_pgfault"])
+            self.assertEqual(16, snapshot["memory_stat_pgmajfault"])
             self.assertEqual(3, snapshot["memory_events_high"])
             self.assertEqual(1, snapshot["memory_events_oom_kill"])
             self.assertEqual(1234, snapshot["pressure_some_total_usec"])
