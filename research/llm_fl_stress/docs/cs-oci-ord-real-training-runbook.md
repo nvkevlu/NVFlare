@@ -64,13 +64,14 @@ git -C "$LOCAL_REPO" status --short
 git -C "$LOCAL_REPO" bundle create "$BUNDLE" codex/llm-fl-real-14b
 git -C "$LOCAL_REPO" bundle verify "$BUNDLE"
 (cd /private/tmp && shasum -a 256 nvflare-14b.bundle > nvflare-14b.bundle.sha256)
-rsync -ah --partial --append-verify --info=progress2 \
+rsync -avP \
   "$BUNDLE" "$BUNDLE.sha256" \
   kevlu@cs-oci-ord-dc-02.nvidia.com:/lustre/fs11/portfolios/coreai/projects/coreai_edgeai_flresearch/users/kevlu/nvflare-14b/incoming/
 ```
 
-If interrupted, rerun the same `rsync`; the bundle is immutable and `--append-verify` resumes it. Then verify and
-clone on the DC node:
+`-P` is the portable spelling of `--partial --progress` and works with the older rsync bundled with macOS. If the
+transfer is interrupted, rerun the same command; rsync will reuse the retained partial destination and the checksum
+step below will verify the completed bundle before it is used. Then verify and clone on the DC node:
 
 ```bash
 ssh kevlu@cs-oci-ord-dc-02.nvidia.com
