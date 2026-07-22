@@ -267,6 +267,16 @@ ls -lh "$PROJECT_ROOT/artifacts/<JOB_ID>"
 tar -tf "$PROJECT_ROOT/artifacts/<JOB_ID>/run.tar" | head
 ```
 
+For a real-training job, inspect the single rank-zero success record in stdout:
+
+```bash
+grep -F '"event": "real_training_round"' "$PROJECT_ROOT/logs/"*<JOB_ID>.out
+```
+
+The record includes the finite loss, positive `selected_max_abs_change`, full-state payload and tensor counts,
+load/export/round timing, and memory telemetry for every rank. A load, training, or export error on any rank terminates
+torchrun and the Slurm job instead of returning an unchanged model.
+
 Advance only when:
 
 - the Slurm state is `COMPLETED` with exit code `0:0`;

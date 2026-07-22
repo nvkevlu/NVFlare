@@ -301,6 +301,40 @@ def _round_metrics(
     return metrics, gathered
 
 
+def _require_round_success(round_error: Optional[str]) -> None:
+    if round_error:
+        raise RuntimeError(f"distributed round failed: {round_error}")
+
+
+def _make_round_summary(
+    current_round: int,
+    args: argparse.Namespace,
+    world_size: int,
+    metrics: dict[str, Any],
+    rank_metrics: list[dict[str, Any]],
+    payload_bytes: int,
+    tensor_count: int,
+    round_seconds: float,
+) -> dict[str, Any]:
+    return {
+        "event": "real_training_round",
+        "status": "PASS",
+        "current_round": current_round,
+        "run_mode": args.run_mode,
+        "trainable_target": args.trainable_target,
+        "local_steps": args.local_steps,
+        "world_size": world_size,
+        "loss": metrics["loss"],
+        "selected_max_abs_change": metrics["selected_max_abs_change"],
+        "load_seconds": metrics["load_seconds"],
+        "export_seconds": metrics["export_seconds"],
+        "payload_bytes": payload_bytes,
+        "tensor_count": tensor_count,
+        "round_seconds": round_seconds,
+        "ranks": rank_metrics,
+    }
+
+
 def _free_round_memory(device: torch.device) -> None:
     gc.collect()
     torch.cuda.empty_cache()
@@ -372,54 +406,59 @@ def _run(args: argparse.Namespace) -> None:
                 except Exception as exc:
                     export_error = f"rank {rank} export: {type(exc).__name__}: {exc}"
                 round_error = _collect_first_error(export_error)
+
+            if not round_error:
+                result_error = None
+                if load_result is None:
+                    result_error = f"rank {rank} did not receive a state bridge load result"
+                elif export_result is None:
+                    result_error = f"rank {rank} did not receive a state bridge export result"
+                elif rank == 0 and export_result.state_dict is None:
+                    result_error = "rank zero did not receive an exported full state dict"
+                round_error = _collect_first_error(result_error)
+            _require_round_success(round_error)
+
+            metrics, rank_metrics = _round_metrics(
+                rank,
+                local_rank,
+                device,
+                loss,
+                max_change,
+                load_result.stats.duration_seconds,
+                export_result.stats.duration_seconds,
+            )
             if rank == 0:
-                if round_error:
-                    params = received_params
-                    metrics = {"loss": float("nan"), "neg_loss": float("nan")}
-                    meta = {"ERROR": round_error, "CURRENT_ROUND": current_round}
-                    rank_metrics = None
-                else:
-                    if load_result is None or export_result is None or export_result.state_dict is None:
-                        raise RuntimeError("rank zero did not receive state bridge results")
-                    params = export_result.state_dict
-                    metrics, rank_metrics = _round_metrics(
-                        rank,
-                        local_rank,
-                        device,
-                        loss,
-                        max_change,
-                        load_result.stats.duration_seconds,
-                        export_result.stats.duration_seconds,
-                    )
-                    meta = {
-                        "CURRENT_ROUND": current_round,
-                        "NUM_STEPS_CURRENT_ROUND": args.local_steps,
-                        "PAYLOAD_BYTES": export_result.stats.payload_bytes,
-                        "TENSOR_COUNT": export_result.stats.tensor_count,
-                        "ROUND_SECONDS": time.perf_counter() - started_at,
-                        "RANK_METRICS": rank_metrics,
-                        "TRAINABLE_TARGET": args.trainable_target,
-                        "RUN_MODE": args.run_mode,
-                    }
+                assert rank_metrics is not None
+                params = export_result.state_dict
+                round_seconds = time.perf_counter() - started_at
+                meta = {
+                    "CURRENT_ROUND": current_round,
+                    "NUM_STEPS_CURRENT_ROUND": args.local_steps,
+                    "PAYLOAD_BYTES": export_result.stats.payload_bytes,
+                    "TENSOR_COUNT": export_result.stats.tensor_count,
+                    "ROUND_SECONDS": round_seconds,
+                    "RANK_METRICS": rank_metrics,
+                    "TRAINABLE_TARGET": args.trainable_target,
+                    "RUN_MODE": args.run_mode,
+                }
+                summary = _make_round_summary(
+                    current_round=current_round,
+                    args=args,
+                    world_size=world_size,
+                    metrics=metrics,
+                    rank_metrics=rank_metrics,
+                    payload_bytes=export_result.stats.payload_bytes,
+                    tensor_count=export_result.stats.tensor_count,
+                    round_seconds=round_seconds,
+                )
                 flare.send(flare.FLModel(params=params, metrics=metrics, meta=meta))
+                print(json.dumps(summary, sort_keys=True), flush=True)
                 if params is not received_params:
                     params.clear()
                 if received_params is not None:
                     received_params.clear()
                 input_model.params = None
                 del input_model
-            else:
-                if not round_error:
-                    _round_metrics(
-                        rank,
-                        local_rank,
-                        device,
-                        loss,
-                        max_change,
-                        load_result.stats.duration_seconds,
-                        export_result.stats.duration_seconds,
-                    )
-
             dist.barrier()
             _free_round_memory(device)
     finally:
@@ -432,7 +471,7 @@ def main() -> None:
     _validate_args(args)
 
     def _terminate(_signum, _frame):
-        raise SystemExit(0)
+        raise SystemExit(128 + _signum)
 
     signal.signal(signal.SIGTERM, _terminate)
     _run(args)
