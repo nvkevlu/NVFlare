@@ -33,6 +33,9 @@ are in the [client-count memory brief](docs/client-count-memory-brief-2026-07-21
 The [real GPU training reuse audit](docs/real-training-reuse-audit-2026-07-21.md)
 identifies the existing Hugging Face, torchrun, Qwen, Lightning, and Slurm
 building blocks and isolates the remaining FSDP-specific work.
+The [CS-OCI-ORD real-training runbook](docs/cs-oci-ord-real-training-runbook.md)
+defines the Data Copier staging path, offline container/model preparation,
+manual Slurm qualification ladder, and four-A100 14B execution procedure.
 The prepared one-server/three-client follow-up is in the
 [three-client 32B runbook](docs/three-client-32b-run.md).
 
