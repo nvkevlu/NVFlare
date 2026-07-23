@@ -36,6 +36,9 @@ building blocks and isolates the remaining FSDP-specific work.
 The [CS-OCI-ORD real-training runbook](docs/cs-oci-ord-real-training-runbook.md)
 defines the Data Copier staging path, offline container/model preparation,
 manual Slurm qualification ladder, and four-A100 14B execution procedure.
+The dated [CS-OCI-ORD qualification record](docs/cs-oci-ord-real-training-qualification-2026-07-22.md)
+preserves the successful 1.5B and 14B job IDs, exact revisions, resource
+telemetry, corrected failures, and boundaries of what the result proves.
 The prepared one-server/three-client follow-up is in the
 [three-client 32B runbook](docs/three-client-32b-run.md).
 

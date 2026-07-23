@@ -19,9 +19,12 @@ that was missing from the repository:
    retain the rank-zero export through the FLARE send and then release it
    deterministically.
 
-The remaining work is client integration: connect this bridge to rank-zero
-Client API receive/send, the selected Hugging Face training loop, and explicit
-post-send cleanup.
+At the time of this audit, the remaining work was client integration: connect
+this bridge to rank-zero Client API receive/send, the selected Hugging Face
+training loop, and explicit post-send cleanup. That integration and the
+four-A100 14B gate subsequently passed on CS-OCI-ORD. See the operational
+[runbook](cs-oci-ord-real-training-runbook.md) and dated
+[qualification record](cs-oci-ord-real-training-qualification-2026-07-22.md).
 
 ## Existing Building Blocks
 
@@ -89,12 +92,12 @@ The earlier list overstated the amount of new work. The revised scope is:
 | Forward/backward/optimizer and mixed precision | Existing; configure |
 | `torchrun`, NCCL, rank ownership, stop/error propagation | Existing; reuse |
 | Slurm multi-node wrapper | Existing; adapt |
-| FSDP wrapping policy and activation checkpointing | New model-specific configuration |
+| FSDP wrapping policy and mixed precision | Implemented for Qwen2/Qwen2.5 decoder blocks |
 | NVFlare full state to FSDP load | Implemented and tested locally in the FSDP2 state bridge |
 | FSDP rank-zero CPU full-state gather to NVFlare | Implemented and tested locally in the FSDP2 state bridge |
-| Memory-safe lifecycle around gather/send | Bridge avoids tensor clones and clears its load working dict; client send/cleanup remains |
-| Deterministic correctness and GPU-memory metrics | Extend existing metrics |
-| Pyxis integration | Conditional on the target cluster |
+| Memory-safe lifecycle around gather/send | Implemented; client retains rank-zero export through send, then cleans round memory |
+| Deterministic correctness and GPU-memory metrics | Implemented with fail-closed per-rank round telemetry |
+| Pyxis/Enroot integration | Implemented for CS-OCI-ORD Slurm jobs |
 
 ## Recommended Prototype
 
@@ -114,7 +117,7 @@ Once this passes at 1B--3B, scale the same adapter to 14B and then 32B. LoRA is
 an easier real-training milestone but does not validate the full-state server
 path because it exchanges a much smaller payload.
 
-## Current Bridge Verification and GPU Gate
+## Bridge Verification and Completed GPU Gate
 
 The local bridge gate is complete:
 
@@ -126,14 +129,13 @@ The local bridge gate is complete:
   full state only on rank zero.
 - The full `tests/unit_test/app_opt/pt` area passes with the bridge included.
 
-The provisioned four-GPU host is the next gate. Run the same integration path
-under `torchrun --nproc_per_node=4` with NCCL, first with the tiny test model and
-then with a 1B--3B text model. Record per-rank peak GPU memory and CPU RSS during
-load and export, assert that nonzero ranks never own an exported full state,
-perform at least one real optimizer step, and verify both finite loss and a
-known parameter change. Only after that gate passes should the client attempt a
-14B full-model round; host RAM and rank-zero export headroom must also be checked
-before that run.
+The planned GPU ladder is now complete. The four-rank NCCL bridge gate passed,
+followed by a 1.5B real-training gate, a 14B exchange-only memory baseline, and
+a 14B real forward/backward/optimizer round. The final 14B run reported a finite
+loss, positive known-parameter change, per-rank GPU/RSS telemetry, a complete
+29.54 GB full-state round trip, one-of-one server aggregation, and persisted
+global state. Exact jobs, timings, and memory measurements are preserved in the
+[July 22 qualification record](cs-oci-ord-real-training-qualification-2026-07-22.md).
 
 ## Evidence Paths
 
