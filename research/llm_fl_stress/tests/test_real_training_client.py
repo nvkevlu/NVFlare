@@ -28,6 +28,7 @@ from research.llm_fl_stress.real_training.client import (  # noqa: E402
     _make_round_summary,
     _require_round_success,
     _select_trainable_parameters,
+    _training_text,
     _validate_args,
 )
 
@@ -108,6 +109,7 @@ def test_round_summary_exposes_training_and_rank_metrics():
 
     summary = _make_round_summary(
         current_round=0,
+        site_name="site-2",
         args=args,
         world_size=4,
         metrics=metrics,
@@ -121,6 +123,7 @@ def test_round_summary_exposes_training_and_rank_metrics():
         "event": "real_training_round",
         "status": "PASS",
         "current_round": 0,
+        "site_name": "site-2",
         "run_mode": "train",
         "trainable_target": "last-layer",
         "local_steps": 1,
@@ -135,6 +138,12 @@ def test_round_summary_exposes_training_and_rank_metrics():
         "ranks": ranks,
     }
     json.dumps(summary)
+
+
+def test_training_text_is_stable_and_distinguishes_two_clients():
+    assert _training_text("site-1", 0) == _training_text("site-1", 0)
+    assert _training_text("site-1", 0) != _training_text("site-2", 0)
+    assert _training_text("site-1", 0) != _training_text("site-1", 1)
 
 
 def test_sigterm_handler_uses_failure_exit_code(monkeypatch, tmp_path):

@@ -11,6 +11,8 @@ persistence. It is not yet a task-specific dataset experiment or a multi-node/mu
 
 The measured July 22 results, including exact job IDs and resource telemetry, are in the
 [qualification record](cs-oci-ord-real-training-qualification-2026-07-22.md).
+The prepared eight-GPU follow-up is in the
+[two-client 14B runbook](cs-oci-ord-two-client-14b-runbook.md).
 
 ## Operating rules
 

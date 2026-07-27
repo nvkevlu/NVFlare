@@ -32,6 +32,7 @@ def _config(model_path: Path, **overrides) -> RealTrainingConfig:
         "model_path": model_path,
         "workspace_root": model_path.parent / "workspace",
         "export_root": model_path.parent / "export",
+        "num_clients": 1,
         "nproc_per_node": 4,
         "num_rounds": 1,
         "local_steps": 1,
@@ -75,6 +76,7 @@ def test_remote_identifier_is_rejected():
 @pytest.mark.parametrize(
     "overrides,match",
     [
+        ({"num_clients": 0}, "greater than zero"),
         ({"nproc_per_node": 1}, "at least 2"),
         ({"num_rounds": 0}, "greater than zero"),
         ({"local_steps": 0}, "greater than zero"),

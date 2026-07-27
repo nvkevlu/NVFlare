@@ -22,13 +22,24 @@ REPO_ROOT="${REPO_ROOT:-${PROJECT_ROOT}/repos/NVFlare}"
 VENV_DIR="${VENV_DIR:-${PROJECT_ROOT}/envs/nvflare-fsdp2}"
 MODEL_PATH="${MODEL_PATH:?Set MODEL_PATH to the absolute local Hugging Face snapshot directory}"
 MODEL_REVISION="${MODEL_REVISION:-}"
+NUM_CLIENTS="${NUM_CLIENTS:-1}"
 NPROC_PER_NODE="${NPROC_PER_NODE:-4}"
 LOCAL_STEPS="${LOCAL_STEPS:-1}"
 TRAINABLE_TARGET="${TRAINABLE_TARGET:-last-layer}"
 RUN_MODE="${RUN_MODE:-train}"
+EXPECTED_GPU_NAME_SUBSTRING="${EXPECTED_GPU_NAME_SUBSTRING:-A100-SXM4-80GB}"
 
-if [[ "${NPROC_PER_NODE}" != "4" ]]; then
-    echo "This qualification allocation requests four GPUs; NPROC_PER_NODE must equal 4." >&2
+if ! [[ "${NUM_CLIENTS}" =~ ^[1-9][0-9]*$ ]]; then
+    echo "NUM_CLIENTS must be a positive integer, got ${NUM_CLIENTS}." >&2
+    exit 1
+fi
+if ! [[ "${NPROC_PER_NODE}" =~ ^[1-9][0-9]*$ ]]; then
+    echo "NPROC_PER_NODE must be a positive integer, got ${NPROC_PER_NODE}." >&2
+    exit 1
+fi
+EXPECTED_GPU_PROCESSES=$((NUM_CLIENTS * NPROC_PER_NODE))
+if [[ "${SLURM_GPUS_ON_NODE:-}" =~ ^[0-9]+$ ]] && [[ "${SLURM_GPUS_ON_NODE}" != "${EXPECTED_GPU_PROCESSES}" ]]; then
+    echo "Allocation exposes ${SLURM_GPUS_ON_NODE} GPUs, but clients require ${EXPECTED_GPU_PROCESSES}." >&2
     exit 1
 fi
 if [[ -n "${NCCL_P2P_DISABLE:-}" ]]; then
@@ -57,6 +68,11 @@ archive_results() {
         printf 'status=%s\n' "${status}"
         printf 'host=%s\n' "$(hostname)"
         printf 'model_path=%s\n' "${MODEL_PATH}"
+        printf 'model_revision=%s\n' "${MODEL_REVISION}"
+        printf 'num_clients=%s\n' "${NUM_CLIENTS}"
+        printf 'nproc_per_client=%s\n' "${NPROC_PER_NODE}"
+        printf 'total_gpu_processes=%s\n' "${EXPECTED_GPU_PROCESSES}"
+        printf 'run_mode=%s\n' "${RUN_MODE}"
         printf 'git_commit=%s\n' "$(git -C "${REPO_ROOT}" rev-parse HEAD 2>/dev/null || true)"
     } > "${manifest}"
     if [[ -d "${SCRATCH_ROOT}" ]]; then
@@ -83,6 +99,7 @@ JOB_ARGS=(
     --model-name-or-path "${MODEL_PATH}"
     --workspace-root "${WORKSPACE_ROOT}"
     --export-root "${EXPORT_ROOT}"
+    --num-clients "${NUM_CLIENTS}"
     --nproc-per-node "${NPROC_PER_NODE}"
     --num-rounds 1
     --local-steps "${LOCAL_STEPS}"
@@ -92,6 +109,9 @@ JOB_ARGS=(
     --run-mode "${RUN_MODE}"
     --timeout-seconds 1800
 )
+if [[ -n "${EXPECTED_GPU_NAME_SUBSTRING}" ]]; then
+    JOB_ARGS+=(--expected-gpu-name-substring "${EXPECTED_GPU_NAME_SUBSTRING}")
+fi
 if [[ -n "${MODEL_REVISION}" ]]; then
     JOB_ARGS+=(--model-revision "${MODEL_REVISION}")
 fi

@@ -39,6 +39,9 @@ manual Slurm qualification ladder, and four-A100 14B execution procedure.
 The dated [CS-OCI-ORD qualification record](docs/cs-oci-ord-real-training-qualification-2026-07-22.md)
 preserves the successful 1.5B and 14B job IDs, exact revisions, resource
 telemetry, corrected failures, and boundaries of what the result proves.
+The [CS-OCI-ORD two-client 14B runbook](docs/cs-oci-ord-two-client-14b-runbook.md)
+defines the next colocated eight-GPU test, its zero-GPU validation, disjoint
+four-rank client groups, and fail-closed two-of-two evidence contract.
 The prepared one-server/three-client follow-up is in the
 [three-client 32B runbook](docs/three-client-32b-run.md).
 

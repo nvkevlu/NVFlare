@@ -183,8 +183,19 @@ def _global_max_change(trainable: list[torch.nn.Parameter], before: list[torch.T
     return float(local_max.item())
 
 
-def _make_batch(tokenizer: Any, rank: int, max_length: int, device: torch.device) -> dict[str, torch.Tensor]:
-    text = _TRAINING_TEXT[rank % len(_TRAINING_TEXT)]
+def _training_text(site_name: str, rank: int) -> str:
+    local_text = _TRAINING_TEXT[rank % len(_TRAINING_TEXT)]
+    return f"Deterministic local partition for federated client {site_name}. {local_text}"
+
+
+def _make_batch(
+    tokenizer: Any,
+    rank: int,
+    max_length: int,
+    device: torch.device,
+    site_name: str,
+) -> dict[str, torch.Tensor]:
+    text = _training_text(site_name, rank)
     encoded = tokenizer(
         text,
         return_tensors="pt",
@@ -206,6 +217,7 @@ def _train_round(
     args: argparse.Namespace,
     rank: int,
     device: torch.device,
+    site_name: str,
 ) -> tuple[float, float]:
     model.train()
     prep_error = None
@@ -213,7 +225,7 @@ def _train_round(
     before = None
     optimizer = None
     try:
-        batch = _make_batch(tokenizer, rank, args.max_length, device)
+        batch = _make_batch(tokenizer, rank, args.max_length, device, site_name)
         before = _snapshot_trainable(trainable)
         optimizer = torch.optim.AdamW(trainable, lr=args.learning_rate)
     except Exception as exc:
@@ -308,6 +320,7 @@ def _require_round_success(round_error: Optional[str]) -> None:
 
 def _make_round_summary(
     current_round: int,
+    site_name: str,
     args: argparse.Namespace,
     world_size: int,
     metrics: dict[str, Any],
@@ -320,6 +333,7 @@ def _make_round_summary(
         "event": "real_training_round",
         "status": "PASS",
         "current_round": current_round,
+        "site_name": site_name,
         "run_mode": args.run_mode,
         "trainable_target": args.trainable_target,
         "local_steps": args.local_steps,
@@ -354,10 +368,14 @@ def _run(args: argparse.Namespace) -> None:
             raise RuntimeError("FSDP2 sharding left no trainable parameters")
         bridge = FSDP2StateBridge(model, exchange_prefix="model.")
         flare.init(rank=rank)
+        site_name = _broadcast_rank_zero(flare.get_site_name() if rank == 0 else None, rank)
+        if not isinstance(site_name, str) or not site_name:
+            raise RuntimeError(f"rank zero did not provide a valid site name: {site_name!r}")
 
         if rank == 0:
             summary = {
                 "event": "real_training_client_ready",
+                "site_name": site_name,
                 "world_size": world_size,
                 "model_path": args.model_name_or_path,
                 "trainable_target": args.trainable_target,
@@ -392,7 +410,7 @@ def _run(args: argparse.Namespace) -> None:
                 train_error = None
                 try:
                     if args.run_mode == "train":
-                        loss, max_change = _train_round(model, tokenizer, trainable, args, rank, device)
+                        loss, max_change = _train_round(model, tokenizer, trainable, args, rank, device, site_name)
                     else:
                         loss, max_change = 0.0, 0.0
                 except Exception as exc:
@@ -440,9 +458,11 @@ def _run(args: argparse.Namespace) -> None:
                     "RANK_METRICS": rank_metrics,
                     "TRAINABLE_TARGET": args.trainable_target,
                     "RUN_MODE": args.run_mode,
+                    "SITE_NAME": site_name,
                 }
                 summary = _make_round_summary(
                     current_round=current_round,
+                    site_name=site_name,
                     args=args,
                     world_size=world_size,
                     metrics=metrics,

@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Validate, export, or run the one-client Hugging Face/FSDP2 NVFLARE job."""
+"""Validate, export, or run the Hugging Face/FSDP2 NVFLARE job."""
 
 from __future__ import annotations
 
@@ -29,6 +29,7 @@ if str(REAL_TRAINING_DIR) not in sys.path:
     sys.path.insert(0, str(REAL_TRAINING_DIR))
 
 from config import RUN_MODES, TRAINABLE_TARGETS, RealTrainingConfig  # noqa: E402
+from evidence import validate_simulation_evidence  # noqa: E402
 
 
 def _define_parser() -> argparse.ArgumentParser:
@@ -37,6 +38,7 @@ def _define_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model-revision", default=None)
     parser.add_argument("--workspace-root", required=True, type=Path)
     parser.add_argument("--export-root", required=True, type=Path)
+    parser.add_argument("--num-clients", type=int, default=1)
     parser.add_argument("--nproc-per-node", type=int, default=4)
     parser.add_argument("--num-rounds", type=int, default=1)
     parser.add_argument("--local-steps", type=int, default=1)
@@ -45,6 +47,7 @@ def _define_parser() -> argparse.ArgumentParser:
     parser.add_argument("--trainable-target", choices=TRAINABLE_TARGETS, default="last-layer")
     parser.add_argument("--run-mode", choices=RUN_MODES, default="train")
     parser.add_argument("--timeout-seconds", type=int, default=1800)
+    parser.add_argument("--expected-gpu-name-substring", default=None)
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--validate-only", action="store_true")
     mode.add_argument("--export-only", action="store_true")
@@ -56,6 +59,7 @@ def _config_from_args(args: argparse.Namespace) -> RealTrainingConfig:
         model_path=args.model_name_or_path,
         workspace_root=args.workspace_root,
         export_root=args.export_root,
+        num_clients=args.num_clients,
         nproc_per_node=args.nproc_per_node,
         num_rounds=args.num_rounds,
         local_steps=args.local_steps,
@@ -70,6 +74,19 @@ def _quote_args(values: list[object]) -> str:
     if any(value is None for value in values):
         raise ValueError("client argument list contains None")
     return " ".join(shlex.quote(str(value)) for value in values)
+
+
+def _client_names(num_clients: int) -> list[str]:
+    return [f"site-{index}" for index in range(1, num_clients + 1)]
+
+
+def _gpu_config(num_clients: int, nproc_per_client: int) -> str:
+    groups = []
+    for client_index in range(num_clients):
+        first_device = client_index * nproc_per_client
+        device_ids = range(first_device, first_device + nproc_per_client)
+        groups.append("[" + ",".join(str(device_id) for device_id in device_ids) + "]")
+    return ",".join(groups)
 
 
 def _client_args(args: argparse.Namespace) -> str:
@@ -111,7 +128,7 @@ def _build_recipe(args: argparse.Namespace):
     recipe = FedAvgRecipe(
         name="llm_fsdp2_real_training",
         model=model,
-        min_clients=1,
+        min_clients=args.num_clients,
         num_rounds=args.num_rounds,
         train_script=str(CLIENT_SCRIPT),
         train_args=_client_args(args),
@@ -149,14 +166,20 @@ def _validated_summary(args: argparse.Namespace, config: RealTrainingConfig) -> 
         "event": "real_training_validation",
         "status": "PASS",
         "model_path": str(config.model_path),
+        "model_revision": args.model_revision,
         "workspace_root": str(config.workspace_root),
         "export_root": str(config.export_root),
+        "num_clients": config.num_clients,
+        "clients": _client_names(config.num_clients),
         "nproc_per_node": config.nproc_per_node,
+        "total_gpu_processes": config.num_clients * config.nproc_per_node,
+        "gpu_config": _gpu_config(config.num_clients, config.nproc_per_node),
         "num_rounds": config.num_rounds,
         "local_steps": config.local_steps,
         "max_length": config.max_length,
         "trainable_target": config.trainable_target,
         "run_mode": config.run_mode,
+        "expected_gpu_name_substring": args.expected_gpu_name_substring,
         "client_command": (
             "python3 -m torch.distributed.run --standalone " f"--nproc_per_node={args.nproc_per_node} --max_restarts=0"
         ),
@@ -183,11 +206,23 @@ def main() -> None:
 
     from nvflare.recipe import SimEnv
 
-    gpu_config = "[" + ",".join(str(index) for index in range(args.nproc_per_node)) + "]"
-    env = SimEnv(clients=["site-1"], num_threads=1, gpu_config=gpu_config, workspace_root=str(config.workspace_root))
+    site_names = _client_names(args.num_clients)
+    gpu_config = _gpu_config(args.num_clients, args.nproc_per_node)
+    env = SimEnv(clients=site_names, num_threads=1, gpu_config=gpu_config, workspace_root=str(config.workspace_root))
     run = recipe.run(env)
-    print(f"Job status: {run.get_status()}")
-    print(f"Job result: {run.get_result()}")
+    status = run.get_status()
+    result_path = Path(run.get_result())
+    evidence = validate_simulation_evidence(
+        result_path,
+        site_names=site_names,
+        run_mode=args.run_mode,
+        nproc_per_client=args.nproc_per_node,
+        num_rounds=args.num_rounds,
+        expected_gpu_name_substring=args.expected_gpu_name_substring,
+    )
+    print(json.dumps(evidence, sort_keys=True), flush=True)
+    print(f"Job status: {status}")
+    print(f"Job result: {result_path}")
 
 
 if __name__ == "__main__":

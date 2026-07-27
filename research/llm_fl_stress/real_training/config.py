@@ -30,6 +30,7 @@ class RealTrainingConfig:
     model_path: Path
     workspace_root: Path
     export_root: Path
+    num_clients: int = 1
     nproc_per_node: int = 4
     num_rounds: int = 1
     local_steps: int = 1
@@ -45,6 +46,7 @@ class RealTrainingConfig:
             raise ValueError("model_path must be absolute")
 
         for name, value in (
+            ("num_clients", self.num_clients),
             ("nproc_per_node", self.nproc_per_node),
             ("num_rounds", self.num_rounds),
             ("local_steps", self.local_steps),
