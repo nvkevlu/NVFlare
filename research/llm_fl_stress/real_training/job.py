@@ -192,7 +192,7 @@ def _build_recipe(args: argparse.Namespace):
     recipe.add_client_config(
         {
             "get_task_timeout": args.timeout_seconds,
-            "max_runner_sync_timeout": 180.0,
+            "max_runner_sync_timeout": args.timeout_seconds,
             "runner_sync_timeout": 5.0,
             "submit_task_result_timeout": args.timeout_seconds,
             "tensor_min_download_timeout": args.timeout_seconds,

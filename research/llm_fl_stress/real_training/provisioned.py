@@ -485,6 +485,27 @@ class LocalProductionFederation:
             "persistence_finished": "End persist model on server." in server_text,
         }
 
+    def run_progress(self, job_id: str) -> dict[str, int]:
+        """Return monotonic counters for meaningful training and transfer activity."""
+
+        server_text = self.service_job_text(SERVER_NAME, job_id)
+        progress = {
+            "aggregated_rounds": server_text.count("Aggregated 2/2 results"),
+            "persistence_started_rounds": server_text.count("Start persist model on server."),
+            "persistence_finished_rounds": server_text.count("End persist model on server."),
+        }
+        for site_name in CLIENT_NAMES:
+            try:
+                text = self.job_text(site_name, job_id)
+            except RuntimeError:
+                text = ""
+            prefix = site_name.replace("-", "_")
+            progress[f"{prefix}_ready_events"] = text.count('"event": "real_training_client_ready"')
+            progress[f"{prefix}_stream_progress_events"] = text.count("accepted stream progress ")
+            progress[f"{prefix}_round_events"] = text.count('"event": "real_training_round"')
+            progress[f"{prefix}_results_submitted"] = text.count("task result sent to server")
+        return progress
+
     @staticmethod
     def _abort(run, reason: str) -> dict[str, str]:
         result = {
@@ -507,17 +528,17 @@ class LocalProductionFederation:
         *,
         model_path: Path,
         ready_timeout: float,
-        total_timeout: float,
-        completion_grace_timeout: float = 0.0,
+        stall_timeout: float,
         poll_interval: float = 5.0,
     ) -> str:
-        """Fail closed on missing clients, explicit client errors, or phase deadline."""
+        """Fail closed on missing clients, explicit errors, or lack of meaningful progress."""
 
         job_id = run.get_job_id()
         started_at = time.monotonic()
         ready_deadline = started_at + ready_timeout
-        total_deadline = started_at + total_timeout
-        completion_grace_deadline = None
+        last_progress_at = started_at
+        last_progress = None
+        all_clients_ready = False
         last_status = "UNKNOWN"
         while True:
             self._require_services_alive()
@@ -528,7 +549,8 @@ class LocalProductionFederation:
 
             ready_sites = self._ready_sites(job_id, model_path)
             now = time.monotonic()
-            if now >= ready_deadline and ready_sites != set(CLIENT_NAMES):
+            observed_all_clients = ready_sites == set(CLIENT_NAMES)
+            if now >= ready_deadline and not observed_all_clients:
                 reason = (
                     f"job did not report both client-ready events within {ready_timeout}s; "
                     f"observed {sorted(ready_sites)}"
@@ -538,15 +560,24 @@ class LocalProductionFederation:
                     f"job {job_id} did not report both client-ready events within {ready_timeout}s; "
                     f"observed {sorted(ready_sites)}"
                 )
+            if observed_all_clients and not all_clients_ready:
+                all_clients_ready = True
+                last_progress_at = now
 
             last_status = str(run.get_status() or "UNKNOWN")
-            progress = self.completion_progress(job_id)
+            progress = self.run_progress(job_id)
+            now = time.monotonic()
+            if progress != last_progress:
+                last_progress = progress
+                last_progress_at = now
+            idle_seconds = max(0.0, now - last_progress_at)
             print(
                 json.dumps(
                     {
-                        "completion_progress": progress,
                         "event": "real_training_production_progress",
+                        "idle_seconds": idle_seconds,
                         "job_id": job_id,
+                        "progress": progress,
                         "ready_sites": sorted(ready_sites),
                         "status": last_status,
                     },
@@ -559,34 +590,10 @@ class LocalProductionFederation:
                     raise RuntimeError(f"production job {job_id} ended with {last_status}")
                 return last_status
 
-            now = time.monotonic()
-            if completion_grace_deadline is None and now >= total_deadline:
-                if completion_grace_timeout > 0.0 and any(progress.values()):
-                    completion_grace_deadline = now + completion_grace_timeout
-                    print(
-                        json.dumps(
-                            {
-                                "completion_grace_seconds": completion_grace_timeout,
-                                "completion_progress": progress,
-                                "event": "real_training_production_completion_grace",
-                                "job_id": job_id,
-                                "status": last_status,
-                            },
-                            sort_keys=True,
-                        ),
-                        flush=True,
-                    )
-                else:
-                    reason = (
-                        f"job did not finish within {total_timeout}s; "
-                        f"status={last_status}; completion_progress={progress}"
-                    )
-                    self._abort(run, reason)
-                    raise TimeoutError(f"production job {job_id} {reason}")
-            elif completion_grace_deadline is not None and now >= completion_grace_deadline:
+            if all_clients_ready and idle_seconds >= stall_timeout:
                 reason = (
-                    f"job did not finish within {total_timeout}s plus {completion_grace_timeout}s "
-                    f"completion grace; status={last_status}; completion_progress={progress}"
+                    f"job made no meaningful progress for {stall_timeout}s; "
+                    f"status={last_status}; progress={progress}"
                 )
                 self._abort(run, reason)
                 raise TimeoutError(f"production job {job_id} {reason}")

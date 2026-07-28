@@ -37,6 +37,106 @@ def test_trainable_phase_args_pin_rounds_steps_and_state_scope(tmp_path):
     assert args.trainable_target == "last-layer"
 
 
+def test_32b_profile_is_bounded_real_training_not_full_state():
+    settings = qualification._profile_settings("trainable-32b")
+
+    assert settings == {
+        "gate_rounds": 2,
+        "target_rounds": 1,
+        "local_steps": 2,
+        "state_scope": "trainable",
+        "target_name": "target-32b",
+    }
+
+
+def test_target_identity_requires_pinned_architecture_and_weight_size(tmp_path):
+    model_path = tmp_path / "Qwen2.5-32B"
+    model_path.mkdir()
+    (model_path / "config.json").write_text(
+        json.dumps(
+            {
+                "architectures": ["Qwen2ForCausalLM"],
+                "hidden_size": 5120,
+                "model_type": "qwen2",
+                "num_hidden_layers": 64,
+                "torch_dtype": "bfloat16",
+            }
+        )
+    )
+    (model_path / "model-00001-of-00002.safetensors").write_bytes(b"1234")
+    (model_path / "model-00002-of-00002.safetensors").write_bytes(b"5678")
+
+    identity = qualification._require_target_identity(
+        model_path,
+        expected_hidden_size=5120,
+        expected_num_hidden_layers=64,
+        expected_min_weight_bytes=8,
+        expected_safetensor_files=2,
+    )
+
+    assert identity["hidden_size"] == 5120
+    assert identity["num_hidden_layers"] == 64
+    assert identity["safetensor_file_count"] == 2
+    assert identity["safetensor_bytes"] == 8
+
+
+def test_target_identity_rejects_wrong_model_before_gpu_work(tmp_path):
+    model_path = tmp_path / "wrong-model"
+    model_path.mkdir()
+    (model_path / "config.json").write_text(
+        json.dumps(
+            {
+                "hidden_size": 5120,
+                "model_type": "qwen2",
+                "num_hidden_layers": 48,
+                "torch_dtype": "bfloat16",
+            }
+        )
+    )
+
+    with pytest.raises(RuntimeError, match="num_hidden_layers mismatch"):
+        qualification._require_target_identity(
+            model_path,
+            expected_hidden_size=5120,
+            expected_num_hidden_layers=64,
+            expected_min_weight_bytes=0,
+            expected_safetensor_files=0,
+        )
+
+
+def test_target_identity_rejects_incomplete_weight_shards(tmp_path):
+    model_path = tmp_path / "incomplete-model"
+    model_path.mkdir()
+    (model_path / "config.json").write_text(
+        json.dumps(
+            {
+                "architectures": ["Qwen2ForCausalLM"],
+                "hidden_size": 5120,
+                "model_type": "qwen2",
+                "num_hidden_layers": 64,
+                "torch_dtype": "bfloat16",
+            }
+        )
+    )
+    (model_path / "model-00001-of-00017.safetensors").write_bytes(b"weights")
+
+    with pytest.raises(RuntimeError, match="safetensor file-count mismatch"):
+        qualification._require_target_identity(
+            model_path,
+            expected_hidden_size=5120,
+            expected_num_hidden_layers=64,
+            expected_min_weight_bytes=0,
+            expected_safetensor_files=17,
+        )
+
+
+def test_32b_payload_must_match_exact_last_layer_size():
+    qualification._require_payload_bytes("target-32b", 975_210_496, 975_210_496)
+
+    with pytest.raises(RuntimeError, match="target-32b trainable payload mismatch"):
+        qualification._require_payload_bytes("target-32b", 975_210_494, 975_210_496)
+
+
 class _RunningMonitorProcess:
     def __init__(self, output):
         self.output = output
@@ -208,8 +308,7 @@ def test_phase_failure_retains_job_id_and_best_effort_logs(tmp_path, monkeypatch
             evidence_root=evidence_root,
             expected_gpu_name_substring="A100-SXM4-80GB",
             ready_timeout=120.0,
-            total_timeout=300.0,
-            completion_grace_timeout=60.0,
+            stall_timeout=300.0,
         )
 
     failure = json.loads((evidence_root / "gate-1.5b" / "failure.json").read_text())

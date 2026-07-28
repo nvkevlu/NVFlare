@@ -102,7 +102,7 @@ def test_trainable_recipe_uses_sparse_server_model_and_distinct_site_data():
 
     recipe = _build_recipe(args)
 
-    assert recipe.model["class_path"] == "model.HFTrainableStateModel"
+    assert recipe.model["path"] == "model.HFTrainableStateModel"
     assert set(recipe.per_site_config) == {"site-1", "site-2"}
     assert "--dataset-file site-1.jsonl" in recipe.per_site_config["site-1"]["train_args"]
     assert "--dataset-file site-2.jsonl" in recipe.per_site_config["site-2"]["train_args"]

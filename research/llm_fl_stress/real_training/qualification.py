@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Fail-closed 1.5B gate and 14B run using real provisioned NVFLARE services."""
+"""Fail-closed small-model gate and large-model run using real provisioned NVFLARE services."""
 
 from __future__ import annotations
 
@@ -47,8 +47,36 @@ from provisioned import (  # noqa: E402
 )
 from state_evidence import file_sha256, inspect_persisted_checkpoint  # noqa: E402
 
-_PROFILES = ("full-state", "trainable-multiround")
+_PROFILES = ("full-state", "trainable-multiround", "trainable-32b")
 _TRAINABLE_PAYLOAD_CEILING_BYTES = 1024 * 1024 * 1024
+
+
+def _profile_settings(profile: str) -> dict[str, Any]:
+    if profile == "full-state":
+        return {
+            "gate_rounds": 1,
+            "target_rounds": 1,
+            "local_steps": 1,
+            "state_scope": "full",
+            "target_name": "target-14b",
+        }
+    if profile == "trainable-multiround":
+        return {
+            "gate_rounds": 2,
+            "target_rounds": 3,
+            "local_steps": 4,
+            "state_scope": "trainable",
+            "target_name": "target-14b",
+        }
+    if profile == "trainable-32b":
+        return {
+            "gate_rounds": 2,
+            "target_rounds": 1,
+            "local_steps": 2,
+            "state_scope": "trainable",
+            "target_name": "target-32b",
+        }
+    raise ValueError(f"unsupported qualification profile: {profile}")
 
 
 class _GpuMonitor:
@@ -151,17 +179,20 @@ def _define_parser() -> argparse.ArgumentParser:
     parser.add_argument("--gate-model-revision", required=True)
     parser.add_argument("--target-model-path", required=True, type=Path)
     parser.add_argument("--target-model-revision", required=True)
+    parser.add_argument("--expected-target-hidden-size", type=int, default=0)
+    parser.add_argument("--expected-target-num-hidden-layers", type=int, default=0)
+    parser.add_argument("--expected-target-min-weight-bytes", type=int, default=0)
+    parser.add_argument("--expected-target-safetensor-files", type=int, default=0)
+    parser.add_argument("--expected-target-payload-bytes", type=int, default=0)
     parser.add_argument("--private-root", required=True, type=Path)
     parser.add_argument("--evidence-root", required=True, type=Path)
     parser.add_argument("--expected-gpu-name-substring", default="A100-SXM4-80GB")
     parser.add_argument("--profile", choices=_PROFILES, default="full-state")
     parser.add_argument("--service-startup-timeout", type=float, default=90.0)
     parser.add_argument("--gate-ready-timeout", type=float, default=120.0)
-    parser.add_argument("--gate-total-timeout", type=float, default=300.0)
-    parser.add_argument("--gate-completion-grace-timeout", type=float, default=60.0)
+    parser.add_argument("--gate-stall-timeout", type=float, default=300.0)
     parser.add_argument("--target-ready-timeout", type=float, default=300.0)
-    parser.add_argument("--target-total-timeout", type=float, default=720.0)
-    parser.add_argument("--target-completion-grace-timeout", type=float, default=120.0)
+    parser.add_argument("--target-stall-timeout", type=float, default=300.0)
     parser.add_argument(
         "--control-plane-only",
         action="store_true",
@@ -179,6 +210,64 @@ def _require_revision(model_path: Path, expected_revision: str) -> None:
         raise RuntimeError(
             f"staged model revision mismatch for {model_path}: expected {expected_revision}, observed {observed}"
         )
+
+
+def _require_target_identity(
+    model_path: Path,
+    *,
+    expected_hidden_size: int,
+    expected_num_hidden_layers: int,
+    expected_min_weight_bytes: int,
+    expected_safetensor_files: int = 0,
+) -> dict[str, Any]:
+    config_path = model_path / "config.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    observed = {
+        "architectures": config.get("architectures"),
+        "hidden_size": config.get("hidden_size"),
+        "model_type": config.get("model_type"),
+        "num_hidden_layers": config.get("num_hidden_layers"),
+        "torch_dtype": config.get("torch_dtype"),
+    }
+    if expected_hidden_size and observed["hidden_size"] != expected_hidden_size:
+        raise RuntimeError(
+            f"target hidden_size mismatch: expected {expected_hidden_size}, observed {observed['hidden_size']}"
+        )
+    if expected_num_hidden_layers and observed["num_hidden_layers"] != expected_num_hidden_layers:
+        raise RuntimeError(
+            "target num_hidden_layers mismatch: "
+            f"expected {expected_num_hidden_layers}, observed {observed['num_hidden_layers']}"
+        )
+    if expected_hidden_size or expected_num_hidden_layers:
+        if (
+            observed["architectures"] != ["Qwen2ForCausalLM"]
+            or observed["model_type"] != "qwen2"
+            or observed["torch_dtype"] != "bfloat16"
+        ):
+            raise RuntimeError(f"target architecture or dtype mismatch: {observed}")
+
+    weight_files = sorted(model_path.glob("model*.safetensors"))
+    if expected_safetensor_files and len(weight_files) != expected_safetensor_files:
+        raise RuntimeError(
+            f"target safetensor file-count mismatch: expected {expected_safetensor_files}, "
+            f"observed {len(weight_files)}"
+        )
+    weight_bytes = sum(path.stat().st_size for path in weight_files)
+    if expected_min_weight_bytes and weight_bytes < expected_min_weight_bytes:
+        raise RuntimeError(
+            f"target safetensor bytes below minimum: expected at least {expected_min_weight_bytes}, "
+            f"observed {weight_bytes}"
+        )
+    return {
+        **observed,
+        "safetensor_file_count": len(weight_files),
+        "safetensor_bytes": weight_bytes,
+    }
+
+
+def _require_payload_bytes(phase: str, observed: int, expected: int) -> None:
+    if expected and observed != expected:
+        raise RuntimeError(f"{phase} trainable payload mismatch: expected {expected}, observed {observed}")
 
 
 def _phase_args(
@@ -204,7 +293,7 @@ def _phase_args(
         trainable_target="last-layer",
         run_mode="train",
         state_scope=state_scope,
-        timeout_seconds=900,
+        timeout_seconds=2400,
         expected_gpu_name_substring=None,
     )
 
@@ -284,8 +373,8 @@ def _run_phase(
     evidence_root: Path,
     expected_gpu_name_substring: str,
     ready_timeout: float,
-    total_timeout: float,
-    completion_grace_timeout: float,
+    stall_timeout: float,
+    expected_payload_bytes: int = 0,
     num_rounds: int = 1,
     local_steps: int = 1,
     state_scope: str = "full",
@@ -302,8 +391,7 @@ def _run_phase(
             "model_path": str(model_path),
             "model_revision": model_revision,
             "ready_timeout_seconds": ready_timeout,
-            "total_timeout_seconds": total_timeout,
-            "completion_grace_timeout_seconds": completion_grace_timeout,
+            "stall_timeout_seconds": stall_timeout,
             "num_clients": 2,
             "nproc_per_client": 4,
             "num_rounds": num_rounds,
@@ -362,10 +450,9 @@ def _run_phase(
             run,
             model_path=model_path,
             ready_timeout=ready_timeout,
-            total_timeout=total_timeout,
-            completion_grace_timeout=completion_grace_timeout,
+            stall_timeout=stall_timeout,
         )
-        persisted_models = watcher.wait_all(timeout=max(30.0, completion_grace_timeout))
+        persisted_models = watcher.wait_all(timeout=60.0)
         persisted = persisted_models[-1]
         collected_roots = federation.collect_job_logs(job_id, phase_root / "logs")
         roots = {site_name: collected_roots[site_name] for site_name in CLIENT_NAMES}
@@ -392,6 +479,9 @@ def _run_phase(
                 persisted_models=persisted_models,
                 max_payload_bytes=_TRAINABLE_PAYLOAD_CEILING_BYTES,
             )
+            observed_payload_bytes = trainable_evidence["payload_bytes_per_transfer"]
+            _require_payload_bytes(name, observed_payload_bytes, expected_payload_bytes)
+            _write_json(phase_root / "trainable-state-evidence.json", trainable_evidence)
         summary = {
             **evidence,
             "phase": name,
@@ -421,8 +511,7 @@ def _run_phase(
             "model_path": str(model_path),
             "model_revision": model_revision,
             "ready_timeout_seconds": ready_timeout,
-            "total_timeout_seconds": total_timeout,
-            "completion_grace_timeout_seconds": completion_grace_timeout,
+            "stall_timeout_seconds": stall_timeout,
             "state_scope": state_scope,
             "num_rounds": num_rounds,
             "local_steps": local_steps,
@@ -589,26 +678,38 @@ def main() -> int:
             "gate_model_revision": args.gate_model_revision,
             "target_model_path": str(args.target_model_path),
             "target_model_revision": args.target_model_revision,
+            "expected_target_hidden_size": args.expected_target_hidden_size,
+            "expected_target_num_hidden_layers": args.expected_target_num_hidden_layers,
+            "expected_target_min_weight_bytes": args.expected_target_min_weight_bytes,
+            "expected_target_safetensor_files": args.expected_target_safetensor_files,
+            "expected_target_payload_bytes": args.expected_target_payload_bytes,
             "expected_gpu_name_substring": args.expected_gpu_name_substring,
             "service_startup_timeout_seconds": args.service_startup_timeout,
             "gate_ready_timeout_seconds": args.gate_ready_timeout,
-            "gate_total_timeout_seconds": args.gate_total_timeout,
-            "gate_completion_grace_timeout_seconds": args.gate_completion_grace_timeout,
+            "gate_stall_timeout_seconds": args.gate_stall_timeout,
             "target_ready_timeout_seconds": args.target_ready_timeout,
-            "target_total_timeout_seconds": args.target_total_timeout,
-            "target_completion_grace_timeout_seconds": args.target_completion_grace_timeout,
+            "target_stall_timeout_seconds": args.target_stall_timeout,
             "service_topology": "localhost-tls-server-plus-two-real-clients",
             "execution_environment": "ProdEnv",
             "gpu_mapping": {"site-1": [0, 1, 2, 3], "site-2": [4, 5, 6, 7]},
         },
     )
     try:
-        trainable_profile = args.profile == "trainable-multiround"
-        gate_rounds = 2 if trainable_profile else 1
-        target_rounds = 3 if trainable_profile else 1
-        local_steps = 4 if trainable_profile else 1
-        state_scope = "trainable" if trainable_profile else "full"
+        profile = _profile_settings(args.profile)
+        gate_rounds = profile["gate_rounds"]
+        target_rounds = profile["target_rounds"]
+        local_steps = profile["local_steps"]
+        state_scope = profile["state_scope"]
+        target_name = profile["target_name"]
         if not args.control_plane_only:
+            target_identity = _require_target_identity(
+                args.target_model_path,
+                expected_hidden_size=args.expected_target_hidden_size,
+                expected_num_hidden_layers=args.expected_target_num_hidden_layers,
+                expected_min_weight_bytes=args.expected_target_min_weight_bytes,
+                expected_safetensor_files=args.expected_target_safetensor_files,
+            )
+            _write_json(args.evidence_root / "target-identity.json", target_identity)
             _validate_phase_inputs(
                 args.gate_model_path,
                 args.gate_model_revision,
@@ -667,8 +768,8 @@ def main() -> int:
                     evidence_root=args.evidence_root,
                     expected_gpu_name_substring=args.expected_gpu_name_substring,
                     ready_timeout=args.gate_ready_timeout,
-                    total_timeout=args.gate_total_timeout,
-                    completion_grace_timeout=args.gate_completion_grace_timeout,
+                    stall_timeout=args.gate_stall_timeout,
+                    expected_payload_bytes=0,
                     num_rounds=gate_rounds,
                     local_steps=local_steps,
                     state_scope=state_scope,
@@ -677,14 +778,14 @@ def main() -> int:
                     raise RuntimeError("1.5B exact-topology gate did not pass")
                 result["target"] = _run_phase(
                     federation,
-                    name="target-14b",
+                    name=target_name,
                     model_path=args.target_model_path,
                     model_revision=args.target_model_revision,
                     evidence_root=args.evidence_root,
                     expected_gpu_name_substring=args.expected_gpu_name_substring,
                     ready_timeout=args.target_ready_timeout,
-                    total_timeout=args.target_total_timeout,
-                    completion_grace_timeout=args.target_completion_grace_timeout,
+                    stall_timeout=args.target_stall_timeout,
+                    expected_payload_bytes=args.expected_target_payload_bytes,
                     num_rounds=target_rounds,
                     local_steps=local_steps,
                     state_scope=state_scope,

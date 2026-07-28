@@ -22,21 +22,28 @@ REPO_ROOT="${REPO_ROOT:-${PROJECT_ROOT}/repos/NVFlare}"
 VENV_DIR="${VENV_DIR:-${PROJECT_ROOT}/envs/nvflare-fsdp2}"
 GATE_MODEL_PATH="${GATE_MODEL_PATH:-${PROJECT_ROOT}/models/Qwen2.5-1.5B-8faed761d45a}"
 TARGET_MODEL_PATH="${TARGET_MODEL_PATH:-${MODEL_PATH:-${PROJECT_ROOT}/models/Qwen2.5-14B-97e1e76335b7}}"
-TARGET_MODEL_REVISION="${TARGET_MODEL_REVISION:-${MODEL_REVISION:-97e1e76335b7017d8f67c08a19d103c0504298c9}}"
-EXPECTED_TARGET_REVISION="97e1e76335b7017d8f67c08a19d103c0504298c9"
+EXPECTED_TARGET_REVISION="${EXPECTED_TARGET_REVISION:-97e1e76335b7017d8f67c08a19d103c0504298c9}"
+TARGET_MODEL_REVISION="${TARGET_MODEL_REVISION:-${MODEL_REVISION:-${EXPECTED_TARGET_REVISION}}}"
+EXPECTED_TARGET_LABEL="${EXPECTED_TARGET_LABEL:-Qwen2.5-14B}"
+EXPECTED_TARGET_HIDDEN_SIZE="${EXPECTED_TARGET_HIDDEN_SIZE:-0}"
+EXPECTED_TARGET_NUM_HIDDEN_LAYERS="${EXPECTED_TARGET_NUM_HIDDEN_LAYERS:-0}"
+EXPECTED_TARGET_MIN_WEIGHT_BYTES="${EXPECTED_TARGET_MIN_WEIGHT_BYTES:-0}"
+EXPECTED_TARGET_SAFETENSOR_FILES="${EXPECTED_TARGET_SAFETENSOR_FILES:-0}"
+EXPECTED_TARGET_PAYLOAD_BYTES="${EXPECTED_TARGET_PAYLOAD_BYTES:-0}"
 EXPECTED_GPU_NAME_SUBSTRING="${EXPECTED_GPU_NAME_SUBSTRING:-A100-SXM4-80GB}"
 REQUIRED_BASE_COMMIT="1be715ed5bc97c83a6771b486c40b75f0b97e4fd"
 EXPECTED_BRANCH="codex/llm-fl-real-14b"
-REQUIRED_RELEASE="2026-07-28-trainable-multiround-v3"
+REQUIRED_RELEASE="2026-07-28-trainable-32b-v5"
 RELEASE_FILE="${REPO_ROOT}/research/llm_fl_stress/real_training/QUALIFICATION_RELEASE"
 QUALIFICATION_PROFILE="${QUALIFICATION_PROFILE:-full-state}"
 
 if [[ "${TARGET_MODEL_REVISION}" != "${EXPECTED_TARGET_REVISION}" ]]; then
-    echo "The target is pinned to Qwen2.5-14B revision ${EXPECTED_TARGET_REVISION}." >&2
+    echo "The target is pinned to ${EXPECTED_TARGET_LABEL} revision ${EXPECTED_TARGET_REVISION}." >&2
     exit 1
 fi
 if [[ "${QUALIFICATION_PROFILE}" != "full-state" &&
-    "${QUALIFICATION_PROFILE}" != "trainable-multiround" ]]; then
+    "${QUALIFICATION_PROFILE}" != "trainable-multiround" &&
+    "${QUALIFICATION_PROFILE}" != "trainable-32b" ]]; then
     echo "Unsupported qualification profile: ${QUALIFICATION_PROFILE}" >&2
     exit 1
 fi
@@ -72,7 +79,7 @@ for model_path in "${GATE_MODEL_PATH}" "${TARGET_MODEL_PATH}"; do
     fi
 done
 if [[ "$(<"${TARGET_MODEL_PATH}/REVISION")" != "${EXPECTED_TARGET_REVISION}" ]]; then
-    echo "The staged 14B model does not match ${EXPECTED_TARGET_REVISION}." >&2
+    echo "The staged ${EXPECTED_TARGET_LABEL} model does not match ${EXPECTED_TARGET_REVISION}." >&2
     exit 1
 fi
 if [[ -n "${NCCL_P2P_DISABLE:-}" ]]; then
@@ -132,17 +139,20 @@ QUALIFICATION_ARGS=(
     --gate-model-revision "${GATE_MODEL_REVISION}"
     --target-model-path "${TARGET_MODEL_PATH}"
     --target-model-revision "${TARGET_MODEL_REVISION}"
+    --expected-target-hidden-size "${EXPECTED_TARGET_HIDDEN_SIZE}"
+    --expected-target-num-hidden-layers "${EXPECTED_TARGET_NUM_HIDDEN_LAYERS}"
+    --expected-target-min-weight-bytes "${EXPECTED_TARGET_MIN_WEIGHT_BYTES}"
+    --expected-target-safetensor-files "${EXPECTED_TARGET_SAFETENSOR_FILES}"
+    --expected-target-payload-bytes "${EXPECTED_TARGET_PAYLOAD_BYTES}"
     --private-root "${PRIVATE_ROOT}"
     --evidence-root "${ARTIFACT_ROOT}"
     --expected-gpu-name-substring "${EXPECTED_GPU_NAME_SUBSTRING}"
     --profile "${QUALIFICATION_PROFILE}"
     --service-startup-timeout 90
-    --gate-ready-timeout 120
-    --gate-total-timeout 300
-    --gate-completion-grace-timeout 60
-    --target-ready-timeout 300
-    --target-total-timeout 720
-    --target-completion-grace-timeout 120
+    --gate-ready-timeout "${GATE_READY_TIMEOUT:-300}"
+    --gate-stall-timeout "${GATE_STALL_TIMEOUT:-300}"
+    --target-ready-timeout "${TARGET_READY_TIMEOUT:-300}"
+    --target-stall-timeout "${TARGET_STALL_TIMEOUT:-300}"
 )
 printf -v QUOTED_QUALIFICATION_ARGS ' %q' "${QUALIFICATION_ARGS[@]}"
 

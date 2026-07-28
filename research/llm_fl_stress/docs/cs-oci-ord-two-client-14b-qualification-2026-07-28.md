@@ -85,25 +85,22 @@ and federate only the trainable last-layer parameters or deltas. The currently s
 
 ## Corrective action
 
-The watchdog now has a bounded completion grace:
+The application-level total-runtime watchdog has been removed. It was not a valid safety control because it could
+abort a healthy run at an arbitrary elapsed time. Supervision now separates:
 
-- the normal gate deadline remains 300 seconds;
-- the normal target deadline remains 720 seconds;
-- the gate may receive at most 60 additional seconds;
-- the target may receive at most 120 additional seconds; and
-- grace is granted only when the server log already proves 2/2 aggregation or persistence progress.
+- a readiness timeout, used only until both expected clients report ready;
+- immediate aborts for explicit fatal service, runner, NCCL, FSDP2, or CUDA errors; and
+- a no-progress timeout that begins only after both clients are ready and resets on meaningful transfer, training,
+  result-submission, aggregation, or persistence activity.
 
-No progress means no extension. A job that remains stuck after the bounded grace is still aborted. Progress and the
-grace decision are emitted as structured JSON. The CPU preflight wall limit is also raised from five to eight minutes
-because the successful cluster preflight `30985793` took 4:51.
+Slurm's declared wall limit remains the ultimate allocation ceiling. The CPU preflight wall limit is also raised
+from five to eight minutes because the successful cluster preflight `30985793` took 4:51.
 
 ## Rerun decision
 
 Do not automatically rerun the full-state 14B qualification. This run already proves the production topology,
 FSDP2 training, two-client transfers, 2/2 aggregation, and persistence at 14B. A rerun is justified only if a formal
-`COMPLETED 0:0` artifact with captured persisted-model size is required. If so, the observed timeline gives high
-confidence that the bounded 120-second completion grace is sufficient without increasing the 25-minute GPU
-allocation.
+`COMPLETED 0:0` artifact with captured persisted-model size is required.
 
 Before any multi-round training experiment, implement and qualify trainable-only exchange instead of repeating
 full-state movement.

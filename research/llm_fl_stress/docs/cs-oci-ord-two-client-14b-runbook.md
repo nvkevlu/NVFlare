@@ -64,9 +64,10 @@ The launcher fails closed:
 
 - the checkout must be the clean `codex/llm-fl-real-14b` branch and contain the qualified production base;
 - both exact client names must register within 90 seconds;
-- both gate clients must report ready within 120 seconds and the gate must finish within 300 seconds;
-- the 14B clients must report ready within 300 seconds and normally finish within 720 seconds;
-- a bounded 120-second completion grace is available only after verified 2/2 aggregation or persistence progress;
+- both gate clients must report ready within the configured readiness window;
+- after both clients are ready, meaningful transfer, training, aggregation, and persistence events reset an inactivity
+  timer;
+- there is no application-level total-runtime cutoff;
 - known runner-synchronization and distributed-training errors cause an immediate abort;
 - every phase must end as `FINISHED:COMPLETED`;
 - both client round records, four ranks per client, 2/2 aggregation, and server persistence are required;
@@ -79,8 +80,8 @@ five-second per-GPU utilization samples are retained. The monitor requires every
 least one sample with positive utilization and positive memory use, and retains per-GPU peaks. Ephemeral startup
 kits, TLS private keys, and full model files stay under node-local private scratch and are deleted during cleanup.
 
-The observed July 28 full-state run lasted 16:07 and completed persistence just after its old 720-second target
-deadline. Details are in the
+The observed July 28 full-state run lasted 16:07 and completed persistence just after an obsolete 720-second target
+deadline incorrectly requested an abort. That elapsed-time watchdog has been removed. Details are in the
 [July 28 qualification record](cs-oci-ord-two-client-14b-qualification-2026-07-28.md). The 25-minute Slurm limit is
 a hard ceiling, not a target.
 
