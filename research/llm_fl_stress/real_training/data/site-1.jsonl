@@ -1,0 +1,48 @@
+{"id":"site-1-001","text":"Federated client one records device telemetry before starting a distributed training round."}
+{"id":"site-1-002","text":"A reproducible experiment pins the model revision, software environment, and local data partition."}
+{"id":"site-1-003","text":"Fully sharded data parallelism divides decoder parameters across the participating accelerators."}
+{"id":"site-1-004","text":"The client checks every rank for finite loss before accepting an optimizer step."}
+{"id":"site-1-005","text":"Immutable base weights can remain local while selected trainable parameters cross the federation boundary."}
+{"id":"site-1-006","text":"A bounded watchdog should distinguish active persistence from a stalled distributed job."}
+{"id":"site-1-007","text":"Structured evidence makes cluster failures diagnosable without retaining private training examples."}
+{"id":"site-1-008","text":"The training process reports peak allocated and reserved accelerator memory for every rank."}
+{"id":"site-1-009","text":"Each federated round begins from the global state produced by the preceding aggregation."}
+{"id":"site-1-010","text":"Client updates are averaged only after both expected participants return valid tensor states."}
+{"id":"site-1-011","text":"Checkpoint hashes make accidental reuse of a stale global model visible during qualification."}
+{"id":"site-1-012","text":"A local dataset checksum prevents silent changes to the qualification corpus between runs."}
+{"id":"site-1-013","text":"Rank zero communicates with the federated runtime while all ranks join FSDP collectives."}
+{"id":"site-1-014","text":"Frozen parameters are loaded from the same pinned base checkpoint at every participating site."}
+{"id":"site-1-015","text":"The trainable state must contain every selected key and must not contain frozen model keys."}
+{"id":"site-1-016","text":"Small linear samples provide an independent check that server averaging used both client results."}
+{"id":"site-1-017","text":"The next client input should match the exact state persisted after the previous global round."}
+{"id":"site-1-018","text":"Production startup kits establish authenticated transport between the server and both clients."}
+{"id":"site-1-019","text":"A resource-conscious job fails closed when a client, rank, or expected artifact is absent."}
+{"id":"site-1-020","text":"The scheduler allocation is released as soon as evidence collection and cleanup have finished."}
+{"id":"site-1-021","text":"Training data stays associated with its client while only selected model state is aggregated."}
+{"id":"site-1-022","text":"Deterministic record selection removes random sampler state from a short qualification run."}
+{"id":"site-1-023","text":"The optimizer is recreated at the start of each federated round for a controlled FedAvg test."}
+{"id":"site-1-024","text":"Multiple local steps produce a loss trajectory instead of a single opaque success marker."}
+{"id":"site-1-025","text":"The server persists the aggregated trainable layer after every completed communication round."}
+{"id":"site-1-026","text":"Reloading the persisted checkpoint verifies both serialization and the expected tensor schema."}
+{"id":"site-1-027","text":"Two independent client partitions should produce different output hashes from a common input."}
+{"id":"site-1-028","text":"Equal local step counts give the two clients equal weight in this qualification profile."}
+{"id":"site-1-029","text":"Model payload accounting includes tensor count, element size, and the resulting byte total."}
+{"id":"site-1-030","text":"Offline model loading prevents an allocated GPU job from waiting on an external download."}
+{"id":"site-1-031","text":"The server model contains only the trainable decoder layer needed for aggregation and persistence."}
+{"id":"site-1-032","text":"The local full model still participates in forward and backward computation on every client."}
+{"id":"site-1-033","text":"A selected parameter must change by a finite positive amount in every training round."}
+{"id":"site-1-034","text":"The control plane is qualified separately before the expensive accelerator allocation is requested."}
+{"id":"site-1-035","text":"Client readiness is proven by structured events from both four-rank worker groups."}
+{"id":"site-1-036","text":"No Python object broadcast carries the full model state between distributed training ranks."}
+{"id":"site-1-037","text":"Distributed checkpoint APIs scatter rank-zero tensors directly into local parameter shards."}
+{"id":"site-1-038","text":"The evidence validator rejects incomplete rounds, duplicate records, and mismatched model paths."}
+{"id":"site-1-039","text":"GPU monitoring samples all eight allocated device indices throughout the production job."}
+{"id":"site-1-040","text":"A completion grace period is granted only after aggregation or persistence progress is verified."}
+{"id":"site-1-041","text":"The final report separates useful training time from startup, transfer, and persistence overhead."}
+{"id":"site-1-042","text":"Trainable-only exchange makes repeated federated rounds practical for a fourteen billion parameter base."}
+{"id":"site-1-043","text":"The experiment records the exact Git commit and refuses a dirty checkout before submission."}
+{"id":"site-1-044","text":"Site-specific examples exercise federated heterogeneity without claiming benchmark model quality."}
+{"id":"site-1-045","text":"A formal pass requires completed scheduler status and all fail-closed evidence invariants."}
+{"id":"site-1-046","text":"The persisted state checksum becomes the expected client input checksum for the following round."}
+{"id":"site-1-047","text":"Aggregation samples are compared with the equal-weight mean of corresponding client samples."}
+{"id":"site-1-048","text":"The qualification ends only after three rounds, final reload, and artifact capture all pass."}

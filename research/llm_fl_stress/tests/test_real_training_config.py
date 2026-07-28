@@ -84,6 +84,9 @@ def test_remote_identifier_is_rejected():
         ({"learning_rate": 0.0}, "greater than zero"),
         ({"trainable_target": "unknown"}, "must be one of"),
         ({"run_mode": "unknown"}, "must be one of"),
+        ({"state_scope": "unknown"}, "must be one of"),
+        ({"state_scope": "trainable", "trainable_target": "all"}, "requires run_mode=train"),
+        ({"state_scope": "trainable", "run_mode": "exchange-only"}, "requires run_mode=train"),
     ],
 )
 def test_invalid_training_config_is_rejected(tmp_path, overrides, match):

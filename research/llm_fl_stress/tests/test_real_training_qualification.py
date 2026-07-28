@@ -19,6 +19,24 @@ import pytest
 from research.llm_fl_stress.real_training import qualification
 
 
+def test_trainable_phase_args_pin_rounds_steps_and_state_scope(tmp_path):
+    args = qualification._phase_args(
+        tmp_path / "model",
+        "revision",
+        tmp_path / "phase",
+        num_rounds=3,
+        local_steps=4,
+        state_scope="trainable",
+    )
+
+    assert args.num_clients == 2
+    assert args.nproc_per_node == 4
+    assert args.num_rounds == 3
+    assert args.local_steps == 4
+    assert args.state_scope == "trainable"
+    assert args.trainable_target == "last-layer"
+
+
 class _RunningMonitorProcess:
     def __init__(self, output):
         self.output = output
@@ -56,7 +74,10 @@ def test_gpu_monitor_requires_and_records_a_real_sample(tmp_path, monkeypatch):
     assert summary["status"] == "PASS"
     assert summary["sample_lines"] == 8
     assert summary["observed_gpu_indices"] == list(range(8))
+    assert summary["active_gpu_indices"] == list(range(8))
     assert summary["samples_per_gpu"] == {str(index): 1 for index in range(8)}
+    assert summary["peak_utilization_percent"] == {str(index): 95 for index in range(8)}
+    assert summary["peak_memory_mib"] == {str(index): 1024 for index in range(8)}
     assert summary["return_code_before_shutdown"] is None
 
 
@@ -108,6 +129,34 @@ def test_gpu_monitor_fails_when_any_allocated_gpu_is_missing(tmp_path, monkeypat
     assert summary["observed_gpu_indices"] == list(range(7))
 
 
+def test_gpu_monitor_fails_when_one_allocated_gpu_never_becomes_active(tmp_path, monkeypatch):
+    class IdleGpuMonitorProcess(_RunningMonitorProcess):
+        def __init__(self, output):
+            self.output = output
+            self.terminated = False
+            self.output.write("timestamp, index, uuid, name, memory.used [MiB], utilization.gpu [%]\n")
+            for index in range(8):
+                utilization = 0 if index == 0 else 95
+                self.output.write(
+                    f"2026/07/27 12:00:00, {index}, GPU-{index}, " f"NVIDIA A100-SXM4-80GB, 1024 MiB, {utilization} %\n"
+                )
+            self.output.flush()
+
+    monkeypatch.setattr(qualification.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(
+        qualification.subprocess,
+        "Popen",
+        lambda *args, **kwargs: IdleGpuMonitorProcess(kwargs["stdout"]),
+    )
+    monitor = qualification._GpuMonitor(tmp_path / "gpu-samples.csv")
+
+    monitor.start()
+    summary = monitor.close()
+
+    assert summary["status"] == "FAIL"
+    assert summary["active_gpu_indices"] == list(range(1, 8))
+
+
 def test_phase_failure_retains_job_id_and_best_effort_logs(tmp_path, monkeypatch):
     from nvflare.recipe import prod_env
 
@@ -122,7 +171,7 @@ def test_phase_failure_retains_job_id_and_best_effort_logs(tmp_path, monkeypatch
             return FakeRun()
 
     class FakeWatcher:
-        def __init__(self, _federation, _job_id, _destination):
+        def __init__(self, _federation, _job_id, _destination, **_kwargs):
             self.closed = False
 
         @staticmethod

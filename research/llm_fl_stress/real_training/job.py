@@ -25,11 +25,18 @@ from pathlib import Path
 REAL_TRAINING_DIR = Path(__file__).resolve().parent
 CLIENT_SCRIPT = Path("research/llm_fl_stress/real_training/client.py")
 MODEL_SCRIPT = REAL_TRAINING_DIR / "model.py"
+STATE_EVIDENCE_SCRIPT = REAL_TRAINING_DIR / "state_evidence.py"
+DATA_DIR = REAL_TRAINING_DIR / "data"
+DATA_FILES = {
+    "site-1": DATA_DIR / "site-1.jsonl",
+    "site-2": DATA_DIR / "site-2.jsonl",
+}
 if str(REAL_TRAINING_DIR) not in sys.path:
     sys.path.insert(0, str(REAL_TRAINING_DIR))
 
-from config import RUN_MODES, TRAINABLE_TARGETS, RealTrainingConfig  # noqa: E402
+from config import RUN_MODES, STATE_SCOPES, TRAINABLE_TARGETS, RealTrainingConfig  # noqa: E402
 from evidence import validate_simulation_evidence  # noqa: E402
+from state_evidence import file_sha256  # noqa: E402
 
 
 def _define_parser() -> argparse.ArgumentParser:
@@ -46,6 +53,7 @@ def _define_parser() -> argparse.ArgumentParser:
     parser.add_argument("--learning-rate", type=float, default=1.0e-5)
     parser.add_argument("--trainable-target", choices=TRAINABLE_TARGETS, default="last-layer")
     parser.add_argument("--run-mode", choices=RUN_MODES, default="train")
+    parser.add_argument("--state-scope", choices=STATE_SCOPES, default="full")
     parser.add_argument("--timeout-seconds", type=int, default=1800)
     parser.add_argument("--expected-gpu-name-substring", default=None)
     mode = parser.add_mutually_exclusive_group()
@@ -67,6 +75,7 @@ def _config_from_args(args: argparse.Namespace) -> RealTrainingConfig:
         learning_rate=args.learning_rate,
         trainable_target=args.trainable_target,
         run_mode=args.run_mode,
+        state_scope=getattr(args, "state_scope", "full"),
     )
 
 
@@ -89,7 +98,12 @@ def _gpu_config(num_clients: int, nproc_per_client: int) -> str:
     return ",".join(groups)
 
 
-def _client_args(args: argparse.Namespace) -> str:
+def _client_args(
+    args: argparse.Namespace,
+    *,
+    dataset_file: str | None = None,
+    dataset_sha256: str | None = None,
+) -> str:
     values: list[object] = [
         "--model-name-or-path",
         args.model_name_or_path,
@@ -103,11 +117,17 @@ def _client_args(args: argparse.Namespace) -> str:
         args.trainable_target,
         "--run-mode",
         args.run_mode,
+        "--state-scope",
+        getattr(args, "state_scope", "full"),
         "--timeout-seconds",
         args.timeout_seconds,
     ]
     if args.model_revision:
         values.extend(["--model-revision", args.model_revision])
+    if dataset_file:
+        values.extend(["--dataset-file", dataset_file])
+    if dataset_sha256:
+        values.extend(["--dataset-sha256", dataset_sha256])
     return _quote_args(values)
 
 
@@ -115,8 +135,11 @@ def _build_recipe(args: argparse.Namespace):
     from nvflare.app_opt.pt.recipes.fedavg import FedAvgRecipe
     from nvflare.client.config import ExchangeFormat, TransferType
 
+    trainable_scope = getattr(args, "state_scope", "full") == "trainable"
+    if trainable_scope and args.num_clients != 2:
+        raise ValueError("trainable-state qualification requires exactly two clients")
     model = {
-        "class_path": "model.HFTextModel",
+        "class_path": "model.HFTrainableStateModel" if trainable_scope else "model.HFTextModel",
         "args": {
             "model_name_or_path": str(args.model_name_or_path),
             "revision": args.model_revision,
@@ -125,6 +148,21 @@ def _build_recipe(args: argparse.Namespace):
     command = (
         "python3 -m torch.distributed.run --standalone " f"--nproc_per_node={args.nproc_per_node} --max_restarts=0"
     )
+    per_site_config = None
+    aggregation_weights = None
+    if trainable_scope:
+        per_site_config = {
+            site_name: {
+                "train_args": _client_args(
+                    args,
+                    dataset_file=dataset_path.name,
+                    dataset_sha256=file_sha256(dataset_path),
+                )
+            }
+            for site_name, dataset_path in DATA_FILES.items()
+        }
+        aggregation_weights = {site_name: 1.0 for site_name in DATA_FILES}
+
     recipe = FedAvgRecipe(
         name="llm_fsdp2_real_training",
         model=model,
@@ -132,6 +170,7 @@ def _build_recipe(args: argparse.Namespace):
         num_rounds=args.num_rounds,
         train_script=str(CLIENT_SCRIPT),
         train_args=_client_args(args),
+        per_site_config=per_site_config,
         launch_external_process=True,
         command=command,
         server_expected_format=ExchangeFormat.PYTORCH,
@@ -139,12 +178,17 @@ def _build_recipe(args: argparse.Namespace):
         launch_once=True,
         shutdown_timeout=60.0,
         key_metric="neg_loss",
+        aggregation_weights=aggregation_weights,
         enable_tensor_disk_offload=True,
         server_memory_gc_rounds=1,
         client_memory_gc_rounds=1,
         cuda_empty_cache=True,
     )
     recipe.add_server_file(str(MODEL_SCRIPT))
+    recipe.add_client_file(str(STATE_EVIDENCE_SCRIPT))
+    if trainable_scope:
+        for site_name, dataset_path in DATA_FILES.items():
+            recipe.add_client_file(str(dataset_path), clients=[site_name])
     recipe.add_client_config(
         {
             "get_task_timeout": args.timeout_seconds,
@@ -181,6 +225,12 @@ def _validated_summary(args: argparse.Namespace, config: RealTrainingConfig) -> 
         "max_length": config.max_length,
         "trainable_target": config.trainable_target,
         "run_mode": config.run_mode,
+        "state_scope": config.state_scope,
+        "dataset_sha256": (
+            {site_name: file_sha256(path) for site_name, path in DATA_FILES.items()}
+            if config.state_scope == "trainable"
+            else None
+        ),
         "expected_gpu_name_substring": args.expected_gpu_name_substring,
         "client_command": (
             "python3 -m torch.distributed.run --standalone " f"--nproc_per_node={args.nproc_per_node} --max_restarts=0"

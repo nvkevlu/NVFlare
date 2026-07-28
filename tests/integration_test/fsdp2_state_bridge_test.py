@@ -81,3 +81,54 @@ def test_two_rank_fsdp2_full_state_round_trip(tmp_path):
         nprocs=world_size,
         join=True,
     )
+
+
+def _run_fsdp2_trainable_round_trip(rank: int, world_size: int, rendezvous_file: str) -> None:
+    dist.init_process_group(
+        "gloo",
+        init_method=f"file://{rendezvous_file}",
+        rank=rank,
+        world_size=world_size,
+    )
+    try:
+        mesh = init_device_mesh("cpu", (world_size,))
+        model = nn.Sequential(nn.Linear(2, 3), nn.Linear(3, 1))
+        for parameter in model.parameters():
+            parameter.requires_grad_(False)
+        model[1].weight.requires_grad_(True)
+        model[1].bias.requires_grad_(True)
+        fully_shard(model[0], mesh=mesh)
+        fully_shard(model[1], mesh=mesh)
+        fully_shard(model, mesh=mesh)
+        bridge = FSDP2StateBridge(model, exchange_prefix="model.")
+        expected = {
+            "model.1.weight": torch.full((1, 3), 7.0),
+            "model.1.bias": torch.full((1,), 8.0),
+        }
+
+        load_result = bridge.load_trainable_state_dict(expected if rank == 0 else None)
+        assert load_result.stats.tensor_count == len(expected)
+        assert not set(load_result.missing_keys).intersection({"1.weight", "1.bias"})
+        assert load_result.unexpected_keys == ()
+
+        export_result = bridge.export_trainable_state_dict()
+        assert export_result.stats.tensor_count == len(expected)
+        if rank == 0:
+            assert export_result.state_dict is not None
+            assert export_result.state_dict.keys() == expected.keys()
+            for key, value in expected.items():
+                assert torch.equal(export_result.state_dict[key], value)
+        else:
+            assert export_result.state_dict is None
+    finally:
+        dist.destroy_process_group()
+
+
+def test_two_rank_fsdp2_trainable_state_round_trip(tmp_path):
+    world_size = 2
+    mp.spawn(
+        _run_fsdp2_trainable_round_trip,
+        args=(world_size, str(tmp_path / "fsdp2_trainable_rendezvous")),
+        nprocs=world_size,
+        join=True,
+    )

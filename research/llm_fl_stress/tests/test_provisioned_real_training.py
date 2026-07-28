@@ -367,6 +367,40 @@ def test_persisted_model_watcher_captures_stat_and_small_metadata(tmp_path):
     assert not (destination / "FL_global_model.pt").exists()
 
 
+def test_persisted_model_watcher_captures_expected_round_count_and_inspection(tmp_path):
+    server_root = tmp_path / "server" / "job-123"
+    model = server_root / "app_server" / "FL_global_model.pt"
+    model.parent.mkdir(parents=True)
+    model.write_bytes(b"model-state")
+    service_log = tmp_path / "server-service.log"
+    service_log.write_text("run=job-123 End persist model on server.\n" "run=job-123 End persist model on server.\n")
+
+    class FakeFederation:
+        services = {SERVER_NAME: SimpleNamespace(log_path=service_log)}
+
+        @staticmethod
+        def job_root(_participant, _job_id):
+            return server_root
+
+    watcher = PersistedModelWatcher(
+        FakeFederation(),
+        "job-123",
+        tmp_path / "persistence",
+        expected_count=2,
+        checkpoint_inspector=lambda _path: {"reload_status": "PASS"},
+    )
+    watcher.start()
+    try:
+        results = watcher.wait_all()
+    finally:
+        watcher.close()
+
+    assert [result["sequence"] for result in results] == [0, 1]
+    assert all(result["reload_status"] == "PASS" for result in results)
+    assert (tmp_path / "persistence" / "persisted_model-0.json").is_file()
+    assert (tmp_path / "persistence" / "persisted_model-1.json").is_file()
+
+
 def test_service_log_redaction_removes_transient_auth_values():
     redacted = _redact_log_text("Sent token: abc-123. Token: def-456 SSID:ghi-789\n")
 

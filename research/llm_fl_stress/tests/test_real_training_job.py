@@ -41,6 +41,7 @@ def _args(**overrides):
         "learning_rate": 1.0e-5,
         "trainable_target": "last-layer",
         "run_mode": "train",
+        "state_scope": "full",
         "timeout_seconds": 1800,
         "expected_gpu_name_substring": None,
     }
@@ -75,6 +76,7 @@ def test_validation_summary_records_exact_process_count():
         max_length=128,
         trainable_target="last-layer",
         run_mode="train",
+        state_scope="full",
     )
 
     result = _validated_summary(args, config)
@@ -93,6 +95,19 @@ def test_two_client_gpu_groups_are_disjoint_and_recipe_requires_both_clients():
     assert _client_names(args.num_clients) == ["site-1", "site-2"]
     assert _gpu_config(args.num_clients, args.nproc_per_node) == "[0,1,2,3],[4,5,6,7]"
     assert _build_recipe(args).min_clients == 2
+
+
+def test_trainable_recipe_uses_sparse_server_model_and_distinct_site_data():
+    args = _args(num_clients=2, nproc_per_node=4, state_scope="trainable")
+
+    recipe = _build_recipe(args)
+
+    assert recipe.model["class_path"] == "model.HFTrainableStateModel"
+    assert set(recipe.per_site_config) == {"site-1", "site-2"}
+    assert "--dataset-file site-1.jsonl" in recipe.per_site_config["site-1"]["train_args"]
+    assert "--dataset-file site-2.jsonl" in recipe.per_site_config["site-2"]["train_args"]
+    assert recipe.per_site_config["site-1"]["train_args"] != recipe.per_site_config["site-2"]["train_args"]
+    assert recipe.aggregation_weights == {"site-1": 1.0, "site-2": 1.0}
 
 
 def test_exported_launcher_uses_packaged_relative_client_path(tmp_path):

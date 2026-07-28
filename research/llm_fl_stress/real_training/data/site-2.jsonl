@@ -1,0 +1,48 @@
+{"id":"site-2-001","text":"Cluster operators inspect account, partition, memory, and accelerator requirements before submission."}
+{"id":"site-2-002","text":"A batch allocation reserves eight A100 devices on one node for two isolated client groups."}
+{"id":"site-2-003","text":"Client two maps its four distributed ranks to visible accelerator indices four through seven."}
+{"id":"site-2-004","text":"The production server and clients communicate through provisioned TLS rather than a simulator thread."}
+{"id":"site-2-005","text":"Node-local scratch holds ephemeral service kits while durable evidence is written to project storage."}
+{"id":"site-2-006","text":"Offline containers and environments avoid package installation during monitored accelerator time."}
+{"id":"site-2-007","text":"A data copier node is appropriate for staging large immutable checkpoints outside compute allocations."}
+{"id":"site-2-008","text":"Scheduler commands are issued sparingly to respect controller remote procedure call rate limits."}
+{"id":"site-2-009","text":"The job records its hostname and scheduler identifier so artifacts can be traced to an allocation."}
+{"id":"site-2-010","text":"A clean branch and pinned release marker prevent an obsolete qualification script from running."}
+{"id":"site-2-011","text":"Every expected file is checked before the job starts any process on an allocated accelerator."}
+{"id":"site-2-012","text":"The model revision file must match the exact staged Hugging Face snapshot used by all participants."}
+{"id":"site-2-013","text":"A short smaller-model gate exercises the same trainable-state bridge before loading the target model."}
+{"id":"site-2-014","text":"The target phase starts only after the gate completes aggregation, persistence, and reload checks."}
+{"id":"site-2-015","text":"Service logs are filtered by job identifier so sequential production jobs cannot mix evidence."}
+{"id":"site-2-016","text":"The watcher captures checkpoint metadata before ephemeral production workspaces are removed."}
+{"id":"site-2-017","text":"Checkpoint inspection waits for a nonempty stable file after the server reports completed persistence."}
+{"id":"site-2-018","text":"A failure artifact retains collected server and client logs for diagnosis without rerunning immediately."}
+{"id":"site-2-019","text":"Signals trigger controlled cleanup and return a nonzero status rather than disguising an interrupted run."}
+{"id":"site-2-020","text":"The requested wall time includes startup and bounded recovery while actual completion releases resources early."}
+{"id":"site-2-021","text":"GPU samples must cover every allocated index and identify the expected A100 SXM model."}
+{"id":"site-2-022","text":"Peak host memory and accelerator memory are interpreted separately during capacity review."}
+{"id":"site-2-023","text":"Trainable-only payloads reduce network and persistence traffic while retaining full local computation."}
+{"id":"site-2-024","text":"The immutable base checkpoint is never averaged because both sites already hold the identical revision."}
+{"id":"site-2-025","text":"Only selected decoder-layer weights are initialized on the server for FedAvg aggregation."}
+{"id":"site-2-026","text":"The server frees temporary full-model objects before client worker groups begin loading their copies."}
+{"id":"site-2-027","text":"Four local examples per rank provide sixteen distinct records at each client during every round."}
+{"id":"site-2-028","text":"Three rounds consume forty-eight ordered examples from each fixed client partition."}
+{"id":"site-2-029","text":"Input state hashes prove both clients started a round from the same global parameters."}
+{"id":"site-2-030","text":"Different output hashes prove the two local partitions did not return identical client updates."}
+{"id":"site-2-031","text":"Persisted hashes link a completed server round to the inputs received in the next round."}
+{"id":"site-2-032","text":"Sampled tensor coordinates provide a direct numerical check of equal-weight federated averaging."}
+{"id":"site-2-033","text":"Payload limits reject an accidental fallback from selected-state exchange to a full checkpoint."}
+{"id":"site-2-034","text":"The final checkpoint contains no frozen keys and reloads with the expected tensor count and shapes."}
+{"id":"site-2-035","text":"Loss values and parameter changes must remain finite on all distributed workers."}
+{"id":"site-2-036","text":"The client reports every local loss step so a successful round is not represented by one scalar alone."}
+{"id":"site-2-037","text":"Equal client weights are explicit and verified instead of inferred from scheduler placement."}
+{"id":"site-2-038","text":"Aggregation and persistence markers must appear once for each configured federated round."}
+{"id":"site-2-039","text":"The evidence summary reports total logical model traffic alongside elapsed allocation time."}
+{"id":"site-2-040","text":"A resource review can compare training work with orchestration, transfer, and checkpoint overhead."}
+{"id":"site-2-041","text":"The experiment does not claim convergence from a small deterministic qualification corpus."}
+{"id":"site-2-042","text":"A later study may replace these records with approved site-owned data using the same state contract."}
+{"id":"site-2-043","text":"The current qualification focuses on federated correctness rather than downstream task accuracy."}
+{"id":"site-2-044","text":"All configuration values written into job folders are nonsecret paths, hashes, and public revisions."}
+{"id":"site-2-045","text":"The runbook gives explicit commands for preflight, submission, monitoring, and artifact inspection."}
+{"id":"site-2-046","text":"No additional accelerator run is authorized until the new code and generated job are locally validated."}
+{"id":"site-2-047","text":"A failed gate stops the workflow before the fourteen billion parameter target phase begins."}
+{"id":"site-2-048","text":"A successful target captures three-round continuity, FedAvg samples, final persistence, and reload evidence."}

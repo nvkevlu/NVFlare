@@ -16,8 +16,8 @@
 
 This script is launched once by NVFLARE through ``torchrun``. Every process
 owns one FSDP2 shard. Only global rank zero calls NVFLARE receive/send, and the
-FSDP2 state bridge transfers full CPU tensors directly between rank zero and
-the distributed model shards.
+FSDP2 state bridge transfers the configured CPU state directly between rank
+zero and the distributed model shards.
 """
 
 from __future__ import annotations
@@ -31,6 +31,7 @@ import signal
 import sys
 import time
 from datetime import timedelta
+from pathlib import Path
 from typing import Any, Optional
 
 import torch
@@ -42,6 +43,14 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 import nvflare.client as flare
 from nvflare.app_opt.pt.fsdp2_state_bridge import FSDP2StateBridge
 
+try:
+    from .state_evidence import file_sha256, load_text_partition, select_partition_record, tensor_state_summary
+except ImportError:
+    custom_root = Path(__file__).resolve().parents[3]
+    if str(custom_root) not in sys.path:
+        sys.path.insert(0, str(custom_root))
+    from state_evidence import file_sha256, load_text_partition, select_partition_record, tensor_state_summary
+
 _TRAINING_TEXT = (
     "Federated learning keeps training data at each participating site.",
     "Fully sharded data parallel training divides model parameters across accelerators.",
@@ -50,6 +59,7 @@ _TRAINING_TEXT = (
 )
 _TRAINABLE_TARGETS = ("last-layer", "lm-head", "all")
 _RUN_MODES = ("exchange-only", "train")
+_STATE_SCOPES = ("full", "trainable")
 
 
 def _parse_args() -> argparse.Namespace:
@@ -61,6 +71,9 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--learning-rate", type=float, default=1.0e-5)
     parser.add_argument("--trainable-target", choices=_TRAINABLE_TARGETS, default="last-layer")
     parser.add_argument("--run-mode", choices=_RUN_MODES, default="train")
+    parser.add_argument("--state-scope", choices=_STATE_SCOPES, default="full")
+    parser.add_argument("--dataset-file", default=None)
+    parser.add_argument("--dataset-sha256", default=None)
     parser.add_argument("--timeout-seconds", type=int, default=1800)
     return parser.parse_args()
 
@@ -75,6 +88,14 @@ def _validate_args(args: argparse.Namespace) -> None:
             raise ValueError(f"--{name.replace('_', '-')} must be greater than zero")
     if args.learning_rate <= 0:
         raise ValueError("--learning-rate must be greater than zero")
+    state_scope = getattr(args, "state_scope", "full")
+    if state_scope == "trainable":
+        if getattr(args, "trainable_target", "last-layer") != "last-layer":
+            raise ValueError("--state-scope=trainable requires --trainable-target=last-layer")
+        if getattr(args, "run_mode", "train") != "train":
+            raise ValueError("--state-scope=trainable requires --run-mode=train")
+        if not getattr(args, "dataset_file", None):
+            raise ValueError("--state-scope=trainable requires --dataset-file")
 
 
 def _setup_distributed(timeout_seconds: int) -> tuple[int, int, int, torch.device]:
@@ -190,12 +211,10 @@ def _training_text(site_name: str, rank: int) -> str:
 
 def _make_batch(
     tokenizer: Any,
-    rank: int,
     max_length: int,
     device: torch.device,
-    site_name: str,
+    text: str,
 ) -> dict[str, torch.Tensor]:
-    text = _training_text(site_name, rank)
     encoded = tokenizer(
         text,
         return_tensors="pt",
@@ -216,16 +235,17 @@ def _train_round(
     trainable: list[torch.nn.Parameter],
     args: argparse.Namespace,
     rank: int,
+    world_size: int,
     device: torch.device,
     site_name: str,
-) -> tuple[float, float]:
+    current_round: int,
+    dataset_records: list[dict[str, str]] | None,
+) -> tuple[float, float, list[float], list[str]]:
     model.train()
     prep_error = None
-    batch = None
     before = None
     optimizer = None
     try:
-        batch = _make_batch(tokenizer, rank, args.max_length, device, site_name)
         before = _snapshot_trainable(trainable)
         optimizer = torch.optim.AdamW(trainable, lr=args.learning_rate)
     except Exception as exc:
@@ -233,12 +253,26 @@ def _train_round(
     prep_error = _collect_first_error(prep_error)
     if prep_error:
         raise RuntimeError(prep_error)
-    if batch is None or before is None or optimizer is None:
+    if before is None or optimizer is None:
         raise RuntimeError("training setup completed without required objects")
 
     last_loss = None
+    loss_trajectory = []
+    sample_ids = []
 
-    for _ in range(args.local_steps):
+    for local_step in range(args.local_steps):
+        if dataset_records is None:
+            record = {"id": f"{site_name}-rank-{rank}", "text": _training_text(site_name, rank)}
+        else:
+            record = select_partition_record(
+                dataset_records,
+                current_round=current_round,
+                local_step=local_step,
+                rank=rank,
+                world_size=world_size,
+                local_steps=args.local_steps,
+            )
+        batch = _make_batch(tokenizer, args.max_length, device, record["text"])
         optimizer.zero_grad(set_to_none=True)
         output = model(**batch)
         loss = output.loss.float()
@@ -249,18 +283,21 @@ def _train_round(
         loss.backward()
         optimizer.step()
         last_loss = loss.detach()
+        loss_sum = last_loss.clone()
+        dist.all_reduce(loss_sum, op=dist.ReduceOp.SUM)
+        loss_trajectory.append(float((loss_sum / world_size).item()))
+        sample_ids.append(record["id"])
+        del batch
 
     if last_loss is None:
         raise RuntimeError("training completed without a loss")
-    loss_sum = last_loss.clone()
-    dist.all_reduce(loss_sum, op=dist.ReduceOp.SUM)
-    mean_loss = float((loss_sum / dist.get_world_size()).item())
+    mean_loss = loss_trajectory[-1]
     max_change = _global_max_change(trainable, before, device)
     if max_change <= 0.0:
         raise RuntimeError("optimizer step did not change any selected parameter shard")
     optimizer.zero_grad(set_to_none=True)
-    del optimizer, before, batch
-    return mean_loss, max_change
+    del optimizer, before
+    return mean_loss, max_change, loss_trajectory, sample_ids
 
 
 def _broadcast_rank_zero(value: Any, rank: int) -> Any:
@@ -288,6 +325,8 @@ def _round_metrics(
     max_change: float,
     load_seconds: float,
     export_seconds: float,
+    loss_trajectory: list[float],
+    sample_ids: list[str],
 ) -> tuple[dict[str, Any], Optional[list[dict[str, Any]]]]:
     local = {
         "rank": rank,
@@ -300,6 +339,8 @@ def _round_metrics(
         "peak_gpu_allocated_bytes": torch.cuda.max_memory_allocated(device),
         "peak_gpu_reserved_bytes": torch.cuda.max_memory_reserved(device),
         "gpu_name": torch.cuda.get_device_name(device),
+        "loss_trajectory": loss_trajectory,
+        "sample_ids": sample_ids,
     }
     gathered = [None for _ in range(dist.get_world_size())] if rank == 0 else None
     dist.gather_object(local, gathered, dst=0)
@@ -328,8 +369,12 @@ def _make_round_summary(
     payload_bytes: int,
     tensor_count: int,
     round_seconds: float,
+    *,
+    input_state: dict[str, Any] | None = None,
+    output_state: dict[str, Any] | None = None,
+    dataset_sha256: str | None = None,
 ) -> dict[str, Any]:
-    return {
+    summary = {
         "event": "real_training_round",
         "status": "PASS",
         "current_round": current_round,
@@ -337,6 +382,7 @@ def _make_round_summary(
         "model_path": args.model_name_or_path,
         "model_revision": args.model_revision,
         "run_mode": args.run_mode,
+        "state_scope": getattr(args, "state_scope", "full"),
         "trainable_target": args.trainable_target,
         "local_steps": args.local_steps,
         "world_size": world_size,
@@ -349,6 +395,32 @@ def _make_round_summary(
         "round_seconds": round_seconds,
         "ranks": rank_metrics,
     }
+    if input_state is not None:
+        summary["input_state"] = input_state
+    if output_state is not None:
+        summary["output_state"] = output_state
+    if dataset_sha256 is not None:
+        summary["dataset_sha256"] = dataset_sha256
+        summary["loss_trajectory"] = rank_metrics[0]["loss_trajectory"]
+        summary["sample_ids"] = sorted(
+            sample_id for rank_record in rank_metrics for sample_id in rank_record["sample_ids"]
+        )
+    return summary
+
+
+def _resolve_dataset(args: argparse.Namespace) -> tuple[list[dict[str, str]] | None, str | None]:
+    dataset_file = getattr(args, "dataset_file", None)
+    if not dataset_file:
+        return None, None
+    path = Path(dataset_file)
+    if not path.is_absolute():
+        candidates = [
+            Path(__file__).resolve().parent / path,
+            Path(__file__).resolve().parents[3] / path,
+        ]
+        path = next((candidate for candidate in candidates if candidate.is_file()), candidates[0])
+    records = load_text_partition(path, expected_sha256=getattr(args, "dataset_sha256", None))
+    return records, file_sha256(path)
 
 
 def _free_round_memory(device: torch.device) -> None:
@@ -361,6 +433,7 @@ def _run(args: argparse.Namespace) -> None:
     rank, world_size, local_rank, device = _setup_distributed(args.timeout_seconds)
     try:
         model, tokenizer = _load_model_and_tokenizer(args)
+        dataset_records, dataset_sha256 = _resolve_dataset(args)
         _select_trainable_parameters(model, args.trainable_target)
         _shard_model(model, world_size)
         # fully_shard may replace registered Parameter objects with DTensor
@@ -382,7 +455,9 @@ def _run(args: argparse.Namespace) -> None:
                 "model_path": args.model_name_or_path,
                 "trainable_target": args.trainable_target,
                 "run_mode": args.run_mode,
+                "state_scope": getattr(args, "state_scope", "full"),
                 "trainable_parameters": sum(param.numel() for param in trainable),
+                "dataset_sha256": dataset_sha256,
             }
             print(json.dumps(summary, sort_keys=True), flush=True)
 
@@ -397,13 +472,22 @@ def _run(args: argparse.Namespace) -> None:
             torch.cuda.reset_peak_memory_stats(device)
             load_result = None
             export_result = None
+            input_state = None
+            output_state = None
             loss = float("nan")
             max_change = 0.0
+            loss_trajectory: list[float] = []
+            sample_ids: list[str] = []
             started_at = time.perf_counter()
 
             load_error = None
             try:
-                load_result = bridge.load_full_state_dict(received_params)
+                if rank == 0 and getattr(args, "state_scope", "full") == "trainable":
+                    input_state = tensor_state_summary(received_params)
+                if getattr(args, "state_scope", "full") == "trainable":
+                    load_result = bridge.load_trainable_state_dict(received_params)
+                else:
+                    load_result = bridge.load_full_state_dict(received_params)
             except Exception as exc:
                 load_error = f"rank {rank} load: {type(exc).__name__}: {exc}"
             round_error = _collect_first_error(load_error)
@@ -412,7 +496,18 @@ def _run(args: argparse.Namespace) -> None:
                 train_error = None
                 try:
                     if args.run_mode == "train":
-                        loss, max_change = _train_round(model, tokenizer, trainable, args, rank, device, site_name)
+                        loss, max_change, loss_trajectory, sample_ids = _train_round(
+                            model,
+                            tokenizer,
+                            trainable,
+                            args,
+                            rank,
+                            world_size,
+                            device,
+                            site_name,
+                            current_round,
+                            dataset_records,
+                        )
                     else:
                         loss, max_change = 0.0, 0.0
                 except Exception as exc:
@@ -422,7 +517,12 @@ def _run(args: argparse.Namespace) -> None:
             if not round_error:
                 export_error = None
                 try:
-                    export_result = bridge.export_full_state_dict()
+                    if getattr(args, "state_scope", "full") == "trainable":
+                        export_result = bridge.export_trainable_state_dict()
+                    else:
+                        export_result = bridge.export_full_state_dict()
+                    if rank == 0 and getattr(args, "state_scope", "full") == "trainable":
+                        output_state = tensor_state_summary(export_result.state_dict)
                 except Exception as exc:
                     export_error = f"rank {rank} export: {type(exc).__name__}: {exc}"
                 round_error = _collect_first_error(export_error)
@@ -446,6 +546,8 @@ def _run(args: argparse.Namespace) -> None:
                 max_change,
                 load_result.stats.duration_seconds,
                 export_result.stats.duration_seconds,
+                loss_trajectory,
+                sample_ids,
             )
             if rank == 0:
                 assert rank_metrics is not None
@@ -461,6 +563,8 @@ def _run(args: argparse.Namespace) -> None:
                     "TRAINABLE_TARGET": args.trainable_target,
                     "RUN_MODE": args.run_mode,
                     "SITE_NAME": site_name,
+                    "STATE_SCOPE": getattr(args, "state_scope", "full"),
+                    "DATASET_SHA256": dataset_sha256,
                 }
                 summary = _make_round_summary(
                     current_round=current_round,
@@ -472,6 +576,9 @@ def _run(args: argparse.Namespace) -> None:
                     payload_bytes=export_result.stats.payload_bytes,
                     tensor_count=export_result.stats.tensor_count,
                     round_seconds=round_seconds,
+                    input_state=input_state,
+                    output_state=output_state,
+                    dataset_sha256=dataset_sha256,
                 )
                 flare.send(flare.FLModel(params=params, metrics=metrics, meta=meta))
                 print(json.dumps(summary, sort_keys=True), flush=True)

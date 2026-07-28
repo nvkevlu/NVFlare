@@ -6,7 +6,7 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=16G
-#SBATCH --time=00:08:00
+#SBATCH --time=00:10:00
 #SBATCH --comment=fact_off
 #SBATCH --output=/lustre/fs11/portfolios/coreai/projects/coreai_edgeai_flresearch/users/kevlu/nvflare-14b/logs/%x-%j.out
 #SBATCH --error=/lustre/fs11/portfolios/coreai/projects/coreai_edgeai_flresearch/users/kevlu/nvflare-14b/logs/%x-%j.err
@@ -23,10 +23,11 @@ TARGET_MODEL_PATH="${TARGET_MODEL_PATH:-${PROJECT_ROOT}/models/Qwen2.5-14B-97e1e
 TARGET_MODEL_REVISION="${TARGET_MODEL_REVISION:-97e1e76335b7017d8f67c08a19d103c0504298c9}"
 REQUIRED_BASE_COMMIT="1be715ed5bc97c83a6771b486c40b75f0b97e4fd"
 EXPECTED_BRANCH="codex/llm-fl-real-14b"
-REQUIRED_RELEASE="2026-07-28-progress-grace-v2"
+REQUIRED_RELEASE="2026-07-28-trainable-multiround-v3"
 RELEASE_FILE="${REPO_ROOT}/research/llm_fl_stress/real_training/QUALIFICATION_RELEASE"
 PRIVATE_ROOT="/tmp/nvflare-control-plane-${SLURM_JOB_ID}"
 ARTIFACT_ROOT="${PROJECT_ROOT}/artifacts/control-plane-${SLURM_JOB_ID}"
+EXPORT_ROOT="/tmp/nvflare-trainable-export-${SLURM_JOB_ID}"
 
 for path in "${CONTAINER_IMAGE}" "${REPO_ROOT}" "${VENV_DIR}" "${GATE_MODEL_PATH}" "${TARGET_MODEL_PATH}"; do
     if [[ ! -e "${path}" ]]; then
@@ -73,6 +74,30 @@ srun --kill-on-bad-exit=1 \
         set -Eeuo pipefail
         source '${VENV_DIR}/bin/activate'
         cd '${REPO_ROOT}'
+        python research/llm_fl_stress/real_training/fsdp2_trainable_cpu_gate.py \
+          > '${ARTIFACT_ROOT}/fsdp2-trainable-cpu-gate.json'
+        python research/llm_fl_stress/real_training/trainable_server_preflight.py \
+          --model-name-or-path '${GATE_MODEL_PATH}' \
+          --model-revision '${GATE_MODEL_REVISION}' \
+          > '${ARTIFACT_ROOT}/trainable-server-preflight.json'
+        python research/llm_fl_stress/real_training/job.py \
+          --model-name-or-path '${GATE_MODEL_PATH}' \
+          --model-revision '${GATE_MODEL_REVISION}' \
+          --workspace-root '${EXPORT_ROOT}/unused-workspace' \
+          --export-root '${EXPORT_ROOT}/job' \
+          --num-clients 2 \
+          --nproc-per-node 4 \
+          --num-rounds 2 \
+          --local-steps 4 \
+          --trainable-target last-layer \
+          --run-mode train \
+          --state-scope trainable \
+          --export-only \
+          > '${ARTIFACT_ROOT}/trainable-export-validation.json'
+        test \"\$(find '${EXPORT_ROOT}/job' -name site-1.jsonl -type f | wc -l)\" -eq 1
+        test \"\$(find '${EXPORT_ROOT}/job' -name site-2.jsonl -type f | wc -l)\" -eq 1
+        grep -R -q -- '--dataset-file site-1.jsonl' '${EXPORT_ROOT}/job'
+        grep -R -q -- '--dataset-file site-2.jsonl' '${EXPORT_ROOT}/job'
         python research/llm_fl_stress/real_training/qualification.py \
           --gate-model-path '${GATE_MODEL_PATH}' \
           --gate-model-revision '${GATE_MODEL_REVISION}' \
@@ -82,4 +107,5 @@ srun --kill-on-bad-exit=1 \
           --evidence-root '${ARTIFACT_ROOT}' \
           --service-startup-timeout 90 \
           --control-plane-only
+        rm -rf -- '${EXPORT_ROOT}'
     "

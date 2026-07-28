@@ -36,8 +36,8 @@ if str(REAL_TRAINING_DIR) not in sys.path:
     sys.path.insert(0, str(REAL_TRAINING_DIR))
 
 from config import RealTrainingConfig  # noqa: E402
-from evidence import validate_production_evidence  # noqa: E402
-from job import _build_recipe  # noqa: E402
+from evidence import validate_production_evidence, validate_trainable_state_evidence  # noqa: E402
+from job import DATA_FILES, _build_recipe  # noqa: E402
 from provisioned import (  # noqa: E402
     ADMIN_NAME,
     CLIENT_NAMES,
@@ -45,6 +45,10 @@ from provisioned import (  # noqa: E402
     LocalProductionFederation,
     PersistedModelWatcher,
 )
+from state_evidence import file_sha256, inspect_persisted_checkpoint  # noqa: E402
+
+_PROFILES = ("full-state", "trainable-multiround")
+_TRAINABLE_PAYLOAD_CEILING_BYTES = 1024 * 1024 * 1024
 
 
 class _GpuMonitor:
@@ -94,21 +98,36 @@ class _GpuMonitor:
         size_bytes = self.output_path.stat().st_size if self.output_path.is_file() else 0
         sample_lines = 0
         samples_per_gpu: dict[int, int] = {}
+        peak_utilization_percent: dict[int, int] = {}
+        peak_memory_mib: dict[int, int] = {}
         if size_bytes:
             with self.output_path.open(encoding="utf-8", errors="replace") as stream:
                 for record in csv.DictReader(stream, skipinitialspace=True):
                     try:
                         index = int(record["index"].strip())
+                        utilization = int(record["utilization.gpu [%]"].split()[0])
+                        memory_mib = int(record["memory.used [MiB]"].split()[0])
                     except (KeyError, TypeError, ValueError):
                         continue
                     sample_lines += 1
                     samples_per_gpu[index] = samples_per_gpu.get(index, 0) + 1
+                    peak_utilization_percent[index] = max(
+                        peak_utilization_percent.get(index, 0),
+                        utilization,
+                    )
+                    peak_memory_mib[index] = max(peak_memory_mib.get(index, 0), memory_mib)
         observed_gpu_indices = sorted(samples_per_gpu)
+        active_gpu_indices = sorted(
+            index
+            for index in observed_gpu_indices
+            if peak_utilization_percent.get(index, 0) > 0 and peak_memory_mib.get(index, 0) > 0
+        )
         status = (
             "PASS"
             if self.process is not None
             and self.return_code_before_shutdown is None
             and observed_gpu_indices == list(range(8))
+            and active_gpu_indices == list(range(8))
             else "FAIL"
         )
         return {
@@ -118,7 +137,10 @@ class _GpuMonitor:
             "output_size_bytes": size_bytes,
             "sample_lines": sample_lines,
             "observed_gpu_indices": observed_gpu_indices,
+            "active_gpu_indices": active_gpu_indices,
             "samples_per_gpu": {str(index): samples_per_gpu[index] for index in observed_gpu_indices},
+            "peak_utilization_percent": {str(index): peak_utilization_percent[index] for index in observed_gpu_indices},
+            "peak_memory_mib": {str(index): peak_memory_mib[index] for index in observed_gpu_indices},
             "return_code_before_shutdown": self.return_code_before_shutdown,
         }
 
@@ -132,6 +154,7 @@ def _define_parser() -> argparse.ArgumentParser:
     parser.add_argument("--private-root", required=True, type=Path)
     parser.add_argument("--evidence-root", required=True, type=Path)
     parser.add_argument("--expected-gpu-name-substring", default="A100-SXM4-80GB")
+    parser.add_argument("--profile", choices=_PROFILES, default="full-state")
     parser.add_argument("--service-startup-timeout", type=float, default=90.0)
     parser.add_argument("--gate-ready-timeout", type=float, default=120.0)
     parser.add_argument("--gate-total-timeout", type=float, default=300.0)
@@ -158,7 +181,15 @@ def _require_revision(model_path: Path, expected_revision: str) -> None:
         )
 
 
-def _phase_args(model_path: Path, model_revision: str, phase_root: Path) -> Namespace:
+def _phase_args(
+    model_path: Path,
+    model_revision: str,
+    phase_root: Path,
+    *,
+    num_rounds: int = 1,
+    local_steps: int = 1,
+    state_scope: str = "full",
+) -> Namespace:
     return Namespace(
         model_name_or_path=model_path,
         model_revision=model_revision,
@@ -166,30 +197,40 @@ def _phase_args(model_path: Path, model_revision: str, phase_root: Path) -> Name
         export_root=phase_root / "unused-export",
         num_clients=2,
         nproc_per_node=4,
-        num_rounds=1,
-        local_steps=1,
+        num_rounds=num_rounds,
+        local_steps=local_steps,
         max_length=128,
         learning_rate=1.0e-5,
         trainable_target="last-layer",
         run_mode="train",
+        state_scope=state_scope,
         timeout_seconds=900,
         expected_gpu_name_substring=None,
     )
 
 
-def _validate_phase_inputs(model_path: Path, model_revision: str, phase_root: Path) -> None:
+def _validate_phase_inputs(
+    model_path: Path,
+    model_revision: str,
+    phase_root: Path,
+    *,
+    num_rounds: int = 1,
+    local_steps: int = 1,
+    state_scope: str = "full",
+) -> None:
     config = RealTrainingConfig(
         model_path=model_path,
         workspace_root=phase_root / "unused-workspace",
         export_root=phase_root / "unused-export",
         num_clients=2,
         nproc_per_node=4,
-        num_rounds=1,
-        local_steps=1,
+        num_rounds=num_rounds,
+        local_steps=local_steps,
         max_length=128,
         learning_rate=1.0e-5,
         trainable_target="last-layer",
         run_mode="train",
+        state_scope=state_scope,
     )
     config.validate(require_model_files=True)
     _require_revision(model_path, model_revision)
@@ -245,6 +286,9 @@ def _run_phase(
     ready_timeout: float,
     total_timeout: float,
     completion_grace_timeout: float,
+    num_rounds: int = 1,
+    local_steps: int = 1,
+    state_scope: str = "full",
 ) -> dict[str, Any]:
     from nvflare.recipe.prod_env import ProdEnv
 
@@ -262,6 +306,14 @@ def _run_phase(
             "completion_grace_timeout_seconds": completion_grace_timeout,
             "num_clients": 2,
             "nproc_per_client": 4,
+            "num_rounds": num_rounds,
+            "local_steps": local_steps,
+            "state_scope": state_scope,
+            "dataset_sha256": (
+                {site_name: file_sha256(path) for site_name, path in DATA_FILES.items()}
+                if state_scope == "trainable"
+                else None
+            ),
             "gpu_mapping": {"site-1": [0, 1, 2, 3], "site-2": [4, 5, 6, 7]},
             "execution_environment": "ProdEnv",
         },
@@ -270,7 +322,16 @@ def _run_phase(
     job_id = None
     watcher = None
     try:
-        recipe = _build_recipe(_phase_args(model_path, model_revision, phase_root))
+        recipe = _build_recipe(
+            _phase_args(
+                model_path,
+                model_revision,
+                phase_root,
+                num_rounds=num_rounds,
+                local_steps=local_steps,
+                state_scope=state_scope,
+            )
+        )
         environment = ProdEnv(
             startup_kit_location=str(federation.admin_kit),
             login_timeout=10.0,
@@ -279,7 +340,13 @@ def _run_phase(
         )
         run = recipe.run(environment)
         job_id = run.get_job_id()
-        watcher = PersistedModelWatcher(federation, job_id, phase_root / "persistence")
+        watcher = PersistedModelWatcher(
+            federation,
+            job_id,
+            phase_root / "persistence",
+            expected_count=num_rounds,
+            checkpoint_inspector=inspect_persisted_checkpoint if state_scope == "trainable" else None,
+        )
         watcher.start()
         _write_json(
             phase_root / "submitted.json",
@@ -298,7 +365,8 @@ def _run_phase(
             total_timeout=total_timeout,
             completion_grace_timeout=completion_grace_timeout,
         )
-        persisted = watcher.wait()
+        persisted_models = watcher.wait_all(timeout=max(30.0, completion_grace_timeout))
+        persisted = persisted_models[-1]
         collected_roots = federation.collect_job_logs(job_id, phase_root / "logs")
         roots = {site_name: collected_roots[site_name] for site_name in CLIENT_NAMES}
         evidence = validate_production_evidence(
@@ -308,9 +376,22 @@ def _run_phase(
             model_path=model_path,
             run_mode="train",
             nproc_per_client=4,
-            num_rounds=1,
+            num_rounds=num_rounds,
             expected_gpu_name_substring=expected_gpu_name_substring,
         )
+        trainable_evidence = None
+        if state_scope == "trainable":
+            trainable_evidence = validate_trainable_state_evidence(
+                client_roots=roots,
+                site_names=list(CLIENT_NAMES),
+                model_path=model_path,
+                num_rounds=num_rounds,
+                local_steps=local_steps,
+                nproc_per_client=4,
+                expected_dataset_sha256={site_name: file_sha256(path) for site_name, path in DATA_FILES.items()},
+                persisted_models=persisted_models,
+                max_payload_bytes=_TRAINABLE_PAYLOAD_CEILING_BYTES,
+            )
         summary = {
             **evidence,
             "phase": name,
@@ -319,6 +400,11 @@ def _run_phase(
             "model_path": str(model_path),
             "model_revision": model_revision,
             "persisted_model": persisted,
+            "persisted_models": persisted_models,
+            "trainable_state_evidence": trainable_evidence,
+            "state_scope": state_scope,
+            "num_rounds": num_rounds,
+            "local_steps": local_steps,
             "elapsed_seconds": time.monotonic() - started_at,
             "execution_environment": "ProdEnv",
             "service_topology": "localhost-tls-server-plus-two-real-clients",
@@ -337,6 +423,9 @@ def _run_phase(
             "ready_timeout_seconds": ready_timeout,
             "total_timeout_seconds": total_timeout,
             "completion_grace_timeout_seconds": completion_grace_timeout,
+            "state_scope": state_scope,
+            "num_rounds": num_rounds,
+            "local_steps": local_steps,
             "elapsed_seconds": time.monotonic() - started_at,
             "error": {"type": type(exc).__name__, "message": str(exc)},
         }
@@ -485,6 +574,7 @@ def main() -> int:
     result: dict[str, Any] = {
         "event": "real_training_production_qualification",
         "status": "FAIL",
+        "profile": args.profile,
         "gate": None,
         "target": None,
     }
@@ -494,6 +584,7 @@ def main() -> int:
         {
             "event": "real_training_production_configuration",
             "control_plane_only": args.control_plane_only,
+            "profile": args.profile,
             "gate_model_path": str(args.gate_model_path),
             "gate_model_revision": args.gate_model_revision,
             "target_model_path": str(args.target_model_path),
@@ -512,9 +603,28 @@ def main() -> int:
         },
     )
     try:
+        trainable_profile = args.profile == "trainable-multiround"
+        gate_rounds = 2 if trainable_profile else 1
+        target_rounds = 3 if trainable_profile else 1
+        local_steps = 4 if trainable_profile else 1
+        state_scope = "trainable" if trainable_profile else "full"
         if not args.control_plane_only:
-            _validate_phase_inputs(args.gate_model_path, args.gate_model_revision, args.evidence_root / "gate")
-            _validate_phase_inputs(args.target_model_path, args.target_model_revision, args.evidence_root / "target")
+            _validate_phase_inputs(
+                args.gate_model_path,
+                args.gate_model_revision,
+                args.evidence_root / "gate",
+                num_rounds=gate_rounds,
+                local_steps=local_steps,
+                state_scope=state_scope,
+            )
+            _validate_phase_inputs(
+                args.target_model_path,
+                args.target_model_revision,
+                args.evidence_root / "target",
+                num_rounds=target_rounds,
+                local_steps=local_steps,
+                state_scope=state_scope,
+            )
         environment = _environment_check(
             args.expected_gpu_name_substring,
             require_gpus=not args.control_plane_only,
@@ -559,6 +669,9 @@ def main() -> int:
                     ready_timeout=args.gate_ready_timeout,
                     total_timeout=args.gate_total_timeout,
                     completion_grace_timeout=args.gate_completion_grace_timeout,
+                    num_rounds=gate_rounds,
+                    local_steps=local_steps,
+                    state_scope=state_scope,
                 )
                 if result["gate"]["status"] != "PASS":
                     raise RuntimeError("1.5B exact-topology gate did not pass")
@@ -572,6 +685,9 @@ def main() -> int:
                     ready_timeout=args.target_ready_timeout,
                     total_timeout=args.target_total_timeout,
                     completion_grace_timeout=args.target_completion_grace_timeout,
+                    num_rounds=target_rounds,
+                    local_steps=local_steps,
+                    state_scope=state_scope,
                 )
                 result["status"] = "PASS"
         exit_code = 0

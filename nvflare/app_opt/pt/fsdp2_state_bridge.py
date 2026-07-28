@@ -12,16 +12,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Rank-zero full-state exchange for a PyTorch FSDP2 model.
+"""Rank-zero full or trainable-state exchange for a PyTorch FSDP2 model.
 
 This bridge owns only the transition between an exchanged full model state and
 an FSDP2-sharded model. The caller remains responsible for NVFLARE receive/send
 operations and for clearing the exchanged payload after it has been handed off.
 
-All ranks in the process group must call ``load_full_state_dict`` and
-``export_full_state_dict`` in the same order. Only rank zero supplies or receives
-the full state dict. Small control metadata is broadcast to keep validation
-failures synchronized; the full Python state object is never object-broadcast.
+All ranks in the process group must call the matching load/export methods in
+the same order. Only rank zero supplies or receives the exchanged state dict.
+Small control metadata is broadcast to keep validation failures synchronized;
+the Python state object is never object-broadcast.
 """
 
 from __future__ import annotations
@@ -68,7 +68,7 @@ class FSDP2ExportResult:
 
 
 class FSDP2StateBridge:
-    """Load and export full model state at an FSDP2 federated boundary.
+    """Load and export full or trainable model state at an FSDP2 boundary.
 
     The model must already have been sharded with FSDP2 ``fully_shard`` and the
     default distributed process group must already be initialized. The bridge
@@ -102,6 +102,26 @@ class FSDP2StateBridge:
         distributed the full tensors into local DTensor shards.
         """
 
+        return self._load_state_dict(full_state_dict, trainable_only=False)
+
+    def load_trainable_state_dict(self, trainable_state_dict: Optional[Mapping[str, Any]]) -> FSDP2LoadResult:
+        """Collectively load exactly the parameters whose ``requires_grad`` is true.
+
+        Frozen parameters and buffers remain at their immutable, locally loaded
+        base values. Rank zero must provide every trainable parameter and no
+        other keys. PyTorch's distributed state-dict load is intentionally
+        non-strict because the frozen base state is absent, while this bridge's
+        explicit key validation preserves fail-closed semantics.
+        """
+
+        return self._load_state_dict(trainable_state_dict, trainable_only=True)
+
+    def _load_state_dict(
+        self,
+        state_dict: Optional[Mapping[str, Any]],
+        *,
+        trainable_only: bool,
+    ) -> FSDP2LoadResult:
         rank, world_size = _require_process_group()
         _require_fsdp2_model(self.model)
         started_at = time.perf_counter()
@@ -109,10 +129,13 @@ class FSDP2StateBridge:
         preparation_error = None
         tensor_count = 0
         payload_bytes = 0
+        trainable_keys = _trainable_state_keys(self.model) if trainable_only else set()
 
         if rank == 0:
             try:
-                prepared_state = _prepare_rank_zero_state(full_state_dict, self.exchange_prefix)
+                prepared_state = _prepare_rank_zero_state(state_dict, self.exchange_prefix)
+                if trainable_only:
+                    _require_exact_state_keys(prepared_state, trainable_keys)
                 tensor_count, payload_bytes = _state_dict_metrics(prepared_state, require_cpu=True)
             except Exception as e:
                 preparation_error = f"{type(e).__name__}: {secure_format_exception(e)}"
@@ -129,11 +152,23 @@ class FSDP2StateBridge:
                 options=StateDictOptions(
                     full_state_dict=True,
                     broadcast_from_rank0=True,
-                    strict=True,
+                    strict=not trainable_only,
                 ),
             )
         finally:
             prepared_state.clear()
+
+        if trainable_only:
+            missing_trainable = trainable_keys.intersection(incompatible_keys.missing_keys)
+            if missing_trainable:
+                raise RuntimeError(
+                    f"distributed trainable-state load left trainable keys missing: {sorted(missing_trainable)}"
+                )
+            if incompatible_keys.unexpected_keys:
+                raise RuntimeError(
+                    f"distributed trainable-state load returned unexpected keys: "
+                    f"{sorted(incompatible_keys.unexpected_keys)}"
+                )
 
         stats = FSDP2StateDictStats(
             tensor_count=tensor_count,
@@ -150,12 +185,25 @@ class FSDP2StateBridge:
     def export_full_state_dict(self) -> FSDP2ExportResult:
         """Collectively gather a full CPU state and return it only on rank zero."""
 
+        return self._export_state_dict(trainable_only=False)
+
+    def export_trainable_state_dict(self) -> FSDP2ExportResult:
+        """Collectively gather only parameters whose ``requires_grad`` is true."""
+
+        return self._export_state_dict(trainable_only=True)
+
+    def _export_state_dict(self, *, trainable_only: bool) -> FSDP2ExportResult:
         rank, world_size = _require_process_group()
         _require_fsdp2_model(self.model)
         started_at = time.perf_counter()
+        trainable_keys = _trainable_state_keys(self.model) if trainable_only else set()
         gathered_state = get_model_state_dict(
             self.model,
-            options=StateDictOptions(full_state_dict=True, cpu_offload=True),
+            options=StateDictOptions(
+                full_state_dict=True,
+                cpu_offload=True,
+                ignore_frozen_params=trainable_only,
+            ),
         )
 
         export_state = None
@@ -164,6 +212,11 @@ class FSDP2StateBridge:
         payload_bytes = 0
         if rank == 0:
             try:
+                if trainable_only:
+                    missing = trainable_keys.difference(gathered_state)
+                    if missing:
+                        raise ValueError(f"PyTorch trainable-state export is missing keys: {sorted(missing)}")
+                    gathered_state = {key: gathered_state[key] for key in sorted(trainable_keys)}
                 export_state = _prepare_export_state(gathered_state, self.exchange_prefix)
                 tensor_count, payload_bytes = _state_dict_metrics(export_state, require_cpu=True)
             except Exception as e:
@@ -200,6 +253,24 @@ def _broadcast_rank_zero_control(value: tuple, rank: int) -> tuple:
     objects = [value if rank == 0 else None]
     dist.broadcast_object_list(objects, src=0)
     return objects[0]
+
+
+def _trainable_state_keys(model: nn.Module) -> set[str]:
+    keys = {name for name, parameter in model.named_parameters() if parameter.requires_grad}
+    if not keys:
+        raise RuntimeError("FSDP2 trainable-state exchange requires at least one trainable parameter")
+    return keys
+
+
+def _require_exact_state_keys(state_dict: Mapping[str, Any], expected_keys: set[str]) -> None:
+    observed_keys = set(state_dict)
+    missing = expected_keys.difference(observed_keys)
+    unexpected = observed_keys.difference(expected_keys)
+    if missing or unexpected:
+        raise ValueError(
+            "trainable state keys do not exactly match the model's trainable parameters: "
+            f"missing={sorted(missing)}, unexpected={sorted(unexpected)}"
+        )
 
 
 def _prepare_rank_zero_state(full_state_dict: Optional[Mapping[str, Any]], exchange_prefix: str) -> dict[str, Any]:

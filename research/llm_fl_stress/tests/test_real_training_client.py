@@ -103,6 +103,7 @@ def test_round_summary_exposes_training_and_rank_metrics():
         local_steps=1,
         model_name_or_path="/models/Qwen2.5-14B",
         model_revision="abc123",
+        state_scope="full",
     )
     metrics = {
         "loss": 1.25,
@@ -133,6 +134,7 @@ def test_round_summary_exposes_training_and_rank_metrics():
         "model_path": "/models/Qwen2.5-14B",
         "model_revision": "abc123",
         "run_mode": "train",
+        "state_scope": "full",
         "trainable_target": "last-layer",
         "local_steps": 1,
         "world_size": 4,

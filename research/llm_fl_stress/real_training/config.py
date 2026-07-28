@@ -21,6 +21,7 @@ from pathlib import Path
 
 TRAINABLE_TARGETS = ("last-layer", "lm-head", "all")
 RUN_MODES = ("exchange-only", "train")
+STATE_SCOPES = ("full", "trainable")
 _TOKENIZER_FILES = ("tokenizer.json", "tokenizer.model", "vocab.json")
 _WEIGHT_PATTERNS = ("model*.safetensors", "pytorch_model*.bin")
 
@@ -38,6 +39,7 @@ class RealTrainingConfig:
     learning_rate: float = 1.0e-5
     trainable_target: str = "last-layer"
     run_mode: str = "train"
+    state_scope: str = "full"
 
     def validate(self, require_model_files: bool = True) -> None:
         if require_model_files:
@@ -64,6 +66,11 @@ class RealTrainingConfig:
         if self.run_mode not in RUN_MODES:
             choices = ", ".join(RUN_MODES)
             raise ValueError(f"run_mode must be one of: {choices}")
+        if self.state_scope not in STATE_SCOPES:
+            choices = ", ".join(STATE_SCOPES)
+            raise ValueError(f"state_scope must be one of: {choices}")
+        if self.state_scope == "trainable" and (self.run_mode != "train" or self.trainable_target != "last-layer"):
+            raise ValueError("trainable state exchange requires run_mode=train and trainable_target=last-layer")
         if not self.workspace_root.is_absolute():
             raise ValueError("workspace_root must be absolute")
         if not self.export_root.is_absolute():

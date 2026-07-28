@@ -74,8 +74,9 @@ The launcher fails closed:
 - a Slurm signal two minutes before the 25-minute limit triggers cleanup.
 
 No full 3 GB or 30 GB result is copied back to Lustre while GPUs sit idle. The persisted model is validated in the
-node-local server workspace; its path, size, small metadata sidecar, client/server logs, phase summary, and five-second
-per-GPU utilization samples are retained. The monitor must observe all GPU indices 0 through 7. Ephemeral startup
+node-local server workspace; its path, size, small metadata sidecar, client/server logs, phase summary, and
+five-second per-GPU utilization samples are retained. The monitor requires every GPU index 0 through 7 to have at
+least one sample with positive utilization and positive memory use, and retains per-GPU peaks. Ephemeral startup
 kits, TLS private keys, and full model files stay under node-local private scratch and are deleted during cleanup.
 
 The observed July 28 full-state run lasted 16:07 and completed persistence just after its old 720-second target
@@ -83,14 +84,51 @@ deadline. Details are in the
 [July 28 qualification record](cs-oci-ord-two-client-14b-qualification-2026-07-28.md). The 25-minute Slurm limit is
 a hard ceiling, not a target.
 
+## Trainable-state multiround follow-up
+
+The next qualification deliberately keeps the same Qwen2.5-14B model and proven eight-GPU production topology. It
+changes the experiment, not the model size:
+
+- the immutable full BF16 model is loaded locally by both clients;
+- only the final decoder layer is trainable and crosses the federated boundary;
+- the 1.5B gate runs two FL rounds with four optimizer steps per rank per round;
+- the 14B target runs three FL rounds with four optimizer steps per rank per round;
+- site-1 and site-2 receive separate fixed 48-record JSONL partitions;
+- four ranks consume 16 unique records per client per round, so the 14B phase consumes all 48 records at each site
+  exactly once; and
+- the server aggregates the two selected-layer states with explicit equal client weights.
+
+The selected Qwen2.5-14B decoder layer is expected to be approximately 551 MB in BF16, compared with the measured
+29.54 GB full-state payload. The implementation enforces a 1 GiB payload ceiling: a regression to full-model
+exchange fails qualification. Moving the selected layer is part of the experiment and should be fast on this node;
+the retained evidence records load time, export time, payload bytes, and derived logical wire bytes so this
+assumption is measured rather than hidden.
+
+This profile answers correctness questions that a one-round completion cannot:
+
+1. each client log records its pinned dataset checksum and the exact unique record IDs used per round;
+2. a per-step global loss trajectory proves four real forward/backward/optimizer steps were executed;
+3. exact SHA-256 summaries prove both clients started each round from the same global selected-layer state;
+4. distinct output hashes prove the different client partitions produced different local updates;
+5. deterministic tensor samples prove each persisted global value is the equal-weight mean of the two client
+   outputs;
+6. persisted round `r` must exactly match both clients' input hash in round `r+1`; and
+7. every persisted checkpoint, including the final checkpoint, is reloaded and schema-checked before the ephemeral
+   workspace is removed.
+
+The run is still a systems qualification, not a convergence or model-quality benchmark. Three short rounds over
+fixed qualification text are sufficient to establish FL state flow and real gradient work without spending an
+allocation on an unbounded training experiment. A larger model would add memory and transfer risk but would not
+answer these state-correctness questions more directly.
+
 ## Install the final transfer bundle
 
-Create the final bundle locally from the reviewed worktree and transfer it through a Data Copier node. The prepared
-artifact is named `nvflare-prod-ready.bundle`; its adjacent checksum uses only the basename so it can be verified
-after transfer:
+Create the final bundle locally from the reviewed worktree and transfer it through a Data Copier node. The
+trainable multiround artifact is named `nvflare-trainable-14b-ready.bundle`; its adjacent checksum uses only the
+basename so it can be verified after transfer:
 
 ```bash
-export BUNDLE=/Users/kevlu/Documents/codex/nvflare-prod-ready.bundle
+export BUNDLE=/Users/kevlu/Documents/codex/nvflare-trainable-14b-ready.bundle
 export PROJECT_ROOT=/lustre/fs11/portfolios/coreai/projects/coreai_edgeai_flresearch/users/kevlu/nvflare-14b
 
 rsync -ah --partial --progress \
@@ -105,14 +143,14 @@ export PROJECT_ROOT=/lustre/fs11/portfolios/coreai/projects/coreai_edgeai_flrese
 export REPO_ROOT="$PROJECT_ROOT/repos/NVFlare"
 cd "$PROJECT_ROOT/incoming"
 
-sha256sum -c nvflare-prod-ready.bundle.sha256
-git -C "$REPO_ROOT" bundle verify "$PROJECT_ROOT/incoming/nvflare-prod-ready.bundle"
-BUNDLE_HEAD=$(git bundle list-heads nvflare-prod-ready.bundle |
+sha256sum -c nvflare-trainable-14b-ready.bundle.sha256
+git -C "$REPO_ROOT" bundle verify "$PROJECT_ROOT/incoming/nvflare-trainable-14b-ready.bundle"
+BUNDLE_HEAD=$(git bundle list-heads nvflare-trainable-14b-ready.bundle |
   awk '$2 == "refs/heads/codex/llm-fl-real-14b" {print $1}')
 test -n "$BUNDLE_HEAD"
 
 git -C "$REPO_ROOT" fetch \
-  "$PROJECT_ROOT/incoming/nvflare-prod-ready.bundle" \
+  "$PROJECT_ROOT/incoming/nvflare-trainable-14b-ready.bundle" \
   refs/heads/codex/llm-fl-real-14b
 git -C "$REPO_ROOT" switch codex/llm-fl-real-14b
 git -C "$REPO_ROOT" merge --ff-only FETCH_HEAD
@@ -160,8 +198,11 @@ unless the immutable snapshot may have changed.
 Run this once after updating the branch. It requests no GPU and exercises the exact TLS provision/start/register
 path inside the qualified container. It submits two consecutive tiny two-client NumPy jobs through `ProdEnv`,
 requires both client runners to synchronize for each job, aggregates 2/2 results twice, and reaches
-`FINISHED:COMPLETED` twice. Reusing the same long-lived services for the second job mirrors the GPU gate-to-target
-transition:
+`FINISHED:COMPLETED` twice. Before starting those services, it runs the trainable-only state bridge on two real
+PyTorch 2.12 CPU ranks, instantiates the sparse 1.5B server state container on CPU, enforces its 1 GiB payload
+ceiling, exports the trainable-state recipe, and requires exactly one site-1 partition in the site-1 app, exactly
+one site-2 partition in the site-2 app, and the matching dataset arguments in the generated configurations.
+Reusing the same long-lived services for the second job mirrors the GPU gate-to-target transition:
 
 ```bash
 cd "$REPO_ROOT"
@@ -178,11 +219,17 @@ cat "$PROJECT_ROOT/artifacts/control-plane-$CONTROL_JOB_ID/control-plane.json"
 cat "$PROJECT_ROOT/artifacts/control-plane-$CONTROL_JOB_ID/control-plane-job-1/summary.json"
 cat "$PROJECT_ROOT/artifacts/control-plane-$CONTROL_JOB_ID/control-plane-job-2/summary.json"
 cat "$PROJECT_ROOT/artifacts/control-plane-$CONTROL_JOB_ID/qualification.json"
+cat "$PROJECT_ROOT/artifacts/control-plane-$CONTROL_JOB_ID/fsdp2-trainable-cpu-gate.json"
+cat "$PROJECT_ROOT/artifacts/control-plane-$CONTROL_JOB_ID/trainable-server-preflight.json"
+cat "$PROJECT_ROOT/artifacts/control-plane-$CONTROL_JOB_ID/trainable-export-validation.json"
 ```
 
-All four JSON files must report `status: PASS`; `connected_clients` and both completed jobs' `sites` must be exactly
+All seven JSON files must report `status: PASS`; `connected_clients` and both completed jobs' `sites` must be exactly
 `site-1` and `site-2`, and each job summary must report `aggregated_results: 2`. Do not submit the GPU job if this
-check fails. The July 28 preflight took 4:51, so its hard limit is now eight minutes.
+check fails. The CPU FSDP2 gate must report two ranks on the pinned torch version. The sparse-server preflight must
+report a positive payload below 1 GiB. The export validation must additionally report `state_scope: trainable`,
+`job_exported: true`, two clients, two rounds, and four local steps. The July 28 services-only preflight took 4:51;
+the hard limit is ten minutes with the added CPU checks.
 
 ## Submit one qualified GPU allocation
 
@@ -191,9 +238,13 @@ No custom exports are normally needed because the wrapper pins both model paths 
 ```bash
 cd "$REPO_ROOT"
 JOB_ID=$(sbatch --parsable \
-  research/llm_fl_stress/real_training/cs_oci_ord/two_client_14b.slurm)
+  research/llm_fl_stress/real_training/cs_oci_ord/two_client_14b_trainable.slurm)
 echo "$JOB_ID"
 ```
+
+`two_client_14b_trainable.slurm` selects the `trainable-multiround` profile and then delegates to the same reviewed
+production wrapper used by the completed full-state qualification. The older `two_client_14b.slurm` remains the
+full-state regression entry point and is not the command for this follow-up.
 
 Do not submit a second copy, add `--exclusive`, set `NCCL_P2P_DISABLE`, use `sbatch -W`, or run `watch squeue`.
 Pending time consumes no GPUs. Once it starts, the wrapper uses all eight GPUs for each training phase.
@@ -213,17 +264,19 @@ Expected milestones are:
 2. `real_training_production_control_plane` with both clients;
 3. a submitted gate job;
 4. gate progress with both `ready_sites`;
-5. a `real_training_federation` gate summary with `status: PASS`;
+5. two gate round records, two reloaded gate checkpoints, and a gate summary with `status: PASS`;
 6. a submitted 14B job;
 7. target progress with both `ready_sites`; and
-8. a target summary followed by a qualification `status: PASS`.
+8. three target round records, three reloaded target checkpoints, a
+   `real_training_trainable_state_evidence` record, and a qualification `status: PASS`.
 
 An emitted `real_training_production_abort` or `real_training_production_phase_failure` is a terminal diagnostic,
 not a prompt to resubmit.
 
-`PotentialSecretWarning` may identify the pinned 40-character Hugging Face revision as high-entropy text. That
-warning is non-blocking and the revision is public, but it does not make actual credentials acceptable in recipe
-arguments. No token, password, or private key should appear in the generated job configuration.
+`PotentialSecretWarning` may identify the pinned 40-character Hugging Face revision or the two public dataset
+SHA-256 values as high-entropy text. That warning is non-blocking for these public integrity identifiers, but it
+does not make actual credentials acceptable in recipe arguments. No token, password, or private key should appear
+in the generated job configuration.
 
 The first phase is intentionally small, so persistent underutilization or a missing client is detected before 14B.
 During model load and full-state serialization, utilization can temporarily be low or uneven; judge the run from the
@@ -243,6 +296,7 @@ cat "$PROJECT_ROOT/artifacts/$JOB_ID/qualification.json"
 cat "$PROJECT_ROOT/artifacts/$JOB_ID/gpu-monitor.json"
 cat "$PROJECT_ROOT/artifacts/$JOB_ID/gate-1.5b/summary.json"
 cat "$PROJECT_ROOT/artifacts/$JOB_ID/target-14b/summary.json"
+cat "$PROJECT_ROOT/artifacts/$JOB_ID/target-14b/persistence/"persisted_model-*.json
 ls -lh "$PROJECT_ROOT/artifacts/$JOB_ID"
 ```
 
@@ -257,6 +311,19 @@ contain:
 - `aggregated_results: 2`;
 - `persisted: true`; and
 - a non-empty persisted-model size.
+
+For the trainable multiround profile, also require:
+
+- `qualification_profile=trainable-multiround` in `manifest.txt`;
+- `state_scope: trainable`;
+- `num_rounds: 2` for the gate and `num_rounds: 3` for the target;
+- `local_steps: 4`;
+- distinct pinned dataset checksums and 32/48 unique records per site in gate/target;
+- a selected-state payload no greater than 1 GiB;
+- two/three successfully reloaded persisted checkpoints in gate/target;
+- client-output divergence on every round;
+- exact persisted-to-next-round hash continuity; and
+- sampled equal-weight FedAvg checks on every persisted round.
 
 If any gate fails, do not resubmit automatically. Preserve the job ID and inspect
 `qualification-error.log`, `services/`, and the phase log directories. A submitted phase also retains

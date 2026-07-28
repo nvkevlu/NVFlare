@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -168,7 +169,7 @@ def _validate_evidence(
     payloads = {record["payload_bytes"] for record in client_records}
     tensor_counts = {record["tensor_count"] for record in client_records}
     if len(payloads) != 1 or len(tensor_counts) != 1:
-        raise RuntimeError("client round records disagree on full-state shape")
+        raise RuntimeError("client round records disagree on exchanged-state shape")
 
     if not server_root.is_dir():
         raise RuntimeError(f"result is missing server directory: {server_root}")
@@ -179,7 +180,8 @@ def _validate_evidence(
     observed_aggregations = server_text.count(expected_aggregation)
     if observed_aggregations < num_rounds:
         raise RuntimeError(
-            f"server log contains {observed_aggregations} {expected_aggregation!r} records, expected at least {num_rounds}"
+            f"server log contains {observed_aggregations} {expected_aggregation!r} records, "
+            f"expected at least {num_rounds}"
         )
     if "End persist model on server." not in server_text:
         raise RuntimeError("server log does not confirm final model persistence")
@@ -259,3 +261,207 @@ def validate_production_evidence(
         expected_gpu_name_substring=expected_gpu_name_substring,
         expected_model_path=model_path,
     )
+
+
+def _state_sample_map(summary: dict[str, Any], *, context: str) -> dict[tuple[str, int], float]:
+    sha256 = summary.get("sha256")
+    if not isinstance(sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", sha256):
+        raise RuntimeError(f"{context} has invalid sha256={sha256!r}")
+    for name in ("tensor_count", "payload_bytes"):
+        value = summary.get(name)
+        if not isinstance(value, int) or value <= 0:
+            raise RuntimeError(f"{context} has invalid {name}={value!r}")
+    samples = summary.get("samples")
+    if not isinstance(samples, list) or not samples:
+        raise RuntimeError(f"{context} has no tensor samples")
+    result = {}
+    for sample in samples:
+        if not isinstance(sample, dict):
+            raise RuntimeError(f"{context} contains a non-object tensor sample")
+        key = sample.get("key")
+        index = sample.get("index")
+        value = sample.get("value")
+        if (
+            not isinstance(key, str)
+            or not isinstance(index, int)
+            or index < 0
+            or not isinstance(value, (int, float))
+            or not math.isfinite(value)
+        ):
+            raise RuntimeError(f"{context} contains an invalid tensor sample: {sample!r}")
+        coordinate = (key, index)
+        if coordinate in result:
+            raise RuntimeError(f"{context} contains duplicate tensor sample {coordinate!r}")
+        result[coordinate] = float(value)
+    return result
+
+
+def validate_trainable_state_evidence(
+    *,
+    client_roots: dict[str, Path],
+    site_names: list[str],
+    model_path: Path,
+    num_rounds: int,
+    local_steps: int,
+    nproc_per_client: int,
+    expected_dataset_sha256: dict[str, str],
+    persisted_models: list[dict[str, Any]],
+    max_payload_bytes: int,
+) -> dict[str, Any]:
+    """Prove trainable-only exchange, client divergence, FedAvg, and round continuity."""
+
+    by_round: dict[int, dict[str, dict[str, Any]]] = {round_index: {} for round_index in range(num_rounds)}
+    all_sample_ids: dict[str, set[str]] = {site_name: set() for site_name in site_names}
+    for site_name in site_names:
+        root = client_roots[site_name]
+        records = _unique_records(_json_events(_log_files(root), _ROUND_EVENT))
+        matching = [
+            record
+            for record in records
+            if record.get("site_name") == site_name and record.get("model_path") == str(model_path)
+        ]
+        if len(matching) != num_rounds:
+            raise RuntimeError(
+                f"{site_name} trainable-state evidence expected {num_rounds} rounds, found {len(matching)}"
+            )
+        for record in matching:
+            round_index = record.get("current_round")
+            if round_index not in by_round or site_name in by_round[round_index]:
+                raise RuntimeError(f"{site_name} has invalid or duplicate trainable-state round {round_index!r}")
+            if record.get("state_scope") != "trainable":
+                raise RuntimeError(f"{site_name} round {round_index} did not use trainable-state exchange")
+            if record.get("dataset_sha256") != expected_dataset_sha256.get(site_name):
+                raise RuntimeError(f"{site_name} round {round_index} has an unexpected dataset checksum")
+            trajectory = record.get("loss_trajectory")
+            if (
+                not isinstance(trajectory, list)
+                or len(trajectory) != local_steps
+                or not all(
+                    isinstance(value, (int, float)) and math.isfinite(value) and value > 0 for value in trajectory
+                )
+            ):
+                raise RuntimeError(f"{site_name} round {round_index} has invalid loss trajectory {trajectory!r}")
+            sample_ids = record.get("sample_ids")
+            expected_samples = local_steps * nproc_per_client
+            if (
+                not isinstance(sample_ids, list)
+                or len(sample_ids) != expected_samples
+                or len(set(sample_ids)) != expected_samples
+                or not all(isinstance(value, str) and value for value in sample_ids)
+            ):
+                raise RuntimeError(f"{site_name} round {round_index} has invalid sample IDs")
+            overlap = all_sample_ids[site_name].intersection(sample_ids)
+            if overlap:
+                raise RuntimeError(f"{site_name} reused dataset records across rounds: {sorted(overlap)}")
+            all_sample_ids[site_name].update(sample_ids)
+            rank_records = record.get("ranks")
+            if not isinstance(rank_records, list) or len(rank_records) != nproc_per_client:
+                raise RuntimeError(f"{site_name} round {round_index} has incomplete rank evidence")
+            rank_sample_ids = []
+            for rank_record in rank_records:
+                if rank_record.get("loss_trajectory") != trajectory:
+                    raise RuntimeError(
+                        f"{site_name} round {round_index} rank {rank_record.get('rank')} "
+                        "has a mismatched global loss trajectory"
+                    )
+                local_ids = rank_record.get("sample_ids")
+                if (
+                    not isinstance(local_ids, list)
+                    or len(local_ids) != local_steps
+                    or len(set(local_ids)) != local_steps
+                ):
+                    raise RuntimeError(
+                        f"{site_name} round {round_index} rank {rank_record.get('rank')} "
+                        "has invalid local sample IDs"
+                    )
+                rank_sample_ids.extend(local_ids)
+            if sorted(rank_sample_ids) != sorted(sample_ids):
+                raise RuntimeError(f"{site_name} round {round_index} rank sample IDs do not match the summary")
+
+            input_state = record.get("input_state")
+            output_state = record.get("output_state")
+            if not isinstance(input_state, dict) or not isinstance(output_state, dict):
+                raise RuntimeError(f"{site_name} round {round_index} is missing input/output state evidence")
+            input_samples = _state_sample_map(input_state, context=f"{site_name} round {round_index} input")
+            output_samples = _state_sample_map(output_state, context=f"{site_name} round {round_index} output")
+            if input_samples.keys() != output_samples.keys():
+                raise RuntimeError(f"{site_name} round {round_index} changed the exchanged tensor schema")
+            if input_state["payload_bytes"] > max_payload_bytes:
+                raise RuntimeError(
+                    f"{site_name} round {round_index} payload {input_state['payload_bytes']} exceeds "
+                    f"trainable-only ceiling {max_payload_bytes}"
+                )
+            if (
+                input_state["payload_bytes"] != output_state["payload_bytes"]
+                or input_state["tensor_count"] != output_state["tensor_count"]
+                or input_state["payload_bytes"] != record.get("payload_bytes")
+                or input_state["tensor_count"] != record.get("tensor_count")
+            ):
+                raise RuntimeError(f"{site_name} round {round_index} has inconsistent exchanged-state shape")
+            if input_state["sha256"] == output_state["sha256"]:
+                raise RuntimeError(f"{site_name} round {round_index} did not change its trainable state")
+            by_round[round_index][site_name] = record
+
+    if len(set(expected_dataset_sha256.values())) != len(site_names):
+        raise RuntimeError("qualification client datasets are not distinct")
+    if len(persisted_models) != num_rounds:
+        raise RuntimeError(f"expected {num_rounds} persisted checkpoints, found {len(persisted_models)}")
+
+    previous_persisted_hash = None
+    for round_index in range(num_rounds):
+        records = by_round[round_index]
+        if set(records) != set(site_names):
+            raise RuntimeError(f"round {round_index} is missing trainable-state client evidence")
+        input_hashes = {record["input_state"]["sha256"] for record in records.values()}
+        output_hashes = {record["output_state"]["sha256"] for record in records.values()}
+        if len(input_hashes) != 1:
+            raise RuntimeError(f"clients received different global inputs in round {round_index}")
+        if len(output_hashes) != len(site_names):
+            raise RuntimeError(f"client updates did not diverge in round {round_index}")
+        if previous_persisted_hash is not None and input_hashes != {previous_persisted_hash}:
+            raise RuntimeError(f"round {round_index} input is not the preceding persisted global state")
+
+        persisted = persisted_models[round_index]
+        if persisted.get("reload_status") != "PASS" or not isinstance(persisted.get("state"), dict):
+            raise RuntimeError(f"persisted checkpoint {round_index} was not successfully reloaded")
+        persisted_state = persisted["state"]
+        persisted_samples = _state_sample_map(persisted_state, context=f"persisted round {round_index}")
+        client_sample_maps = [
+            _state_sample_map(
+                records[site_name]["output_state"],
+                context=f"{site_name} round {round_index} output",
+            )
+            for site_name in site_names
+        ]
+        if any(samples.keys() != persisted_samples.keys() for samples in client_sample_maps):
+            raise RuntimeError(f"persisted round {round_index} tensor samples do not match client schemas")
+        for coordinate, persisted_value in persisted_samples.items():
+            expected_value = sum(samples[coordinate] for samples in client_sample_maps) / len(client_sample_maps)
+            if not math.isclose(persisted_value, expected_value, rel_tol=0.01, abs_tol=0.02):
+                raise RuntimeError(
+                    f"persisted round {round_index} sample {coordinate!r} is not the equal-weight client mean: "
+                    f"expected {expected_value}, observed {persisted_value}"
+                )
+        if (
+            persisted_state["payload_bytes"] != records[site_names[0]]["payload_bytes"]
+            or persisted_state["tensor_count"] != records[site_names[0]]["tensor_count"]
+        ):
+            raise RuntimeError(f"persisted round {round_index} has an unexpected state schema")
+        if persisted_state["sha256"] in input_hashes:
+            raise RuntimeError(f"persisted round {round_index} did not change the global trainable state")
+        previous_persisted_hash = persisted_state["sha256"]
+
+    payload_bytes = next(iter(by_round[0].values()))["payload_bytes"]
+    return {
+        "event": "real_training_trainable_state_evidence",
+        "status": "PASS",
+        "state_scope": "trainable",
+        "num_rounds": num_rounds,
+        "local_steps": local_steps,
+        "dataset_sha256": expected_dataset_sha256,
+        "unique_samples_per_site": {site_name: len(all_sample_ids[site_name]) for site_name in site_names},
+        "payload_bytes_per_transfer": payload_bytes,
+        "logical_wire_bytes": payload_bytes * len(site_names) * 2 * num_rounds,
+        "persisted_checkpoints_reloaded": len(persisted_models),
+        "final_persisted_sha256": previous_persisted_hash,
+    }

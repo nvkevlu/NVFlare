@@ -243,3 +243,94 @@ def test_rank_zero_export_rejects_non_cpu_tensor(bridge, monkeypatch):
 
     with pytest.raises(RuntimeError, match="must be on CPU"):
         bridge.export_full_state_dict()
+
+
+def test_trainable_load_requires_exact_trainable_keys_and_uses_non_strict_dcp(bridge, monkeypatch):
+    bridge.model.bias.requires_grad_(False)
+    observed = {}
+
+    def fake_set_model_state_dict(model, state_dict, options):
+        observed["state_dict"] = dict(state_dict)
+        observed["options"] = options
+        return IncompatibleKeys(["bias"], [])
+
+    monkeypatch.setattr(state_bridge, "set_model_state_dict", fake_set_model_state_dict)
+    weight = torch.full((2, 3), 5.0)
+
+    result = bridge.load_trainable_state_dict({"model.weight": weight})
+
+    assert observed["state_dict"] == {"weight": weight}
+    assert observed["options"].full_state_dict is True
+    assert observed["options"].broadcast_from_rank0 is True
+    assert observed["options"].strict is False
+    assert result.missing_keys == ("bias",)
+    assert result.unexpected_keys == ()
+    assert result.stats.tensor_count == 1
+    assert result.stats.payload_bytes == weight.numel() * weight.element_size()
+
+
+@pytest.mark.parametrize(
+    "incoming, expected_error",
+    [
+        ({"model.bias": torch.zeros(2)}, "missing=\\['weight'\\]"),
+        (
+            {"model.weight": torch.ones(2, 3), "model.bias": torch.zeros(2)},
+            "unexpected=\\['bias'\\]",
+        ),
+    ],
+)
+def test_trainable_load_rejects_missing_or_frozen_keys(bridge, monkeypatch, incoming, expected_error):
+    bridge.model.bias.requires_grad_(False)
+    monkeypatch.setattr(
+        state_bridge,
+        "set_model_state_dict",
+        lambda *args, **kwargs: pytest.fail("DCP load should not run"),
+    )
+
+    with pytest.raises(RuntimeError, match=expected_error):
+        bridge.load_trainable_state_dict(incoming)
+
+
+def test_trainable_load_fails_if_dcp_leaves_selected_key_missing(bridge, monkeypatch):
+    bridge.model.bias.requires_grad_(False)
+    monkeypatch.setattr(
+        state_bridge,
+        "set_model_state_dict",
+        lambda *args, **kwargs: IncompatibleKeys(["weight", "bias"], []),
+    )
+
+    with pytest.raises(RuntimeError, match="trainable keys missing.*weight"):
+        bridge.load_trainable_state_dict({"model.weight": torch.ones(2, 3)})
+
+
+def test_trainable_export_filters_frozen_parameters_and_buffers(bridge, monkeypatch):
+    bridge.model.bias.requires_grad_(False)
+    bridge.model.register_buffer("scale", torch.tensor(2.0))
+    weight = torch.full((2, 3), 6.0)
+    observed = {}
+
+    def fake_get_model_state_dict(model, options):
+        observed["options"] = options
+        return {
+            "weight": weight,
+            "scale": bridge.model.scale,
+        }
+
+    monkeypatch.setattr(state_bridge, "get_model_state_dict", fake_get_model_state_dict)
+
+    result = bridge.export_trainable_state_dict()
+
+    assert observed["options"].full_state_dict is True
+    assert observed["options"].cpu_offload is True
+    assert observed["options"].ignore_frozen_params is True
+    assert result.state_dict == {"model.weight": weight}
+    assert result.stats.tensor_count == 1
+    assert result.stats.payload_bytes == weight.numel() * weight.element_size()
+
+
+def test_trainable_export_requires_every_selected_key(bridge, monkeypatch):
+    bridge.model.bias.requires_grad_(False)
+    monkeypatch.setattr(state_bridge, "get_model_state_dict", lambda *args, **kwargs: {})
+
+    with pytest.raises(RuntimeError, match="trainable-state export is missing keys.*weight"):
+        bridge.export_trainable_state_dict()

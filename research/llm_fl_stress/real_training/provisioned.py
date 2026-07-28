@@ -29,7 +29,7 @@ import time
 import types
 from dataclasses import dataclass
 from pathlib import Path
-from typing import IO, Any, Iterable
+from typing import IO, Any, Callable, Iterable
 
 ADMIN_NAME = "admin@nvidia.com"
 CLIENT_NAMES = ("site-1", "site-2")
@@ -132,11 +132,24 @@ class _Service:
 class PersistedModelWatcher:
     """Capture model persistence metadata before production server cleanup removes the run workspace."""
 
-    def __init__(self, federation: "LocalProductionFederation", job_id: str, destination: Path):
+    def __init__(
+        self,
+        federation: "LocalProductionFederation",
+        job_id: str,
+        destination: Path,
+        *,
+        expected_count: int = 1,
+        checkpoint_inspector: Callable[[Path], dict[str, Any]] | None = None,
+    ):
+        if expected_count <= 0:
+            raise ValueError("expected_count must be greater than zero")
         self.federation = federation
         self.job_id = job_id
         self.destination = destination
+        self.expected_count = expected_count
+        self.checkpoint_inspector = checkpoint_inspector
         self.result: dict[str, Any] | None = None
+        self.results: list[dict[str, Any]] = []
         self.error: Exception | None = None
         self._done = threading.Event()
         self._stop = threading.Event()
@@ -159,13 +172,13 @@ class PersistedModelWatcher:
                 partial = ""
                 if complete_lines and not complete_lines[-1].endswith(("\n", "\r")):
                     partial = complete_lines.pop()
-                persisted = any(
+                persisted_count = sum(
                     self.job_id in line and "End persist model on server." in line for line in complete_lines
                 )
-                if persisted:
+                for _ in range(persisted_count):
                     model_files = []
                     model_path = None
-                    model_deadline = time.monotonic() + 2.0
+                    model_deadline = time.monotonic() + 30.0
                     while time.monotonic() < model_deadline and not self._stop.is_set():
                         try:
                             root = self.federation.job_root(SERVER_NAME, self.job_id)
@@ -186,17 +199,28 @@ class PersistedModelWatcher:
                     metadata = Path(f"{model_path}.metadata")
                     if metadata.is_file():
                         shutil.copy2(metadata, self.destination / metadata.name)
-                    self.result = {
+                    result = {
                         "path": str(model_path),
                         "size_bytes": model_size,
                         "metadata_copied": metadata.is_file(),
+                        "sequence": len(self.results),
                     }
-                    (self.destination / "persisted_model.json").write_text(
-                        json.dumps(self.result, indent=2, sort_keys=True) + "\n",
+                    if self.checkpoint_inspector is not None:
+                        result.update(self.checkpoint_inspector(model_path))
+                    self.results.append(result)
+                    self.result = result
+                    result_name = (
+                        "persisted_model.json"
+                        if self.expected_count == 1
+                        else f"persisted_model-{len(self.results) - 1}.json"
+                    )
+                    (self.destination / result_name).write_text(
+                        json.dumps(result, indent=2, sort_keys=True) + "\n",
                         encoding="utf-8",
                     )
-                    self._done.set()
-                    return
+                    if len(self.results) >= self.expected_count:
+                        self._done.set()
+                        return
                 self._stop.wait(0.05)
         except Exception as exc:
             self.error = exc
@@ -210,6 +234,20 @@ class PersistedModelWatcher:
         if self.result is None:
             raise RuntimeError(f"persisted model watcher for {self.job_id} completed without a result")
         return self.result
+
+    def wait_all(self, timeout: float = 30.0) -> list[dict[str, Any]]:
+        if not self._done.wait(timeout):
+            raise TimeoutError(
+                f"captured {len(self.results)}/{self.expected_count} persisted models for job {self.job_id}"
+            )
+        if self.error is not None:
+            raise self.error
+        if len(self.results) != self.expected_count:
+            raise RuntimeError(
+                f"persisted model watcher for {self.job_id} captured "
+                f"{len(self.results)}/{self.expected_count} results"
+            )
+        return list(self.results)
 
     def close(self) -> None:
         self._stop.set()

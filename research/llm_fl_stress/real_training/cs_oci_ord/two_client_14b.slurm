@@ -27,11 +27,17 @@ EXPECTED_TARGET_REVISION="97e1e76335b7017d8f67c08a19d103c0504298c9"
 EXPECTED_GPU_NAME_SUBSTRING="${EXPECTED_GPU_NAME_SUBSTRING:-A100-SXM4-80GB}"
 REQUIRED_BASE_COMMIT="1be715ed5bc97c83a6771b486c40b75f0b97e4fd"
 EXPECTED_BRANCH="codex/llm-fl-real-14b"
-REQUIRED_RELEASE="2026-07-28-progress-grace-v2"
+REQUIRED_RELEASE="2026-07-28-trainable-multiround-v3"
 RELEASE_FILE="${REPO_ROOT}/research/llm_fl_stress/real_training/QUALIFICATION_RELEASE"
+QUALIFICATION_PROFILE="${QUALIFICATION_PROFILE:-full-state}"
 
 if [[ "${TARGET_MODEL_REVISION}" != "${EXPECTED_TARGET_REVISION}" ]]; then
     echo "The target is pinned to Qwen2.5-14B revision ${EXPECTED_TARGET_REVISION}." >&2
+    exit 1
+fi
+if [[ "${QUALIFICATION_PROFILE}" != "full-state" &&
+    "${QUALIFICATION_PROFILE}" != "trainable-multiround" ]]; then
+    echo "Unsupported qualification profile: ${QUALIFICATION_PROFILE}" >&2
     exit 1
 fi
 for path in "${CONTAINER_IMAGE}" "${REPO_ROOT}" "${VENV_DIR}" "${GATE_MODEL_PATH}" "${TARGET_MODEL_PATH}"; do
@@ -93,6 +99,7 @@ record_result() {
         printf 'host=%s\n' "$(hostname)"
         printf 'execution_environment=ProdEnv\n'
         printf 'service_topology=localhost-tls-server-plus-two-real-clients\n'
+        printf 'qualification_profile=%s\n' "${QUALIFICATION_PROFILE}"
         printf 'gate_model_path=%s\n' "${GATE_MODEL_PATH}"
         printf 'gate_model_revision=%s\n' "${GATE_MODEL_REVISION}"
         printf 'target_model_path=%s\n' "${TARGET_MODEL_PATH}"
@@ -128,6 +135,7 @@ QUALIFICATION_ARGS=(
     --private-root "${PRIVATE_ROOT}"
     --evidence-root "${ARTIFACT_ROOT}"
     --expected-gpu-name-substring "${EXPECTED_GPU_NAME_SUBSTRING}"
+    --profile "${QUALIFICATION_PROFILE}"
     --service-startup-timeout 90
     --gate-ready-timeout 120
     --gate-total-timeout 300
