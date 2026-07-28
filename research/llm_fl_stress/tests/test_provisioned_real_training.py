@@ -18,6 +18,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from research.llm_fl_stress.real_training import provisioned
 from research.llm_fl_stress.real_training.provisioned import (
     ADMIN_NAME,
     CLIENT_NAMES,
@@ -146,6 +147,173 @@ def test_service_job_text_scans_complete_log_not_only_tail(tmp_path):
     result = federation.service_job_text(SERVER_NAME, "job-123")
 
     assert result == "job-123 Aggregated 2/2 results"
+
+
+def test_wait_for_run_grants_bounded_grace_after_two_of_two_aggregation(tmp_path, monkeypatch, capsys):
+    federation = _federation(tmp_path)
+    clock = {"seconds": 0.0}
+
+    monkeypatch.setattr(provisioned.time, "monotonic", lambda: clock["seconds"])
+    monkeypatch.setattr(
+        provisioned.time,
+        "sleep",
+        lambda seconds: clock.__setitem__("seconds", clock["seconds"] + seconds),
+    )
+    monkeypatch.setattr(federation, "_require_services_alive", lambda: None)
+    monkeypatch.setattr(federation, "_fatal_job_error", lambda _job_id: None)
+    monkeypatch.setattr(
+        federation,
+        "_ready_sites",
+        lambda _job_id, _model_path: set(CLIENT_NAMES),
+    )
+    monkeypatch.setattr(
+        federation,
+        "completion_progress",
+        lambda _job_id: {
+            "aggregated_2_of_2": clock["seconds"] >= 9.0,
+            "persistence_started": clock["seconds"] >= 10.0,
+            "persistence_finished": False,
+        },
+    )
+
+    class FakeRun:
+        aborted = False
+
+        @staticmethod
+        def get_job_id():
+            return "job-123"
+
+        @staticmethod
+        def get_status():
+            return "FINISHED:COMPLETED" if clock["seconds"] >= 12.0 else "RUNNING"
+
+        def abort(self):
+            self.aborted = True
+
+    run = FakeRun()
+    status = federation.wait_for_run(
+        run,
+        model_path=Path("/models/qwen"),
+        ready_timeout=5.0,
+        total_timeout=10.0,
+        completion_grace_timeout=5.0,
+        poll_interval=1.0,
+    )
+
+    assert status == "FINISHED:COMPLETED"
+    assert run.aborted is False
+    assert '"event": "real_training_production_completion_grace"' in capsys.readouterr().out
+
+
+def test_wait_for_run_does_not_grant_grace_without_completion_progress(tmp_path, monkeypatch):
+    federation = _federation(tmp_path)
+    clock = {"seconds": 0.0}
+
+    monkeypatch.setattr(provisioned.time, "monotonic", lambda: clock["seconds"])
+    monkeypatch.setattr(
+        provisioned.time,
+        "sleep",
+        lambda seconds: clock.__setitem__("seconds", clock["seconds"] + seconds),
+    )
+    monkeypatch.setattr(federation, "_require_services_alive", lambda: None)
+    monkeypatch.setattr(federation, "_fatal_job_error", lambda _job_id: None)
+    monkeypatch.setattr(
+        federation,
+        "_ready_sites",
+        lambda _job_id, _model_path: set(CLIENT_NAMES),
+    )
+    monkeypatch.setattr(
+        federation,
+        "completion_progress",
+        lambda _job_id: {
+            "aggregated_2_of_2": False,
+            "persistence_started": False,
+            "persistence_finished": False,
+        },
+    )
+
+    class FakeRun:
+        aborted = False
+
+        @staticmethod
+        def get_job_id():
+            return "job-123"
+
+        @staticmethod
+        def get_status():
+            return "RUNNING"
+
+        def abort(self):
+            self.aborted = True
+
+    run = FakeRun()
+    with pytest.raises(TimeoutError, match="completion_progress"):
+        federation.wait_for_run(
+            run,
+            model_path=Path("/models/qwen"),
+            ready_timeout=5.0,
+            total_timeout=10.0,
+            completion_grace_timeout=5.0,
+            poll_interval=1.0,
+        )
+
+    assert run.aborted is True
+
+
+def test_wait_for_run_aborts_when_bounded_completion_grace_expires(tmp_path, monkeypatch):
+    federation = _federation(tmp_path)
+    clock = {"seconds": 0.0}
+
+    monkeypatch.setattr(provisioned.time, "monotonic", lambda: clock["seconds"])
+    monkeypatch.setattr(
+        provisioned.time,
+        "sleep",
+        lambda seconds: clock.__setitem__("seconds", clock["seconds"] + seconds),
+    )
+    monkeypatch.setattr(federation, "_require_services_alive", lambda: None)
+    monkeypatch.setattr(federation, "_fatal_job_error", lambda _job_id: None)
+    monkeypatch.setattr(
+        federation,
+        "_ready_sites",
+        lambda _job_id, _model_path: set(CLIENT_NAMES),
+    )
+    monkeypatch.setattr(
+        federation,
+        "completion_progress",
+        lambda _job_id: {
+            "aggregated_2_of_2": True,
+            "persistence_started": True,
+            "persistence_finished": False,
+        },
+    )
+
+    class FakeRun:
+        aborted = False
+
+        @staticmethod
+        def get_job_id():
+            return "job-123"
+
+        @staticmethod
+        def get_status():
+            return "RUNNING"
+
+        def abort(self):
+            self.aborted = True
+
+    run = FakeRun()
+    with pytest.raises(TimeoutError, match=r"plus 5\.0s completion grace"):
+        federation.wait_for_run(
+            run,
+            model_path=Path("/models/qwen"),
+            ready_timeout=5.0,
+            total_timeout=10.0,
+            completion_grace_timeout=5.0,
+            poll_interval=1.0,
+        )
+
+    assert run.aborted is True
+    assert clock["seconds"] == 15.0
 
 
 def test_collect_job_logs_keeps_redacted_logs_but_not_full_model(tmp_path):

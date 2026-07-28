@@ -27,6 +27,8 @@ EXPECTED_TARGET_REVISION="97e1e76335b7017d8f67c08a19d103c0504298c9"
 EXPECTED_GPU_NAME_SUBSTRING="${EXPECTED_GPU_NAME_SUBSTRING:-A100-SXM4-80GB}"
 REQUIRED_BASE_COMMIT="1be715ed5bc97c83a6771b486c40b75f0b97e4fd"
 EXPECTED_BRANCH="codex/llm-fl-real-14b"
+REQUIRED_RELEASE="2026-07-28-progress-grace-v2"
+RELEASE_FILE="${REPO_ROOT}/research/llm_fl_stress/real_training/QUALIFICATION_RELEASE"
 
 if [[ "${TARGET_MODEL_REVISION}" != "${EXPECTED_TARGET_REVISION}" ]]; then
     echo "The target is pinned to Qwen2.5-14B revision ${EXPECTED_TARGET_REVISION}." >&2
@@ -45,6 +47,10 @@ if [[ "${OBSERVED_BRANCH}" != "${EXPECTED_BRANCH}" ]]; then
 fi
 if ! git -C "${REPO_ROOT}" merge-base --is-ancestor "${REQUIRED_BASE_COMMIT}" HEAD; then
     echo "Checkout does not contain required production qualification base ${REQUIRED_BASE_COMMIT}." >&2
+    exit 1
+fi
+if [[ ! -s "${RELEASE_FILE}" ]] || [[ "$(<"${RELEASE_FILE}")" != "${REQUIRED_RELEASE}" ]]; then
+    echo "Checkout does not contain required qualification release ${REQUIRED_RELEASE}." >&2
     exit 1
 fi
 GIT_STATUS="$(git -C "${REPO_ROOT}" status --porcelain --untracked-files=all)"
@@ -125,8 +131,10 @@ QUALIFICATION_ARGS=(
     --service-startup-timeout 90
     --gate-ready-timeout 120
     --gate-total-timeout 300
+    --gate-completion-grace-timeout 60
     --target-ready-timeout 300
     --target-total-timeout 720
+    --target-completion-grace-timeout 120
 )
 printf -v QUOTED_QUALIFICATION_ARGS ' %q' "${QUALIFICATION_ARGS[@]}"
 

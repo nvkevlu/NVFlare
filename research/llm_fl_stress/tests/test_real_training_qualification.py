@@ -160,6 +160,7 @@ def test_phase_failure_retains_job_id_and_best_effort_logs(tmp_path, monkeypatch
             expected_gpu_name_substring="A100-SXM4-80GB",
             ready_timeout=120.0,
             total_timeout=300.0,
+            completion_grace_timeout=60.0,
         )
 
     failure = json.loads((evidence_root / "gate-1.5b" / "failure.json").read_text())

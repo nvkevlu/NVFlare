@@ -439,6 +439,14 @@ class LocalProductionFederation:
         service = self.services[participant]
         return _matching_lines(service.log_path, job_id)
 
+    def completion_progress(self, job_id: str) -> dict[str, bool]:
+        server_text = self.service_job_text(SERVER_NAME, job_id)
+        return {
+            "aggregated_2_of_2": "Aggregated 2/2 results" in server_text,
+            "persistence_started": "Start persist model on server." in server_text,
+            "persistence_finished": "End persist model on server." in server_text,
+        }
+
     @staticmethod
     def _abort(run, reason: str) -> dict[str, str]:
         result = {
@@ -462,6 +470,7 @@ class LocalProductionFederation:
         model_path: Path,
         ready_timeout: float,
         total_timeout: float,
+        completion_grace_timeout: float = 0.0,
         poll_interval: float = 5.0,
     ) -> str:
         """Fail closed on missing clients, explicit client errors, or phase deadline."""
@@ -470,8 +479,9 @@ class LocalProductionFederation:
         started_at = time.monotonic()
         ready_deadline = started_at + ready_timeout
         total_deadline = started_at + total_timeout
+        completion_grace_deadline = None
         last_status = "UNKNOWN"
-        while time.monotonic() < total_deadline:
+        while True:
             self._require_services_alive()
             fatal_error = self._fatal_job_error(job_id)
             if fatal_error:
@@ -479,7 +489,8 @@ class LocalProductionFederation:
                 raise RuntimeError(fatal_error)
 
             ready_sites = self._ready_sites(job_id, model_path)
-            if time.monotonic() >= ready_deadline and ready_sites != set(CLIENT_NAMES):
+            now = time.monotonic()
+            if now >= ready_deadline and ready_sites != set(CLIENT_NAMES):
                 reason = (
                     f"job did not report both client-ready events within {ready_timeout}s; "
                     f"observed {sorted(ready_sites)}"
@@ -491,9 +502,11 @@ class LocalProductionFederation:
                 )
 
             last_status = str(run.get_status() or "UNKNOWN")
+            progress = self.completion_progress(job_id)
             print(
                 json.dumps(
                     {
+                        "completion_progress": progress,
                         "event": "real_training_production_progress",
                         "job_id": job_id,
                         "ready_sites": sorted(ready_sites),
@@ -507,10 +520,39 @@ class LocalProductionFederation:
                 if last_status != "FINISHED:COMPLETED":
                     raise RuntimeError(f"production job {job_id} ended with {last_status}")
                 return last_status
-            time.sleep(poll_interval)
 
-        self._abort(run, f"job did not finish within {total_timeout}s; status={last_status}")
-        raise TimeoutError(f"production job {job_id} did not finish within {total_timeout}s; status={last_status}")
+            now = time.monotonic()
+            if completion_grace_deadline is None and now >= total_deadline:
+                if completion_grace_timeout > 0.0 and any(progress.values()):
+                    completion_grace_deadline = now + completion_grace_timeout
+                    print(
+                        json.dumps(
+                            {
+                                "completion_grace_seconds": completion_grace_timeout,
+                                "completion_progress": progress,
+                                "event": "real_training_production_completion_grace",
+                                "job_id": job_id,
+                                "status": last_status,
+                            },
+                            sort_keys=True,
+                        ),
+                        flush=True,
+                    )
+                else:
+                    reason = (
+                        f"job did not finish within {total_timeout}s; "
+                        f"status={last_status}; completion_progress={progress}"
+                    )
+                    self._abort(run, reason)
+                    raise TimeoutError(f"production job {job_id} {reason}")
+            elif completion_grace_deadline is not None and now >= completion_grace_deadline:
+                reason = (
+                    f"job did not finish within {total_timeout}s plus {completion_grace_timeout}s "
+                    f"completion grace; status={last_status}; completion_progress={progress}"
+                )
+                self._abort(run, reason)
+                raise TimeoutError(f"production job {job_id} {reason}")
+            time.sleep(poll_interval)
 
     def collect_job_logs(self, job_id: str, destination: Path) -> dict[str, Path]:
         """Copy redacted job logs without startup kits or model tensors."""

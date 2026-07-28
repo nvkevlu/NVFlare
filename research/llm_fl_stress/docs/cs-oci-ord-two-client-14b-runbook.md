@@ -65,7 +65,8 @@ The launcher fails closed:
 - the checkout must be the clean `codex/llm-fl-real-14b` branch and contain the qualified production base;
 - both exact client names must register within 90 seconds;
 - both gate clients must report ready within 120 seconds and the gate must finish within 300 seconds;
-- the 14B clients must report ready within 300 seconds and the phase must finish within 720 seconds;
+- the 14B clients must report ready within 300 seconds and normally finish within 720 seconds;
+- a bounded 120-second completion grace is available only after verified 2/2 aggregation or persistence progress;
 - known runner-synchronization and distributed-training errors cause an immediate abort;
 - every phase must end as `FINISHED:COMPLETED`;
 - both client round records, four ranks per client, 2/2 aggregation, and server persistence are required;
@@ -77,8 +78,10 @@ node-local server workspace; its path, size, small metadata sidecar, client/serv
 per-GPU utilization samples are retained. The monitor must observe all GPU indices 0 through 7. Ephemeral startup
 kits, TLS private keys, and full model files stay under node-local private scratch and are deleted during cleanup.
 
-Typical total runtime is expected to be about 10–18 minutes after the job starts; 25 minutes is a hard Slurm limit,
-not a target. The configured phase ceilings plus service startup and cleanup leave several minutes of margin.
+The observed July 28 full-state run lasted 16:07 and completed persistence just after its old 720-second target
+deadline. Details are in the
+[July 28 qualification record](cs-oci-ord-two-client-14b-qualification-2026-07-28.md). The 25-minute Slurm limit is
+a hard ceiling, not a target.
 
 ## Install the final transfer bundle
 
@@ -117,9 +120,9 @@ test "$(git -C "$REPO_ROOT" rev-parse HEAD)" = "$BUNDLE_HEAD"
 test -z "$(git -C "$REPO_ROOT" status --porcelain --untracked-files=all)"
 ```
 
-The last test is intentional. Both Slurm wrappers also refuse a dirty tree, the wrong branch, or a checkout missing
-the production qualification base. If the old accidental `?? awk` entry is still present, inspect it and move it
-outside the repository; do not use `git clean`:
+The last test is intentional. Both Slurm wrappers also refuse a dirty tree, the wrong branch, a checkout missing the
+production qualification base, or a checkout missing the current qualification release marker. If the old
+accidental `?? awk` entry is still present, inspect it and move it outside the repository; do not use `git clean`:
 
 ```bash
 git -C "$REPO_ROOT" status --short
@@ -179,7 +182,7 @@ cat "$PROJECT_ROOT/artifacts/control-plane-$CONTROL_JOB_ID/qualification.json"
 
 All four JSON files must report `status: PASS`; `connected_clients` and both completed jobs' `sites` must be exactly
 `site-1` and `site-2`, and each job summary must report `aggregated_results: 2`. Do not submit the GPU job if this
-check fails. This job normally takes roughly 1–3 minutes and has a five-minute hard limit.
+check fails. The July 28 preflight took 4:51, so its hard limit is now eight minutes.
 
 ## Submit one qualified GPU allocation
 

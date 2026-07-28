@@ -6,7 +6,7 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=16G
-#SBATCH --time=00:05:00
+#SBATCH --time=00:08:00
 #SBATCH --comment=fact_off
 #SBATCH --output=/lustre/fs11/portfolios/coreai/projects/coreai_edgeai_flresearch/users/kevlu/nvflare-14b/logs/%x-%j.out
 #SBATCH --error=/lustre/fs11/portfolios/coreai/projects/coreai_edgeai_flresearch/users/kevlu/nvflare-14b/logs/%x-%j.err
@@ -23,6 +23,8 @@ TARGET_MODEL_PATH="${TARGET_MODEL_PATH:-${PROJECT_ROOT}/models/Qwen2.5-14B-97e1e
 TARGET_MODEL_REVISION="${TARGET_MODEL_REVISION:-97e1e76335b7017d8f67c08a19d103c0504298c9}"
 REQUIRED_BASE_COMMIT="1be715ed5bc97c83a6771b486c40b75f0b97e4fd"
 EXPECTED_BRANCH="codex/llm-fl-real-14b"
+REQUIRED_RELEASE="2026-07-28-progress-grace-v2"
+RELEASE_FILE="${REPO_ROOT}/research/llm_fl_stress/real_training/QUALIFICATION_RELEASE"
 PRIVATE_ROOT="/tmp/nvflare-control-plane-${SLURM_JOB_ID}"
 ARTIFACT_ROOT="${PROJECT_ROOT}/artifacts/control-plane-${SLURM_JOB_ID}"
 
@@ -39,6 +41,10 @@ if [[ "${OBSERVED_BRANCH}" != "${EXPECTED_BRANCH}" ]]; then
 fi
 if ! git -C "${REPO_ROOT}" merge-base --is-ancestor "${REQUIRED_BASE_COMMIT}" HEAD; then
     echo "Checkout does not contain required production qualification base ${REQUIRED_BASE_COMMIT}." >&2
+    exit 1
+fi
+if [[ ! -s "${RELEASE_FILE}" ]] || [[ "$(<"${RELEASE_FILE}")" != "${REQUIRED_RELEASE}" ]]; then
+    echo "Checkout does not contain required qualification release ${REQUIRED_RELEASE}." >&2
     exit 1
 fi
 GIT_STATUS="$(git -C "${REPO_ROOT}" status --porcelain --untracked-files=all)"

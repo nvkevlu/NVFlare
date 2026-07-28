@@ -135,8 +135,10 @@ def _define_parser() -> argparse.ArgumentParser:
     parser.add_argument("--service-startup-timeout", type=float, default=90.0)
     parser.add_argument("--gate-ready-timeout", type=float, default=120.0)
     parser.add_argument("--gate-total-timeout", type=float, default=300.0)
+    parser.add_argument("--gate-completion-grace-timeout", type=float, default=60.0)
     parser.add_argument("--target-ready-timeout", type=float, default=300.0)
     parser.add_argument("--target-total-timeout", type=float, default=720.0)
+    parser.add_argument("--target-completion-grace-timeout", type=float, default=120.0)
     parser.add_argument(
         "--control-plane-only",
         action="store_true",
@@ -242,6 +244,7 @@ def _run_phase(
     expected_gpu_name_substring: str,
     ready_timeout: float,
     total_timeout: float,
+    completion_grace_timeout: float,
 ) -> dict[str, Any]:
     from nvflare.recipe.prod_env import ProdEnv
 
@@ -256,6 +259,7 @@ def _run_phase(
             "model_revision": model_revision,
             "ready_timeout_seconds": ready_timeout,
             "total_timeout_seconds": total_timeout,
+            "completion_grace_timeout_seconds": completion_grace_timeout,
             "num_clients": 2,
             "nproc_per_client": 4,
             "gpu_mapping": {"site-1": [0, 1, 2, 3], "site-2": [4, 5, 6, 7]},
@@ -292,6 +296,7 @@ def _run_phase(
             model_path=model_path,
             ready_timeout=ready_timeout,
             total_timeout=total_timeout,
+            completion_grace_timeout=completion_grace_timeout,
         )
         persisted = watcher.wait()
         collected_roots = federation.collect_job_logs(job_id, phase_root / "logs")
@@ -331,6 +336,7 @@ def _run_phase(
             "model_revision": model_revision,
             "ready_timeout_seconds": ready_timeout,
             "total_timeout_seconds": total_timeout,
+            "completion_grace_timeout_seconds": completion_grace_timeout,
             "elapsed_seconds": time.monotonic() - started_at,
             "error": {"type": type(exc).__name__, "message": str(exc)},
         }
@@ -496,8 +502,10 @@ def main() -> int:
             "service_startup_timeout_seconds": args.service_startup_timeout,
             "gate_ready_timeout_seconds": args.gate_ready_timeout,
             "gate_total_timeout_seconds": args.gate_total_timeout,
+            "gate_completion_grace_timeout_seconds": args.gate_completion_grace_timeout,
             "target_ready_timeout_seconds": args.target_ready_timeout,
             "target_total_timeout_seconds": args.target_total_timeout,
+            "target_completion_grace_timeout_seconds": args.target_completion_grace_timeout,
             "service_topology": "localhost-tls-server-plus-two-real-clients",
             "execution_environment": "ProdEnv",
             "gpu_mapping": {"site-1": [0, 1, 2, 3], "site-2": [4, 5, 6, 7]},
@@ -550,6 +558,7 @@ def main() -> int:
                     expected_gpu_name_substring=args.expected_gpu_name_substring,
                     ready_timeout=args.gate_ready_timeout,
                     total_timeout=args.gate_total_timeout,
+                    completion_grace_timeout=args.gate_completion_grace_timeout,
                 )
                 if result["gate"]["status"] != "PASS":
                     raise RuntimeError("1.5B exact-topology gate did not pass")
@@ -562,6 +571,7 @@ def main() -> int:
                     expected_gpu_name_substring=args.expected_gpu_name_substring,
                     ready_timeout=args.target_ready_timeout,
                     total_timeout=args.target_total_timeout,
+                    completion_grace_timeout=args.target_completion_grace_timeout,
                 )
                 result["status"] = "PASS"
         exit_code = 0
