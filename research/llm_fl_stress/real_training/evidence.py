@@ -111,28 +111,32 @@ def _require_rank_evidence(
         raise RuntimeError(f"{site_name} round has invalid tensor_count={record.get('tensor_count')!r}")
 
 
-def validate_simulation_evidence(
-    run_root: Path,
+def _validate_evidence(
+    client_roots: dict[str, Path],
+    server_root: Path,
     *,
     site_names: list[str],
     run_mode: str,
     nproc_per_client: int,
     num_rounds: int = 1,
     expected_gpu_name_substring: str | None = None,
+    expected_model_path: Path | None = None,
 ) -> dict[str, Any]:
-    """Require every configured client round plus complete server aggregation and persistence."""
-
-    if not run_root.is_dir():
-        raise RuntimeError(f"simulation result directory does not exist: {run_root}")
-
     client_records = []
     for site_name in site_names:
-        site_root = run_root / site_name
+        site_root = client_roots.get(site_name)
+        if site_root is None:
+            raise RuntimeError(f"result is missing client root for {site_name}")
         if not site_root.is_dir():
-            raise RuntimeError(f"simulation result is missing client directory: {site_root}")
+            raise RuntimeError(f"result is missing client directory: {site_root}")
         records = _unique_records(_json_events(_log_files(site_root), _ROUND_EVENT))
         matching = sorted(
-            (record for record in records if record.get("site_name") == site_name),
+            (
+                record
+                for record in records
+                if record.get("site_name") == site_name
+                and (expected_model_path is None or record.get("model_path") == str(expected_model_path))
+            ),
             key=lambda record: record["current_round"] if isinstance(record.get("current_round"), int) else -1,
         )
         if len(matching) != num_rounds:
@@ -157,9 +161,8 @@ def validate_simulation_evidence(
     if len(payloads) != 1 or len(tensor_counts) != 1:
         raise RuntimeError("client round records disagree on full-state shape")
 
-    server_root = run_root / "server"
     if not server_root.is_dir():
-        raise RuntimeError(f"simulation result is missing server directory: {server_root}")
+        raise RuntimeError(f"result is missing server directory: {server_root}")
     server_text = "\n".join(
         log_path.read_text(encoding="utf-8", errors="replace") for log_path in _log_files(server_root)
     )
@@ -197,3 +200,52 @@ def validate_simulation_evidence(
         "payload_bytes_per_client": payloads.pop(),
         "tensor_count": tensor_counts.pop(),
     }
+
+
+def validate_simulation_evidence(
+    run_root: Path,
+    *,
+    site_names: list[str],
+    run_mode: str,
+    nproc_per_client: int,
+    num_rounds: int = 1,
+    expected_gpu_name_substring: str | None = None,
+) -> dict[str, Any]:
+    """Require every configured simulation client plus server aggregation and persistence."""
+
+    if not run_root.is_dir():
+        raise RuntimeError(f"simulation result directory does not exist: {run_root}")
+    return _validate_evidence(
+        {site_name: run_root / site_name for site_name in site_names},
+        run_root / "server",
+        site_names=site_names,
+        run_mode=run_mode,
+        nproc_per_client=nproc_per_client,
+        num_rounds=num_rounds,
+        expected_gpu_name_substring=expected_gpu_name_substring,
+    )
+
+
+def validate_production_evidence(
+    *,
+    client_roots: dict[str, Path],
+    server_root: Path,
+    site_names: list[str],
+    model_path: Path,
+    run_mode: str,
+    nproc_per_client: int,
+    num_rounds: int = 1,
+    expected_gpu_name_substring: str | None = None,
+) -> dict[str, Any]:
+    """Validate one provisioned production job without downloading its full model."""
+
+    return _validate_evidence(
+        client_roots,
+        server_root,
+        site_names=site_names,
+        run_mode=run_mode,
+        nproc_per_client=nproc_per_client,
+        num_rounds=num_rounds,
+        expected_gpu_name_substring=expected_gpu_name_substring,
+        expected_model_path=model_path,
+    )

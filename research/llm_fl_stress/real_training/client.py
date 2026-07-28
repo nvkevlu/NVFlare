@@ -334,6 +334,8 @@ def _make_round_summary(
         "status": "PASS",
         "current_round": current_round,
         "site_name": site_name,
+        "model_path": args.model_name_or_path,
+        "model_revision": args.model_revision,
         "run_mode": args.run_mode,
         "trainable_target": args.trainable_target,
         "local_steps": args.local_steps,

@@ -13,10 +13,14 @@
 # limitations under the License.
 
 import json
+from pathlib import Path
 
 import pytest
 
-from research.llm_fl_stress.real_training.evidence import validate_simulation_evidence
+from research.llm_fl_stress.real_training.evidence import (
+    validate_production_evidence,
+    validate_simulation_evidence,
+)
 
 
 def _round_record(site_name: str, loss: float) -> dict:
@@ -123,3 +127,37 @@ def test_multi_round_evidence_requires_server_aggregation_for_each_round(tmp_pat
             nproc_per_client=4,
             num_rounds=2,
         )
+
+
+def test_production_evidence_filters_sequential_jobs_by_model_path(tmp_path):
+    gate_model = Path("/models/Qwen2.5-1.5B")
+    target_model = Path("/models/Qwen2.5-14B")
+    client_roots = {}
+    for site_name, loss in (("site-1", 4.5), ("site-2", 4.8)):
+        root = tmp_path / site_name
+        client_roots[site_name] = root
+        log_path = root / "log.txt"
+        log_path.parent.mkdir(parents=True)
+        gate_record = _round_record(site_name, loss + 1.0)
+        gate_record["model_path"] = str(gate_model)
+        target_record = _round_record(site_name, loss)
+        target_record["model_path"] = str(target_model)
+        log_path.write_text(
+            f"INFO - {json.dumps(gate_record, sort_keys=True)}\n"
+            f"INFO - {json.dumps(target_record, sort_keys=True)}\n"
+        )
+    server_root = tmp_path / "server"
+    server_root.mkdir()
+    (server_root / "log.txt").write_text("Aggregated 2/2 results\nEnd persist model on server.\n")
+
+    result = validate_production_evidence(
+        client_roots=client_roots,
+        server_root=server_root,
+        site_names=["site-1", "site-2"],
+        model_path=target_model,
+        run_mode="train",
+        nproc_per_client=4,
+    )
+
+    assert result["status"] == "PASS"
+    assert {site["loss"] for site in result["sites"]} == {4.5, 4.8}

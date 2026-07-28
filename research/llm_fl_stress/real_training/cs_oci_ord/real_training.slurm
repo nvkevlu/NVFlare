@@ -29,6 +29,11 @@ TRAINABLE_TARGET="${TRAINABLE_TARGET:-last-layer}"
 RUN_MODE="${RUN_MODE:-train}"
 EXPECTED_GPU_NAME_SUBSTRING="${EXPECTED_GPU_NAME_SUBSTRING:-A100-SXM4-80GB}"
 
+if [[ "${NUM_CLIENTS}" != "1" ]]; then
+    echo "Multi-client SimEnv execution is disabled for real training." >&2
+    echo "Use cs_oci_ord/two_client_14b.slurm, which provisions real TLS services and uses ProdEnv." >&2
+    exit 1
+fi
 if ! [[ "${NUM_CLIENTS}" =~ ^[1-9][0-9]*$ ]]; then
     echo "NUM_CLIENTS must be a positive integer, got ${NUM_CLIENTS}." >&2
     exit 1

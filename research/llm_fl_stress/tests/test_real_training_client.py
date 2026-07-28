@@ -97,7 +97,13 @@ def test_distributed_round_error_fails_closed():
 
 
 def test_round_summary_exposes_training_and_rank_metrics():
-    args = Namespace(run_mode="train", trainable_target="last-layer", local_steps=1)
+    args = Namespace(
+        run_mode="train",
+        trainable_target="last-layer",
+        local_steps=1,
+        model_name_or_path="/models/Qwen2.5-14B",
+        model_revision="abc123",
+    )
     metrics = {
         "loss": 1.25,
         "neg_loss": -1.25,
@@ -124,6 +130,8 @@ def test_round_summary_exposes_training_and_rank_metrics():
         "status": "PASS",
         "current_round": 0,
         "site_name": "site-2",
+        "model_path": "/models/Qwen2.5-14B",
+        "model_revision": "abc123",
         "run_mode": "train",
         "trainable_target": "last-layer",
         "local_steps": 1,

@@ -148,6 +148,8 @@ def _build_recipe(args: argparse.Namespace):
     recipe.add_client_config(
         {
             "get_task_timeout": args.timeout_seconds,
+            "max_runner_sync_timeout": 180.0,
+            "runner_sync_timeout": 5.0,
             "submit_task_result_timeout": args.timeout_seconds,
             "tensor_min_download_timeout": args.timeout_seconds,
         }
@@ -203,6 +205,12 @@ def main() -> None:
     print(json.dumps({**summary, "job_exported": True}, indent=2, sort_keys=True))
     if args.export_only:
         return
+
+    if args.num_clients != 1:
+        raise RuntimeError(
+            "Multi-client real training is intentionally disabled in SimEnv. "
+            "Use real_training/qualification.py with provisioned startup kits and ProdEnv."
+        )
 
     from nvflare.recipe import SimEnv
 
