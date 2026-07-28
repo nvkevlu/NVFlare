@@ -90,6 +90,15 @@ def _require_rank_evidence(
                     f"{site_name} rank {rank.get('rank')} used GPU {gpu_name!r}, "
                     f"expected a name containing {expected_gpu_name_substring!r}"
                 )
+    for rank in ranks:
+        for metric in ("max_rss_bytes", "peak_gpu_allocated_bytes", "peak_gpu_reserved_bytes"):
+            value = rank.get(metric)
+            if not isinstance(value, int) or value <= 0:
+                raise RuntimeError(f"{site_name} rank {rank.get('rank')} has invalid {metric}={value!r}")
+        if rank["peak_gpu_reserved_bytes"] < rank["peak_gpu_allocated_bytes"]:
+            raise RuntimeError(
+                f"{site_name} rank {rank.get('rank')} reports reserved GPU memory below allocated memory"
+            )
 
     loss = record.get("loss")
     change = record.get("selected_max_abs_change")
@@ -192,6 +201,7 @@ def _validate_evidence(
                 "max_rank_rss_bytes": max(rank["max_rss_bytes"] for rank in record["ranks"]),
                 "max_gpu_allocated_bytes": max(rank["peak_gpu_allocated_bytes"] for rank in record["ranks"]),
                 "max_gpu_reserved_bytes": max(rank["peak_gpu_reserved_bytes"] for rank in record["ranks"]),
+                "ranks": record["ranks"],
             }
             for record in client_records
         ],

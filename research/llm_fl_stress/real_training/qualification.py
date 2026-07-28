@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import os
 import shutil
@@ -51,8 +52,10 @@ class _GpuMonitor:
         self.output_path = output_path
         self.process: subprocess.Popen | None = None
         self.stream = None
+        self.return_code_before_shutdown: int | None = None
 
     def start(self) -> None:
+        self.output_path.parent.mkdir(parents=True, exist_ok=True)
         self.stream = self.output_path.open("w", encoding="utf-8")
         self.process = subprocess.Popen(
             [
@@ -65,17 +68,59 @@ class _GpuMonitor:
             stderr=subprocess.STDOUT,
             text=True,
         )
+        time.sleep(0.25)
+        self.return_code_before_shutdown = self.process.poll()
+        if self.return_code_before_shutdown is not None:
+            self.stream.flush()
+            raise RuntimeError(
+                f"nvidia-smi utilization monitor exited with {self.return_code_before_shutdown}: "
+                f"{self.output_path.read_text(encoding='utf-8', errors='replace')}"
+            )
 
-    def close(self) -> None:
-        if self.process is not None and self.process.poll() is None:
-            self.process.terminate()
-            try:
-                self.process.wait(timeout=5.0)
-            except subprocess.TimeoutExpired:
-                self.process.kill()
-                self.process.wait(timeout=5.0)
+    def close(self) -> dict[str, Any]:
+        if self.process is not None:
+            observed_return_code = self.process.poll()
+            if observed_return_code is None:
+                self.process.terminate()
+                try:
+                    self.process.wait(timeout=5.0)
+                except subprocess.TimeoutExpired:
+                    self.process.kill()
+                    self.process.wait(timeout=5.0)
+            else:
+                self.return_code_before_shutdown = observed_return_code
         if self.stream is not None:
             self.stream.close()
+        size_bytes = self.output_path.stat().st_size if self.output_path.is_file() else 0
+        sample_lines = 0
+        samples_per_gpu: dict[int, int] = {}
+        if size_bytes:
+            with self.output_path.open(encoding="utf-8", errors="replace") as stream:
+                for record in csv.DictReader(stream, skipinitialspace=True):
+                    try:
+                        index = int(record["index"].strip())
+                    except (KeyError, TypeError, ValueError):
+                        continue
+                    sample_lines += 1
+                    samples_per_gpu[index] = samples_per_gpu.get(index, 0) + 1
+        observed_gpu_indices = sorted(samples_per_gpu)
+        status = (
+            "PASS"
+            if self.process is not None
+            and self.return_code_before_shutdown is None
+            and observed_gpu_indices == list(range(8))
+            else "FAIL"
+        )
+        return {
+            "event": "real_training_gpu_monitor",
+            "status": status,
+            "output_path": str(self.output_path),
+            "output_size_bytes": size_bytes,
+            "sample_lines": sample_lines,
+            "observed_gpu_indices": observed_gpu_indices,
+            "samples_per_gpu": {str(index): samples_per_gpu[index] for index in observed_gpu_indices},
+            "return_code_before_shutdown": self.return_code_before_shutdown,
+        }
 
 
 def _define_parser() -> argparse.ArgumentParser:
@@ -202,29 +247,46 @@ def _run_phase(
 
     phase_root = evidence_root / name
     phase_root.mkdir(parents=True, exist_ok=False)
-    recipe = _build_recipe(_phase_args(model_path, model_revision, phase_root))
-    environment = ProdEnv(
-        startup_kit_location=str(federation.admin_kit),
-        login_timeout=10.0,
-        username=ADMIN_NAME,
-        study="default",
-    )
-    started_at = time.monotonic()
-    run = recipe.run(environment)
-    job_id = run.get_job_id()
-    watcher = PersistedModelWatcher(federation, job_id, phase_root / "persistence")
-    watcher.start()
     _write_json(
-        phase_root / "submitted.json",
+        phase_root / "configuration.json",
         {
-            "event": "real_training_production_submitted",
-            "job_id": job_id,
+            "event": "real_training_production_phase_configuration",
+            "phase": name,
             "model_path": str(model_path),
             "model_revision": model_revision,
-            "phase": name,
+            "ready_timeout_seconds": ready_timeout,
+            "total_timeout_seconds": total_timeout,
+            "num_clients": 2,
+            "nproc_per_client": 4,
+            "gpu_mapping": {"site-1": [0, 1, 2, 3], "site-2": [4, 5, 6, 7]},
+            "execution_environment": "ProdEnv",
         },
     )
+    started_at = time.monotonic()
+    job_id = None
+    watcher = None
     try:
+        recipe = _build_recipe(_phase_args(model_path, model_revision, phase_root))
+        environment = ProdEnv(
+            startup_kit_location=str(federation.admin_kit),
+            login_timeout=10.0,
+            username=ADMIN_NAME,
+            study="default",
+        )
+        run = recipe.run(environment)
+        job_id = run.get_job_id()
+        watcher = PersistedModelWatcher(federation, job_id, phase_root / "persistence")
+        watcher.start()
+        _write_json(
+            phase_root / "submitted.json",
+            {
+                "event": "real_training_production_submitted",
+                "job_id": job_id,
+                "model_path": str(model_path),
+                "model_revision": model_revision,
+                "phase": name,
+            },
+        )
         status = federation.wait_for_run(
             run,
             model_path=model_path,
@@ -232,42 +294,66 @@ def _run_phase(
             total_timeout=total_timeout,
         )
         persisted = watcher.wait()
+        collected_roots = federation.collect_job_logs(job_id, phase_root / "logs")
+        roots = {site_name: collected_roots[site_name] for site_name in CLIENT_NAMES}
+        evidence = validate_production_evidence(
+            client_roots=roots,
+            server_root=collected_roots[SERVER_NAME],
+            site_names=list(CLIENT_NAMES),
+            model_path=model_path,
+            run_mode="train",
+            nproc_per_client=4,
+            num_rounds=1,
+            expected_gpu_name_substring=expected_gpu_name_substring,
+        )
+        summary = {
+            **evidence,
+            "phase": name,
+            "job_id": job_id,
+            "job_status": status,
+            "model_path": str(model_path),
+            "model_revision": model_revision,
+            "persisted_model": persisted,
+            "elapsed_seconds": time.monotonic() - started_at,
+            "execution_environment": "ProdEnv",
+            "service_topology": "localhost-tls-server-plus-two-real-clients",
+        }
+        _write_json(phase_root / "summary.json", summary)
+        print(json.dumps(summary, sort_keys=True), flush=True)
+        return summary
+    except Exception as exc:
+        failure = {
+            "event": "real_training_production_phase_failure",
+            "status": "FAIL",
+            "phase": name,
+            "job_id": job_id,
+            "model_path": str(model_path),
+            "model_revision": model_revision,
+            "ready_timeout_seconds": ready_timeout,
+            "total_timeout_seconds": total_timeout,
+            "elapsed_seconds": time.monotonic() - started_at,
+            "error": {"type": type(exc).__name__, "message": str(exc)},
+        }
+        if job_id is not None:
+            try:
+                federation.collect_job_logs(job_id, phase_root / "failure-logs")
+                failure["failure_logs_collected"] = True
+            except Exception as collection_error:
+                failure["failure_logs_collected"] = False
+                failure["log_collection_error"] = f"{type(collection_error).__name__}: {collection_error}"
+        _write_json(phase_root / "failure.json", failure)
+        print(json.dumps(failure, sort_keys=True), flush=True)
+        raise
     finally:
-        watcher.close()
-    collected_roots = federation.collect_job_logs(job_id, phase_root / "logs")
-    roots = {site_name: collected_roots[site_name] for site_name in CLIENT_NAMES}
-    evidence = validate_production_evidence(
-        client_roots=roots,
-        server_root=collected_roots[SERVER_NAME],
-        site_names=list(CLIENT_NAMES),
-        model_path=model_path,
-        run_mode="train",
-        nproc_per_client=4,
-        num_rounds=1,
-        expected_gpu_name_substring=expected_gpu_name_substring,
-    )
-    summary = {
-        **evidence,
-        "phase": name,
-        "job_id": job_id,
-        "job_status": status,
-        "model_path": str(model_path),
-        "model_revision": model_revision,
-        "persisted_model": persisted,
-        "elapsed_seconds": time.monotonic() - started_at,
-        "execution_environment": "ProdEnv",
-        "service_topology": "localhost-tls-server-plus-two-real-clients",
-    }
-    _write_json(phase_root / "summary.json", summary)
-    print(json.dumps(summary, sort_keys=True), flush=True)
-    return summary
+        if watcher is not None:
+            watcher.close()
 
 
-def _build_control_plane_recipe():
+def _build_control_plane_recipe(sequence: int):
     from nvflare.app_common.np.recipes.fedavg import NumpyFedAvgRecipe
 
     recipe = NumpyFedAvgRecipe(
-        name="llm_real_services_control_plane",
+        name=f"llm_real_services_control_plane_{sequence}",
         min_clients=2,
         num_rounds=1,
         model=[[1.0, 2.0], [3.0, 4.0]],
@@ -289,46 +375,80 @@ def _build_control_plane_recipe():
 def _run_control_plane_job(
     federation: LocalProductionFederation,
     evidence_root: Path,
+    sequence: int,
 ) -> dict[str, Any]:
     from nvflare.recipe.prod_env import ProdEnv
 
-    environment = ProdEnv(
-        startup_kit_location=str(federation.admin_kit),
-        login_timeout=10.0,
-        username=ADMIN_NAME,
-        study="default",
-    )
-    run = _build_control_plane_recipe().run(environment)
-    job_id = run.get_job_id()
-    status = federation.wait_for_terminal(run, total_timeout=90.0)
-    sites = set()
-    for site_name in CLIENT_NAMES:
-        events = list(
-            {
-                json.dumps(event, sort_keys=True): event
-                for event in federation.job_events(site_name, job_id, "real_training_control_plane_round")
-            }.values()
+    destination = evidence_root / f"control-plane-job-{sequence}"
+    destination.mkdir(parents=True, exist_ok=False)
+    started_at = time.monotonic()
+    job_id = None
+    try:
+        environment = ProdEnv(
+            startup_kit_location=str(federation.admin_kit),
+            login_timeout=10.0,
+            username=ADMIN_NAME,
+            study="default",
         )
-        if len(events) != 1 or events[0].get("status") != "PASS" or events[0].get("site_name") != site_name:
-            raise RuntimeError(f"control-plane job has invalid {site_name} evidence: {events}")
-        sites.add(site_name)
-    server_text = federation.service_job_text(SERVER_NAME, job_id)
-    if "Aggregated 2/2 results" not in server_text:
-        raise RuntimeError("control-plane job did not aggregate both client results")
-    destination = evidence_root / "control-plane-job"
-    federation.collect_job_logs(job_id, destination)
-    summary = {
-        "aggregated_results": 2,
-        "event": "real_training_production_control_plane_job",
-        "execution_environment": "ProdEnv",
-        "job_id": job_id,
-        "job_status": status,
-        "sites": sorted(sites),
-        "status": "PASS",
-    }
-    _write_json(destination / "summary.json", summary)
-    print(json.dumps(summary, sort_keys=True), flush=True)
-    return summary
+        run = _build_control_plane_recipe(sequence).run(environment)
+        job_id = run.get_job_id()
+        _write_json(
+            destination / "submitted.json",
+            {
+                "event": "real_training_production_control_plane_submitted",
+                "job_id": job_id,
+                "sequence": sequence,
+                "sites": list(CLIENT_NAMES),
+            },
+        )
+        status = federation.wait_for_terminal(run, total_timeout=90.0)
+        sites = set()
+        for site_name in CLIENT_NAMES:
+            events = list(
+                {
+                    json.dumps(event, sort_keys=True): event
+                    for event in federation.job_events(site_name, job_id, "real_training_control_plane_round")
+                }.values()
+            )
+            if len(events) != 1 or events[0].get("status") != "PASS" or events[0].get("site_name") != site_name:
+                raise RuntimeError(f"control-plane job has invalid {site_name} evidence: {events}")
+            sites.add(site_name)
+        server_text = federation.service_job_text(SERVER_NAME, job_id)
+        if "Aggregated 2/2 results" not in server_text:
+            raise RuntimeError("control-plane job did not aggregate both client results")
+        federation.collect_job_logs(job_id, destination)
+        summary = {
+            "aggregated_results": 2,
+            "event": "real_training_production_control_plane_job",
+            "execution_environment": "ProdEnv",
+            "job_id": job_id,
+            "job_status": status,
+            "sequence": sequence,
+            "sites": sorted(sites),
+            "status": "PASS",
+        }
+        _write_json(destination / "summary.json", summary)
+        print(json.dumps(summary, sort_keys=True), flush=True)
+        return summary
+    except Exception as exc:
+        failure = {
+            "event": "real_training_production_control_plane_failure",
+            "status": "FAIL",
+            "job_id": job_id,
+            "sequence": sequence,
+            "elapsed_seconds": time.monotonic() - started_at,
+            "error": {"type": type(exc).__name__, "message": str(exc)},
+        }
+        if job_id is not None:
+            try:
+                federation.collect_job_logs(job_id, destination / "failure-logs")
+                failure["failure_logs_collected"] = True
+            except Exception as collection_error:
+                failure["failure_logs_collected"] = False
+                failure["log_collection_error"] = f"{type(collection_error).__name__}: {collection_error}"
+        _write_json(destination / "failure.json", failure)
+        print(json.dumps(failure, sort_keys=True), flush=True)
+        raise
 
 
 def _install_signal_handlers() -> None:
@@ -362,6 +482,27 @@ def main() -> int:
         "gate": None,
         "target": None,
     }
+    exit_code = 1
+    _write_json(
+        args.evidence_root / "configuration.json",
+        {
+            "event": "real_training_production_configuration",
+            "control_plane_only": args.control_plane_only,
+            "gate_model_path": str(args.gate_model_path),
+            "gate_model_revision": args.gate_model_revision,
+            "target_model_path": str(args.target_model_path),
+            "target_model_revision": args.target_model_revision,
+            "expected_gpu_name_substring": args.expected_gpu_name_substring,
+            "service_startup_timeout_seconds": args.service_startup_timeout,
+            "gate_ready_timeout_seconds": args.gate_ready_timeout,
+            "gate_total_timeout_seconds": args.gate_total_timeout,
+            "target_ready_timeout_seconds": args.target_ready_timeout,
+            "target_total_timeout_seconds": args.target_total_timeout,
+            "service_topology": "localhost-tls-server-plus-two-real-clients",
+            "execution_environment": "ProdEnv",
+            "gpu_mapping": {"site-1": [0, 1, 2, 3], "site-2": [4, 5, 6, 7]},
+        },
+    )
     try:
         if not args.control_plane_only:
             _validate_phase_inputs(args.gate_model_path, args.gate_model_revision, args.evidence_root / "gate")
@@ -391,10 +532,13 @@ def main() -> int:
             _write_json(args.evidence_root / "control-plane.json", control_plane)
             print(json.dumps(control_plane, sort_keys=True), flush=True)
             if args.control_plane_only:
+                control_plane_jobs = [
+                    _run_control_plane_job(federation, args.evidence_root, sequence) for sequence in (1, 2)
+                ]
                 result.update(
                     status="PASS",
                     control_plane_only=True,
-                    control_plane_job=_run_control_plane_job(federation, args.evidence_root),
+                    control_plane_jobs=control_plane_jobs,
                 )
             else:
                 result["gate"] = _run_phase(
@@ -420,16 +564,34 @@ def main() -> int:
                     total_timeout=args.target_total_timeout,
                 )
                 result["status"] = "PASS"
-        return 0
+        exit_code = 0
     except Exception as exc:
         result["error"] = {"type": type(exc).__name__, "message": str(exc)}
         (args.evidence_root / "qualification-error.log").write_text(traceback.format_exc(), encoding="utf-8")
-        print(json.dumps(result, sort_keys=True), flush=True)
-        return 1
     finally:
-        monitor.close()
+        try:
+            monitor_summary = monitor.close()
+        except Exception as monitor_error:
+            monitor_summary = {
+                "event": "real_training_gpu_monitor",
+                "status": "FAIL",
+                "output_path": str(monitor.output_path),
+                "error": f"{type(monitor_error).__name__}: {monitor_error}",
+            }
+        if not args.control_plane_only:
+            result["gpu_monitor"] = monitor_summary
+            _write_json(args.evidence_root / "gpu-monitor.json", monitor_summary)
+            if monitor_summary["status"] != "PASS" and exit_code == 0:
+                result["status"] = "FAIL"
+                result["error"] = {
+                    "type": "RuntimeError",
+                    "message": "GPU utilization monitor did not produce valid samples",
+                }
+                exit_code = 1
         _write_json(result_path, result)
+        print(json.dumps(result, sort_keys=True), flush=True)
         _cleanup_private_root(args.private_root)
+    return exit_code
 
 
 if __name__ == "__main__":

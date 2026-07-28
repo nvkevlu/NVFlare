@@ -114,6 +114,40 @@ def test_wait_for_run_aborts_immediately_on_runner_sync_failure(tmp_path):
     assert run.aborted is True
 
 
+def test_abort_reports_the_abort_api_error_instead_of_hiding_it(tmp_path, capsys):
+    federation = _federation(tmp_path)
+
+    class FakeRun:
+        @staticmethod
+        def get_job_id():
+            return "job-123"
+
+        @staticmethod
+        def abort():
+            raise RuntimeError("admin connection lost")
+
+    result = federation._abort(FakeRun(), "phase deadline")
+
+    assert result["status"] == "ERROR"
+    assert result["error"] == "RuntimeError: admin connection lost"
+    emitted = json.loads(capsys.readouterr().out)
+    assert emitted["event"] == "real_training_production_abort"
+    assert emitted["reason"] == "phase deadline"
+
+
+def test_service_job_text_scans_complete_log_not_only_tail(tmp_path):
+    federation = _federation(tmp_path)
+    service_log = tmp_path / "service-server.log"
+    service_log.write_text(
+        "job-123 Aggregated 2/2 results\n" + ("unrelated transport metric\n" * 30_000) + "job-456 unrelated run\n"
+    )
+    federation.services[SERVER_NAME] = SimpleNamespace(log_path=service_log)
+
+    result = federation.service_job_text(SERVER_NAME, "job-123")
+
+    assert result == "job-123 Aggregated 2/2 results"
+
+
 def test_collect_job_logs_keeps_redacted_logs_but_not_full_model(tmp_path):
     federation = _federation(tmp_path)
     job_id = "job-123"

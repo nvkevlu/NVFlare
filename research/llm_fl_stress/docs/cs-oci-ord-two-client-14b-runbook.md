@@ -16,6 +16,22 @@ stress harness:
 - admin-API registration checks; and
 - recipe submission through `ProdEnv`.
 
+## Prepared state on July 27
+
+The production path has been checked without consuming another cluster GPU allocation:
+
+- the complete stress-harness suite passes locally;
+- shell syntax, Python compilation, formatting, and lint checks pass;
+- a live local TLS/`ProdEnv` smoke provisioned a server and two independent clients;
+- both clients registered and completed two consecutive submitted NumPy jobs through the same services;
+- the server aggregated 2/2 results twice and both jobs reached `FINISHED:COMPLETED`;
+- ephemeral startup kits and keys were deleted; and
+- retained logs passed the transient-token redaction check.
+
+This is control-plane qualification, not a substitute for tomorrow's exact 8-GPU gate. The remaining no-GPU action
+after installing the final bundle is the cluster CPU preflight described below. No new 14B GPU claim should be made
+until the exact gate and target phases pass on CS-OCI-ORD.
+
 ## Fixed topology
 
 All services remain inside one Slurm allocation and one Pyxis/Enroot container:
@@ -46,6 +62,7 @@ cheap to detect before loading 14B.
 
 The launcher fails closed:
 
+- the checkout must be the clean `codex/llm-fl-real-14b` branch and contain the qualified production base;
 - both exact client names must register within 90 seconds;
 - both gate clients must report ready within 120 seconds and the gate must finish within 300 seconds;
 - the 14B clients must report ready within 300 seconds and the phase must finish within 720 seconds;
@@ -57,8 +74,61 @@ The launcher fails closed:
 
 No full 3 GB or 30 GB result is copied back to Lustre while GPUs sit idle. The persisted model is validated in the
 node-local server workspace; its path, size, small metadata sidecar, client/server logs, phase summary, and five-second
-per-GPU utilization samples are retained. Ephemeral startup kits, TLS private keys, and full model files stay under
-node-local private scratch and are deleted during cleanup.
+per-GPU utilization samples are retained. The monitor must observe all GPU indices 0 through 7. Ephemeral startup
+kits, TLS private keys, and full model files stay under node-local private scratch and are deleted during cleanup.
+
+Typical total runtime is expected to be about 10–18 minutes after the job starts; 25 minutes is a hard Slurm limit,
+not a target. The configured phase ceilings plus service startup and cleanup leave several minutes of margin.
+
+## Install the final transfer bundle
+
+Create the final bundle locally from the reviewed worktree and transfer it through a Data Copier node. The prepared
+artifact is named `nvflare-prod-ready.bundle`; its adjacent checksum uses only the basename so it can be verified
+after transfer:
+
+```bash
+export BUNDLE=/Users/kevlu/Documents/codex/nvflare-prod-ready.bundle
+export PROJECT_ROOT=/lustre/fs11/portfolios/coreai/projects/coreai_edgeai_flresearch/users/kevlu/nvflare-14b
+
+rsync -ah --partial --progress \
+  "$BUNDLE" "$BUNDLE.sha256" \
+  kevlu@cs-oci-ord-dc-02.nvidia.com:"$PROJECT_ROOT/incoming/"
+```
+
+On the cluster, verify the checksum and derive the intended branch head from the bundle itself:
+
+```bash
+export PROJECT_ROOT=/lustre/fs11/portfolios/coreai/projects/coreai_edgeai_flresearch/users/kevlu/nvflare-14b
+export REPO_ROOT="$PROJECT_ROOT/repos/NVFlare"
+cd "$PROJECT_ROOT/incoming"
+
+sha256sum -c nvflare-prod-ready.bundle.sha256
+git -C "$REPO_ROOT" bundle verify "$PROJECT_ROOT/incoming/nvflare-prod-ready.bundle"
+BUNDLE_HEAD=$(git bundle list-heads nvflare-prod-ready.bundle |
+  awk '$2 == "refs/heads/codex/llm-fl-real-14b" {print $1}')
+test -n "$BUNDLE_HEAD"
+
+git -C "$REPO_ROOT" fetch \
+  "$PROJECT_ROOT/incoming/nvflare-prod-ready.bundle" \
+  refs/heads/codex/llm-fl-real-14b
+git -C "$REPO_ROOT" switch codex/llm-fl-real-14b
+git -C "$REPO_ROOT" merge --ff-only FETCH_HEAD
+test "$(git -C "$REPO_ROOT" rev-parse HEAD)" = "$BUNDLE_HEAD"
+test -z "$(git -C "$REPO_ROOT" status --porcelain --untracked-files=all)"
+```
+
+The last test is intentional. Both Slurm wrappers also refuse a dirty tree, the wrong branch, or a checkout missing
+the production qualification base. If the old accidental `?? awk` entry is still present, inspect it and move it
+outside the repository; do not use `git clean`:
+
+```bash
+git -C "$REPO_ROOT" status --short
+if [[ -f "$REPO_ROOT/awk" ]]; then
+  sed -n '1,20p' "$REPO_ROOT/awk"
+  mv "$REPO_ROOT/awk" "$PROJECT_ROOT/incoming/awk.accidental-preflight"
+fi
+test -z "$(git -C "$REPO_ROOT" status --porcelain --untracked-files=all)"
+```
 
 ## Prerequisites
 
@@ -79,14 +149,16 @@ git -C "$REPO_ROOT" status --short --branch
 git -C "$REPO_ROOT" rev-parse HEAD
 ```
 
-Do not proceed from a dirty cluster checkout or an unexpected commit. Do not rerun the 30 GB checksum unless the
-immutable snapshot may have changed.
+Do not proceed from a dirty cluster checkout or a head other than `BUNDLE_HEAD`. Do not rerun the 30 GB checksum
+unless the immutable snapshot may have changed.
 
 ## CPU-only control-plane qualification
 
 Run this once after updating the branch. It requests no GPU and exercises the exact TLS provision/start/register
-path inside the qualified container. It also submits a tiny two-client NumPy job through `ProdEnv`, requires both
-client runners to synchronize, aggregates 2/2 results, and reaches `FINISHED:COMPLETED`:
+path inside the qualified container. It submits two consecutive tiny two-client NumPy jobs through `ProdEnv`,
+requires both client runners to synchronize for each job, aggregates 2/2 results twice, and reaches
+`FINISHED:COMPLETED` twice. Reusing the same long-lived services for the second job mirrors the GPU gate-to-target
+transition:
 
 ```bash
 cd "$REPO_ROOT"
@@ -100,13 +172,14 @@ After it finishes, inspect once:
 ```bash
 sacct -j "$CONTROL_JOB_ID" --format=JobID,State,Elapsed,ExitCode,AllocTRES,MaxRSS -X
 cat "$PROJECT_ROOT/artifacts/control-plane-$CONTROL_JOB_ID/control-plane.json"
-cat "$PROJECT_ROOT/artifacts/control-plane-$CONTROL_JOB_ID/control-plane-job/summary.json"
+cat "$PROJECT_ROOT/artifacts/control-plane-$CONTROL_JOB_ID/control-plane-job-1/summary.json"
+cat "$PROJECT_ROOT/artifacts/control-plane-$CONTROL_JOB_ID/control-plane-job-2/summary.json"
 cat "$PROJECT_ROOT/artifacts/control-plane-$CONTROL_JOB_ID/qualification.json"
 ```
 
-All three JSON files must report `status: PASS`; `connected_clients` and the completed job's `sites` must be exactly
-`site-1` and `site-2`, and the job summary must report `aggregated_results: 2`. Do not submit the GPU job if this
-check fails.
+All four JSON files must report `status: PASS`; `connected_clients` and both completed jobs' `sites` must be exactly
+`site-1` and `site-2`, and each job summary must report `aggregated_results: 2`. Do not submit the GPU job if this
+check fails. This job normally takes roughly 1–3 minutes and has a five-minute hard limit.
 
 ## Submit one qualified GPU allocation
 
@@ -142,6 +215,13 @@ Expected milestones are:
 7. target progress with both `ready_sites`; and
 8. a target summary followed by a qualification `status: PASS`.
 
+An emitted `real_training_production_abort` or `real_training_production_phase_failure` is a terminal diagnostic,
+not a prompt to resubmit.
+
+`PotentialSecretWarning` may identify the pinned 40-character Hugging Face revision as high-entropy text. That
+warning is non-blocking and the revision is public, but it does not make actual credentials acceptable in recipe
+arguments. No token, password, or private key should appear in the generated job configuration.
+
 The first phase is intentionally small, so persistent underutilization or a missing client is detected before 14B.
 During model load and full-state serialization, utilization can temporarily be low or uneven; judge the run from the
 five-second samples and phase milestones, not one instantaneous `nvidia-smi`.
@@ -155,14 +235,17 @@ sacct -j "$JOB_ID" \
   --format=JobID,JobName%36,State,Elapsed,ExitCode,AllocTRES,MaxRSS -X
 
 cat "$PROJECT_ROOT/artifacts/$JOB_ID/manifest.txt"
+cat "$PROJECT_ROOT/artifacts/$JOB_ID/configuration.json"
 cat "$PROJECT_ROOT/artifacts/$JOB_ID/qualification.json"
+cat "$PROJECT_ROOT/artifacts/$JOB_ID/gpu-monitor.json"
 cat "$PROJECT_ROOT/artifacts/$JOB_ID/gate-1.5b/summary.json"
 cat "$PROJECT_ROOT/artifacts/$JOB_ID/target-14b/summary.json"
 ls -lh "$PROJECT_ROOT/artifacts/$JOB_ID"
 ```
 
-Accept only if Slurm reports `COMPLETED` with `0:0`, the manifest reports `execution_environment=ProdEnv`, and all
-three summaries report `PASS`. Each phase summary must contain:
+Accept only if Slurm reports `COMPLETED` with `0:0`, the manifest reports `execution_environment=ProdEnv`, the GPU
+monitor reports `PASS` with observed indices 0–7, and all three summaries report `PASS`. Each phase summary must
+contain:
 
 - both `site-1` and `site-2`;
 - exactly four rank records per site on A100-SXM4-80GB;
@@ -173,8 +256,23 @@ three summaries report `PASS`. Each phase summary must contain:
 - a non-empty persisted-model size.
 
 If any gate fails, do not resubmit automatically. Preserve the job ID and inspect
-`qualification-error.log`, `services/`, and the phase log directories. Change only a diagnosed cause before another
-allocation.
+`qualification-error.log`, `services/`, and the phase log directories. A submitted phase also retains
+`submitted.json`; a failed phase retains `failure.json` and best-effort `failure-logs/`. Change only a diagnosed
+cause before another allocation.
+
+## Tomorrow's go/no-go checklist
+
+Proceed to one GPU submission only when every item is true:
+
+1. the transferred bundle checksum and `git bundle verify` pass;
+2. the cluster checkout equals `BUNDLE_HEAD`, is on `codex/llm-fl-real-14b`, and is clean;
+3. the staged 1.5B and 14B revision files match the intended immutable snapshots;
+4. the CPU preflight is `COMPLETED 0:0` and the registration plus both sequential job records pass;
+5. no second copy of the GPU job is queued or running; and
+6. the output log path is ready to tail without `squeue` polling.
+
+If the GPU job needs to be stopped, issue one `scancel "$JOB_ID"` and let the signal/cleanup path run. Do not launch a
+replacement until the retained failure evidence identifies a concrete cause.
 
 ## Deliberate safety interlock
 

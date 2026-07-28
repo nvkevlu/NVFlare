@@ -86,6 +86,19 @@ def _tail(path: Path, max_bytes: int = 16_384) -> str:
         return stream.read().decode("utf-8", errors="replace")
 
 
+def _matching_lines(path: Path, needle: str) -> str:
+    """Read only matching lines without assuming they are near the end of a large service log."""
+
+    if not path.is_file():
+        return ""
+    matches = []
+    with path.open(encoding="utf-8", errors="replace") as stream:
+        for line in stream:
+            if needle in line:
+                matches.append(line.rstrip("\r\n"))
+    return "\n".join(matches)
+
+
 def _redact_log_text(text: str) -> str:
     for pattern in _TOKEN_PATTERNS:
         text = pattern.sub(r"\1<redacted>", text)
@@ -150,14 +163,24 @@ class PersistedModelWatcher:
                     self.job_id in line and "End persist model on server." in line for line in complete_lines
                 )
                 if persisted:
-                    root = self.federation.job_root(SERVER_NAME, self.job_id)
-                    model_files = sorted(root.rglob("FL_global_model.pt"))
-                    if len(model_files) != 1 or model_files[0].stat().st_size <= 0:
+                    model_files = []
+                    model_path = None
+                    model_deadline = time.monotonic() + 2.0
+                    while time.monotonic() < model_deadline and not self._stop.is_set():
+                        try:
+                            root = self.federation.job_root(SERVER_NAME, self.job_id)
+                            model_files = sorted(root.rglob("FL_global_model.pt"))
+                            if len(model_files) == 1 and model_files[0].stat().st_size > 0:
+                                model_path = model_files[0]
+                                break
+                        except (OSError, RuntimeError):
+                            model_files = []
+                        self._stop.wait(0.05)
+                    if model_path is None:
                         raise RuntimeError(
                             f"persistence completed but expected one non-empty global model for {self.job_id}; "
                             f"found {[str(path) for path in model_files]}"
                         )
-                    model_path = model_files[0]
                     model_size = model_path.stat().st_size
                     self.destination.mkdir(parents=True, exist_ok=True)
                     metadata = Path(f"{model_path}.metadata")
@@ -414,14 +437,23 @@ class LocalProductionFederation:
 
     def service_job_text(self, participant: str, job_id: str) -> str:
         service = self.services[participant]
-        return "\n".join(line for line in _tail(service.log_path, max_bytes=262_144).splitlines() if job_id in line)
+        return _matching_lines(service.log_path, job_id)
 
     @staticmethod
-    def _abort(run) -> None:
+    def _abort(run, reason: str) -> dict[str, str]:
+        result = {
+            "event": "real_training_production_abort",
+            "job_id": str(run.get_job_id()),
+            "reason": reason,
+            "status": "REQUESTED",
+        }
         try:
             run.abort()
-        except Exception:
-            pass
+        except Exception as exc:
+            result["status"] = "ERROR"
+            result["error"] = f"{type(exc).__name__}: {exc}"
+        print(json.dumps(result, sort_keys=True), flush=True)
+        return result
 
     def wait_for_run(
         self,
@@ -443,12 +475,16 @@ class LocalProductionFederation:
             self._require_services_alive()
             fatal_error = self._fatal_job_error(job_id)
             if fatal_error:
-                self._abort(run)
+                self._abort(run, fatal_error)
                 raise RuntimeError(fatal_error)
 
             ready_sites = self._ready_sites(job_id, model_path)
             if time.monotonic() >= ready_deadline and ready_sites != set(CLIENT_NAMES):
-                self._abort(run)
+                reason = (
+                    f"job did not report both client-ready events within {ready_timeout}s; "
+                    f"observed {sorted(ready_sites)}"
+                )
+                self._abort(run, reason)
                 raise TimeoutError(
                     f"job {job_id} did not report both client-ready events within {ready_timeout}s; "
                     f"observed {sorted(ready_sites)}"
@@ -473,7 +509,7 @@ class LocalProductionFederation:
                 return last_status
             time.sleep(poll_interval)
 
-        self._abort(run)
+        self._abort(run, f"job did not finish within {total_timeout}s; status={last_status}")
         raise TimeoutError(f"production job {job_id} did not finish within {total_timeout}s; status={last_status}")
 
     def collect_job_logs(self, job_id: str, destination: Path) -> dict[str, Path]:
@@ -516,7 +552,7 @@ class LocalProductionFederation:
             self._require_services_alive()
             fatal_error = self._fatal_job_error(job_id)
             if fatal_error:
-                self._abort(run)
+                self._abort(run, fatal_error)
                 raise RuntimeError(fatal_error)
             last_status = str(run.get_status() or "UNKNOWN")
             if last_status.startswith("FINISHED:"):
@@ -524,7 +560,7 @@ class LocalProductionFederation:
                     raise RuntimeError(f"production job {job_id} ended with {last_status}")
                 return last_status
             time.sleep(poll_interval)
-        self._abort(run)
+        self._abort(run, f"job did not finish within {total_timeout}s; status={last_status}")
         raise TimeoutError(f"production job {job_id} did not finish within {total_timeout}s; status={last_status}")
 
     def close(self) -> None:

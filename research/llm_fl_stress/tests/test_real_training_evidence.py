@@ -82,6 +82,7 @@ def test_two_client_evidence_requires_both_sites_aggregation_and_persistence(tmp
     assert result["aggregated_results"] == 2
     assert result["persisted"] is True
     assert {site["site_name"] for site in result["sites"]} == {"site-1", "site-2"}
+    assert all(len(site["ranks"]) == 4 for site in result["sites"])
 
 
 def test_two_client_evidence_fails_when_one_client_round_is_missing(tmp_path):
@@ -102,6 +103,22 @@ def test_two_client_evidence_fails_when_server_did_not_aggregate_both_results(tm
     (run_root / "server" / "simulate_job" / "log.txt").write_text("INFO - Aggregated 1/2 results\n")
 
     with pytest.raises(RuntimeError, match="Aggregated 2/2 results"):
+        validate_simulation_evidence(
+            run_root,
+            site_names=["site-1", "site-2"],
+            run_mode="train",
+            nproc_per_client=4,
+        )
+
+
+def test_two_client_evidence_requires_positive_gpu_memory_on_every_rank(tmp_path):
+    run_root = _write_valid_workspace(tmp_path)
+    site_log = run_root / "site-2" / "simulate_job" / "log.txt"
+    record = _round_record("site-2", 4.8)
+    record["ranks"][3]["peak_gpu_allocated_bytes"] = 0
+    site_log.write_text(f"INFO - {json.dumps(record, sort_keys=True)}\n")
+
+    with pytest.raises(RuntimeError, match="rank 3 has invalid peak_gpu_allocated_bytes=0"):
         validate_simulation_evidence(
             run_root,
             site_names=["site-1", "site-2"],
