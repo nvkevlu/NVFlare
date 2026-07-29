@@ -57,7 +57,7 @@ git -C "$REPO_ROOT" fetch "$BUNDLE" refs/heads/codex/llm-fl-real-14b
 git -C "$REPO_ROOT" merge --ff-only FETCH_HEAD
 
 test "$(cat "$REPO_ROOT/research/llm_fl_stress/real_training/QUALIFICATION_RELEASE")" \
-  = "2026-07-28-trainable-32b-v5"
+  = "2026-07-29-trainable-32b-v6"
 test -z "$(git -C "$REPO_ROOT" status --porcelain --untracked-files=all)"
 git -C "$REPO_ROOT" log -3 --oneline
 ```
@@ -156,7 +156,7 @@ export REPO_ROOT="$PROJECT_ROOT/repos/NVFlare"
 cd "$REPO_ROOT"
 
 test "$(cat research/llm_fl_stress/real_training/QUALIFICATION_RELEASE)" \
-  = "2026-07-28-trainable-32b-v5"
+  = "2026-07-29-trainable-32b-v6"
 test -z "$(git status --porcelain --untracked-files=all)"
 
 JOB_ID=$(sbatch --parsable \

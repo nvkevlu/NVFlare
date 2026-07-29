@@ -15,8 +15,14 @@
 
 set -Eeuo pipefail
 
-SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="${PROJECT_ROOT:-/lustre/fs11/portfolios/coreai/projects/coreai_edgeai_flresearch/users/kevlu/nvflare-14b}"
+REPO_ROOT="${REPO_ROOT:-${PROJECT_ROOT}/repos/NVFlare}"
+QUALIFICATION_SCRIPT="${REPO_ROOT}/research/llm_fl_stress/real_training/cs_oci_ord/two_client_14b.slurm"
+
+if [[ ! -f "${QUALIFICATION_SCRIPT}" ]]; then
+    echo "Qualification launcher does not exist: ${QUALIFICATION_SCRIPT}" >&2
+    exit 1
+fi
 
 export QUALIFICATION_PROFILE=trainable-32b
 export EXPECTED_TARGET_LABEL=Qwen2.5-32B
@@ -31,4 +37,4 @@ export EXPECTED_TARGET_PAYLOAD_BYTES=975210496
 export TARGET_READY_TIMEOUT=1800
 export TARGET_STALL_TIMEOUT=900
 
-exec bash "${SCRIPT_DIR}/two_client_14b.slurm"
+exec bash "${QUALIFICATION_SCRIPT}"

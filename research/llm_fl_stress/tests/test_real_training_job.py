@@ -110,6 +110,15 @@ def test_trainable_recipe_uses_sparse_server_model_and_distinct_site_data():
     assert recipe.aggregation_weights == {"site-1": 1.0, "site-2": 1.0}
 
 
+@pytest.mark.parametrize("name", ["two_client_14b_trainable.slurm", "two_client_32b_trainable.slurm"])
+def test_slurm_wrappers_resolve_launcher_from_repo_not_spooled_script(name):
+    wrapper = (Path(__file__).resolve().parents[1] / "real_training" / "cs_oci_ord" / name).read_text()
+
+    assert "BASH_SOURCE" not in wrapper
+    assert 'QUALIFICATION_SCRIPT="${REPO_ROOT}/research/llm_fl_stress/real_training/' in wrapper
+    assert 'exec bash "${QUALIFICATION_SCRIPT}"' in wrapper
+
+
 def test_exported_launcher_uses_packaged_relative_client_path(tmp_path):
     pytest.importorskip("torch")
     pytest.importorskip("nvflare")
