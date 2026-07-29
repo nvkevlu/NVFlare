@@ -50,7 +50,33 @@ When using Client API, NVFlare launches your script as a subprocess and waits fo
 - Heavy library imports (PyTorch, TensorFlow, transformers)
 - Slow disk I/O reading model weights
 
-**Solution**: Increase ``external_pre_init_timeout`` in the executor configuration:
+**Solution**: Call ``flare.init()`` as soon as the distributed rank is known and
+before model, tokenizer, dataset, or checkpoint loading. Increasing the timeout is
+defense in depth, not a substitute for this ordering:
+
+.. code-block:: python
+
+   import os
+   import nvflare.client as flare
+
+   rank = int(os.environ.get("RANK", "0"))
+   flare.init(rank=rank)
+
+   # Heavy initialization begins only after the Client API session exists.
+   model = load_model()
+   tokenizer = load_tokenizer()
+
+For a recipe-generated job, also make the pre-init budget explicit:
+
+.. code-block:: python
+
+   from nvflare.client.constants import EXTERNAL_PRE_INIT_TIMEOUT
+
+   recipe.add_client_config({
+       EXTERNAL_PRE_INIT_TIMEOUT: 600,
+   })
+
+For a directly configured executor, set the same budget in its constructor:
 
 .. code-block:: python
 
@@ -328,6 +354,80 @@ Server-side safety flags guidance (see :ref:`server_startup_dead_job_safety_flag
 Recommended Settings by Scenario
 ================================
 
+Client API Large-Model Checklist
+--------------------------------
+
+Use this checklist for subprocess-mode PyTorch jobs that load or exchange large
+models. The timeout values are an example envelope; choose one operation budget
+that exceeds the slowest measured load or transfer, then keep dependent settings
+coordinated.
+
+**Required lifecycle order**:
+
+1. Establish the distributed rank/process group.
+2. Call ``flare.init(rank=rank)`` on every rank before heavyweight initialization.
+3. Load the model, tokenizer, datasets, and checkpoints; then apply FSDP/DDP sharding.
+4. Only rank zero calls ``flare.receive()`` and ``flare.send()``; all ranks participate
+   in the framework collectives.
+
+**Coordinated recipe configuration**:
+
+.. code-block:: python
+
+   from nvflare.client.config import ConfigKey
+   from nvflare.client.constants import EXTERNAL_PRE_INIT_TIMEOUT, PEER_READ_TIMEOUT
+   from nvflare.fuel.f3.streaming.transfer_progress import (
+       STREAMING_IDLE_TIMEOUT,
+       STREAMING_MAX_PEER_SILENCE,
+   )
+
+   operation_timeout = 1800
+
+   recipe.add_client_config({
+       EXTERNAL_PRE_INIT_TIMEOUT: operation_timeout,
+       PEER_READ_TIMEOUT: operation_timeout,
+       ConfigKey.HEARTBEAT_TIMEOUT: operation_timeout,
+       ConfigKey.SUBMIT_RESULT_TIMEOUT: operation_timeout,
+       ConfigKey.DOWNLOAD_COMPLETE_TIMEOUT: operation_timeout,
+       ConfigKey.MAX_RESENDS: 3,
+       STREAMING_IDLE_TIMEOUT: operation_timeout,
+       STREAMING_MAX_PEER_SILENCE: operation_timeout * 1.5,
+       "get_task_timeout": operation_timeout,
+       "submit_task_result_timeout": operation_timeout,
+       "max_runner_sync_timeout": operation_timeout,
+       "runner_sync_timeout": 5.0,
+       "tensor_streaming_per_request_timeout": operation_timeout,
+       "tensor_min_download_timeout": operation_timeout,
+   })
+
+   recipe.add_server_config({
+       "strict_start_job_reply_check": True,
+       "sync_client_jobs_require_previous_report": True,
+       STREAMING_IDLE_TIMEOUT: operation_timeout,
+       STREAMING_MAX_PEER_SILENCE: operation_timeout * 1.5,
+       "tensor_streaming_per_request_timeout": operation_timeout,
+       "tensor_min_download_timeout": operation_timeout,
+   })
+
+Keep ``max_resends`` finite. Set ``submit_task_result_timeout`` greater than or
+equal to ``submit_result_timeout``, and keep ``tensor_min_download_timeout``
+greater than or equal to ``tensor_streaming_per_request_timeout``.
+
+The ``tensor_`` prefix is required for PyTorch ``TensorDecomposer`` transfers.
+The generic ``streaming_per_request_timeout`` key does not replace
+``tensor_streaming_per_request_timeout``.
+
+Before allocating accelerators, export the job on a CPU node and verify both
+client configurations and the server configuration. Also inspect the packaged
+training source—not only the source checkout—to confirm that ``flare.init()``
+still precedes heavyweight initialization. A large-model run should fail
+preflight if any required site, timeout, dataset, or lifecycle check is missing.
+
+These are operation and inactivity budgets, not a recommendation to add an
+application-level total-runtime deadline. Use a separate progress-aware watchdog
+only if it resets on real transfer, training, aggregation, and persistence
+progress.
+
 Standard Training
 -----------------
 
@@ -348,7 +448,8 @@ Large Model Training (100M+ parameters)
        "submit_task_result_timeout": 600,
        "submit_result_timeout": 600,        # subprocess mode only
        "download_complete_timeout": 1800,   # subprocess mode only
-       "tensor_min_download_timeout": 300,  # subprocess mode only; use np_min_download_timeout for NumPy
+       "tensor_streaming_per_request_timeout": 600,  # PyTorch subprocess mode
+       "tensor_min_download_timeout": 600,  # use np_min_download_timeout for NumPy
        "PEER_READ_TIMEOUT": 600,            # subprocess mode only
        "max_resends": 3,                    # subprocess mode only; finite default
    })
@@ -364,9 +465,10 @@ LLM/Foundation Model Training
        "submit_task_result_timeout": 1800,  # server-side; must be >= submit_result_timeout
        "submit_result_timeout": 1800,       # subprocess mode only
        "download_complete_timeout": 1800,   # subprocess mode only
+       "tensor_streaming_per_request_timeout": 600,  # PyTorch
        "tensor_min_download_timeout": 600,  # PyTorch; use np_min_download_timeout for NumPy
        "PEER_READ_TIMEOUT": 600,            # subprocess mode only
-       "max_resends": 5,                    # subprocess mode only
+       "max_resends": 3,                    # keep finite; increase only after measured transient failures
    })
 
 
