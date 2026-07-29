@@ -52,12 +52,12 @@ export REPO_ROOT="$PROJECT_ROOT/repos/NVFlare"
 export BUNDLE="$PROJECT_ROOT/incoming/nvflare-32b-success.bundle"
 
 sha256sum --check "$BUNDLE.sha256"
-git bundle verify "$BUNDLE"
+git -C "$REPO_ROOT" bundle verify "$BUNDLE"
 git -C "$REPO_ROOT" fetch "$BUNDLE" refs/heads/codex/llm-fl-real-14b
 git -C "$REPO_ROOT" merge --ff-only FETCH_HEAD
 
 test "$(cat "$REPO_ROOT/research/llm_fl_stress/real_training/QUALIFICATION_RELEASE")" \
-  = "2026-07-29-trainable-32b-v6"
+  = "2026-07-29-trainable-32b-v7"
 test -z "$(git -C "$REPO_ROOT" status --porcelain --untracked-files=all)"
 git -C "$REPO_ROOT" log -3 --oneline
 ```
@@ -144,6 +144,8 @@ Required result:
 - model identity is Qwen2 BF16 with hidden size 5120, 64 layers, and exactly 17 weight shards;
 - sparse server payload is exactly `975210496`;
 - job export reports two clients, one round, two local steps, four ranks per client, and trainable state scope; and
+- each site package contains `custom/data/site-N.jsonl`, while its generated launcher passes
+  `--dataset-file data/site-N.jsonl`; and
 - the manifest records the reviewed Git commit.
 
 Do not submit the GPU job if any preflight condition is missing.
@@ -156,7 +158,7 @@ export REPO_ROOT="$PROJECT_ROOT/repos/NVFlare"
 cd "$REPO_ROOT"
 
 test "$(cat research/llm_fl_stress/real_training/QUALIFICATION_RELEASE)" \
-  = "2026-07-29-trainable-32b-v6"
+  = "2026-07-29-trainable-32b-v7"
 test -z "$(git status --porcelain --untracked-files=all)"
 
 JOB_ID=$(sbatch --parsable \

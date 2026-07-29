@@ -155,7 +155,7 @@ def _build_recipe(args: argparse.Namespace):
             site_name: {
                 "train_args": _client_args(
                     args,
-                    dataset_file=dataset_path.name,
+                    dataset_file=f"data/{dataset_path.name}",
                     dataset_sha256=file_sha256(dataset_path),
                 )
             }

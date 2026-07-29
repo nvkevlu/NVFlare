@@ -23,7 +23,7 @@ TARGET_MODEL_PATH="${TARGET_MODEL_PATH:-${PROJECT_ROOT}/models/Qwen2.5-14B-97e1e
 TARGET_MODEL_REVISION="${TARGET_MODEL_REVISION:-97e1e76335b7017d8f67c08a19d103c0504298c9}"
 REQUIRED_BASE_COMMIT="1be715ed5bc97c83a6771b486c40b75f0b97e4fd"
 EXPECTED_BRANCH="codex/llm-fl-real-14b"
-REQUIRED_RELEASE="2026-07-29-trainable-32b-v6"
+REQUIRED_RELEASE="2026-07-29-trainable-32b-v7"
 RELEASE_FILE="${REPO_ROOT}/research/llm_fl_stress/real_training/QUALIFICATION_RELEASE"
 PRIVATE_ROOT="/tmp/nvflare-control-plane-${SLURM_JOB_ID}"
 ARTIFACT_ROOT="${PROJECT_ROOT}/artifacts/control-plane-${SLURM_JOB_ID}"
@@ -94,10 +94,12 @@ srun --kill-on-bad-exit=1 \
           --state-scope trainable \
           --export-only \
           > '${ARTIFACT_ROOT}/trainable-export-validation.json'
-        test \"\$(find '${EXPORT_ROOT}/job' -name site-1.jsonl -type f | wc -l)\" -eq 1
-        test \"\$(find '${EXPORT_ROOT}/job' -name site-2.jsonl -type f | wc -l)\" -eq 1
-        grep -R -q -- '--dataset-file site-1.jsonl' '${EXPORT_ROOT}/job'
-        grep -R -q -- '--dataset-file site-2.jsonl' '${EXPORT_ROOT}/job'
+        test -s '${EXPORT_ROOT}/job/llm_fsdp2_real_training/app_site-1/custom/data/site-1.jsonl'
+        test -s '${EXPORT_ROOT}/job/llm_fsdp2_real_training/app_site-2/custom/data/site-2.jsonl'
+        grep -q -- '--dataset-file data/site-1.jsonl' \
+          '${EXPORT_ROOT}/job/llm_fsdp2_real_training/app_site-1/config/config_fed_client.json'
+        grep -q -- '--dataset-file data/site-2.jsonl' \
+          '${EXPORT_ROOT}/job/llm_fsdp2_real_training/app_site-2/config/config_fed_client.json'
         python research/llm_fl_stress/real_training/qualification.py \
           --gate-model-path '${GATE_MODEL_PATH}' \
           --gate-model-revision '${GATE_MODEL_REVISION}' \

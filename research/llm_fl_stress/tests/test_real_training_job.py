@@ -104,8 +104,8 @@ def test_trainable_recipe_uses_sparse_server_model_and_distinct_site_data():
 
     assert recipe.model["path"] == "model.HFTrainableStateModel"
     assert set(recipe.per_site_config) == {"site-1", "site-2"}
-    assert "--dataset-file site-1.jsonl" in recipe.per_site_config["site-1"]["train_args"]
-    assert "--dataset-file site-2.jsonl" in recipe.per_site_config["site-2"]["train_args"]
+    assert "--dataset-file data/site-1.jsonl" in recipe.per_site_config["site-1"]["train_args"]
+    assert "--dataset-file data/site-2.jsonl" in recipe.per_site_config["site-2"]["train_args"]
     assert recipe.per_site_config["site-1"]["train_args"] != recipe.per_site_config["site-2"]["train_args"]
     assert recipe.aggregation_weights == {"site-1": 1.0, "site-2": 1.0}
 
@@ -133,3 +133,43 @@ def test_exported_launcher_uses_packaged_relative_client_path(tmp_path):
     script = launcher["args"]["script"]
     assert "custom/research/llm_fl_stress/real_training/client.py" in script
     assert "custom//" not in script
+
+
+def test_exported_trainable_datasets_resolve_from_client_runtime(tmp_path, monkeypatch):
+    pytest.importorskip("torch")
+    pytest.importorskip("nvflare")
+    from research.llm_fl_stress.real_training import client
+    from research.llm_fl_stress.real_training.job import DATA_FILES
+
+    args = _args(
+        model_name_or_path=Path("/models/Qwen2.5-1.5B"),
+        model_revision="abc123",
+        num_clients=2,
+        state_scope="trainable",
+    )
+    recipe = _build_recipe(args)
+    recipe.export(str(tmp_path))
+    job_root = tmp_path / "llm_fsdp2_real_training"
+
+    for site_name, source_dataset in DATA_FILES.items():
+        app_root = job_root / f"app_{site_name}"
+        packaged_dataset = app_root / "custom" / "data" / source_dataset.name
+        exported_client = app_root / "custom" / "research" / "llm_fl_stress" / "real_training" / "client.py"
+        config_path = app_root / "config" / "config_fed_client.json"
+        config = json.loads(config_path.read_text())
+        launcher = next(component for component in config["components"] if component["id"] == "launcher")
+        dataset_arg = f"data/{source_dataset.name}"
+
+        assert packaged_dataset.read_bytes() == source_dataset.read_bytes()
+        assert f"--dataset-file {dataset_arg}" in launcher["args"]["script"]
+
+        monkeypatch.setattr(client, "__file__", str(exported_client))
+        records, observed_sha256 = client._resolve_dataset(
+            Namespace(
+                dataset_file=dataset_arg,
+                dataset_sha256=client.file_sha256(source_dataset),
+            )
+        )
+
+        assert records
+        assert observed_sha256 == client.file_sha256(source_dataset)
