@@ -18,6 +18,7 @@ from pathlib import Path
 
 import pytest
 
+from research.llm_fl_stress.real_training.exported_job_preflight import validate_exported_job
 from research.llm_fl_stress.real_training.job import (
     _build_recipe,
     _client_args,
@@ -150,6 +151,22 @@ def test_exported_trainable_datasets_resolve_from_client_runtime(tmp_path, monke
     recipe = _build_recipe(args)
     recipe.export(str(tmp_path))
     job_root = tmp_path / "llm_fsdp2_real_training"
+    expected_client_config = {
+        "EXTERNAL_PRE_INIT_TIMEOUT": args.timeout_seconds,
+        "PEER_READ_TIMEOUT": args.timeout_seconds,
+        "HEARTBEAT_TIMEOUT": args.timeout_seconds,
+        "submit_result_timeout": args.timeout_seconds,
+        "download_complete_timeout": args.timeout_seconds,
+        "max_resends": 3,
+        "streaming_idle_timeout": args.timeout_seconds,
+        "streaming_max_peer_silence": args.timeout_seconds * 1.5,
+        "get_task_timeout": args.timeout_seconds,
+        "max_runner_sync_timeout": args.timeout_seconds,
+        "runner_sync_timeout": 5.0,
+        "submit_task_result_timeout": args.timeout_seconds,
+        "tensor_streaming_per_request_timeout": args.timeout_seconds,
+        "tensor_min_download_timeout": args.timeout_seconds,
+    }
 
     for site_name, source_dataset in DATA_FILES.items():
         app_root = job_root / f"app_{site_name}"
@@ -160,6 +177,8 @@ def test_exported_trainable_datasets_resolve_from_client_runtime(tmp_path, monke
         launcher = next(component for component in config["components"] if component["id"] == "launcher")
         dataset_arg = f"data/{source_dataset.name}"
 
+        for key, value in expected_client_config.items():
+            assert config[key] == value
         assert packaged_dataset.read_bytes() == source_dataset.read_bytes()
         assert f"--dataset-file {dataset_arg}" in launcher["args"]["script"]
 
@@ -173,3 +192,24 @@ def test_exported_trainable_datasets_resolve_from_client_runtime(tmp_path, monke
 
         assert records
         assert observed_sha256 == client.file_sha256(source_dataset)
+
+    server_config_path = job_root / "app_server" / "config" / "config_fed_server.json"
+    server_config = json.loads(server_config_path.read_text())
+    assert server_config["strict_start_job_reply_check"] is True
+    assert server_config["sync_client_jobs_require_previous_report"] is True
+    assert server_config["streaming_idle_timeout"] == args.timeout_seconds
+    assert server_config["streaming_max_peer_silence"] == args.timeout_seconds * 1.5
+    assert server_config["tensor_streaming_per_request_timeout"] == args.timeout_seconds
+    assert server_config["tensor_min_download_timeout"] == args.timeout_seconds
+
+    preflight = validate_exported_job(job_root, args.timeout_seconds)
+    assert preflight["status"] == "PASS"
+    assert preflight["clients"] == ["site-1", "site-2"]
+    assert preflight["early_flare_init"] is True
+
+    site_2_config_path = job_root / "app_site-2" / "config" / "config_fed_client.json"
+    site_2_config = json.loads(site_2_config_path.read_text())
+    del site_2_config["download_complete_timeout"]
+    site_2_config_path.write_text(json.dumps(site_2_config))
+    with pytest.raises(RuntimeError, match="download_complete_timeout"):
+        validate_exported_job(job_root, args.timeout_seconds)

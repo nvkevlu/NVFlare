@@ -472,6 +472,16 @@ def test_persisted_model_watcher_captures_expected_round_count_and_inspection(tm
     assert (tmp_path / "persistence" / "persisted_model-1.json").is_file()
 
 
+def test_persisted_model_watcher_validates_model_file_timeout(tmp_path):
+    with pytest.raises(ValueError, match="model_file_timeout must be greater than zero"):
+        PersistedModelWatcher(
+            SimpleNamespace(),
+            "job-123",
+            tmp_path / "persistence",
+            model_file_timeout=0,
+        )
+
+
 def test_service_log_redaction_removes_transient_auth_values():
     redacted = _redact_log_text("Sent token: abc-123. Token: def-456 SSID:ghi-789\n")
 

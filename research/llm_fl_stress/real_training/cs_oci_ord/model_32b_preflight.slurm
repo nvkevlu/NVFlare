@@ -20,7 +20,7 @@ REPO_ROOT="${REPO_ROOT:-${PROJECT_ROOT}/repos/NVFlare}"
 VENV_DIR="${VENV_DIR:-${PROJECT_ROOT}/envs/nvflare-fsdp2}"
 MODEL_PATH="${MODEL_PATH:-${PROJECT_ROOT}/models/Qwen2.5-32B-1818d35814b8}"
 MODEL_REVISION=1818d35814b8319459f4bd55ed1ac8709630f003
-REQUIRED_RELEASE=2026-07-29-trainable-32b-v7
+REQUIRED_RELEASE=2026-07-29-trainable-32b-v9
 REQUIRED_BASE_COMMIT=1be715ed5bc97c83a6771b486c40b75f0b97e4fd
 EXPECTED_BRANCH=codex/llm-fl-real-14b
 RELEASE_FILE="${REPO_ROOT}/research/llm_fl_stress/real_training/QUALIFICATION_RELEASE"
@@ -93,10 +93,10 @@ srun --kill-on-bad-exit=1 \
           > '${ARTIFACT_ROOT}/job-export.json'
         test -s '${EXPORT_ROOT}/job/llm_fsdp2_real_training/app_site-1/custom/data/site-1.jsonl'
         test -s '${EXPORT_ROOT}/job/llm_fsdp2_real_training/app_site-2/custom/data/site-2.jsonl'
-        grep -q -- '--dataset-file data/site-1.jsonl' \
-          '${EXPORT_ROOT}/job/llm_fsdp2_real_training/app_site-1/config/config_fed_client.json'
-        grep -q -- '--dataset-file data/site-2.jsonl' \
-          '${EXPORT_ROOT}/job/llm_fsdp2_real_training/app_site-2/config/config_fed_client.json'
+        python research/llm_fl_stress/real_training/exported_job_preflight.py \
+          --job-root '${EXPORT_ROOT}/job/llm_fsdp2_real_training' \
+          --timeout-seconds 2400 \
+          > '${ARTIFACT_ROOT}/exported-job-preflight.json'
         grep -R -q -- '--state-scope trainable' '${EXPORT_ROOT}/job'
         grep -R -q -- '--timeout-seconds 2400' '${EXPORT_ROOT}/job'
     "

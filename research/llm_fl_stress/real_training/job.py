@@ -133,7 +133,9 @@ def _client_args(
 
 def _build_recipe(args: argparse.Namespace):
     from nvflare.app_opt.pt.recipes.fedavg import FedAvgRecipe
-    from nvflare.client.config import ExchangeFormat, TransferType
+    from nvflare.client.config import ConfigKey, ExchangeFormat, TransferType
+    from nvflare.client.constants import EXTERNAL_PRE_INIT_TIMEOUT, PEER_READ_TIMEOUT
+    from nvflare.fuel.f3.streaming.transfer_progress import STREAMING_IDLE_TIMEOUT, STREAMING_MAX_PEER_SILENCE
 
     trainable_scope = getattr(args, "state_scope", "full") == "trainable"
     if trainable_scope and args.num_clients != 2:
@@ -191,16 +193,29 @@ def _build_recipe(args: argparse.Namespace):
             recipe.add_client_file(str(dataset_path), clients=[site_name])
     recipe.add_client_config(
         {
+            EXTERNAL_PRE_INIT_TIMEOUT: args.timeout_seconds,
+            PEER_READ_TIMEOUT: args.timeout_seconds,
+            ConfigKey.HEARTBEAT_TIMEOUT: args.timeout_seconds,
+            ConfigKey.SUBMIT_RESULT_TIMEOUT: args.timeout_seconds,
+            ConfigKey.DOWNLOAD_COMPLETE_TIMEOUT: args.timeout_seconds,
+            ConfigKey.MAX_RESENDS: 3,
+            STREAMING_IDLE_TIMEOUT: args.timeout_seconds,
+            STREAMING_MAX_PEER_SILENCE: args.timeout_seconds * 1.5,
             "get_task_timeout": args.timeout_seconds,
             "max_runner_sync_timeout": args.timeout_seconds,
             "runner_sync_timeout": 5.0,
             "submit_task_result_timeout": args.timeout_seconds,
+            "tensor_streaming_per_request_timeout": args.timeout_seconds,
             "tensor_min_download_timeout": args.timeout_seconds,
         }
     )
     recipe.add_server_config(
         {
-            "streaming_per_request_timeout": args.timeout_seconds,
+            "strict_start_job_reply_check": True,
+            "sync_client_jobs_require_previous_report": True,
+            STREAMING_IDLE_TIMEOUT: args.timeout_seconds,
+            STREAMING_MAX_PEER_SILENCE: args.timeout_seconds * 1.5,
+            "tensor_streaming_per_request_timeout": args.timeout_seconds,
             "tensor_min_download_timeout": args.timeout_seconds,
         }
     )

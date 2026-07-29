@@ -156,6 +156,31 @@ def test_training_text_is_stable_and_distinguishes_two_clients():
     assert _training_text("site-1", 0) != _training_text("site-1", 1)
 
 
+def test_flare_session_initializes_before_heavy_model_loading(monkeypatch):
+    from research.llm_fl_stress.real_training import client
+
+    events = []
+    args = Namespace(timeout_seconds=2400)
+    monkeypatch.setattr(
+        client,
+        "_setup_distributed",
+        lambda _timeout: (0, 4, 0, torch.device("cpu")),
+    )
+    monkeypatch.setattr(client.flare, "init", lambda *, rank: events.append(("flare.init", rank)))
+
+    def fail_after_recording(_args):
+        events.append(("load_model", None))
+        raise RuntimeError("stop after startup-order observation")
+
+    monkeypatch.setattr(client, "_load_model_and_tokenizer", fail_after_recording)
+    monkeypatch.setattr(client.dist, "is_initialized", lambda: False)
+
+    with pytest.raises(RuntimeError, match="startup-order observation"):
+        client._run(args)
+
+    assert events == [("flare.init", 0), ("load_model", None)]
+
+
 def test_sigterm_handler_uses_failure_exit_code(monkeypatch, tmp_path):
     from research.llm_fl_stress.real_training import client
 

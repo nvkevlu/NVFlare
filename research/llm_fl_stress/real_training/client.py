@@ -432,6 +432,9 @@ def _free_round_memory(device: torch.device) -> None:
 def _run(args: argparse.Namespace) -> None:
     rank, world_size, local_rank, device = _setup_distributed(args.timeout_seconds)
     try:
+        # Establish the NVFLARE session before heavyweight model loading and
+        # FSDP2 sharding. Model readiness is reported separately below.
+        flare.init(rank=rank)
         model, tokenizer = _load_model_and_tokenizer(args)
         dataset_records, dataset_sha256 = _resolve_dataset(args)
         _select_trainable_parameters(model, args.trainable_target)
@@ -442,7 +445,6 @@ def _run(args: argparse.Namespace) -> None:
         if not trainable:
             raise RuntimeError("FSDP2 sharding left no trainable parameters")
         bridge = FSDP2StateBridge(model, exchange_prefix="model.")
-        flare.init(rank=rank)
         site_name = _broadcast_rank_zero(flare.get_site_name() if rank == 0 else None, rank)
         if not isinstance(site_name, str) or not site_name:
             raise RuntimeError(f"rank zero did not provide a valid site name: {site_name!r}")

@@ -49,6 +49,27 @@ def test_32b_profile_is_bounded_real_training_not_full_state():
     }
 
 
+def test_32b_profile_rejects_short_ready_or_stall_watchdogs():
+    qualification._validate_profile_timeouts(
+        "trainable-32b",
+        target_ready_timeout=1800.0,
+        target_stall_timeout=900.0,
+    )
+
+    with pytest.raises(ValueError, match="target_ready_timeout must be at least 1800.0s"):
+        qualification._validate_profile_timeouts(
+            "trainable-32b",
+            target_ready_timeout=300.0,
+            target_stall_timeout=900.0,
+        )
+    with pytest.raises(ValueError, match="target_stall_timeout must be at least 900.0s"):
+        qualification._validate_profile_timeouts(
+            "trainable-32b",
+            target_ready_timeout=1800.0,
+            target_stall_timeout=300.0,
+        )
+
+
 def test_target_identity_requires_pinned_architecture_and_weight_size(tmp_path):
     model_path = tmp_path / "Qwen2.5-32B"
     model_path.mkdir()

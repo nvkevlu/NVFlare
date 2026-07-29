@@ -27,19 +27,59 @@ artifact is green.
 There is no application-level total-runtime deadline. In particular, the obsolete 720-second watchdog is not
 present.
 
-The remaining controls have distinct purposes:
+The implementation and this runbook were audited against:
 
-- production services must register normally;
-- the 32B clients have up to 1,800 seconds to load and report ready;
-- only after both clients are ready, 900 seconds with no meaningful transfer, training, result, aggregation, or
-  persistence progress is considered a stall;
-- explicit runner, CUDA, NCCL, FSDP2, or service errors abort immediately; and
-- Slurm's two-hour request is only the allocation ceiling and signals the wrapper five minutes before expiry so it can
-  retain failure evidence.
+- `docs/user_guide/timeout_troubleshooting.rst`;
+- `docs/programming_guide/timeouts.rst`;
+- `docs/programming_guide/tensor_downloader.rst`;
+- `docs/design/progress_aware_streaming.md`;
+- `docs/programming_guide/execution_api_type/3rd_party_integration.rst`;
+- `nvflare/app_common/executors/client_api_launcher_executor.py`;
+- `nvflare/app_common/executors/launcher_executor.py`; and
+- `nvflare/fuel/utils/fobs/decomposers/via_downloader.py`.
+
+The complete active timeout envelope is:
+
+| Boundary | Value | What it governs |
+| --- | ---: | --- |
+| Slurm allocation | 2 hours | Hard allocation ceiling, not an expected duration |
+| Slurm TERM notice | 300 seconds before ceiling | Evidence-preserving cleanup opportunity |
+| Production service registration | 90 seconds | Local TLS server and both local clients before any training job |
+| Framework start-job RPC | 20 seconds | Starts the small packaged app on each already-connected local client; model weights are not transferred in this RPC |
+| 1.5B client-ready gate | 300 seconds | Small-model loading and FSDP2 sharding |
+| 32B client-ready gate | 1,800 seconds | Large-model loading and FSDP2 sharding |
+| Post-ready progress stall | 300 seconds for 1.5B; 900 seconds for 32B | No meaningful progress only; resets on transfer, round, aggregation, or persistence progress |
+| External pre-init | 2,400 seconds | Defense in depth; `flare.init()` now runs before heavyweight model loading |
+| Parent peer read and heartbeat | 2,400 seconds | Client-job/subprocess liveness |
+| Task receive, runner sync, result submission | 2,400 seconds | Client/server task exchange |
+| Subprocess result ACK and download completion | 2,400 seconds | Keeps the result producer alive through server download |
+| PyTorch tensor per-request, minimum download, and generic streaming idle | 2,400 seconds | Large tensor transfer inactivity, using the required `tensor_`-prefixed keys |
+| Streaming maximum peer silence | 3,600 seconds | Derived 1.5× compatibility ceiling |
+| Low-level F3 stream read | 300 seconds | System-level zero-byte-progress cutoff for an individual loopback byte stream; normal chunk progress keeps it alive |
+| CoreCell request ceiling | 3,600 seconds | Framework communication ceiling, above the configured 2,400-second tensor request budget |
+| Result resends | 3 | Finite retry count; never unbounded |
+| Persisted-model evidence capture | 2,400 seconds | Post-success file appearance and inspection |
+| FedAvg task workflow | no total task timeout | No application-selected total training deadline |
+| External launcher last-result grace | 300 seconds | Applies only after the subprocess has already exited; it is not a healthy-run deadline |
+| Recipe shutdown | 60 seconds | Cleanup after job completion or failure |
+
+The client and server both use `tensor_streaming_per_request_timeout`; the generic
+`streaming_per_request_timeout` does not configure PyTorch `TensorDecomposer` transfers and is rejected by preflight.
+The server also enables `strict_start_job_reply_check` and
+`sync_client_jobs_require_previous_report`, so a missing client cannot be silently excluded.
+The fixed 20-second framework start-job RPC is fail-closed under that setting; the CPU control-plane qualification
+starts two consecutive two-client jobs through this exact path before GPU submission.
+The low-level F3 300-second read setting is deliberately retained: all services are on one host, transfers use
+2 MiB chunks, and that setting measures an individual byte stream making no progress rather than model load,
+training, or total transfer duration.
 
 Progress events reset the inactivity clock. A healthy run is not aborted merely because total elapsed time crosses
 an application-selected number. The job releases the allocation immediately after success; requesting two hours does
 not force it to occupy the node for two hours.
+
+The earlier exactly-300-second failure was the documented external pre-initialization failure mode: the training
+process loaded and sharded the model before calling `flare.init()`. That ordering is now reversed, and the exported-job
+preflight parses the packaged client source to reject any regression.
 
 ## 1. Install the reviewed source bundle
 
@@ -49,15 +89,16 @@ in the main runbook. On the cluster:
 ```bash
 export PROJECT_ROOT=/lustre/fs11/portfolios/coreai/projects/coreai_edgeai_flresearch/users/kevlu/nvflare-14b
 export REPO_ROOT="$PROJECT_ROOT/repos/NVFlare"
-export BUNDLE="$PROJECT_ROOT/incoming/nvflare-32b-success.bundle"
+export BUNDLE="$PROJECT_ROOT/incoming/nvflare-32b-success-v9.bundle"
 
-sha256sum --check "$BUNDLE.sha256"
+cd "$(dirname "$BUNDLE")"
+sha256sum --check "$(basename "$BUNDLE").sha256"
 git -C "$REPO_ROOT" bundle verify "$BUNDLE"
 git -C "$REPO_ROOT" fetch "$BUNDLE" refs/heads/codex/llm-fl-real-14b
 git -C "$REPO_ROOT" merge --ff-only FETCH_HEAD
 
 test "$(cat "$REPO_ROOT/research/llm_fl_stress/real_training/QUALIFICATION_RELEASE")" \
-  = "2026-07-29-trainable-32b-v7"
+  = "2026-07-29-trainable-32b-v9"
 test -z "$(git -C "$REPO_ROOT" status --porcelain --untracked-files=all)"
 git -C "$REPO_ROOT" log -3 --oneline
 ```
@@ -134,6 +175,7 @@ PREFLIGHT_ARTIFACT="$PROJECT_ROOT/artifacts/32b-preflight-$PREFLIGHT_JOB_ID"
 cat "$PREFLIGHT_ARTIFACT/dependency-check.json"
 cat "$PREFLIGHT_ARTIFACT/trainable-server-preflight.json"
 cat "$PREFLIGHT_ARTIFACT/job-export.json"
+cat "$PREFLIGHT_ARTIFACT/exported-job-preflight.json"
 cat "$PREFLIGHT_ARTIFACT/manifest.txt"
 ```
 
@@ -146,6 +188,9 @@ Required result:
 - job export reports two clients, one round, two local steps, four ranks per client, and trainable state scope; and
 - each site package contains `custom/data/site-N.jsonl`, while its generated launcher passes
   `--dataset-file data/site-N.jsonl`; and
+- the exported-job preflight reports `PASS` after checking both client configs, the server config, finite resends,
+  every documented 2,400-second transfer/lifecycle setting, strict two-client startup, both packaged datasets, and
+  early `flare.init()` ordering; and
 - the manifest records the reviewed Git commit.
 
 Do not submit the GPU job if any preflight condition is missing.
@@ -158,7 +203,7 @@ export REPO_ROOT="$PROJECT_ROOT/repos/NVFlare"
 cd "$REPO_ROOT"
 
 test "$(cat research/llm_fl_stress/real_training/QUALIFICATION_RELEASE)" \
-  = "2026-07-29-trainable-32b-v7"
+  = "2026-07-29-trainable-32b-v9"
 test -z "$(git status --porcelain --untracked-files=all)"
 
 JOB_ID=$(sbatch --parsable \

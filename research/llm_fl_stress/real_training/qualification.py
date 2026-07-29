@@ -49,6 +49,10 @@ from state_evidence import file_sha256, inspect_persisted_checkpoint  # noqa: E4
 
 _PROFILES = ("full-state", "trainable-multiround", "trainable-32b")
 _TRAINABLE_PAYLOAD_CEILING_BYTES = 1024 * 1024 * 1024
+_CLIENT_OPERATION_TIMEOUT_SECONDS = 2400
+_PERSISTENCE_TIMEOUT_SECONDS = 2400.0
+_MIN_32B_READY_TIMEOUT_SECONDS = 1800.0
+_MIN_32B_STALL_TIMEOUT_SECONDS = 900.0
 
 
 def _profile_settings(profile: str) -> dict[str, Any]:
@@ -77,6 +81,28 @@ def _profile_settings(profile: str) -> dict[str, Any]:
             "target_name": "target-32b",
         }
     raise ValueError(f"unsupported qualification profile: {profile}")
+
+
+def _validate_profile_timeouts(
+    profile: str,
+    *,
+    target_ready_timeout: float,
+    target_stall_timeout: float,
+) -> None:
+    """Reject known-unsafe 32B watchdog settings before services or GPUs start."""
+
+    if profile != "trainable-32b":
+        return
+    if target_ready_timeout < _MIN_32B_READY_TIMEOUT_SECONDS:
+        raise ValueError(
+            "trainable-32b target_ready_timeout must be at least "
+            f"{_MIN_32B_READY_TIMEOUT_SECONDS}s, got {target_ready_timeout}s"
+        )
+    if target_stall_timeout < _MIN_32B_STALL_TIMEOUT_SECONDS:
+        raise ValueError(
+            "trainable-32b target_stall_timeout must be at least "
+            f"{_MIN_32B_STALL_TIMEOUT_SECONDS}s, got {target_stall_timeout}s"
+        )
 
 
 class _GpuMonitor:
@@ -293,7 +319,7 @@ def _phase_args(
         trainable_target="last-layer",
         run_mode="train",
         state_scope=state_scope,
-        timeout_seconds=2400,
+        timeout_seconds=_CLIENT_OPERATION_TIMEOUT_SECONDS,
         expected_gpu_name_substring=None,
     )
 
@@ -392,6 +418,8 @@ def _run_phase(
             "model_revision": model_revision,
             "ready_timeout_seconds": ready_timeout,
             "stall_timeout_seconds": stall_timeout,
+            "client_operation_timeout_seconds": _CLIENT_OPERATION_TIMEOUT_SECONDS,
+            "persistence_timeout_seconds": _PERSISTENCE_TIMEOUT_SECONDS,
             "num_clients": 2,
             "nproc_per_client": 4,
             "num_rounds": num_rounds,
@@ -434,6 +462,7 @@ def _run_phase(
             phase_root / "persistence",
             expected_count=num_rounds,
             checkpoint_inspector=inspect_persisted_checkpoint if state_scope == "trainable" else None,
+            model_file_timeout=_PERSISTENCE_TIMEOUT_SECONDS,
         )
         watcher.start()
         _write_json(
@@ -452,7 +481,7 @@ def _run_phase(
             ready_timeout=ready_timeout,
             stall_timeout=stall_timeout,
         )
-        persisted_models = watcher.wait_all(timeout=60.0)
+        persisted_models = watcher.wait_all(timeout=_PERSISTENCE_TIMEOUT_SECONDS)
         persisted = persisted_models[-1]
         collected_roots = federation.collect_job_logs(job_id, phase_root / "logs")
         roots = {site_name: collected_roots[site_name] for site_name in CLIENT_NAMES}
@@ -696,6 +725,12 @@ def main() -> int:
     )
     try:
         profile = _profile_settings(args.profile)
+        if not args.control_plane_only:
+            _validate_profile_timeouts(
+                args.profile,
+                target_ready_timeout=args.target_ready_timeout,
+                target_stall_timeout=args.target_stall_timeout,
+            )
         gate_rounds = profile["gate_rounds"]
         target_rounds = profile["target_rounds"]
         local_steps = profile["local_steps"]

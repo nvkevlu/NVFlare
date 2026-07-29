@@ -140,14 +140,18 @@ class PersistedModelWatcher:
         *,
         expected_count: int = 1,
         checkpoint_inspector: Callable[[Path], dict[str, Any]] | None = None,
+        model_file_timeout: float = 30.0,
     ):
         if expected_count <= 0:
             raise ValueError("expected_count must be greater than zero")
+        if model_file_timeout <= 0:
+            raise ValueError("model_file_timeout must be greater than zero")
         self.federation = federation
         self.job_id = job_id
         self.destination = destination
         self.expected_count = expected_count
         self.checkpoint_inspector = checkpoint_inspector
+        self.model_file_timeout = model_file_timeout
         self.result: dict[str, Any] | None = None
         self.results: list[dict[str, Any]] = []
         self.error: Exception | None = None
@@ -178,7 +182,7 @@ class PersistedModelWatcher:
                 for _ in range(persisted_count):
                     model_files = []
                     model_path = None
-                    model_deadline = time.monotonic() + 30.0
+                    model_deadline = time.monotonic() + self.model_file_timeout
                     while time.monotonic() < model_deadline and not self._stop.is_set():
                         try:
                             root = self.federation.job_root(SERVER_NAME, self.job_id)
@@ -191,7 +195,8 @@ class PersistedModelWatcher:
                         self._stop.wait(0.05)
                     if model_path is None:
                         raise RuntimeError(
-                            f"persistence completed but expected one non-empty global model for {self.job_id}; "
+                            f"persistence completed but no single non-empty global model appeared within "
+                            f"{self.model_file_timeout}s for {self.job_id}; "
                             f"found {[str(path) for path in model_files]}"
                         )
                     model_size = model_path.stat().st_size
