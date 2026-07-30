@@ -1,5 +1,10 @@
 # CS-OCI-ORD two-client Qwen2.5-32B real-training qualification
 
+**Qualification status:** Passed on 2026-07-29 as Slurm job `31091793` (`COMPLETED 0:0` in 11:19).
+See [the retained qualification report](cs-oci-ord-two-client-32b-qualification-2026-07-29.md) for the exact model,
+training, aggregation, persistence, GPU, transfer, and resource evidence. Do not repeat the qualification unless a
+new experiment requires a materially different proof.
+
 ## Purpose and success boundary
 
 This is the next formal large-model qualification. It runs two real provisioned NVFLARE clients on one
