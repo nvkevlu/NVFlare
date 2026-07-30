@@ -95,7 +95,9 @@ def test_two_client_gpu_groups_are_disjoint_and_recipe_requires_both_clients():
 
     assert _client_names(args.num_clients) == ["site-1", "site-2"]
     assert _gpu_config(args.num_clients, args.nproc_per_node) == "[0,1,2,3],[4,5,6,7]"
-    assert _build_recipe(args).min_clients == 2
+    recipe = _build_recipe(args)
+    assert recipe.min_clients == 2
+    assert recipe.shutdown_timeout == 600.0
 
 
 def test_trainable_recipe_uses_sparse_server_model_and_distinct_site_data():
@@ -133,9 +135,13 @@ def test_72b_wrapper_pins_capacity_identity_and_safe_timeouts():
     ).read_text()
 
     assert "#SBATCH --gpus-per-node=8" in wrapper
-    assert "#SBATCH --mem=1400G" in wrapper
-    assert "#SBATCH --time=03:00:00" in wrapper
+    assert "#SBATCH --mem=1600G" in wrapper
+    assert "#SBATCH --time=04:00:00" in wrapper
+    assert "#SBATCH --signal=TERM@300" in wrapper
     assert "QUALIFICATION_PROFILE=trainable-72b" in wrapper
+    assert 'GATE_MODEL_PATH="${PROJECT_ROOT}/models/Qwen2.5-1.5B-8faed761d45a"' in wrapper
+    assert 'TARGET_MODEL_PATH="${PROJECT_ROOT}/models/Qwen2.5-72B-efba10c8e54e"' in wrapper
+    assert "TARGET_MODEL_PATH:-" not in wrapper
     assert "efba10c8e54e91e0d9570ab5f7b51a958474d4cb" in wrapper
     assert "EXPECTED_TARGET_HIDDEN_SIZE=8192" in wrapper
     assert "EXPECTED_TARGET_INTERMEDIATE_SIZE=29568" in wrapper
@@ -143,9 +149,15 @@ def test_72b_wrapper_pins_capacity_identity_and_safe_timeouts():
     assert "EXPECTED_TARGET_NUM_ATTENTION_HEADS=64" in wrapper
     assert "EXPECTED_TARGET_NUM_KEY_VALUE_HEADS=8" in wrapper
     assert "EXPECTED_TARGET_SAFETENSOR_FILES=37" in wrapper
+    assert "EXPECTED_TARGET_TENSOR_BYTES=145412407296" in wrapper
     assert "EXPECTED_TARGET_PAYLOAD_BYTES=1755369472" in wrapper
-    assert "TARGET_READY_TIMEOUT=3600" in wrapper
+    assert "SERVICE_STARTUP_TIMEOUT=300" in wrapper
+    assert "GATE_READY_TIMEOUT=900" in wrapper
+    assert "GATE_STALL_TIMEOUT=900" in wrapper
+    assert "TARGET_READY_TIMEOUT=7200" in wrapper
     assert "TARGET_STALL_TIMEOUT=1800" in wrapper
+    assert "CONTROL_JOB_ID PREFLIGHT_JOB_ID GPU_PREFLIGHT_JOB_ID" in wrapper
+    assert "must name the passing gate used by the login-node readiness validator" in wrapper
 
 
 def test_72b_gpu_gate_is_real_four_rank_training_with_headroom_requirement():
@@ -154,11 +166,23 @@ def test_72b_gpu_gate_is_real_four_rank_training_with_headroom_requirement():
     ).read_text()
 
     assert "#SBATCH --gpus-per-node=4" in wrapper
-    assert "#SBATCH --mem=768G" in wrapper
+    assert "#SBATCH --mem=900G" in wrapper
+    assert "#SBATCH --time=02:00:00" in wrapper
+    assert "#SBATCH --signal=TERM@300" in wrapper
+    assert 'MODEL_PATH="${PROJECT_ROOT}/models/Qwen2.5-72B-efba10c8e54e"' in wrapper
+    assert "MODEL_PATH:-" not in wrapper
+    assert 'MODEL_VERIFICATION_MARKER="${MODEL_MANIFEST}.verified"' in wrapper
+    assert "Model file changed after verification" in wrapper
     assert "--nproc_per_node=4" in wrapper
     assert "--local-steps 2" in wrapper
     assert "--expected-payload-bytes 1755369472" in wrapper
-    assert "--required-headroom-mib 8192" in wrapper
+    assert "--timeout-seconds 7200" in wrapper
+    assert "--required-headroom-mib 16384" in wrapper
+    assert "--full-job-memory-gib 1600" in wrapper
+    assert "--full-job-client-count 2" in wrapper
+    assert "--required-fixed-host-headroom-gib 128" in wrapper
+    assert "--max-model-ready-seconds 2400" in wrapper
+    assert "--max-work-seconds 1200" in wrapper
     assert "NCCL_P2P_DISABLE" in wrapper
     assert "real_model_fsdp2_gpu_gate.py" in wrapper
 
@@ -170,6 +194,9 @@ def test_72b_cpu_preflight_checks_sparse_state_and_exported_job():
 
     assert "#SBATCH --partition=cpu" in wrapper
     assert "#SBATCH --mem=32G" in wrapper
+    assert 'MODEL_PATH="${PROJECT_ROOT}/models/Qwen2.5-72B-efba10c8e54e"' in wrapper
+    assert "MANIFEST.sha256.verified" in wrapper
+    assert "model_manifest_verified=PASS" in wrapper
     assert "trainable_server_preflight.py" in wrapper
     assert "--expected-hidden-size 8192" in wrapper
     assert "--expected-intermediate-size 29568" in wrapper
@@ -177,12 +204,51 @@ def test_72b_cpu_preflight_checks_sparse_state_and_exported_job():
     assert "--expected-num-attention-heads 64" in wrapper
     assert "--expected-num-key-value-heads 8" in wrapper
     assert "--expected-safetensor-files 37" in wrapper
+    assert "--expected-tensor-bytes 145412407296" in wrapper
     assert "--expected-payload-bytes 1755369472" in wrapper
     assert "--max-payload-bytes 2147483648" in wrapper
     assert "--num-clients 2" in wrapper
     assert "--nproc-per-node 4" in wrapper
     assert "--state-scope trainable" in wrapper
+    assert "--timeout-seconds 10800" in wrapper
     assert "exported_job_preflight.py" in wrapper
+
+
+def test_control_plane_preflight_is_pinned_and_records_submit_evidence():
+    wrapper = (
+        Path(__file__).resolve().parents[1] / "real_training" / "cs_oci_ord" / "control_plane_preflight.slurm"
+    ).read_text()
+
+    assert "#SBATCH --time=00:15:00" in wrapper
+    assert 'GATE_MODEL_PATH="${PROJECT_ROOT}/models/Qwen2.5-1.5B-8faed761d45a"' in wrapper
+    assert 'TARGET_MODEL_PATH="${GATE_MODEL_PATH}"' in wrapper
+    assert "Qwen2.5-14B" not in wrapper
+    assert "--timeout-seconds 10800" in wrapper
+    assert "--service-startup-timeout 300" in wrapper
+    assert "operation_timeout_seconds=10800" in wrapper
+    assert "transport_timeout_seconds=10800" in wrapper
+    assert "NVFLARE_STREAMING_ACK_WAIT=10800" in wrapper
+    assert "NVFLARE_STREAMING_ACK_PROGRESS_TIMEOUT=10800" in wrapper
+    assert "NVFLARE_STREAMING_READ_TIMEOUT=10800" in wrapper
+    assert "NVFLARE_STREAMING_SEND_TIMEOUT=10800" in wrapper
+    assert "git_commit=%s" in wrapper
+
+
+def test_full_72b_allocation_revalidates_gate_evidence_before_dependency_imports():
+    wrapper = (
+        Path(__file__).resolve().parents[1] / "real_training" / "cs_oci_ord" / "two_client_14b.slurm"
+    ).read_text()
+
+    readiness = wrapper.index("validate_72b_readiness.py")
+    dependencies = wrapper.index("dependency_check.py")
+    qualification = wrapper.index("qualification.py${QUOTED_QUALIFICATION_ARGS}")
+
+    assert readiness < dependencies < qualification
+    assert "allocation-start-readiness.json" in wrapper
+    assert "NVFLARE_STREAMING_ACK_WAIT=10800" in wrapper
+    assert "NVFLARE_STREAMING_ACK_PROGRESS_TIMEOUT=10800" in wrapper
+    assert "NVFLARE_STREAMING_READ_TIMEOUT=10800" in wrapper
+    assert "NVFLARE_STREAMING_SEND_TIMEOUT=10800" in wrapper
 
 
 def test_exported_launcher_uses_packaged_relative_client_path(tmp_path):
@@ -223,6 +289,7 @@ def test_exported_trainable_datasets_resolve_from_client_runtime(tmp_path, monke
         "submit_result_timeout": args.timeout_seconds,
         "download_complete_timeout": args.timeout_seconds,
         "max_resends": 3,
+        "last_result_transfer_timeout": args.timeout_seconds,
         "streaming_idle_timeout": args.timeout_seconds,
         "streaming_max_peer_silence": args.timeout_seconds * 1.5,
         "get_task_timeout": args.timeout_seconds,
@@ -244,6 +311,7 @@ def test_exported_trainable_datasets_resolve_from_client_runtime(tmp_path, monke
 
         for key, value in expected_client_config.items():
             assert config[key] == value
+        assert launcher["args"]["shutdown_timeout"] == 600.0
         assert packaged_dataset.read_bytes() == source_dataset.read_bytes()
         assert f"--dataset-file {dataset_arg}" in launcher["args"]["script"]
 
@@ -271,10 +339,31 @@ def test_exported_trainable_datasets_resolve_from_client_runtime(tmp_path, monke
     assert preflight["status"] == "PASS"
     assert preflight["clients"] == ["site-1", "site-2"]
     assert preflight["early_flare_init"] is True
+    assert preflight["launcher_shutdown_timeout_seconds"] == 600.0
+    assert preflight["subprocess_tensor_download_timeout_seconds"] == args.timeout_seconds
 
     site_2_config_path = job_root / "app_site-2" / "config" / "config_fed_client.json"
     site_2_config = json.loads(site_2_config_path.read_text())
     del site_2_config["download_complete_timeout"]
     site_2_config_path.write_text(json.dumps(site_2_config))
     with pytest.raises(RuntimeError, match="download_complete_timeout"):
+        validate_exported_job(job_root, args.timeout_seconds)
+
+
+def test_exported_job_preflight_rejects_short_launcher_shutdown(tmp_path):
+    args = _args(
+        model_name_or_path=Path("/models/Qwen2.5-1.5B"),
+        model_revision="abc123",
+        num_clients=2,
+        state_scope="trainable",
+    )
+    _build_recipe(args).export(str(tmp_path))
+    job_root = tmp_path / "llm_fsdp2_real_training"
+    config_path = job_root / "app_site-1" / "config" / "config_fed_client.json"
+    config = json.loads(config_path.read_text())
+    launcher = next(component for component in config["components"] if component["id"] == "launcher")
+    launcher["args"]["shutdown_timeout"] = 60.0
+    config_path.write_text(json.dumps(config))
+
+    with pytest.raises(RuntimeError, match="shutdown_timeout"):
         validate_exported_job(job_root, args.timeout_seconds)

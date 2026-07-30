@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any
 
 CLIENT_NAMES = ("site-1", "site-2")
+EXPECTED_LAUNCHER_SHUTDOWN_TIMEOUT_SECONDS = 600.0
 
 
 def _require_equal(mapping: dict[str, Any], expected: dict[str, Any], source: Path) -> None:
@@ -79,6 +80,7 @@ def validate_exported_job(job_root: Path, timeout_seconds: int) -> dict[str, Any
         "submit_result_timeout": timeout_seconds,
         "download_complete_timeout": timeout_seconds,
         "max_resends": 3,
+        "last_result_transfer_timeout": timeout_seconds,
         "streaming_idle_timeout": timeout_seconds,
         "streaming_max_peer_silence": timeout_seconds * 1.5,
         "get_task_timeout": timeout_seconds,
@@ -106,7 +108,15 @@ def validate_exported_job(job_root: Path, timeout_seconds: int) -> dict[str, Any
         launchers = [component for component in config.get("components", []) if component.get("id") == "launcher"]
         if len(launchers) != 1:
             raise RuntimeError(f"expected exactly one launcher component in {config_path}, found {len(launchers)}")
-        launcher_script = launchers[0].get("args", {}).get("script", "")
+        launcher_args = launchers[0].get("args")
+        if not isinstance(launcher_args, dict):
+            raise RuntimeError(f"launcher component in {config_path} has invalid args: {launcher_args!r}")
+        _require_equal(
+            launcher_args,
+            {"shutdown_timeout": EXPECTED_LAUNCHER_SHUTDOWN_TIMEOUT_SECONDS},
+            config_path,
+        )
+        launcher_script = launcher_args.get("script", "")
         expected_dataset_arg = f"--dataset-file data/{site_name}.jsonl"
         if expected_dataset_arg not in launcher_script:
             raise RuntimeError(f"launcher in {config_path} does not contain {expected_dataset_arg!r}")
@@ -137,6 +147,8 @@ def validate_exported_job(job_root: Path, timeout_seconds: int) -> dict[str, Any
         "clients": validated_clients,
         "timeout_seconds": timeout_seconds,
         "max_resends": 3,
+        "launcher_shutdown_timeout_seconds": EXPECTED_LAUNCHER_SHUTDOWN_TIMEOUT_SECONDS,
+        "subprocess_tensor_download_timeout_seconds": timeout_seconds,
         "early_flare_init": True,
         "strict_start_job_reply_check": True,
     }

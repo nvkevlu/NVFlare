@@ -34,6 +34,16 @@ from typing import IO, Any, Callable, Iterable
 ADMIN_NAME = "admin@nvidia.com"
 CLIENT_NAMES = ("site-1", "site-2")
 SERVER_NAME = "localhost"
+TRANSPORT_TIMEOUT_SECONDS = 10800
+TRANSPORT_TIMEOUT_CONFIG = {
+    "streaming_ack_wait": TRANSPORT_TIMEOUT_SECONDS,
+    "streaming_ack_progress_timeout": TRANSPORT_TIMEOUT_SECONDS,
+    "streaming_read_timeout": TRANSPORT_TIMEOUT_SECONDS,
+    "streaming_send_timeout": TRANSPORT_TIMEOUT_SECONDS,
+}
+TRANSPORT_TIMEOUT_ENVIRONMENT = {
+    f"NVFLARE_{name.upper()}": str(value) for name, value in TRANSPORT_TIMEOUT_CONFIG.items()
+}
 _FATAL_JOB_MARKERS = (
     "cannot sync with server Runner",
     "distributed round failed:",
@@ -55,6 +65,36 @@ def _append_no_proxy(environment: dict[str, str]) -> None:
             if value not in values:
                 values.append(value)
         environment[name] = ",".join(values)
+
+
+def _pin_transport_timeout_config(kit: Path) -> dict[str, Any]:
+    """Pin effective F3 timeout values in a provisioned participant's comm config."""
+
+    config_path = kit / "local" / "comm_config.json"
+    if config_path.is_file():
+        try:
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as e:
+            raise RuntimeError(f"cannot read provisioned comm config {config_path}: {e}") from e
+    else:
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        config = {}
+    if not isinstance(config, dict):
+        raise RuntimeError(f"provisioned comm config must contain a JSON object: {config_path}")
+
+    config.update(TRANSPORT_TIMEOUT_CONFIG)
+    temporary = config_path.with_name(f".{config_path.name}.tmp")
+    temporary.write_text(json.dumps(config, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    temporary.replace(config_path)
+    observed = json.loads(config_path.read_text(encoding="utf-8"))
+    mismatches = {
+        name: {"expected": expected, "observed": observed.get(name)}
+        for name, expected in TRANSPORT_TIMEOUT_CONFIG.items()
+        if observed.get(name) != expected
+    }
+    if mismatches:
+        raise RuntimeError(f"failed to pin transport timeouts in {config_path}: {mismatches}")
+    return {"path": str(config_path), "settings": dict(TRANSPORT_TIMEOUT_CONFIG)}
 
 
 def _json_events(paths: Iterable[Path], event: str) -> list[dict[str, Any]]:
@@ -335,6 +375,23 @@ class LocalProductionFederation:
             for name, kit in self.kits.items():
                 if not (kit / "startup" / "sub_start.sh").is_file() and name != ADMIN_NAME:
                     raise RuntimeError(f"provisioned startup kit is incomplete for {name}: {kit}")
+            transport_configs = {
+                name: _pin_transport_timeout_config(self.kits[name]) for name in (SERVER_NAME, *CLIENT_NAMES)
+            }
+            (self.evidence_root / "transport-config.json").write_text(
+                json.dumps(
+                    {
+                        "event": "real_training_transport_config",
+                        "status": "PASS",
+                        "timeout_seconds": TRANSPORT_TIMEOUT_SECONDS,
+                        "participants": transport_configs,
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
             self.admin_kit = self.kits[ADMIN_NAME]
         finally:
             for reservation in reservations:
@@ -347,6 +404,7 @@ class LocalProductionFederation:
         log_path.parent.mkdir(parents=True, exist_ok=True)
         log_stream = log_path.open("w", encoding="utf-8")
         environment = os.environ.copy()
+        environment.update(TRANSPORT_TIMEOUT_ENVIRONMENT)
         environment["CUDA_VISIBLE_DEVICES"] = cuda_visible_devices
         environment["NVFLARE_ENABLE_JEMALLOC_PRELOAD"] = "true"
         environment["TMPDIR"] = str(self.private_root / "tmp" / name)

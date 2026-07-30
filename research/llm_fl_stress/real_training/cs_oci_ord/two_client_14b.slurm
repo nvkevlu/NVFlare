@@ -8,7 +8,7 @@
 #SBATCH --gpus-per-node=8
 #SBATCH --mem=512G
 #SBATCH --time=00:25:00
-#SBATCH --signal=B:TERM@120
+#SBATCH --signal=TERM@120
 #SBATCH --comment=fact_off
 #SBATCH --output=/lustre/fs11/portfolios/coreai/projects/coreai_edgeai_flresearch/users/kevlu/nvflare-14b/logs/%x-%j.out
 #SBATCH --error=/lustre/fs11/portfolios/coreai/projects/coreai_edgeai_flresearch/users/kevlu/nvflare-14b/logs/%x-%j.err
@@ -32,11 +32,12 @@ EXPECTED_TARGET_NUM_ATTENTION_HEADS="${EXPECTED_TARGET_NUM_ATTENTION_HEADS:-0}"
 EXPECTED_TARGET_NUM_KEY_VALUE_HEADS="${EXPECTED_TARGET_NUM_KEY_VALUE_HEADS:-0}"
 EXPECTED_TARGET_MIN_WEIGHT_BYTES="${EXPECTED_TARGET_MIN_WEIGHT_BYTES:-0}"
 EXPECTED_TARGET_SAFETENSOR_FILES="${EXPECTED_TARGET_SAFETENSOR_FILES:-0}"
+EXPECTED_TARGET_TENSOR_BYTES="${EXPECTED_TARGET_TENSOR_BYTES:-0}"
 EXPECTED_TARGET_PAYLOAD_BYTES="${EXPECTED_TARGET_PAYLOAD_BYTES:-0}"
 EXPECTED_GPU_NAME_SUBSTRING="${EXPECTED_GPU_NAME_SUBSTRING:-A100-SXM4-80GB}"
 REQUIRED_BASE_COMMIT="1be715ed5bc97c83a6771b486c40b75f0b97e4fd"
 EXPECTED_BRANCH="codex/llm-fl-real-14b"
-REQUIRED_RELEASE="2026-07-30-trainable-72b-v10"
+REQUIRED_RELEASE="2026-07-30-trainable-72b-v11"
 RELEASE_FILE="${REPO_ROOT}/research/llm_fl_stress/real_training/QUALIFICATION_RELEASE"
 QUALIFICATION_PROFILE="${QUALIFICATION_PROFILE:-full-state}"
 
@@ -82,11 +83,16 @@ for model_path in "${GATE_MODEL_PATH}" "${TARGET_MODEL_PATH}"; do
         exit 1
     fi
 done
+if [[ -n "${EXPECTED_GATE_REVISION:-}" ]] &&
+    [[ "$(<"${GATE_MODEL_PATH}/REVISION")" != "${EXPECTED_GATE_REVISION}" ]]; then
+    echo "The staged gate model does not match ${EXPECTED_GATE_REVISION}." >&2
+    exit 1
+fi
 if [[ "$(<"${TARGET_MODEL_PATH}/REVISION")" != "${EXPECTED_TARGET_REVISION}" ]]; then
     echo "The staged ${EXPECTED_TARGET_LABEL} model does not match ${EXPECTED_TARGET_REVISION}." >&2
     exit 1
 fi
-if [[ -n "${NCCL_P2P_DISABLE:-}" ]]; then
+if [[ "${NCCL_P2P_DISABLE+x}" == "x" ]]; then
     echo "Refusing inherited NCCL_P2P_DISABLE=${NCCL_P2P_DISABLE}; use cluster NCCL defaults." >&2
     exit 1
 fi
@@ -118,6 +124,7 @@ record_result() {
         printf 'num_clients=2\n'
         printf 'nproc_per_client=4\n'
         printf 'total_gpu_processes=8\n'
+        printf 'transport_timeout_seconds=10800\n'
         printf 'git_commit=%s\n' "$(git -C "${REPO_ROOT}" rev-parse HEAD 2>/dev/null || true)"
     } > "${ARTIFACT_ROOT}/manifest.txt"
     if [[ -d "${PRIVATE_ROOT}" ]] &&
@@ -137,6 +144,13 @@ export HF_HOME="${PROJECT_ROOT}/cache/huggingface"
 export TOKENIZERS_PARALLELISM=false
 export WANDB_DISABLED=true
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+# These low-level F3 flow-control/read/send guards must not undercut the
+# reviewed qualification watchdogs. They are inherited by the provisioned
+# server, both clients, and their training subprocesses.
+export NVFLARE_STREAMING_ACK_WAIT=10800
+export NVFLARE_STREAMING_ACK_PROGRESS_TIMEOUT=10800
+export NVFLARE_STREAMING_READ_TIMEOUT=10800
+export NVFLARE_STREAMING_SEND_TIMEOUT=10800
 
 QUALIFICATION_ARGS=(
     --gate-model-path "${GATE_MODEL_PATH}"
@@ -150,18 +164,39 @@ QUALIFICATION_ARGS=(
     --expected-target-num-key-value-heads "${EXPECTED_TARGET_NUM_KEY_VALUE_HEADS}"
     --expected-target-min-weight-bytes "${EXPECTED_TARGET_MIN_WEIGHT_BYTES}"
     --expected-target-safetensor-files "${EXPECTED_TARGET_SAFETENSOR_FILES}"
+    --expected-target-tensor-bytes "${EXPECTED_TARGET_TENSOR_BYTES}"
     --expected-target-payload-bytes "${EXPECTED_TARGET_PAYLOAD_BYTES}"
     --private-root "${PRIVATE_ROOT}"
     --evidence-root "${ARTIFACT_ROOT}"
     --expected-gpu-name-substring "${EXPECTED_GPU_NAME_SUBSTRING}"
     --profile "${QUALIFICATION_PROFILE}"
-    --service-startup-timeout 90
+    --service-startup-timeout "${SERVICE_STARTUP_TIMEOUT:-90}"
     --gate-ready-timeout "${GATE_READY_TIMEOUT:-300}"
     --gate-stall-timeout "${GATE_STALL_TIMEOUT:-300}"
     --target-ready-timeout "${TARGET_READY_TIMEOUT:-300}"
     --target-stall-timeout "${TARGET_STALL_TIMEOUT:-300}"
 )
 printf -v QUOTED_QUALIFICATION_ARGS ' %q' "${QUALIFICATION_ARGS[@]}"
+
+QUOTED_READINESS_COMMAND=""
+if [[ "${QUALIFICATION_PROFILE}" == "trainable-72b" ]]; then
+    for job_id_name in CONTROL_JOB_ID PREFLIGHT_JOB_ID GPU_PREFLIGHT_JOB_ID; do
+        job_id_value="${!job_id_name:-}"
+        if [[ ! "${job_id_value}" =~ ^[0-9]+$ ]]; then
+            echo "${job_id_name} must be a numeric passing-gate job ID for the 72B qualification." >&2
+            exit 1
+        fi
+    done
+    READINESS_COMMAND=(
+        python
+        research/llm_fl_stress/real_training/cs_oci_ord/validate_72b_readiness.py
+        --project-root "${PROJECT_ROOT}"
+        --control-job-id "${CONTROL_JOB_ID}"
+        --cpu-job-id "${PREFLIGHT_JOB_ID}"
+        --gpu-job-id "${GPU_PREFLIGHT_JOB_ID}"
+    )
+    printf -v QUOTED_READINESS_COMMAND ' %q' "${READINESS_COMMAND[@]}"
+fi
 
 srun --kill-on-bad-exit=1 \
     --container-image="${CONTAINER_IMAGE}" \
@@ -170,5 +205,10 @@ srun --kill-on-bad-exit=1 \
         set -Eeuo pipefail
         source '${VENV_DIR}/bin/activate'
         cd '${REPO_ROOT}'
+        if [[ -n '${QUOTED_READINESS_COMMAND}' ]]; then
+            ${QUOTED_READINESS_COMMAND} > '${ARTIFACT_ROOT}/allocation-start-readiness.json'
+        fi
+        python research/llm_fl_stress/real_training/dependency_check.py \
+          > '${ARTIFACT_ROOT}/dependency-check.json'
         python research/llm_fl_stress/real_training/qualification.py${QUOTED_QUALIFICATION_ARGS}
     "

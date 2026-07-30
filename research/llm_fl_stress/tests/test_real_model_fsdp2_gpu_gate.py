@@ -37,7 +37,13 @@ def test_training_args_are_exactly_bounded_to_last_layer(tmp_path):
     assert training.trainable_target == "last-layer"
     assert training.local_steps == 2
     assert training.max_length == 128
-    assert training.timeout_seconds == 2400
+    assert training.timeout_seconds == 7200
+    assert args.required_headroom_mib == 16384
+    assert args.full_job_memory_gib == 1600
+    assert args.full_job_client_count == 2
+    assert args.required_fixed_host_headroom_gib == 128
+    assert args.max_model_ready_seconds == 2400
+    assert args.max_work_seconds == 1200
 
 
 @pytest.mark.parametrize(
@@ -48,6 +54,11 @@ def test_training_args_are_exactly_bounded_to_last_layer(tmp_path):
         ("--max-length", "0"),
         ("--timeout-seconds", "0"),
         ("--required-headroom-mib", "0"),
+        ("--full-job-memory-gib", "0"),
+        ("--full-job-client-count", "0"),
+        ("--required-fixed-host-headroom-gib", "0"),
+        ("--max-model-ready-seconds", "0"),
+        ("--max-work-seconds", "0"),
         ("--learning-rate", "0"),
     ],
 )
@@ -82,3 +93,75 @@ def test_capacity_gate_requires_existing_absolute_model_directory(tmp_path):
 
     with pytest.raises(ValueError, match="existing absolute directory"):
         gate._validate_args(args)
+
+
+def test_capacity_gate_rejects_projection_for_fewer_than_two_clients(tmp_path):
+    args = gate._define_parser().parse_args(
+        [
+            "--model-name-or-path",
+            str(tmp_path),
+            "--model-revision",
+            "revision",
+            "--expected-payload-bytes",
+            "1755369472",
+            "--full-job-client-count",
+            "1",
+        ]
+    )
+
+    with pytest.raises(ValueError, match="at least two"):
+        gate._validate_args(args)
+
+
+def test_full_job_host_projection_includes_two_clients_checkpoint_and_fixed_headroom():
+    gib = 1024 * 1024 * 1024
+    rank_metrics = [{"max_rss_bytes": value * gib} for value in (10, 20, 30, 40)]
+
+    result = gate._full_job_host_projection(
+        rank_metrics,
+        checkpoint_bytes=50 * gib,
+        full_job_memory_gib=1600,
+        full_job_client_count=2,
+        required_fixed_host_headroom_gib=128,
+    )
+
+    assert result == {
+        "full_job_memory_gib": 1600,
+        "full_job_memory_bytes": 1600 * gib,
+        "full_job_client_count": 2,
+        "required_fixed_host_headroom_gib": 128,
+        "required_fixed_host_headroom_bytes": 128 * gib,
+        "checkpoint_bytes": 50 * gib,
+        "one_client_rank_peak_rss_bytes": 100 * gib,
+        "projected_full_job_rank_peak_rss_bytes": 200 * gib,
+        "projected_full_job_host_bytes": 378 * gib,
+        "projected_full_job_host_headroom_bytes": 1222 * gib,
+    }
+
+
+@pytest.mark.parametrize(
+    ("rank_metrics", "checkpoint_bytes", "match"),
+    [
+        ([{"max_rss_bytes": 0}], 1, "rank peak RSS"),
+        ([{"max_rss_bytes": "1"}], 1, "rank peak RSS"),
+        ([{"max_rss_bytes": 1}], 0, "checkpoint bytes"),
+    ],
+)
+def test_full_job_host_projection_rejects_invalid_measurements(rank_metrics, checkpoint_bytes, match):
+    with pytest.raises(RuntimeError, match=match):
+        gate._full_job_host_projection(
+            rank_metrics,
+            checkpoint_bytes=checkpoint_bytes,
+            full_job_memory_gib=1600,
+            full_job_client_count=2,
+            required_fixed_host_headroom_gib=128,
+        )
+
+
+def test_rank_zero_final_state_validation_is_synchronized_before_gather():
+    source = Path(gate.__file__).read_text(encoding="utf-8")
+
+    synchronized = source.index("final_validation_error = _collect_first_error(final_validation_error)")
+    gathered = source.index("dist.gather_object(local_metrics, gathered, dst=0)")
+
+    assert synchronized < gathered

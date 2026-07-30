@@ -224,7 +224,12 @@ class ExProcessClientAPI(APISpec):
                                 else:
                                     self.logger.debug(f"failed to send stream progress event: {ex}")
 
-                        pipe.cell.update_fobs_context({FOBSContextKey.STREAM_PROGRESS_CB: _send_stream_progress})
+                        pipe.cell.update_fobs_context(
+                            {
+                                FOBSContextKey.STREAM_PROGRESS_CB: _send_stream_progress,
+                                FOBSContextKey.DOWNLOAD_REQ_TIMEOUT: client_config.get_download_request_timeout(),
+                            }
+                        )
                         self.logger.info("PASS_THROUGH enabled on subprocess CellPipe (reverse path)")
                 metric_pipe, metric_channel_name = None, ""
                 if ConfigKey.METRICS_EXCHANGE in client_config.config:

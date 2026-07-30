@@ -29,3 +29,9 @@ EXTERNAL_PRE_INIT_TIMEOUT = "EXTERNAL_PRE_INIT_TIMEOUT"
 # Keeping this in the same config file as submit_result_timeout makes it easy
 # to review and tune both timeouts together.
 PEER_READ_TIMEOUT = "PEER_READ_TIMEOUT"
+
+# Configuration key for overriding LauncherExecutor's final-result grace period
+# after the external process exits. This is a CJ-side timeout: it must cover the
+# time needed for the final pipe result to arrive, especially for large tensor
+# payloads.
+LAST_RESULT_TRANSFER_TIMEOUT = "last_result_transfer_timeout"

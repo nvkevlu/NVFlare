@@ -65,6 +65,7 @@ class ConfigKey:
     SUBMIT_RESULT_TIMEOUT = "submit_result_timeout"
     MAX_RESENDS = "max_resends"
     DOWNLOAD_COMPLETE_TIMEOUT = "download_complete_timeout"
+    DOWNLOAD_REQ_TIMEOUT = "download_req_timeout"
     STREAMING_IDLE_TIMEOUT = STREAMING_IDLE_TIMEOUT
     LAUNCH_ONCE = "launch_once"
 
@@ -221,6 +222,25 @@ class ClientConfig:
                 ConfigKey.DOWNLOAD_COMPLETE_TIMEOUT, DownloadService.FINISHED_REFS_TTL
             )
         )
+
+    def get_download_request_timeout(self) -> float:
+        """Return the per-request timeout for tensor downloads performed by the subprocess.
+
+        The parent Client API launcher resolves the active decomposer-specific application
+        setting (for example ``tensor_streaming_per_request_timeout`` for PyTorch) and
+        serializes that effective value into the subprocess config. This prevents the
+        subprocess from silently falling back to its own 600-second default.
+        """
+
+        value = self.config.get(ConfigKey.TASK_EXCHANGE, {}).get(ConfigKey.DOWNLOAD_REQ_TIMEOUT, 600.0)
+        try:
+            timeout = float(value)
+        except (TypeError, ValueError) as e:
+            raise ValueError(f"invalid {ConfigKey.DOWNLOAD_REQ_TIMEOUT}: {value!r}") from e
+        try:
+            return check_positive_finite_number(ConfigKey.DOWNLOAD_REQ_TIMEOUT, timeout)
+        except ValueError as e:
+            raise ValueError(f"invalid {ConfigKey.DOWNLOAD_REQ_TIMEOUT}: {value!r}") from e
 
     def get_streaming_idle_timeout(self) -> Optional[float]:
         """Return shared idle timeout for streamed task payloads and result uploads.

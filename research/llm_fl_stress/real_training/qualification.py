@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import math
 import os
 import shutil
 import signal
@@ -42,6 +43,7 @@ from provisioned import (  # noqa: E402
     ADMIN_NAME,
     CLIENT_NAMES,
     SERVER_NAME,
+    TRANSPORT_TIMEOUT_ENVIRONMENT,
     LocalProductionFederation,
     PersistedModelWatcher,
 )
@@ -49,11 +51,14 @@ from state_evidence import file_sha256, inspect_persisted_checkpoint  # noqa: E4
 
 _PROFILES = ("full-state", "trainable-multiround", "trainable-32b", "trainable-72b")
 _ONE_GIB = 1024 * 1024 * 1024
-_CLIENT_OPERATION_TIMEOUT_SECONDS = 2400
-_PERSISTENCE_TIMEOUT_SECONDS = 2400.0
+_CLIENT_OPERATION_TIMEOUT_SECONDS = 10800
+_PERSISTENCE_TIMEOUT_SECONDS = 7200.0
+_TRANSPORT_TIMEOUT_ENVIRONMENT = TRANSPORT_TIMEOUT_ENVIRONMENT
+_MIN_SCRATCH_FREE_BYTES = 50 * _ONE_GIB
+_MIN_SCRATCH_FREE_INODES = 100_000
 _MIN_TARGET_TIMEOUTS_SECONDS = {
     "trainable-32b": {"ready": 1800.0, "stall": 900.0},
-    "trainable-72b": {"ready": 3600.0, "stall": 1800.0},
+    "trainable-72b": {"ready": 7200.0, "stall": 1800.0},
 }
 
 
@@ -225,12 +230,13 @@ def _define_parser() -> argparse.ArgumentParser:
     parser.add_argument("--expected-target-num-key-value-heads", type=int, default=0)
     parser.add_argument("--expected-target-min-weight-bytes", type=int, default=0)
     parser.add_argument("--expected-target-safetensor-files", type=int, default=0)
+    parser.add_argument("--expected-target-tensor-bytes", type=int, default=0)
     parser.add_argument("--expected-target-payload-bytes", type=int, default=0)
     parser.add_argument("--private-root", required=True, type=Path)
     parser.add_argument("--evidence-root", required=True, type=Path)
     parser.add_argument("--expected-gpu-name-substring", default="A100-SXM4-80GB")
     parser.add_argument("--profile", choices=_PROFILES, default="full-state")
-    parser.add_argument("--service-startup-timeout", type=float, default=90.0)
+    parser.add_argument("--service-startup-timeout", type=float, default=300.0)
     parser.add_argument("--gate-ready-timeout", type=float, default=120.0)
     parser.add_argument("--gate-stall-timeout", type=float, default=300.0)
     parser.add_argument("--target-ready-timeout", type=float, default=300.0)
@@ -264,6 +270,7 @@ def _require_target_identity(
     expected_num_attention_heads: int = 0,
     expected_num_key_value_heads: int = 0,
     expected_safetensor_files: int = 0,
+    expected_tensor_bytes: int = 0,
 ) -> dict[str, Any]:
     config_path = model_path / "config.json"
     config = json.loads(config_path.read_text(encoding="utf-8"))
@@ -313,16 +320,46 @@ def _require_target_identity(
             f"target safetensor bytes below minimum: expected at least {expected_min_weight_bytes}, "
             f"observed {weight_bytes}"
         )
+    tensor_bytes = None
+    if expected_tensor_bytes:
+        index_path = model_path / "model.safetensors.index.json"
+        index = json.loads(index_path.read_text(encoding="utf-8"))
+        metadata = index.get("metadata")
+        tensor_bytes = metadata.get("total_size") if isinstance(metadata, dict) else None
+        if tensor_bytes != expected_tensor_bytes:
+            raise RuntimeError(
+                f"target logical tensor bytes mismatch: expected {expected_tensor_bytes}, observed {tensor_bytes}"
+            )
     return {
         **observed,
         "safetensor_file_count": len(weight_files),
         "safetensor_bytes": weight_bytes,
+        "safetensor_tensor_bytes": tensor_bytes,
     }
 
 
 def _require_payload_bytes(phase: str, observed: int, expected: int) -> None:
     if expected and observed != expected:
         raise RuntimeError(f"{phase} trainable payload mismatch: expected {expected}, observed {observed}")
+
+
+def _require_transport_timeout_environment() -> dict[str, int]:
+    """Require low-level F3 flow-control/read/send guards to match the reviewed operation envelope."""
+
+    observed = {}
+    for name, expected_text in _TRANSPORT_TIMEOUT_ENVIRONMENT.items():
+        raw_value = os.environ.get(name)
+        if raw_value is None:
+            raise RuntimeError(f"required transport timeout environment variable is missing: {name}")
+        try:
+            value = float(raw_value)
+        except ValueError as e:
+            raise RuntimeError(f"{name} must be numeric, got {raw_value!r}") from e
+        expected = float(expected_text)
+        if not math.isfinite(value) or value != expected:
+            raise RuntimeError(f"{name} must equal {expected_text}, got {raw_value!r}")
+        observed[name] = int(expected)
+    return observed
 
 
 def _phase_args(
@@ -381,6 +418,7 @@ def _validate_phase_inputs(
 
 
 def _environment_check(expected_gpu_name_substring: str, *, require_gpus: bool) -> dict[str, Any]:
+    transport_timeouts = _require_transport_timeout_environment()
     import torch
 
     if os.environ.get("NCCL_P2P_DISABLE"):
@@ -396,6 +434,7 @@ def _environment_check(expected_gpu_name_substring: str, *, require_gpus: bool) 
             "cuda_device_count": count,
             "cuda_devices": names,
             "gpu_check_skipped": True,
+            "transport_timeout_environment": transport_timeouts,
             "torch_version": torch.__version__,
             "torch_cuda_version": torch.version.cuda,
         }
@@ -409,6 +448,7 @@ def _environment_check(expected_gpu_name_substring: str, *, require_gpus: bool) 
         "status": "PASS",
         "cuda_device_count": count,
         "cuda_devices": names,
+        "transport_timeout_environment": transport_timeouts,
         "torch_version": torch.__version__,
         "torch_cuda_version": torch.version.cuda,
     }
@@ -417,6 +457,40 @@ def _environment_check(expected_gpu_name_substring: str, *, require_gpus: bool) 
 def _write_json(path: Path, value: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def _require_scratch_capacity(private_root: Path) -> dict[str, Any]:
+    """Fail before service startup if the selected local scratch filesystem is too full."""
+
+    probe = private_root
+    while not probe.exists():
+        if probe.parent == probe:
+            raise RuntimeError(f"cannot find an existing parent filesystem for scratch path {private_root}")
+        probe = probe.parent
+    usage = shutil.disk_usage(probe)
+    filesystem = os.statvfs(probe)
+    free_inodes = filesystem.f_favail
+    result = {
+        "event": "real_training_scratch_capacity",
+        "status": "PASS",
+        "scratch_root": str(private_root),
+        "probed_path": str(probe),
+        "free_bytes": usage.free,
+        "required_free_bytes": _MIN_SCRATCH_FREE_BYTES,
+        "free_inodes": free_inodes,
+        "required_free_inodes": _MIN_SCRATCH_FREE_INODES,
+    }
+    if usage.free < _MIN_SCRATCH_FREE_BYTES:
+        raise RuntimeError(
+            f"scratch filesystem for {private_root} has {usage.free} free bytes; "
+            f"at least {_MIN_SCRATCH_FREE_BYTES} are required"
+        )
+    if free_inodes < _MIN_SCRATCH_FREE_INODES:
+        raise RuntimeError(
+            f"scratch filesystem for {private_root} has {free_inodes} free inodes; "
+            f"at least {_MIN_SCRATCH_FREE_INODES} are required"
+        )
+    return result
 
 
 def _run_phase(
@@ -481,7 +555,7 @@ def _run_phase(
         )
         environment = ProdEnv(
             startup_kit_location=str(federation.admin_kit),
-            login_timeout=10.0,
+            login_timeout=60.0,
             username=ADMIN_NAME,
             study="default",
         )
@@ -632,7 +706,7 @@ def _run_control_plane_job(
     try:
         environment = ProdEnv(
             startup_kit_location=str(federation.admin_kit),
-            login_timeout=10.0,
+            login_timeout=60.0,
             username=ADMIN_NAME,
             study="default",
         )
@@ -647,7 +721,7 @@ def _run_control_plane_job(
                 "sites": list(CLIENT_NAMES),
             },
         )
-        status = federation.wait_for_terminal(run, total_timeout=90.0)
+        status = federation.wait_for_terminal(run, total_timeout=180.0)
         sites = set()
         for site_name in CLIENT_NAMES:
             events = list(
@@ -747,6 +821,7 @@ def main() -> int:
             "expected_target_num_key_value_heads": args.expected_target_num_key_value_heads,
             "expected_target_min_weight_bytes": args.expected_target_min_weight_bytes,
             "expected_target_safetensor_files": args.expected_target_safetensor_files,
+            "expected_target_tensor_bytes": args.expected_target_tensor_bytes,
             "expected_target_payload_bytes": args.expected_target_payload_bytes,
             "expected_gpu_name_substring": args.expected_gpu_name_substring,
             "service_startup_timeout_seconds": args.service_startup_timeout,
@@ -783,6 +858,7 @@ def main() -> int:
                 expected_num_key_value_heads=args.expected_target_num_key_value_heads,
                 expected_min_weight_bytes=args.expected_target_min_weight_bytes,
                 expected_safetensor_files=args.expected_target_safetensor_files,
+                expected_tensor_bytes=args.expected_target_tensor_bytes,
             )
             _write_json(args.evidence_root / "target-identity.json", target_identity)
             _validate_phase_inputs(
@@ -808,6 +884,9 @@ def main() -> int:
         _write_json(args.evidence_root / "environment.json", environment)
         print(json.dumps(environment, sort_keys=True), flush=True)
         if not args.control_plane_only:
+            scratch_capacity = _require_scratch_capacity(args.private_root)
+            _write_json(args.evidence_root / "scratch-capacity.json", scratch_capacity)
+            print(json.dumps(scratch_capacity, sort_keys=True), flush=True)
             monitor.start()
 
         with LocalProductionFederation(

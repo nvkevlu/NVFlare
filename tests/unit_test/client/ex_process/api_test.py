@@ -133,6 +133,17 @@ def test_get_streaming_idle_timeout_default_and_explicit():
     assert config.get_streaming_idle_timeout() is None
 
 
+def test_get_download_request_timeout_default_explicit_and_invalid():
+    assert ClientConfig({}).get_download_request_timeout() == 600.0
+    config = ClientConfig({ConfigKey.TASK_EXCHANGE: {ConfigKey.DOWNLOAD_REQ_TIMEOUT: 10800}})
+    assert config.get_download_request_timeout() == 10800.0
+
+    for invalid in (0, -1, float("inf"), "bad"):
+        config = ClientConfig({ConfigKey.TASK_EXCHANGE: {ConfigKey.DOWNLOAD_REQ_TIMEOUT: invalid}})
+        with pytest.raises(ValueError, match=ConfigKey.DOWNLOAD_REQ_TIMEOUT):
+            config.get_download_request_timeout()
+
+
 def test_ex_process_api_passes_submit_result_timeout_to_agent(monkeypatch):
     """ExProcessClientAPI.init() must pass task-exchange timeouts from config to FlareAgentWithFLModel."""
     from nvflare.client.config import ConfigKey
@@ -148,12 +159,17 @@ def test_ex_process_api_passes_submit_result_timeout_to_agent(monkeypatch):
                 ConfigKey.SUBMIT_MODEL_TASK_NAME: "submit_model",
                 ConfigKey.HEARTBEAT_TIMEOUT: 60,
                 ConfigKey.SUBMIT_RESULT_TIMEOUT: 999.0,
+                ConfigKey.DOWNLOAD_REQ_TIMEOUT: 10800.0,
                 ConfigKey.STREAMING_IDLE_TIMEOUT: 1200.0,
             }
         }
     )
 
-    mock_pipe = MagicMock()
+    from nvflare.fuel.utils.fobs import FOBSContextKey
+    from nvflare.fuel.utils.pipe.cell_pipe import CellPipe
+
+    mock_pipe = MagicMock(spec=CellPipe)
+    mock_pipe.cell = MagicMock()
     captured_kwargs = {}
 
     class _CapturingAgent:
@@ -191,6 +207,8 @@ def test_ex_process_api_passes_submit_result_timeout_to_agent(monkeypatch):
     assert "submit_result_timeout" in captured_kwargs, "submit_result_timeout was not passed to FlareAgentWithFLModel"
     assert captured_kwargs["submit_result_timeout"] == 999.0
     assert captured_kwargs["streaming_idle_timeout"] == 1200.0
+    fobs_context = mock_pipe.cell.update_fobs_context.call_args.args[0]
+    assert fobs_context[FOBSContextKey.DOWNLOAD_REQ_TIMEOUT] == 10800.0
 
 
 def test_ex_process_receive_timeout_does_not_arm_send_under_congestion():

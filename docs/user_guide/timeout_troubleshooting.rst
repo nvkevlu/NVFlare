@@ -182,8 +182,9 @@ server to finish pulling tensors from its ``DownloadService`` after result ACK.
    recipe.add_client_config({
        "submit_result_timeout": 1800,      # 30 min for LLM-scale results
        "download_complete_timeout": 1800,  # keep subprocess alive for server tensor download
+       "last_result_transfer_timeout": 1800,  # parent waits for final result transfer
        "PEER_READ_TIMEOUT": 600,           # parent CJ read budget; match configured streaming timeout
-       "tensor_min_download_timeout": 600, # PyTorch: increase if inter-chunk gaps exceed 300s default
+       "tensor_min_download_timeout": 600, # PyTorch transaction lifetime/inactivity floor
        # "np_min_download_timeout": 600,   # NumPy/sklearn: same, use instead of tensor variant
        "max_resends": 3,                   # finite value; 0 disables retries, None is rejected
    })
@@ -268,14 +269,17 @@ Most Commonly Adjusted Timeouts
      - 300 s through Client API job config; 60 s in raw ``FlareAgent``
      - Large model result transfers from subprocess; set 1800 s for LLMs
    * - tensor_min_download_timeout / np_min_download_timeout (subprocess mode only)
-     - 300 s
-     - 70B+ models on congested networks; increase to 600 s (tensor = PyTorch, np = NumPy/sklearn)
+     - Effective 600 s with the current default streaming-idle floor
+     - Large streamed transactions with long activity gaps (tensor = PyTorch, np = NumPy/sklearn); this is not the F3 receiver inter-chunk read guard
    * - PEER_READ_TIMEOUT (Client API subprocess only)
      - 300 s
      - Large task payloads when streaming per-request timeout is explicitly increased
    * - download_complete_timeout (subprocess mode only)
      - 1800 s
      - Keep subprocess alive while the server downloads large tensor results
+   * - last_result_transfer_timeout (Client API subprocess only)
+     - 300 s
+     - Large final subprocess result; coordinate with result/download operation budgets
    * - max_resends (subprocess mode only)
      - 3
      - Persistent network failures; keep finite; use 0 to disable retries
@@ -283,7 +287,7 @@ Most Commonly Adjusted Timeouts
      - 3600 s
      - 7B+ model P2P transfers between Swarm peers
    * - external_pre_init_timeout (Client API subprocess only)
-     - 60-300s
+     - 300 s
      - LLMs, heavy imports before ``flare.init()``
    * - heartbeat_timeout
      - 60-300s
@@ -347,7 +351,10 @@ Server-side safety flags guidance (see :ref:`server_startup_dead_job_safety_flag
 
    {
      "heartbeat_interval": 10,
-     "streaming_read_timeout": 600
+     "streaming_ack_wait": 600,
+     "streaming_ack_progress_timeout": 600,
+     "streaming_read_timeout": 600,
+     "streaming_send_timeout": 600
    }
 
 
@@ -375,7 +382,7 @@ coordinated.
 .. code-block:: python
 
    from nvflare.client.config import ConfigKey
-   from nvflare.client.constants import EXTERNAL_PRE_INIT_TIMEOUT, PEER_READ_TIMEOUT
+   from nvflare.client.constants import EXTERNAL_PRE_INIT_TIMEOUT, LAST_RESULT_TRANSFER_TIMEOUT, PEER_READ_TIMEOUT
    from nvflare.fuel.f3.streaming.transfer_progress import (
        STREAMING_IDLE_TIMEOUT,
        STREAMING_MAX_PEER_SILENCE,
@@ -390,6 +397,7 @@ coordinated.
        ConfigKey.SUBMIT_RESULT_TIMEOUT: operation_timeout,
        ConfigKey.DOWNLOAD_COMPLETE_TIMEOUT: operation_timeout,
        ConfigKey.MAX_RESENDS: 3,
+       LAST_RESULT_TRANSFER_TIMEOUT: operation_timeout,
        STREAMING_IDLE_TIMEOUT: operation_timeout,
        STREAMING_MAX_PEER_SILENCE: operation_timeout * 1.5,
        "get_task_timeout": operation_timeout,
@@ -413,6 +421,41 @@ Keep ``max_resends`` finite. Set ``submit_task_result_timeout`` greater than or
 equal to ``submit_result_timeout``, and keep ``tensor_min_download_timeout``
 greater than or equal to ``tensor_streaming_per_request_timeout``.
 
+Pin the matching low-level transport guards in ``comm_config.json`` for the
+server and every client startup kit. Configuration-file values take precedence
+over environment fallbacks:
+
+.. code-block:: json
+
+   {
+     "streaming_ack_wait": 1800,
+     "streaming_ack_progress_timeout": 1800,
+     "streaming_read_timeout": 1800,
+     "streaming_send_timeout": 1800
+   }
+
+``streaming_ack_wait`` is the absolute time a sender may remain blocked by its
+flow-control window; it does not reset merely because a partial ACK advanced
+within that window. ``streaming_ack_progress_timeout`` and
+``streaming_read_timeout`` are no-progress/read inactivity guards.
+``streaming_send_timeout`` applies to the socket-driver frame-send path; gRPC
+deployments should still pin it if startup kits may later change transport.
+
+For external-process PyTorch clients, the launcher resolves
+``tensor_streaming_per_request_timeout`` and writes the effective value into
+``client_api_config.json`` as ``download_req_timeout``. The subprocess installs
+that value as ``FOBSContextKey.DOWNLOAD_REQ_TIMEOUT`` before it decodes the first
+task. This propagation is required; otherwise the subprocess-side
+``TensorDecomposer`` cannot see the parent application configuration and falls
+back to 600 seconds.
+
+The operation budget must also be greater than or equal to the external
+client-readiness allowance. Calling ``flare.init()`` early establishes the
+subprocess session, but the parent can already be waiting for that subprocess
+to read its first task while model loading and sharding continue. In
+particular, a shorter ``PEER_READ_TIMEOUT`` can undercut an apparently longer
+model-readiness watchdog.
+
 The ``tensor_`` prefix is required for PyTorch ``TensorDecomposer`` transfers.
 The generic ``streaming_per_request_timeout`` key does not replace
 ``tensor_streaming_per_request_timeout``.
@@ -427,6 +470,28 @@ These are operation and inactivity budgets, not a recommendation to add an
 application-level total-runtime deadline. Use a separate progress-aware watchdog
 only if it resets on real transfer, training, aggregation, and persistence
 progress.
+
+Also size the recipe's external-process ``shutdown_timeout`` for distributed
+framework teardown. This clock starts during cleanup, not during healthy
+training, but a short value can terminate a large FSDP or NCCL process group
+before it has released resources and returned its final status.
+
+Some framework boundaries are intentionally lower-level than this coordinated
+envelope. The server start-job request covers launching an already-deployed
+client job, not loading model weights. When a byte-stream sender is blocked by
+its flow-control window, F3 defaults to a 300-second ACK-wait limit and a
+separate 60-second no-ACK-progress guard. The receiver read default is 300
+seconds. These are lower boundaries unless the startup kits override them; ACK
+wait is a blocked-window lifetime, while ACK progress and receiver read are
+inactivity guards. CoreCell's ``max_timeout`` (3,600 seconds by default) is used
+only when the caller supplies no request timeout; it does not clamp an
+explicitly longer call. ``streaming_max_peer_silence`` is currently resolved
+for compatibility but is not a Phase-1 progress-aware task-send liveness guard;
+use the active streaming-idle timeout rather than treating max-peer-silence as
+proof. Before a costly run, exercise the exact provisioned control plane with
+all required clients and confirm that the largest individual serialized
+tensor—not only the aggregate state—is below the transport's message-size
+ceiling.
 
 Standard Training
 -----------------
@@ -448,6 +513,7 @@ Large Model Training (100M+ parameters)
        "submit_task_result_timeout": 600,
        "submit_result_timeout": 600,        # subprocess mode only
        "download_complete_timeout": 1800,   # subprocess mode only
+       "last_result_transfer_timeout": 600, # parent launcher final-result wait
        "tensor_streaming_per_request_timeout": 600,  # PyTorch subprocess mode
        "tensor_min_download_timeout": 600,  # use np_min_download_timeout for NumPy
        "PEER_READ_TIMEOUT": 600,            # subprocess mode only
@@ -465,6 +531,7 @@ LLM/Foundation Model Training
        "submit_task_result_timeout": 1800,  # server-side; must be >= submit_result_timeout
        "submit_result_timeout": 1800,       # subprocess mode only
        "download_complete_timeout": 1800,   # subprocess mode only
+       "last_result_transfer_timeout": 1800, # parent launcher final-result wait
        "tensor_streaming_per_request_timeout": 600,  # PyTorch
        "tensor_min_download_timeout": 600,  # PyTorch; use np_min_download_timeout for NumPy
        "PEER_READ_TIMEOUT": 600,            # subprocess mode only
@@ -489,7 +556,10 @@ System-level (``comm_config.json`` in startup kit):
 
    {
      "heartbeat_interval": 15,
-     "streaming_read_timeout": 600
+     "streaming_ack_wait": 600,
+     "streaming_ack_progress_timeout": 600,
+     "streaming_read_timeout": 600,
+     "streaming_send_timeout": 600
    }
 
 
@@ -501,7 +571,9 @@ For large payload/model transfers, configure F3 stream stall detection in
 
 **Runtime defaults** (if not set explicitly):
 
-- ``streaming_send_timeout``: ``30.0`` seconds
+- ``streaming_ack_wait``: ``300`` seconds while the flow-control window remains blocked
+- ``streaming_read_timeout``: ``300`` seconds
+- ``streaming_send_timeout``: ``30.0`` seconds for the socket driver
 - ``streaming_ack_progress_timeout``: ``60.0`` seconds
 - ``streaming_ack_progress_check_interval``: ``5.0`` seconds
 - ``sfm_send_stall_timeout``: ``45.0`` seconds

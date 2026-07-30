@@ -31,6 +31,7 @@ if str(REAL_TRAINING_DIR) not in sys.path:
     sys.path.insert(0, str(REAL_TRAINING_DIR))
 
 from client import (
+    _collect_first_error,
     _load_model_and_tokenizer,
     _max_rss_bytes,
     _select_trainable_parameters,
@@ -44,6 +45,7 @@ from state_evidence import file_sha256, load_text_partition, tensor_state_summar
 from nvflare.app_opt.pt.fsdp2_state_bridge import FSDP2StateBridge
 
 _MIB = 1024 * 1024
+_GIB = 1024 * 1024 * 1024
 
 
 def _define_parser() -> argparse.ArgumentParser:
@@ -55,8 +57,13 @@ def _define_parser() -> argparse.ArgumentParser:
     parser.add_argument("--local-steps", type=int, default=2)
     parser.add_argument("--max-length", type=int, default=128)
     parser.add_argument("--learning-rate", type=float, default=1.0e-5)
-    parser.add_argument("--timeout-seconds", type=int, default=2400)
-    parser.add_argument("--required-headroom-mib", type=int, default=8192)
+    parser.add_argument("--timeout-seconds", type=int, default=7200)
+    parser.add_argument("--required-headroom-mib", type=int, default=16384)
+    parser.add_argument("--full-job-memory-gib", type=int, default=1600)
+    parser.add_argument("--full-job-client-count", type=int, default=2)
+    parser.add_argument("--required-fixed-host-headroom-gib", type=int, default=128)
+    parser.add_argument("--max-model-ready-seconds", type=float, default=2400.0)
+    parser.add_argument("--max-work-seconds", type=float, default=1200.0)
     return parser
 
 
@@ -67,6 +74,11 @@ def _validate_args(args: argparse.Namespace) -> None:
         "max_length",
         "timeout_seconds",
         "required_headroom_mib",
+        "full_job_memory_gib",
+        "full_job_client_count",
+        "required_fixed_host_headroom_gib",
+        "max_model_ready_seconds",
+        "max_work_seconds",
     ):
         if getattr(args, name) <= 0:
             raise ValueError(f"--{name.replace('_', '-')} must be greater than zero")
@@ -74,6 +86,8 @@ def _validate_args(args: argparse.Namespace) -> None:
         raise ValueError("--learning-rate must be greater than zero")
     if not args.model_name_or_path.is_absolute() or not args.model_name_or_path.is_dir():
         raise ValueError("--model-name-or-path must be an existing absolute directory")
+    if args.full_job_client_count < 2:
+        raise ValueError("--full-job-client-count must be at least two for the two-client production projection")
 
 
 def _training_args(args: argparse.Namespace) -> Namespace:
@@ -86,6 +100,43 @@ def _training_args(args: argparse.Namespace) -> Namespace:
         learning_rate=args.learning_rate,
         timeout_seconds=args.timeout_seconds,
     )
+
+
+def _full_job_host_projection(
+    rank_metrics: list[dict],
+    *,
+    checkpoint_bytes: int,
+    full_job_memory_gib: int,
+    full_job_client_count: int,
+    required_fixed_host_headroom_gib: int,
+) -> dict:
+    """Project two-client peak host use from the exact one-client, four-rank capacity gate."""
+
+    rank_peak_rss = [record.get("max_rss_bytes") for record in rank_metrics]
+    if not rank_peak_rss or not all(isinstance(value, int) and value > 0 for value in rank_peak_rss):
+        raise RuntimeError(f"capacity gate has invalid rank peak RSS values: {rank_peak_rss}")
+    if checkpoint_bytes <= 0:
+        raise RuntimeError(f"capacity gate has invalid checkpoint bytes: {checkpoint_bytes}")
+
+    one_client_rank_peak_rss_bytes = sum(rank_peak_rss)
+    projected_full_job_rank_peak_rss_bytes = one_client_rank_peak_rss_bytes * full_job_client_count
+    required_fixed_host_headroom_bytes = required_fixed_host_headroom_gib * _GIB
+    full_job_memory_bytes = full_job_memory_gib * _GIB
+    projected_full_job_host_bytes = (
+        projected_full_job_rank_peak_rss_bytes + checkpoint_bytes + required_fixed_host_headroom_bytes
+    )
+    return {
+        "full_job_memory_gib": full_job_memory_gib,
+        "full_job_memory_bytes": full_job_memory_bytes,
+        "full_job_client_count": full_job_client_count,
+        "required_fixed_host_headroom_gib": required_fixed_host_headroom_gib,
+        "required_fixed_host_headroom_bytes": required_fixed_host_headroom_bytes,
+        "checkpoint_bytes": checkpoint_bytes,
+        "one_client_rank_peak_rss_bytes": one_client_rank_peak_rss_bytes,
+        "projected_full_job_rank_peak_rss_bytes": projected_full_job_rank_peak_rss_bytes,
+        "projected_full_job_host_bytes": projected_full_job_host_bytes,
+        "projected_full_job_host_headroom_bytes": full_job_memory_bytes - projected_full_job_host_bytes,
+    }
 
 
 def _run(args: argparse.Namespace) -> None:
@@ -107,6 +158,16 @@ def _run(args: argparse.Namespace) -> None:
         if not trainable:
             raise RuntimeError("FSDP2 sharding left no trainable parameters")
         model_ready_seconds = time.perf_counter() - started_at
+        model_ready_error = None
+        if model_ready_seconds > args.max_model_ready_seconds:
+            model_ready_error = (
+                f"rank {rank} model readiness took {model_ready_seconds:.3f}s, "
+                f"exceeding {args.max_model_ready_seconds:.3f}s"
+            )
+        model_ready_error = _collect_first_error(model_ready_error)
+        if model_ready_error:
+            raise RuntimeError(model_ready_error)
+        post_ready_started_at = time.perf_counter()
 
         bridge = FSDP2StateBridge(model, exchange_prefix="model.")
         initial_export = bridge.export_trainable_state_dict()
@@ -116,7 +177,16 @@ def _run(args: argparse.Namespace) -> None:
                 f"observed {initial_export.stats.payload_bytes}"
             )
         initial_state = initial_export.state_dict if rank == 0 else None
-        initial_summary = tensor_state_summary(initial_state) if rank == 0 else None
+        initial_summary = None
+        initial_summary_error = None
+        if rank == 0:
+            try:
+                initial_summary = tensor_state_summary(initial_state)
+            except Exception as exc:
+                initial_summary_error = f"rank-zero initial-state summary failed: {type(exc).__name__}: {exc}"
+        initial_summary_error = _collect_first_error(initial_summary_error)
+        if initial_summary_error:
+            raise RuntimeError(initial_summary_error)
         load_result = bridge.load_trainable_state_dict(initial_state)
         if rank == 0 and initial_state is not None:
             initial_state.clear()
@@ -141,14 +211,23 @@ def _run(args: argparse.Namespace) -> None:
                 f"final trainable payload mismatch: expected {args.expected_payload_bytes}, "
                 f"observed {final_export.stats.payload_bytes}"
             )
-        final_summary = tensor_state_summary(final_export.state_dict) if rank == 0 else None
+        final_summary = None
+        final_validation_error = None
         if rank == 0:
-            if initial_summary is None or final_summary is None:
-                raise RuntimeError("rank zero did not receive trainable state summaries")
-            if initial_summary["sha256"] == final_summary["sha256"]:
-                raise RuntimeError("real optimizer steps did not change the exported trainable state")
+            try:
+                final_summary = tensor_state_summary(final_export.state_dict)
+                if initial_summary is None:
+                    raise RuntimeError("rank zero did not receive the initial trainable-state summary")
+                if initial_summary["sha256"] == final_summary["sha256"]:
+                    raise RuntimeError("real optimizer steps did not change the exported trainable state")
+            except Exception as exc:
+                final_validation_error = f"rank-zero final-state validation failed: {type(exc).__name__}: {exc}"
+        final_validation_error = _collect_first_error(final_validation_error)
+        if final_validation_error:
+            raise RuntimeError(final_validation_error)
 
         torch.cuda.synchronize(device)
+        post_ready_work_seconds = time.perf_counter() - post_ready_started_at
         total_memory_bytes = torch.cuda.get_device_properties(device).total_memory
         peak_allocated_bytes = torch.cuda.max_memory_allocated(device)
         peak_reserved_bytes = torch.cuda.max_memory_reserved(device)
@@ -163,6 +242,7 @@ def _run(args: argparse.Namespace) -> None:
             "reserved_headroom_bytes": reserved_headroom_bytes,
             "max_rss_bytes": _max_rss_bytes(),
             "model_ready_seconds": model_ready_seconds,
+            "post_ready_work_seconds": post_ready_work_seconds,
             "state_load_seconds": load_result.stats.duration_seconds,
             "initial_export_seconds": initial_export.stats.duration_seconds,
             "final_export_seconds": final_export.stats.duration_seconds,
@@ -177,16 +257,43 @@ def _run(args: argparse.Namespace) -> None:
         if rank == 0:
             assert gathered is not None
             required_headroom_bytes = args.required_headroom_mib * _MIB
+            checkpoint_bytes = sum(
+                path.stat().st_size for path in args.model_name_or_path.glob("model*.safetensors") if path.is_file()
+            )
+            host_projection = _full_job_host_projection(
+                gathered,
+                checkpoint_bytes=checkpoint_bytes,
+                full_job_memory_gib=args.full_job_memory_gib,
+                full_job_client_count=args.full_job_client_count,
+                required_fixed_host_headroom_gib=args.required_fixed_host_headroom_gib,
+            )
+            observed_max_model_ready_seconds = max(record["model_ready_seconds"] for record in gathered)
+            observed_max_work_seconds = max(record["post_ready_work_seconds"] for record in gathered)
             insufficient = [
                 record["rank"] for record in gathered if record["reserved_headroom_bytes"] < required_headroom_bytes
             ]
+            failures = []
             if insufficient:
-                raise RuntimeError(
+                failures.append(
                     f"ranks {insufficient} retained less than {args.required_headroom_mib} MiB reserved headroom"
+                )
+            if observed_max_model_ready_seconds > args.max_model_ready_seconds:
+                failures.append(
+                    f"model readiness took {observed_max_model_ready_seconds:.3f}s, "
+                    f"exceeding {args.max_model_ready_seconds:.3f}s"
+                )
+            if observed_max_work_seconds > args.max_work_seconds:
+                failures.append(
+                    f"post-ready work took {observed_max_work_seconds:.3f}s, " f"exceeding {args.max_work_seconds:.3f}s"
+                )
+            if host_projection["projected_full_job_host_headroom_bytes"] < 0:
+                failures.append(
+                    f"projected full-job host bytes {host_projection['projected_full_job_host_bytes']} exceed "
+                    f"{args.full_job_memory_gib} GiB ({host_projection['full_job_memory_bytes']} bytes)"
                 )
             result = {
                 "event": "real_model_fsdp2_gpu_capacity_gate",
-                "status": "PASS",
+                "status": "FAIL" if failures else "PASS",
                 "model_path": str(args.model_name_or_path),
                 "model_revision": args.model_revision,
                 "world_size": world_size,
@@ -196,6 +303,11 @@ def _run(args: argparse.Namespace) -> None:
                 "payload_bytes": final_export.stats.payload_bytes,
                 "tensor_count": final_export.stats.tensor_count,
                 "required_headroom_mib": args.required_headroom_mib,
+                "max_model_ready_seconds": args.max_model_ready_seconds,
+                "observed_max_model_ready_seconds": observed_max_model_ready_seconds,
+                "max_work_seconds": args.max_work_seconds,
+                "observed_max_work_seconds": observed_max_work_seconds,
+                **host_projection,
                 "initial_state": initial_summary,
                 "final_state": final_summary,
                 "ranks": gathered,
@@ -203,6 +315,8 @@ def _run(args: argparse.Namespace) -> None:
             print(json.dumps(result, sort_keys=True), flush=True)
             if final_export.state_dict is not None:
                 final_export.state_dict.clear()
+            if failures:
+                raise RuntimeError("; ".join(failures))
     finally:
         if dist.is_initialized():
             dist.destroy_process_group()

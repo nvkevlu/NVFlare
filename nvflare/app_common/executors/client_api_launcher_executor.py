@@ -23,11 +23,17 @@ from nvflare.app_common.app_constant import AppConstants
 from nvflare.app_common.executors.launcher_executor import LauncherExecutor
 from nvflare.app_common.utils.export_utils import update_export_props
 from nvflare.client.config import ConfigKey, ExchangeFormat, TransferType, write_config_to_file
-from nvflare.client.constants import CLIENT_API_CONFIG, EXTERNAL_PRE_INIT_TIMEOUT, PEER_READ_TIMEOUT
+from nvflare.client.constants import (
+    CLIENT_API_CONFIG,
+    EXTERNAL_PRE_INIT_TIMEOUT,
+    LAST_RESULT_TRANSFER_TIMEOUT,
+    PEER_READ_TIMEOUT,
+)
 from nvflare.fuel.f3.streaming.transfer_progress import (
     DEFAULT_STREAMING_IDLE_TIMEOUT,
     STREAMING_IDLE_TIMEOUT,
     STREAMING_MAX_PEER_SILENCE,
+    check_positive_finite_number,
     resolve_streaming_progress_config,
 )
 from nvflare.fuel.utils.attributes_exportable import ExportMode
@@ -162,6 +168,9 @@ class ClientAPILauncherExecutor(LauncherExecutor):
         self._cuda_empty_cache = cuda_empty_cache
         self._submit_result_timeout = submit_result_timeout
         self._download_complete_timeout = download_complete_timeout
+        # Resolved from the active decomposer's application config before the
+        # subprocess Client API config is written.
+        self._download_request_timeout = 600.0
         self._cj_round_count = 0
 
         # Allow the subprocess to exit naturally after its download-completion wait
@@ -374,6 +383,9 @@ class ClientAPILauncherExecutor(LauncherExecutor):
         self._apply_positive_float_client_config_override(
             fl_ctx, ConfigKey.DOWNLOAD_COMPLETE_TIMEOUT, "_download_complete_timeout"
         )
+        self._apply_positive_float_client_config_override(
+            fl_ctx, LAST_RESULT_TRANSFER_TIMEOUT, "_last_result_transfer_timeout"
+        )
         self._apply_streaming_progress_client_config_overrides(fl_ctx)
         self._stop_task_wait_timeout = self._download_complete_timeout
 
@@ -441,6 +453,16 @@ class ClientAPILauncherExecutor(LauncherExecutor):
         per_req_key = f"{prefix}{ConfigVarName.STREAMING_PER_REQUEST_TIMEOUT}"
         configured_per_req = ConfigService.get_float_var(per_req_key, conf=SystemConfigs.APPLICATION_CONF, default=None)
         per_req = acu.get_positive_float_var(per_req_key, 600.0)
+        try:
+            if configured_per_req is not None:
+                per_req = check_positive_finite_number(per_req_key, float(configured_per_req))
+            else:
+                per_req = check_positive_finite_number(per_req_key, float(per_req))
+        except (TypeError, ValueError) as e:
+            msg = f"{per_req_key} must be a positive finite number, got {configured_per_req!r}"
+            self.log_error(fl_ctx, msg)
+            raise ValueError(msg) from e
+        self._download_request_timeout = per_req
         effective_streaming_idle_timeout = self.streaming_idle_timeout or DEFAULT_STREAMING_IDLE_TIMEOUT
         min_dl = acu.get_positive_float_var(
             f"{prefix}{ConfigVarName.MIN_DOWNLOAD_TIMEOUT}", effective_streaming_idle_timeout
@@ -603,6 +625,7 @@ class ClientAPILauncherExecutor(LauncherExecutor):
             ConfigKey.SUBMIT_RESULT_TIMEOUT: self._submit_result_timeout,
             ConfigKey.MAX_RESENDS: self.max_resends,
             ConfigKey.DOWNLOAD_COMPLETE_TIMEOUT: self._download_complete_timeout,
+            ConfigKey.DOWNLOAD_REQ_TIMEOUT: self._download_request_timeout,
             ConfigKey.STREAMING_IDLE_TIMEOUT: self.streaming_idle_timeout,
             ConfigKey.LAUNCH_ONCE: self._resolve_launch_once(fl_ctx),
         }

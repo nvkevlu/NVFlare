@@ -6,7 +6,7 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=16G
-#SBATCH --time=00:10:00
+#SBATCH --time=00:15:00
 #SBATCH --comment=fact_off
 #SBATCH --output=/lustre/fs11/portfolios/coreai/projects/coreai_edgeai_flresearch/users/kevlu/nvflare-14b/logs/%x-%j.out
 #SBATCH --error=/lustre/fs11/portfolios/coreai/projects/coreai_edgeai_flresearch/users/kevlu/nvflare-14b/logs/%x-%j.err
@@ -15,26 +15,55 @@ set -Eeuo pipefail
 umask 077
 
 PROJECT_ROOT="${PROJECT_ROOT:-/lustre/fs11/portfolios/coreai/projects/coreai_edgeai_flresearch/users/kevlu/nvflare-14b}"
-CONTAINER_IMAGE="${CONTAINER_IMAGE:-${PROJECT_ROOT}/containers/pytorch-25.01-py3.sqsh}"
-REPO_ROOT="${REPO_ROOT:-${PROJECT_ROOT}/repos/NVFlare}"
-VENV_DIR="${VENV_DIR:-${PROJECT_ROOT}/envs/nvflare-fsdp2}"
-GATE_MODEL_PATH="${GATE_MODEL_PATH:-${PROJECT_ROOT}/models/Qwen2.5-1.5B-8faed761d45a}"
-TARGET_MODEL_PATH="${TARGET_MODEL_PATH:-${PROJECT_ROOT}/models/Qwen2.5-14B-97e1e76335b7}"
-TARGET_MODEL_REVISION="${TARGET_MODEL_REVISION:-97e1e76335b7017d8f67c08a19d103c0504298c9}"
+CONTAINER_IMAGE="${PROJECT_ROOT}/containers/pytorch-25.01-py3.sqsh"
+REPO_ROOT="${PROJECT_ROOT}/repos/NVFlare"
+VENV_DIR="${PROJECT_ROOT}/envs/nvflare-fsdp2"
+GATE_MODEL_PATH="${PROJECT_ROOT}/models/Qwen2.5-1.5B-8faed761d45a"
+GATE_MODEL_REVISION=8faed761d45a263340a0528343f099c05c9a4323
+# A control-plane-only qualification does not load a target model. The
+# parser's required target arguments reuse the pinned gate snapshot.
+TARGET_MODEL_PATH="${GATE_MODEL_PATH}"
+TARGET_MODEL_REVISION="${GATE_MODEL_REVISION}"
 REQUIRED_BASE_COMMIT="1be715ed5bc97c83a6771b486c40b75f0b97e4fd"
 EXPECTED_BRANCH="codex/llm-fl-real-14b"
-REQUIRED_RELEASE="2026-07-30-trainable-72b-v10"
+REQUIRED_RELEASE="2026-07-30-trainable-72b-v11"
 RELEASE_FILE="${REPO_ROOT}/research/llm_fl_stress/real_training/QUALIFICATION_RELEASE"
 PRIVATE_ROOT="/tmp/nvflare-control-plane-${SLURM_JOB_ID}"
 ARTIFACT_ROOT="${PROJECT_ROOT}/artifacts/control-plane-${SLURM_JOB_ID}"
 EXPORT_ROOT="/tmp/nvflare-trainable-export-${SLURM_JOB_ID}"
 
-for path in "${CONTAINER_IMAGE}" "${REPO_ROOT}" "${VENV_DIR}" "${GATE_MODEL_PATH}" "${TARGET_MODEL_PATH}"; do
+for path in "${CONTAINER_IMAGE}" "${REPO_ROOT}" "${VENV_DIR}" "${GATE_MODEL_PATH}"; do
     if [[ ! -e "${path}" ]]; then
         echo "Required path does not exist: ${path}" >&2
         exit 1
     fi
 done
+CONTAINER_CHECKSUM="${CONTAINER_IMAGE}.sha256"
+CONTAINER_VERIFICATION_MARKER="${CONTAINER_CHECKSUM}.verified"
+for path in "${CONTAINER_CHECKSUM}" "${CONTAINER_VERIFICATION_MARKER}"; do
+    if [[ ! -s "${path}" ]]; then
+        echo "Required container verification file is missing or empty: ${path}" >&2
+        exit 1
+    fi
+done
+EXPECTED_CONTAINER_MANIFEST_SHA256="$(awk 'NR == 1 {print $1}' "${CONTAINER_VERIFICATION_MARKER}")"
+OBSERVED_CONTAINER_MANIFEST_SHA256="$(sha256sum "${CONTAINER_CHECKSUM}" | awk '{print $1}')"
+if [[ ! "${EXPECTED_CONTAINER_MANIFEST_SHA256}" =~ ^[0-9a-f]{64}$ ]] ||
+    [[ "${EXPECTED_CONTAINER_MANIFEST_SHA256}" != "${OBSERVED_CONTAINER_MANIFEST_SHA256}" ]]; then
+    echo "Container verification marker does not match ${CONTAINER_CHECKSUM}." >&2
+    exit 1
+fi
+CONTAINER_CHECKSUM_TARGET="$(awk 'NR == 1 {print $2}' "${CONTAINER_CHECKSUM}")"
+CONTAINER_CHECKSUM_TARGET="${CONTAINER_CHECKSUM_TARGET#\*}"
+if [[ "${CONTAINER_CHECKSUM_TARGET##*/}" != "${CONTAINER_IMAGE##*/}" ]]; then
+    echo "Container checksum does not name ${CONTAINER_IMAGE##*/}." >&2
+    exit 1
+fi
+if [[ "${CONTAINER_IMAGE}" -nt "${CONTAINER_VERIFICATION_MARKER}" ]] ||
+    [[ "${CONTAINER_CHECKSUM}" -nt "${CONTAINER_VERIFICATION_MARKER}" ]]; then
+    echo "Container image or checksum changed after verification." >&2
+    exit 1
+fi
 OBSERVED_BRANCH="$(git -C "${REPO_ROOT}" branch --show-current)"
 if [[ "${OBSERVED_BRANCH}" != "${EXPECTED_BRANCH}" ]]; then
     echo "Expected branch ${EXPECTED_BRANCH}, found ${OBSERVED_BRANCH:-detached HEAD}." >&2
@@ -54,18 +83,42 @@ if [[ -n "${GIT_STATUS}" ]]; then
     printf '%s\n' "${GIT_STATUS}" >&2
     exit 1
 fi
-for model_path in "${GATE_MODEL_PATH}" "${TARGET_MODEL_PATH}"; do
-    if [[ ! -s "${model_path}/REVISION" ]]; then
-        echo "Staged model is missing a non-empty REVISION file: ${model_path}/REVISION" >&2
-        exit 1
-    fi
-done
-if [[ "$(<"${TARGET_MODEL_PATH}/REVISION")" != "${TARGET_MODEL_REVISION}" ]]; then
-    echo "The staged target model revision does not match ${TARGET_MODEL_REVISION}." >&2
+if [[ ! -s "${GATE_MODEL_PATH}/REVISION" ]] ||
+    [[ "$(<"${GATE_MODEL_PATH}/REVISION")" != "${GATE_MODEL_REVISION}" ]]; then
+    echo "The staged gate model revision does not match ${GATE_MODEL_REVISION}." >&2
     exit 1
 fi
-GATE_MODEL_REVISION="$(<"${GATE_MODEL_PATH}/REVISION")"
 mkdir -p "${ARTIFACT_ROOT}"
+
+export NVFLARE_STREAMING_ACK_WAIT=10800
+export NVFLARE_STREAMING_ACK_PROGRESS_TIMEOUT=10800
+export NVFLARE_STREAMING_READ_TIMEOUT=10800
+export NVFLARE_STREAMING_SEND_TIMEOUT=10800
+
+record_result() {
+    status=$?
+    trap - EXIT
+    rm -rf -- "${EXPORT_ROOT}"
+    if [[ "${status}" == "0" ]]; then
+        result=PASS
+    else
+        result=FAIL
+    fi
+    {
+        printf 'job_id=%s\n' "${SLURM_JOB_ID}"
+        printf 'status=%s\n' "${result}"
+        printf 'exit_code=%s\n' "${status}"
+        printf 'host=%s\n' "$(hostname)"
+        printf 'model_path=%s\n' "${GATE_MODEL_PATH}"
+        printf 'model_revision=%s\n' "${GATE_MODEL_REVISION}"
+        printf 'operation_timeout_seconds=10800\n'
+        printf 'transport_timeout_seconds=10800\n'
+        printf 'service_startup_timeout_seconds=300\n'
+        printf 'git_commit=%s\n' "$(git -C "${REPO_ROOT}" rev-parse HEAD 2>/dev/null || true)"
+    } > "${ARTIFACT_ROOT}/manifest.txt"
+    return "${status}"
+}
+trap record_result EXIT
 
 srun --kill-on-bad-exit=1 \
     --container-image="${CONTAINER_IMAGE}" \
@@ -92,14 +145,14 @@ srun --kill-on-bad-exit=1 \
           --trainable-target last-layer \
           --run-mode train \
           --state-scope trainable \
-          --timeout-seconds 2400 \
+          --timeout-seconds 10800 \
           --export-only \
           > '${ARTIFACT_ROOT}/trainable-export-validation.json'
         test -s '${EXPORT_ROOT}/job/llm_fsdp2_real_training/app_site-1/custom/data/site-1.jsonl'
         test -s '${EXPORT_ROOT}/job/llm_fsdp2_real_training/app_site-2/custom/data/site-2.jsonl'
         python research/llm_fl_stress/real_training/exported_job_preflight.py \
           --job-root '${EXPORT_ROOT}/job/llm_fsdp2_real_training' \
-          --timeout-seconds 2400 \
+          --timeout-seconds 10800 \
           > '${ARTIFACT_ROOT}/exported-job-preflight.json'
         python research/llm_fl_stress/real_training/qualification.py \
           --gate-model-path '${GATE_MODEL_PATH}' \
@@ -108,7 +161,6 @@ srun --kill-on-bad-exit=1 \
           --target-model-revision '${TARGET_MODEL_REVISION}' \
           --private-root '${PRIVATE_ROOT}' \
           --evidence-root '${ARTIFACT_ROOT}' \
-          --service-startup-timeout 90 \
+          --service-startup-timeout 300 \
           --control-plane-only
-        rm -rf -- '${EXPORT_ROOT}'
     "

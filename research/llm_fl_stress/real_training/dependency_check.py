@@ -47,6 +47,8 @@ def main() -> None:
         raise RuntimeError(f"expected torchvision 0.27.0+cu126, got {torchvision.__version__}")
     if not hasattr(torch.ops.torchvision, "nms"):
         raise RuntimeError("torchvision compiled operators did not register torchvision::nms")
+    if transformers.__version__ != "4.57.6":
+        raise RuntimeError(f"expected Transformers 4.57.6, got {transformers.__version__}")
     result = {
         "event": "real_training_dependency_check",
         "status": "PASS",

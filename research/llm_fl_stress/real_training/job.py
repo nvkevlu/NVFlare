@@ -134,7 +134,7 @@ def _client_args(
 def _build_recipe(args: argparse.Namespace):
     from nvflare.app_opt.pt.recipes.fedavg import FedAvgRecipe
     from nvflare.client.config import ConfigKey, ExchangeFormat, TransferType
-    from nvflare.client.constants import EXTERNAL_PRE_INIT_TIMEOUT, PEER_READ_TIMEOUT
+    from nvflare.client.constants import EXTERNAL_PRE_INIT_TIMEOUT, LAST_RESULT_TRANSFER_TIMEOUT, PEER_READ_TIMEOUT
     from nvflare.fuel.f3.streaming.transfer_progress import STREAMING_IDLE_TIMEOUT, STREAMING_MAX_PEER_SILENCE
 
     trainable_scope = getattr(args, "state_scope", "full") == "trainable"
@@ -178,7 +178,7 @@ def _build_recipe(args: argparse.Namespace):
         server_expected_format=ExchangeFormat.PYTORCH,
         params_transfer_type=TransferType.FULL,
         launch_once=True,
-        shutdown_timeout=60.0,
+        shutdown_timeout=600.0,
         key_metric="neg_loss",
         aggregation_weights=aggregation_weights,
         enable_tensor_disk_offload=True,
@@ -199,6 +199,7 @@ def _build_recipe(args: argparse.Namespace):
             ConfigKey.SUBMIT_RESULT_TIMEOUT: args.timeout_seconds,
             ConfigKey.DOWNLOAD_COMPLETE_TIMEOUT: args.timeout_seconds,
             ConfigKey.MAX_RESENDS: 3,
+            LAST_RESULT_TRANSFER_TIMEOUT: args.timeout_seconds,
             STREAMING_IDLE_TIMEOUT: args.timeout_seconds,
             STREAMING_MAX_PEER_SILENCE: args.timeout_seconds * 1.5,
             "get_task_timeout": args.timeout_seconds,

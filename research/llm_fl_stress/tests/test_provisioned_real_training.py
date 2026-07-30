@@ -23,8 +23,11 @@ from research.llm_fl_stress.real_training.provisioned import (
     ADMIN_NAME,
     CLIENT_NAMES,
     SERVER_NAME,
+    TRANSPORT_TIMEOUT_CONFIG,
+    TRANSPORT_TIMEOUT_ENVIRONMENT,
     LocalProductionFederation,
     PersistedModelWatcher,
+    _pin_transport_timeout_config,
     _redact_log_text,
 )
 
@@ -44,6 +47,41 @@ def test_project_is_real_tls_server_and_two_client_topology(tmp_path):
     assert participants[ADMIN_NAME]["type"] == "admin"
     assert all("poc" not in builder["path"].lower() for builder in project["builders"])
     assert all("sim" not in builder["path"].lower() for builder in project["builders"])
+
+
+def test_provisioned_transport_config_is_pinned_in_file_and_environment(tmp_path):
+    kit = tmp_path / "site-1"
+    config_path = kit / "local" / "comm_config.json"
+    config_path.parent.mkdir(parents=True)
+    config_path.write_text('{"internal": {"scheme": "grpc"}, "streaming_read_timeout": 1}\n')
+
+    evidence = _pin_transport_timeout_config(kit)
+
+    config = json.loads(config_path.read_text())
+    assert {key: config[key] for key in TRANSPORT_TIMEOUT_CONFIG} == TRANSPORT_TIMEOUT_CONFIG
+    assert evidence["settings"] == TRANSPORT_TIMEOUT_CONFIG
+    assert TRANSPORT_TIMEOUT_ENVIRONMENT == {
+        f"NVFLARE_{key.upper()}": str(value) for key, value in TRANSPORT_TIMEOUT_CONFIG.items()
+    }
+
+
+def test_provisioned_transport_config_creates_comm_config_when_builder_omits_it(tmp_path):
+    kit = tmp_path / "site-1"
+
+    evidence = _pin_transport_timeout_config(kit)
+
+    config_path = kit / "local" / "comm_config.json"
+    assert json.loads(config_path.read_text()) == TRANSPORT_TIMEOUT_CONFIG
+    assert evidence == {"path": str(config_path), "settings": TRANSPORT_TIMEOUT_CONFIG}
+
+
+def test_provisioned_transport_config_rejects_invalid_existing_comm_config(tmp_path):
+    config_path = tmp_path / "site-1" / "local" / "comm_config.json"
+    config_path.parent.mkdir(parents=True)
+    config_path.write_text("not JSON\n")
+
+    with pytest.raises(RuntimeError, match="cannot read provisioned comm config"):
+        _pin_transport_timeout_config(tmp_path / "site-1")
 
 
 def test_job_root_resolves_exact_participant_workspace(tmp_path):

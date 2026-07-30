@@ -460,6 +460,37 @@ def test_peer_read_timeout_and_external_pre_init_both_overridable(monkeypatch):
     assert executor._external_pre_init_timeout == 120.0
 
 
+def test_last_result_transfer_timeout_overridden_from_client_config(monkeypatch):
+    """The exported large-result grace period must update the live launcher timeout."""
+    from nvflare.client.constants import LAST_RESULT_TRANSFER_TIMEOUT
+
+    monkeypatch.setattr(ClientAPILauncherExecutor, "prepare_config_for_launch", lambda self, fl_ctx: None)
+    monkeypatch.setattr(LauncherExecutor, "initialize", lambda self, fl_ctx: None)
+    monkeypatch.setattr(ClientAPILauncherExecutor, "log_info", lambda self, fl_ctx, msg: None)
+    monkeypatch.setattr(ClientAPILauncherExecutor, "log_warning", lambda self, fl_ctx, msg: None)
+    monkeypatch.setattr(_GCV_MODULE, _make_gcv_stub({LAST_RESULT_TRANSFER_TIMEOUT: 10800}))
+
+    executor = ClientAPILauncherExecutor(pipe_id="test_pipe", last_result_transfer_timeout=300.0)
+    executor.initialize(_FakeFLContext(_FakeCell()))
+
+    assert executor._last_result_transfer_timeout == 10800.0
+
+
+@pytest.mark.parametrize("value", [0, -1, float("inf"), "invalid"])
+def test_last_result_transfer_timeout_override_must_be_positive_finite(monkeypatch, value):
+    from nvflare.client.constants import LAST_RESULT_TRANSFER_TIMEOUT
+
+    monkeypatch.setattr(ClientAPILauncherExecutor, "prepare_config_for_launch", lambda self, fl_ctx: None)
+    monkeypatch.setattr(LauncherExecutor, "initialize", lambda self, fl_ctx: None)
+    monkeypatch.setattr(ClientAPILauncherExecutor, "log_error", lambda self, fl_ctx, msg: None)
+    monkeypatch.setattr(_GCV_MODULE, _make_gcv_stub({LAST_RESULT_TRANSFER_TIMEOUT: value}))
+
+    executor = ClientAPILauncherExecutor(pipe_id="test_pipe")
+
+    with pytest.raises(ValueError, match="last_result_transfer_timeout must be"):
+        executor.initialize(_FakeFLContext(_FakeCell()))
+
+
 def test_streaming_idle_timeout_overridden_from_config(monkeypatch):
     from nvflare.fuel.f3.streaming.transfer_progress import STREAMING_IDLE_TIMEOUT
 
@@ -890,12 +921,106 @@ def test_client_config_overrides_apply_before_subprocess_config_write(monkeypatc
     assert task_exchange[ConfigKey.SUBMIT_RESULT_TIMEOUT] == 650.0
     assert task_exchange[ConfigKey.MAX_RESENDS] == 8
     assert task_exchange[ConfigKey.DOWNLOAD_COMPLETE_TIMEOUT] == 2400.0
+    assert task_exchange[ConfigKey.DOWNLOAD_REQ_TIMEOUT] == 600.0
     assert task_exchange[ConfigKey.STREAMING_IDLE_TIMEOUT] == 1200.0
     assert executor._submit_result_timeout == 650.0
     assert executor.max_resends == 8
     assert executor._download_complete_timeout == 2400.0
     assert executor.streaming_idle_timeout == 1200.0
     assert executor._stop_task_wait_timeout == 2400.0
+
+
+def test_tensor_download_request_timeout_is_resolved_and_serialized(monkeypatch):
+    """The effective decomposer timeout must reach the subprocess Client API config."""
+    import nvflare.fuel.utils.app_config_utils as acu
+    from nvflare.apis.fl_constant import ConfigVarName
+    from nvflare.app_opt.pt.client_api_launcher_executor import PTClientAPILauncherExecutor
+    from nvflare.client.config import ConfigKey
+    from nvflare.fuel.utils.config_service import ConfigService
+
+    captured = {}
+    monkeypatch.setattr(_GCV_MODULE, _make_gcv_stub({}))
+    monkeypatch.setattr(
+        "nvflare.app_common.executors.client_api_launcher_executor.write_config_to_file",
+        lambda config_data, config_file_path: captured.update(config_data),
+    )
+    monkeypatch.setattr(
+        "nvflare.app_common.executors.client_api_launcher_executor.update_export_props",
+        lambda config_data, fl_ctx: None,
+    )
+    monkeypatch.setattr(LauncherExecutor, "initialize", lambda self, fl_ctx: None)
+    monkeypatch.setattr(ClientAPILauncherExecutor, "log_info", lambda self, fl_ctx, msg: None)
+    monkeypatch.setattr(ClientAPILauncherExecutor, "log_warning", lambda self, fl_ctx, msg: None)
+
+    def _fake_get(name, default):
+        if ConfigVarName.MIN_DOWNLOAD_TIMEOUT in name:
+            return 10800.0
+        if ConfigVarName.STREAMING_PER_REQUEST_TIMEOUT in name:
+            return 10800.0
+        return default
+
+    monkeypatch.setattr(acu, "get_positive_float_var", _fake_get)
+    monkeypatch.setattr(
+        ConfigService,
+        "get_float_var",
+        lambda name, conf=None, default=None: (
+            10800.0 if ConfigVarName.STREAMING_PER_REQUEST_TIMEOUT in name else default
+        ),
+    )
+
+    executor = PTClientAPILauncherExecutor(pipe_id="test_pipe")
+    mock_pipe = MagicMock()
+    mock_pipe.export.return_value = ("nvflare.some.PipeClass", {})
+    executor.pipe = mock_pipe
+    executor.get_pipe_channel_name = lambda: "task"
+
+    fake_workspace = MagicMock()
+    fake_workspace.get_app_config_dir.return_value = "/tmp/fake_dir"
+    fake_engine = MagicMock()
+    fake_engine.get_workspace.return_value = fake_workspace
+    fl_ctx = MagicMock()
+    fl_ctx.get_engine.return_value = fake_engine
+    fl_ctx.get_job_id.return_value = "test_job"
+
+    executor.initialize(fl_ctx)
+
+    task_exchange = captured[ConfigKey.TASK_EXCHANGE]
+    assert executor._download_request_timeout == 10800.0
+    assert task_exchange[ConfigKey.DOWNLOAD_REQ_TIMEOUT] == 10800.0
+
+
+@pytest.mark.parametrize("invalid", [0.0, -1.0, float("inf"), float("nan")])
+def test_invalid_configured_tensor_download_request_timeout_fails_before_launch(monkeypatch, invalid):
+    """An invalid explicit decomposer timeout must fail before a subprocess or GPU is launched."""
+    import nvflare.fuel.utils.app_config_utils as acu
+    from nvflare.apis.fl_constant import ConfigVarName
+    from nvflare.app_opt.pt.client_api_launcher_executor import PTClientAPILauncherExecutor
+    from nvflare.fuel.utils.config_service import ConfigService
+
+    errors = []
+    monkeypatch.setattr(_GCV_MODULE, _make_gcv_stub({}))
+    monkeypatch.setattr(LauncherExecutor, "initialize", lambda self, fl_ctx: None)
+    monkeypatch.setattr(ClientAPILauncherExecutor, "prepare_config_for_launch", lambda self, fl_ctx: None)
+    monkeypatch.setattr(ClientAPILauncherExecutor, "log_error", lambda self, fl_ctx, msg: errors.append(msg))
+    monkeypatch.setattr(ClientAPILauncherExecutor, "log_warning", lambda self, fl_ctx, msg: None)
+    monkeypatch.setattr(
+        acu,
+        "get_positive_float_var",
+        lambda name, default: 10800.0 if ConfigVarName.MIN_DOWNLOAD_TIMEOUT in name else default,
+    )
+    monkeypatch.setattr(
+        ConfigService,
+        "get_float_var",
+        lambda name, conf=None, default=None: (
+            invalid if ConfigVarName.STREAMING_PER_REQUEST_TIMEOUT in name else default
+        ),
+    )
+
+    executor = PTClientAPILauncherExecutor(pipe_id="test_pipe")
+    with pytest.raises(ValueError, match="tensor_streaming_per_request_timeout must be a positive finite number"):
+        executor.initialize(_FakeFLContext(_FakeCell()))
+
+    assert any("tensor_streaming_per_request_timeout" in error for error in errors)
 
 
 def test_heartbeat_timeout_none_fallback_is_serialized_to_subprocess_config(monkeypatch):
