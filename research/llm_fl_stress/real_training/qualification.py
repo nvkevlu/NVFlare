@@ -47,12 +47,14 @@ from provisioned import (  # noqa: E402
 )
 from state_evidence import file_sha256, inspect_persisted_checkpoint  # noqa: E402
 
-_PROFILES = ("full-state", "trainable-multiround", "trainable-32b")
-_TRAINABLE_PAYLOAD_CEILING_BYTES = 1024 * 1024 * 1024
+_PROFILES = ("full-state", "trainable-multiround", "trainable-32b", "trainable-72b")
+_ONE_GIB = 1024 * 1024 * 1024
 _CLIENT_OPERATION_TIMEOUT_SECONDS = 2400
 _PERSISTENCE_TIMEOUT_SECONDS = 2400.0
-_MIN_32B_READY_TIMEOUT_SECONDS = 1800.0
-_MIN_32B_STALL_TIMEOUT_SECONDS = 900.0
+_MIN_TARGET_TIMEOUTS_SECONDS = {
+    "trainable-32b": {"ready": 1800.0, "stall": 900.0},
+    "trainable-72b": {"ready": 3600.0, "stall": 1800.0},
+}
 
 
 def _profile_settings(profile: str) -> dict[str, Any]:
@@ -63,6 +65,7 @@ def _profile_settings(profile: str) -> dict[str, Any]:
             "local_steps": 1,
             "state_scope": "full",
             "target_name": "target-14b",
+            "max_payload_bytes": 0,
         }
     if profile == "trainable-multiround":
         return {
@@ -71,6 +74,7 @@ def _profile_settings(profile: str) -> dict[str, Any]:
             "local_steps": 4,
             "state_scope": "trainable",
             "target_name": "target-14b",
+            "max_payload_bytes": _ONE_GIB,
         }
     if profile == "trainable-32b":
         return {
@@ -79,6 +83,16 @@ def _profile_settings(profile: str) -> dict[str, Any]:
             "local_steps": 2,
             "state_scope": "trainable",
             "target_name": "target-32b",
+            "max_payload_bytes": _ONE_GIB,
+        }
+    if profile == "trainable-72b":
+        return {
+            "gate_rounds": 2,
+            "target_rounds": 1,
+            "local_steps": 2,
+            "state_scope": "trainable",
+            "target_name": "target-72b",
+            "max_payload_bytes": 2 * _ONE_GIB,
         }
     raise ValueError(f"unsupported qualification profile: {profile}")
 
@@ -89,19 +103,18 @@ def _validate_profile_timeouts(
     target_ready_timeout: float,
     target_stall_timeout: float,
 ) -> None:
-    """Reject known-unsafe 32B watchdog settings before services or GPUs start."""
+    """Reject known-unsafe large-model watchdog settings before services or GPUs start."""
 
-    if profile != "trainable-32b":
+    minimums = _MIN_TARGET_TIMEOUTS_SECONDS.get(profile)
+    if minimums is None:
         return
-    if target_ready_timeout < _MIN_32B_READY_TIMEOUT_SECONDS:
+    if target_ready_timeout < minimums["ready"]:
         raise ValueError(
-            "trainable-32b target_ready_timeout must be at least "
-            f"{_MIN_32B_READY_TIMEOUT_SECONDS}s, got {target_ready_timeout}s"
+            f"{profile} target_ready_timeout must be at least " f"{minimums['ready']}s, got {target_ready_timeout}s"
         )
-    if target_stall_timeout < _MIN_32B_STALL_TIMEOUT_SECONDS:
+    if target_stall_timeout < minimums["stall"]:
         raise ValueError(
-            "trainable-32b target_stall_timeout must be at least "
-            f"{_MIN_32B_STALL_TIMEOUT_SECONDS}s, got {target_stall_timeout}s"
+            f"{profile} target_stall_timeout must be at least " f"{minimums['stall']}s, got {target_stall_timeout}s"
         )
 
 
@@ -206,7 +219,10 @@ def _define_parser() -> argparse.ArgumentParser:
     parser.add_argument("--target-model-path", required=True, type=Path)
     parser.add_argument("--target-model-revision", required=True)
     parser.add_argument("--expected-target-hidden-size", type=int, default=0)
+    parser.add_argument("--expected-target-intermediate-size", type=int, default=0)
     parser.add_argument("--expected-target-num-hidden-layers", type=int, default=0)
+    parser.add_argument("--expected-target-num-attention-heads", type=int, default=0)
+    parser.add_argument("--expected-target-num-key-value-heads", type=int, default=0)
     parser.add_argument("--expected-target-min-weight-bytes", type=int, default=0)
     parser.add_argument("--expected-target-safetensor-files", type=int, default=0)
     parser.add_argument("--expected-target-payload-bytes", type=int, default=0)
@@ -244,6 +260,9 @@ def _require_target_identity(
     expected_hidden_size: int,
     expected_num_hidden_layers: int,
     expected_min_weight_bytes: int,
+    expected_intermediate_size: int = 0,
+    expected_num_attention_heads: int = 0,
+    expected_num_key_value_heads: int = 0,
     expected_safetensor_files: int = 0,
 ) -> dict[str, Any]:
     config_path = model_path / "config.json"
@@ -251,8 +270,11 @@ def _require_target_identity(
     observed = {
         "architectures": config.get("architectures"),
         "hidden_size": config.get("hidden_size"),
+        "intermediate_size": config.get("intermediate_size"),
         "model_type": config.get("model_type"),
+        "num_attention_heads": config.get("num_attention_heads"),
         "num_hidden_layers": config.get("num_hidden_layers"),
+        "num_key_value_heads": config.get("num_key_value_heads"),
         "torch_dtype": config.get("torch_dtype"),
     }
     if expected_hidden_size and observed["hidden_size"] != expected_hidden_size:
@@ -264,6 +286,13 @@ def _require_target_identity(
             "target num_hidden_layers mismatch: "
             f"expected {expected_num_hidden_layers}, observed {observed['num_hidden_layers']}"
         )
+    for name, expected in (
+        ("intermediate_size", expected_intermediate_size),
+        ("num_attention_heads", expected_num_attention_heads),
+        ("num_key_value_heads", expected_num_key_value_heads),
+    ):
+        if expected and observed[name] != expected:
+            raise RuntimeError(f"target {name} mismatch: expected {expected}, observed {observed[name]}")
     if expected_hidden_size or expected_num_hidden_layers:
         if (
             observed["architectures"] != ["Qwen2ForCausalLM"]
@@ -401,6 +430,7 @@ def _run_phase(
     ready_timeout: float,
     stall_timeout: float,
     expected_payload_bytes: int = 0,
+    max_payload_bytes: int = 0,
     num_rounds: int = 1,
     local_steps: int = 1,
     state_scope: str = "full",
@@ -425,6 +455,7 @@ def _run_phase(
             "num_rounds": num_rounds,
             "local_steps": local_steps,
             "state_scope": state_scope,
+            "max_payload_bytes": max_payload_bytes,
             "dataset_sha256": (
                 {site_name: file_sha256(path) for site_name, path in DATA_FILES.items()}
                 if state_scope == "trainable"
@@ -497,6 +528,8 @@ def _run_phase(
         )
         trainable_evidence = None
         if state_scope == "trainable":
+            if max_payload_bytes <= 0:
+                raise RuntimeError(f"{name} trainable phase requires a positive payload ceiling")
             trainable_evidence = validate_trainable_state_evidence(
                 client_roots=roots,
                 site_names=list(CLIENT_NAMES),
@@ -506,7 +539,7 @@ def _run_phase(
                 nproc_per_client=4,
                 expected_dataset_sha256={site_name: file_sha256(path) for site_name, path in DATA_FILES.items()},
                 persisted_models=persisted_models,
-                max_payload_bytes=_TRAINABLE_PAYLOAD_CEILING_BYTES,
+                max_payload_bytes=max_payload_bytes,
             )
             observed_payload_bytes = trainable_evidence["payload_bytes_per_transfer"]
             _require_payload_bytes(name, observed_payload_bytes, expected_payload_bytes)
@@ -708,7 +741,10 @@ def main() -> int:
             "target_model_path": str(args.target_model_path),
             "target_model_revision": args.target_model_revision,
             "expected_target_hidden_size": args.expected_target_hidden_size,
+            "expected_target_intermediate_size": args.expected_target_intermediate_size,
             "expected_target_num_hidden_layers": args.expected_target_num_hidden_layers,
+            "expected_target_num_attention_heads": args.expected_target_num_attention_heads,
+            "expected_target_num_key_value_heads": args.expected_target_num_key_value_heads,
             "expected_target_min_weight_bytes": args.expected_target_min_weight_bytes,
             "expected_target_safetensor_files": args.expected_target_safetensor_files,
             "expected_target_payload_bytes": args.expected_target_payload_bytes,
@@ -736,11 +772,15 @@ def main() -> int:
         local_steps = profile["local_steps"]
         state_scope = profile["state_scope"]
         target_name = profile["target_name"]
+        max_payload_bytes = profile["max_payload_bytes"]
         if not args.control_plane_only:
             target_identity = _require_target_identity(
                 args.target_model_path,
                 expected_hidden_size=args.expected_target_hidden_size,
+                expected_intermediate_size=args.expected_target_intermediate_size,
                 expected_num_hidden_layers=args.expected_target_num_hidden_layers,
+                expected_num_attention_heads=args.expected_target_num_attention_heads,
+                expected_num_key_value_heads=args.expected_target_num_key_value_heads,
                 expected_min_weight_bytes=args.expected_target_min_weight_bytes,
                 expected_safetensor_files=args.expected_target_safetensor_files,
             )
@@ -805,6 +845,7 @@ def main() -> int:
                     ready_timeout=args.gate_ready_timeout,
                     stall_timeout=args.gate_stall_timeout,
                     expected_payload_bytes=0,
+                    max_payload_bytes=max_payload_bytes,
                     num_rounds=gate_rounds,
                     local_steps=local_steps,
                     state_scope=state_scope,
@@ -821,6 +862,7 @@ def main() -> int:
                     ready_timeout=args.target_ready_timeout,
                     stall_timeout=args.target_stall_timeout,
                     expected_payload_bytes=args.expected_target_payload_bytes,
+                    max_payload_bytes=max_payload_bytes,
                     num_rounds=target_rounds,
                     local_steps=local_steps,
                     state_scope=state_scope,

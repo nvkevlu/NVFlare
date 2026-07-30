@@ -111,13 +111,78 @@ def test_trainable_recipe_uses_sparse_server_model_and_distinct_site_data():
     assert recipe.aggregation_weights == {"site-1": 1.0, "site-2": 1.0}
 
 
-@pytest.mark.parametrize("name", ["two_client_14b_trainable.slurm", "two_client_32b_trainable.slurm"])
+@pytest.mark.parametrize(
+    "name",
+    [
+        "two_client_14b_trainable.slurm",
+        "two_client_32b_trainable.slurm",
+        "two_client_72b_trainable.slurm",
+    ],
+)
 def test_slurm_wrappers_resolve_launcher_from_repo_not_spooled_script(name):
     wrapper = (Path(__file__).resolve().parents[1] / "real_training" / "cs_oci_ord" / name).read_text()
 
     assert "BASH_SOURCE" not in wrapper
     assert 'QUALIFICATION_SCRIPT="${REPO_ROOT}/research/llm_fl_stress/real_training/' in wrapper
     assert 'exec bash "${QUALIFICATION_SCRIPT}"' in wrapper
+
+
+def test_72b_wrapper_pins_capacity_identity_and_safe_timeouts():
+    wrapper = (
+        Path(__file__).resolve().parents[1] / "real_training" / "cs_oci_ord" / "two_client_72b_trainable.slurm"
+    ).read_text()
+
+    assert "#SBATCH --gpus-per-node=8" in wrapper
+    assert "#SBATCH --mem=1400G" in wrapper
+    assert "#SBATCH --time=03:00:00" in wrapper
+    assert "QUALIFICATION_PROFILE=trainable-72b" in wrapper
+    assert "efba10c8e54e91e0d9570ab5f7b51a958474d4cb" in wrapper
+    assert "EXPECTED_TARGET_HIDDEN_SIZE=8192" in wrapper
+    assert "EXPECTED_TARGET_INTERMEDIATE_SIZE=29568" in wrapper
+    assert "EXPECTED_TARGET_NUM_HIDDEN_LAYERS=80" in wrapper
+    assert "EXPECTED_TARGET_NUM_ATTENTION_HEADS=64" in wrapper
+    assert "EXPECTED_TARGET_NUM_KEY_VALUE_HEADS=8" in wrapper
+    assert "EXPECTED_TARGET_SAFETENSOR_FILES=37" in wrapper
+    assert "EXPECTED_TARGET_PAYLOAD_BYTES=1755369472" in wrapper
+    assert "TARGET_READY_TIMEOUT=3600" in wrapper
+    assert "TARGET_STALL_TIMEOUT=1800" in wrapper
+
+
+def test_72b_gpu_gate_is_real_four_rank_training_with_headroom_requirement():
+    wrapper = (
+        Path(__file__).resolve().parents[1] / "real_training" / "cs_oci_ord" / "model_72b_gpu_preflight.slurm"
+    ).read_text()
+
+    assert "#SBATCH --gpus-per-node=4" in wrapper
+    assert "#SBATCH --mem=768G" in wrapper
+    assert "--nproc_per_node=4" in wrapper
+    assert "--local-steps 2" in wrapper
+    assert "--expected-payload-bytes 1755369472" in wrapper
+    assert "--required-headroom-mib 8192" in wrapper
+    assert "NCCL_P2P_DISABLE" in wrapper
+    assert "real_model_fsdp2_gpu_gate.py" in wrapper
+
+
+def test_72b_cpu_preflight_checks_sparse_state_and_exported_job():
+    wrapper = (
+        Path(__file__).resolve().parents[1] / "real_training" / "cs_oci_ord" / "model_72b_preflight.slurm"
+    ).read_text()
+
+    assert "#SBATCH --partition=cpu" in wrapper
+    assert "#SBATCH --mem=32G" in wrapper
+    assert "trainable_server_preflight.py" in wrapper
+    assert "--expected-hidden-size 8192" in wrapper
+    assert "--expected-intermediate-size 29568" in wrapper
+    assert "--expected-num-hidden-layers 80" in wrapper
+    assert "--expected-num-attention-heads 64" in wrapper
+    assert "--expected-num-key-value-heads 8" in wrapper
+    assert "--expected-safetensor-files 37" in wrapper
+    assert "--expected-payload-bytes 1755369472" in wrapper
+    assert "--max-payload-bytes 2147483648" in wrapper
+    assert "--num-clients 2" in wrapper
+    assert "--nproc-per-node 4" in wrapper
+    assert "--state-scope trainable" in wrapper
+    assert "exported_job_preflight.py" in wrapper
 
 
 def test_exported_launcher_uses_packaged_relative_client_path(tmp_path):

@@ -23,7 +23,7 @@ from pathlib import Path
 from model import HFTrainableStateModel
 from state_evidence import tensor_state_summary
 
-_PAYLOAD_CEILING_BYTES = 1024 * 1024 * 1024
+_DEFAULT_PAYLOAD_CEILING_BYTES = 1024 * 1024 * 1024
 
 
 def main() -> None:
@@ -31,11 +31,17 @@ def main() -> None:
     parser.add_argument("--model-name-or-path", required=True)
     parser.add_argument("--model-revision", required=True)
     parser.add_argument("--expected-hidden-size", type=int, default=0)
+    parser.add_argument("--expected-intermediate-size", type=int, default=0)
     parser.add_argument("--expected-num-hidden-layers", type=int, default=0)
+    parser.add_argument("--expected-num-attention-heads", type=int, default=0)
+    parser.add_argument("--expected-num-key-value-heads", type=int, default=0)
     parser.add_argument("--expected-min-weight-bytes", type=int, default=0)
     parser.add_argument("--expected-safetensor-files", type=int, default=0)
     parser.add_argument("--expected-payload-bytes", type=int, default=0)
+    parser.add_argument("--max-payload-bytes", type=int, default=_DEFAULT_PAYLOAD_CEILING_BYTES)
     args = parser.parse_args()
+    if args.max_payload_bytes <= 0:
+        raise ValueError("--max-payload-bytes must be greater than zero")
 
     model_path = Path(args.model_name_or_path)
     config = json.loads((model_path / "config.json").read_text(encoding="utf-8"))
@@ -48,6 +54,13 @@ def main() -> None:
             "num_hidden_layers mismatch: "
             f"expected {args.expected_num_hidden_layers}, observed {config.get('num_hidden_layers')}"
         )
+    for name, expected in (
+        ("intermediate_size", args.expected_intermediate_size),
+        ("num_attention_heads", args.expected_num_attention_heads),
+        ("num_key_value_heads", args.expected_num_key_value_heads),
+    ):
+        if expected and config.get(name) != expected:
+            raise RuntimeError(f"{name} mismatch: expected {expected}, observed {config.get(name)}")
     if args.expected_hidden_size or args.expected_num_hidden_layers:
         observed_identity = {
             "architectures": config.get("architectures"),
@@ -77,8 +90,8 @@ def main() -> None:
     if not all(key.startswith("model.model.layers.") for key in state):
         raise RuntimeError(f"sparse server model contains unexpected keys: {sorted(state)}")
     summary = tensor_state_summary(state)
-    if summary["payload_bytes"] > _PAYLOAD_CEILING_BYTES:
-        raise RuntimeError(f"sparse server payload {summary['payload_bytes']} exceeds ceiling {_PAYLOAD_CEILING_BYTES}")
+    if summary["payload_bytes"] > args.max_payload_bytes:
+        raise RuntimeError(f"sparse server payload {summary['payload_bytes']} exceeds ceiling {args.max_payload_bytes}")
     if args.expected_payload_bytes and summary["payload_bytes"] != args.expected_payload_bytes:
         raise RuntimeError(
             f"sparse server payload mismatch: expected {args.expected_payload_bytes}, "
@@ -93,6 +106,7 @@ def main() -> None:
                 "model_revision": args.model_revision,
                 "safetensor_bytes": weight_bytes,
                 "safetensor_file_count": len(weight_files),
+                "max_payload_bytes": args.max_payload_bytes,
                 "state": summary,
             },
             sort_keys=True,

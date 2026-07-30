@@ -46,26 +46,47 @@ def test_32b_profile_is_bounded_real_training_not_full_state():
         "local_steps": 2,
         "state_scope": "trainable",
         "target_name": "target-32b",
+        "max_payload_bytes": 1024 * 1024 * 1024,
     }
 
 
-def test_32b_profile_rejects_short_ready_or_stall_watchdogs():
+def test_72b_profile_is_bounded_last_layer_training_with_two_gib_payload_ceiling():
+    settings = qualification._profile_settings("trainable-72b")
+
+    assert settings == {
+        "gate_rounds": 2,
+        "target_rounds": 1,
+        "local_steps": 2,
+        "state_scope": "trainable",
+        "target_name": "target-72b",
+        "max_payload_bytes": 2 * 1024 * 1024 * 1024,
+    }
+
+
+@pytest.mark.parametrize(
+    "profile,ready_timeout,stall_timeout",
+    [
+        ("trainable-32b", 1800.0, 900.0),
+        ("trainable-72b", 3600.0, 1800.0),
+    ],
+)
+def test_large_model_profiles_reject_short_ready_or_stall_watchdogs(profile, ready_timeout, stall_timeout):
     qualification._validate_profile_timeouts(
-        "trainable-32b",
-        target_ready_timeout=1800.0,
-        target_stall_timeout=900.0,
+        profile,
+        target_ready_timeout=ready_timeout,
+        target_stall_timeout=stall_timeout,
     )
 
-    with pytest.raises(ValueError, match="target_ready_timeout must be at least 1800.0s"):
+    with pytest.raises(ValueError, match=f"target_ready_timeout must be at least {ready_timeout}s"):
         qualification._validate_profile_timeouts(
-            "trainable-32b",
+            profile,
             target_ready_timeout=300.0,
-            target_stall_timeout=900.0,
+            target_stall_timeout=stall_timeout,
         )
-    with pytest.raises(ValueError, match="target_stall_timeout must be at least 900.0s"):
+    with pytest.raises(ValueError, match=f"target_stall_timeout must be at least {stall_timeout}s"):
         qualification._validate_profile_timeouts(
-            "trainable-32b",
-            target_ready_timeout=1800.0,
+            profile,
+            target_ready_timeout=ready_timeout,
             target_stall_timeout=300.0,
         )
 
@@ -156,6 +177,13 @@ def test_32b_payload_must_match_exact_last_layer_size():
 
     with pytest.raises(RuntimeError, match="target-32b trainable payload mismatch"):
         qualification._require_payload_bytes("target-32b", 975_210_494, 975_210_496)
+
+
+def test_72b_payload_must_match_exact_last_layer_size():
+    qualification._require_payload_bytes("target-72b", 1_755_369_472, 1_755_369_472)
+
+    with pytest.raises(RuntimeError, match="target-72b trainable payload mismatch"):
+        qualification._require_payload_bytes("target-72b", 1_755_369_470, 1_755_369_472)
 
 
 class _RunningMonitorProcess:
