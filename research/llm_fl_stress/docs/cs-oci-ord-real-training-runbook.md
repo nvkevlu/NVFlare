@@ -19,6 +19,9 @@ own reviewed release, exact preflight ladder, and claim boundary; it does not re
 last-layer 14B results documented here.
 Its completed result is retained in the
 [two-client 14B full-model qualification record](cs-oci-ord-two-client-14b-full-model-qualification-2026-07-31.md).
+The completed five-round continuation and its bounded FedAvg-continuity evidence are retained in the
+[multiround runbook](cs-oci-ord-two-client-14b-full-model-multiround-runbook.md) and
+[multiround qualification record](cs-oci-ord-two-client-14b-full-model-multiround-qualification-2026-07-31.md).
 The gated last-layer scaling procedure is in the
 [two-client 72B runbook](cs-oci-ord-two-client-72b-runbook.md).
 The completed large-model results are retained in the

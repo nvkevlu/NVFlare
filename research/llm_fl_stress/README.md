@@ -49,6 +49,10 @@ its exact-model CPU and four-GPU gates, two-hour production envelope, BF16 AdamW
 caveat, and evidence boundary. The completed result and resource measurements are
 in the
 [two-client 14B full-model qualification record](docs/cs-oci-ord-two-client-14b-full-model-qualification-2026-07-31.md).
+The completed five-round follow-up, including bounded BF16 FedAvg continuity and repeated-persistence evidence, is
+in the
+[multiround runbook](docs/cs-oci-ord-two-client-14b-full-model-multiround-runbook.md) and
+[multiround qualification record](docs/cs-oci-ord-two-client-14b-full-model-multiround-qualification-2026-07-31.md).
 The completed trainable-state scaling results are in the
 [two-client 32B qualification record](docs/cs-oci-ord-two-client-32b-qualification-2026-07-29.md) and
 [two-client 72B qualification record](docs/cs-oci-ord-two-client-72b-qualification-2026-07-30.md).

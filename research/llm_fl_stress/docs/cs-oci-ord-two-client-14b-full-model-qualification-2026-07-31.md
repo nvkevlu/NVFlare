@@ -254,3 +254,7 @@ It does not establish convergence, useful model quality, multi-round continuity,
 server-only memory, FP32-moment capacity, fault tolerance, privacy properties, or scaling of full-model training to
 32B or 72B. No rerun is required for this qualification. Any later GPU allocation should answer a new question,
 such as multi-round state continuity, isolated server memory, communication reduction, or multi-node behavior.
+
+The later five-round job `31225699` closed this run's bounded multi-round-continuity gap without changing the
+historical claims above. See the
+[five-round qualification record](cs-oci-ord-two-client-14b-full-model-multiround-qualification-2026-07-31.md).

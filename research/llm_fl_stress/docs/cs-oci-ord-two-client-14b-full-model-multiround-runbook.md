@@ -1,5 +1,9 @@
 # CS-OCI-ORD five-round Qwen2.5-14B full-model federation
 
+**Qualification status:** Passed on 2026-07-31 as Slurm job `31225699`. See the
+[retained qualification report](cs-oci-ord-two-client-14b-full-model-multiround-qualification-2026-07-31.md) for
+the exact continuity, persistence, timing, and resource evidence. No rerun is required for this qualification.
+
 This is the next result-producing experiment after the passing one-round 14B full-model qualification. It runs one
 provisioned-TLS NVFLARE server and two real clients on one eight-A100 node. Each client uses four FSDP2 ranks, trains
 all 14,770,033,664 parameters for two optimizer steps per round, and exchanges the exact 579-tensor, 29,540,067,328-byte
