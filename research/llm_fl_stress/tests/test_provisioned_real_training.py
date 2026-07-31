@@ -204,6 +204,7 @@ def test_run_progress_counts_only_meaningful_training_and_transfer_events(tmp_pa
         root.mkdir(parents=True)
         (root / "log.txt").write_text(
             '{"event": "real_training_client_ready"}\n'
+            '{"event": "real_training_step"}\n'
             "accepted stream progress active\n"
             '{"event": "real_training_round"}\n'
             "task result sent to server\n"
@@ -217,6 +218,7 @@ def test_run_progress_counts_only_meaningful_training_and_transfer_events(tmp_pa
     assert progress["persistence_finished_rounds"] == 1
     for prefix in ("site_1", "site_2"):
         assert progress[f"{prefix}_ready_events"] == 1
+        assert progress[f"{prefix}_step_events"] == 1
         assert progress[f"{prefix}_stream_progress_events"] == 1
         assert progress[f"{prefix}_round_events"] == 1
         assert progress[f"{prefix}_results_submitted"] == 1

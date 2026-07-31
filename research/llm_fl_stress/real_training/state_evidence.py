@@ -144,6 +144,48 @@ def tensor_state_summary(state_dict: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def tensor_state_probe(state_dict: Mapping[str, Any]) -> dict[str, Any]:
+    """Record exact tensor schema and bounded values without hashing every tensor byte."""
+
+    import torch
+
+    if not isinstance(state_dict, Mapping) or not state_dict:
+        raise ValueError("tensor state must be a non-empty mapping")
+
+    schema_digest = hashlib.sha256()
+    samples = []
+    tensor_count = 0
+    payload_bytes = 0
+    for key in sorted(state_dict):
+        value = state_dict[key]
+        if not isinstance(key, str):
+            raise TypeError(f"tensor state key must be str, got {type(key).__name__}")
+        if not torch.is_tensor(value):
+            raise TypeError(f"tensor state value for {key!r} must be a tensor, got {type(value).__name__}")
+        if value.device.type != "cpu":
+            raise ValueError(f"tensor state value for {key!r} must be on CPU, got {value.device}")
+        metadata = json.dumps(
+            {"dtype": str(value.dtype), "key": key, "shape": list(value.shape)},
+            sort_keys=True,
+        ).encode("utf-8")
+        schema_digest.update(len(metadata).to_bytes(8, "big"))
+        schema_digest.update(metadata)
+        tensor_count += 1
+        payload_bytes += value.numel() * value.element_size()
+        if value.numel():
+            flat = value.detach().reshape(-1)
+            indices = sorted({0, value.numel() // 3, (2 * value.numel()) // 3, value.numel() - 1})
+            for index in indices[:_SAMPLES_PER_TENSOR]:
+                samples.append({"key": key, "index": index, "value": float(flat[index].item())})
+    return {
+        "strategy": "schema-sha256-plus-bounded-values",
+        "schema_sha256": schema_digest.hexdigest(),
+        "tensor_count": tensor_count,
+        "payload_bytes": payload_bytes,
+        "samples": samples,
+    }
+
+
 def inspect_persisted_checkpoint(path: Path) -> dict[str, Any]:
     """Reload a persisted trainable-state checkpoint and summarize its model tensors."""
 

@@ -18,7 +18,9 @@ from __future__ import annotations
 
 import argparse
 import ast
+import hashlib
 import json
+import shlex
 from pathlib import Path
 from typing import Any
 
@@ -67,7 +69,36 @@ def _require_early_flare_init(client_script: Path) -> None:
         )
 
 
-def validate_exported_job(job_root: Path, timeout_seconds: int) -> dict[str, Any]:
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _option_value(tokens: list[str], name: str) -> str:
+    matches = []
+    for index, token in enumerate(tokens):
+        if token == name and index + 1 < len(tokens):
+            matches.append(tokens[index + 1])
+        elif token.startswith(f"{name}="):
+            matches.append(token.split("=", maxsplit=1)[1])
+    if len(matches) != 1:
+        raise RuntimeError(f"exported launcher must contain exactly one {name}, observed {matches}")
+    return matches[0]
+
+
+def validate_exported_job(
+    job_root: Path,
+    timeout_seconds: int,
+    *,
+    expected_trainable_target: str | None = None,
+    expected_state_scope: str | None = None,
+    expected_local_steps: int | None = None,
+    expected_max_length: int | None = None,
+    expected_model_revision: str | None = None,
+) -> dict[str, Any]:
     if timeout_seconds <= 0:
         raise ValueError("timeout_seconds must be greater than zero")
     if not job_root.is_dir():
@@ -91,6 +122,8 @@ def validate_exported_job(job_root: Path, timeout_seconds: int) -> dict[str, Any
         "tensor_min_download_timeout": timeout_seconds,
     }
     validated_clients = []
+    launcher_contracts = []
+    dataset_sha256 = {}
     for site_name in CLIENT_NAMES:
         app_root = job_root / f"app_{site_name}"
         config_path = app_root / "config" / "config_fed_client.json"
@@ -117,11 +150,50 @@ def validate_exported_job(job_root: Path, timeout_seconds: int) -> dict[str, Any
             config_path,
         )
         launcher_script = launcher_args.get("script", "")
+        tokens = shlex.split(launcher_script)
         expected_dataset_arg = f"--dataset-file data/{site_name}.jsonl"
         if expected_dataset_arg not in launcher_script:
             raise RuntimeError(f"launcher in {config_path} does not contain {expected_dataset_arg!r}")
+        declared_dataset_sha256 = _option_value(tokens, "--dataset-sha256")
+        observed_dataset_sha256 = _file_sha256(dataset)
+        if declared_dataset_sha256 != observed_dataset_sha256:
+            raise RuntimeError(
+                f"launcher dataset checksum does not match packaged data in {config_path}: "
+                f"{declared_dataset_sha256} != {observed_dataset_sha256}"
+            )
+        contract = {
+            "trainable_target": _option_value(tokens, "--trainable-target"),
+            "state_scope": _option_value(tokens, "--state-scope"),
+            "local_steps": int(_option_value(tokens, "--local-steps")),
+            "max_length": int(_option_value(tokens, "--max-length")),
+            "model_revision": _option_value(tokens, "--model-revision"),
+            "nproc_per_node": int(_option_value(tokens, "--nproc_per_node")),
+        }
+        expected_contract = {
+            "trainable_target": expected_trainable_target,
+            "state_scope": expected_state_scope,
+            "local_steps": expected_local_steps,
+            "max_length": expected_max_length,
+            "model_revision": expected_model_revision,
+        }
+        mismatches = {
+            key: {"expected": expected, "observed": contract[key]}
+            for key, expected in expected_contract.items()
+            if expected is not None and contract[key] != expected
+        }
+        if mismatches:
+            raise RuntimeError(f"launcher training contract mismatch in {config_path}: {mismatches}")
+        if contract["nproc_per_node"] != 4:
+            raise RuntimeError(f"launcher in {config_path} must use exactly four torchrun ranks")
         _require_early_flare_init(client_script)
         validated_clients.append(site_name)
+        launcher_contracts.append(contract)
+        dataset_sha256[site_name] = observed_dataset_sha256
+
+    if launcher_contracts[0] != launcher_contracts[1]:
+        raise RuntimeError(f"client launchers disagree on the training contract: {launcher_contracts}")
+    if len(set(dataset_sha256.values())) != len(CLIENT_NAMES):
+        raise RuntimeError("the two packaged client datasets must have distinct SHA-256 values")
 
     server_config_path = job_root / "app_server" / "config" / "config_fed_server.json"
     server_config = json.loads(server_config_path.read_text(encoding="utf-8"))
@@ -140,6 +212,21 @@ def validate_exported_job(job_root: Path, timeout_seconds: int) -> dict[str, Any
             "PyTorch tensor transfers require tensor_streaming_per_request_timeout"
         )
 
+    controllers = [workflow for workflow in server_config.get("workflows", []) if workflow.get("id") == "controller"]
+    if len(controllers) != 1:
+        raise RuntimeError(
+            f"expected exactly one controller workflow in {server_config_path}, found {len(controllers)}"
+        )
+    controller_args = controllers[0].get("args")
+    if not isinstance(controller_args, dict):
+        raise RuntimeError(f"controller workflow in {server_config_path} has invalid args: {controller_args!r}")
+    expected_aggregation_weights = {site_name: 1.0 for site_name in CLIENT_NAMES}
+    if controller_args.get("aggregation_weights") != expected_aggregation_weights:
+        raise RuntimeError(
+            f"controller aggregation_weights mismatch in {server_config_path}: "
+            f"expected {expected_aggregation_weights}, observed {controller_args.get('aggregation_weights')!r}"
+        )
+
     return {
         "event": "real_training_exported_job_preflight",
         "status": "PASS",
@@ -151,6 +238,9 @@ def validate_exported_job(job_root: Path, timeout_seconds: int) -> dict[str, Any
         "subprocess_tensor_download_timeout_seconds": timeout_seconds,
         "early_flare_init": True,
         "strict_start_job_reply_check": True,
+        "aggregation_weights": expected_aggregation_weights,
+        "launcher_contract": launcher_contracts[0],
+        "dataset_sha256": dataset_sha256,
     }
 
 
@@ -158,10 +248,23 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--job-root", required=True, type=Path)
     parser.add_argument("--timeout-seconds", required=True, type=int)
+    parser.add_argument("--expected-trainable-target", choices=("last-layer", "lm-head", "all"))
+    parser.add_argument("--expected-state-scope", choices=("full", "trainable"))
+    parser.add_argument("--expected-local-steps", type=int)
+    parser.add_argument("--expected-max-length", type=int)
+    parser.add_argument("--expected-model-revision")
     args = parser.parse_args()
     print(
         json.dumps(
-            validate_exported_job(args.job_root, args.timeout_seconds),
+            validate_exported_job(
+                args.job_root,
+                args.timeout_seconds,
+                expected_trainable_target=args.expected_trainable_target,
+                expected_state_scope=args.expected_state_scope,
+                expected_local_steps=args.expected_local_steps,
+                expected_max_length=args.expected_max_length,
+                expected_model_revision=args.expected_model_revision,
+            ),
             sort_keys=True,
         ),
         flush=True,

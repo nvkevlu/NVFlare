@@ -35,7 +35,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 EXPECTED_BRANCH = "codex/llm-fl-real-14b"
-EXPECTED_RELEASE = "2026-07-30-trainable-72b-v11"
+EXPECTED_RELEASE = "2026-07-31-full-model-14b-v12"
 GATE_MODEL_DIR = "Qwen2.5-1.5B-8faed761d45a"
 GATE_MODEL_REVISION = "8faed761d45a263340a0528343f099c05c9a4323"
 TARGET_MODEL_DIR = "Qwen2.5-72B-efba10c8e54e"

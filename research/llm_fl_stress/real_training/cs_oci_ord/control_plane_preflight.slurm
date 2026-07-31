@@ -7,6 +7,7 @@
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=16G
 #SBATCH --time=00:15:00
+#SBATCH --no-requeue
 #SBATCH --comment=fact_off
 #SBATCH --output=/lustre/fs11/portfolios/coreai/projects/coreai_edgeai_flresearch/users/kevlu/nvflare-14b/logs/%x-%j.out
 #SBATCH --error=/lustre/fs11/portfolios/coreai/projects/coreai_edgeai_flresearch/users/kevlu/nvflare-14b/logs/%x-%j.err
@@ -26,7 +27,7 @@ TARGET_MODEL_PATH="${GATE_MODEL_PATH}"
 TARGET_MODEL_REVISION="${GATE_MODEL_REVISION}"
 REQUIRED_BASE_COMMIT="1be715ed5bc97c83a6771b486c40b75f0b97e4fd"
 EXPECTED_BRANCH="codex/llm-fl-real-14b"
-REQUIRED_RELEASE="2026-07-30-trainable-72b-v11"
+REQUIRED_RELEASE="2026-07-31-full-model-14b-v12"
 RELEASE_FILE="${REPO_ROOT}/research/llm_fl_stress/real_training/QUALIFICATION_RELEASE"
 PRIVATE_ROOT="/tmp/nvflare-control-plane-${SLURM_JOB_ID}"
 ARTIFACT_ROOT="${PROJECT_ROOT}/artifacts/control-plane-${SLURM_JOB_ID}"

@@ -34,10 +34,12 @@ EXPECTED_TARGET_MIN_WEIGHT_BYTES="${EXPECTED_TARGET_MIN_WEIGHT_BYTES:-0}"
 EXPECTED_TARGET_SAFETENSOR_FILES="${EXPECTED_TARGET_SAFETENSOR_FILES:-0}"
 EXPECTED_TARGET_TENSOR_BYTES="${EXPECTED_TARGET_TENSOR_BYTES:-0}"
 EXPECTED_TARGET_PAYLOAD_BYTES="${EXPECTED_TARGET_PAYLOAD_BYTES:-0}"
+EXPECTED_TARGET_TENSOR_COUNT="${EXPECTED_TARGET_TENSOR_COUNT:-0}"
+EXPECTED_TARGET_TRAINABLE_PARAMETERS="${EXPECTED_TARGET_TRAINABLE_PARAMETERS:-0}"
 EXPECTED_GPU_NAME_SUBSTRING="${EXPECTED_GPU_NAME_SUBSTRING:-A100-SXM4-80GB}"
 REQUIRED_BASE_COMMIT="1be715ed5bc97c83a6771b486c40b75f0b97e4fd"
 EXPECTED_BRANCH="codex/llm-fl-real-14b"
-REQUIRED_RELEASE="2026-07-30-trainable-72b-v11"
+REQUIRED_RELEASE="2026-07-31-full-model-14b-v12"
 RELEASE_FILE="${REPO_ROOT}/research/llm_fl_stress/real_training/QUALIFICATION_RELEASE"
 QUALIFICATION_PROFILE="${QUALIFICATION_PROFILE:-full-state}"
 
@@ -48,7 +50,8 @@ fi
 if [[ "${QUALIFICATION_PROFILE}" != "full-state" &&
     "${QUALIFICATION_PROFILE}" != "trainable-multiround" &&
     "${QUALIFICATION_PROFILE}" != "trainable-32b" &&
-    "${QUALIFICATION_PROFILE}" != "trainable-72b" ]]; then
+    "${QUALIFICATION_PROFILE}" != "trainable-72b" &&
+    "${QUALIFICATION_PROFILE}" != "full-model-14b" ]]; then
     echo "Unsupported qualification profile: ${QUALIFICATION_PROFILE}" >&2
     exit 1
 fi
@@ -125,6 +128,14 @@ record_result() {
         printf 'nproc_per_client=4\n'
         printf 'total_gpu_processes=8\n'
         printf 'transport_timeout_seconds=10800\n'
+        if [[ "${QUALIFICATION_PROFILE}" == "full-model-14b" ]]; then
+            printf 'slurm_mem_per_node_mib=%s\n' "${SLURM_ALLOCATION_MEMORY_MIB:-UNSET}"
+            printf 'slurm_gpus_on_node=%s\n' "${SLURM_ALLOCATION_GPUS_ON_NODE:-UNSET}"
+            printf 'slurm_job_end_time_epoch=%s\n' "${SLURM_ALLOCATION_END_TIME_EPOCH:-UNSET}"
+            printf 'slurm_allocation_check_time_epoch=%s\n' "${SLURM_ALLOCATION_CHECK_TIME_EPOCH:-UNSET}"
+            printf 'slurm_remaining_seconds_at_check=%s\n' "${SLURM_ALLOCATION_REMAINING_SECONDS:-UNSET}"
+        fi
+        printf 'release=%s\n' "${REQUIRED_RELEASE}"
         printf 'git_commit=%s\n' "$(git -C "${REPO_ROOT}" rev-parse HEAD 2>/dev/null || true)"
     } > "${ARTIFACT_ROOT}/manifest.txt"
     if [[ -d "${PRIVATE_ROOT}" ]] &&
@@ -166,6 +177,8 @@ QUALIFICATION_ARGS=(
     --expected-target-safetensor-files "${EXPECTED_TARGET_SAFETENSOR_FILES}"
     --expected-target-tensor-bytes "${EXPECTED_TARGET_TENSOR_BYTES}"
     --expected-target-payload-bytes "${EXPECTED_TARGET_PAYLOAD_BYTES}"
+    --expected-target-tensor-count "${EXPECTED_TARGET_TENSOR_COUNT}"
+    --expected-target-trainable-parameters "${EXPECTED_TARGET_TRAINABLE_PARAMETERS}"
     --private-root "${PRIVATE_ROOT}"
     --evidence-root "${ARTIFACT_ROOT}"
     --expected-gpu-name-substring "${EXPECTED_GPU_NAME_SUBSTRING}"
@@ -179,17 +192,22 @@ QUALIFICATION_ARGS=(
 printf -v QUOTED_QUALIFICATION_ARGS ' %q' "${QUALIFICATION_ARGS[@]}"
 
 QUOTED_READINESS_COMMAND=""
-if [[ "${QUALIFICATION_PROFILE}" == "trainable-72b" ]]; then
+if [[ "${QUALIFICATION_PROFILE}" == "trainable-72b" ||
+    "${QUALIFICATION_PROFILE}" == "full-model-14b" ]]; then
     for job_id_name in CONTROL_JOB_ID PREFLIGHT_JOB_ID GPU_PREFLIGHT_JOB_ID; do
         job_id_value="${!job_id_name:-}"
         if [[ ! "${job_id_value}" =~ ^[0-9]+$ ]]; then
-            echo "${job_id_name} must be a numeric passing-gate job ID for the 72B qualification." >&2
+            echo "${job_id_name} must be a numeric passing-gate job ID for ${QUALIFICATION_PROFILE}." >&2
             exit 1
         fi
     done
+    if [[ "${QUALIFICATION_PROFILE}" == "trainable-72b" ]]; then
+        READINESS_SCRIPT=research/llm_fl_stress/real_training/cs_oci_ord/validate_72b_readiness.py
+    else
+        READINESS_SCRIPT=research/llm_fl_stress/real_training/cs_oci_ord/validate_14b_full_model_readiness.py
+    fi
     READINESS_COMMAND=(
-        python
-        research/llm_fl_stress/real_training/cs_oci_ord/validate_72b_readiness.py
+        python "${READINESS_SCRIPT}"
         --project-root "${PROJECT_ROOT}"
         --control-job-id "${CONTROL_JOB_ID}"
         --cpu-job-id "${PREFLIGHT_JOB_ID}"

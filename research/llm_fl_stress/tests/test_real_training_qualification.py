@@ -103,6 +103,19 @@ def test_scratch_capacity_rejects_insufficient_space(tmp_path, monkeypatch, free
         qualification._require_scratch_capacity(tmp_path / "job" / "private")
 
 
+def test_full_model_scratch_capacity_uses_profile_specific_threshold(tmp_path, monkeypatch):
+    usage = type("Usage", (), {"free": 199 * qualification._ONE_GIB})()
+    filesystem = type("Filesystem", (), {"f_favail": 200_000})()
+    monkeypatch.setattr(qualification.shutil, "disk_usage", lambda _path: usage)
+    monkeypatch.setattr(qualification.os, "statvfs", lambda _path: filesystem)
+
+    with pytest.raises(RuntimeError, match="at least"):
+        qualification._require_scratch_capacity(
+            tmp_path / "job" / "private",
+            required_free_bytes=200 * qualification._ONE_GIB,
+        )
+
+
 def test_32b_profile_is_bounded_real_training_not_full_state():
     settings = qualification._profile_settings("trainable-32b")
 
@@ -129,11 +142,49 @@ def test_72b_profile_is_bounded_last_layer_training_with_two_gib_payload_ceiling
     }
 
 
+def test_full_model_14b_profile_is_all_parameter_full_state_and_amortizes_transfer():
+    settings = qualification._profile_settings("full-model-14b")
+
+    assert settings == {
+        "gate_rounds": 1,
+        "target_rounds": 1,
+        "gate_local_steps": 2,
+        "target_local_steps": 8,
+        "gate_max_length": 128,
+        "target_max_length": 512,
+        "gate_trainable_target": "all",
+        "target_trainable_target": "all",
+        "state_scope": "full",
+        "target_name": "target-14b-full-model",
+        "max_payload_bytes": 0,
+        "minimum_scratch_free_bytes": 200 * qualification._ONE_GIB,
+        "required_gpu_reserved_headroom_bytes": 16 * qualification._ONE_GIB,
+    }
+
+
+def test_full_model_phase_args_propagate_all_and_sequence_length(tmp_path):
+    args = qualification._phase_args(
+        tmp_path / "model",
+        "revision",
+        tmp_path / "phase",
+        local_steps=8,
+        max_length=512,
+        trainable_target="all",
+        state_scope="full",
+    )
+
+    assert args.local_steps == 8
+    assert args.max_length == 512
+    assert args.trainable_target == "all"
+    assert args.state_scope == "full"
+
+
 @pytest.mark.parametrize(
     "profile,ready_timeout,stall_timeout",
     [
         ("trainable-32b", 1800.0, 900.0),
         ("trainable-72b", 7200.0, 1800.0),
+        ("full-model-14b", 1800.0, 1800.0),
     ],
 )
 def test_large_model_profiles_reject_short_ready_or_stall_watchdogs(profile, ready_timeout, stall_timeout):
@@ -271,14 +322,14 @@ def test_target_identity_requires_exact_indexed_tensor_bytes(tmp_path):
 def test_32b_payload_must_match_exact_last_layer_size():
     qualification._require_payload_bytes("target-32b", 975_210_496, 975_210_496)
 
-    with pytest.raises(RuntimeError, match="target-32b trainable payload mismatch"):
+    with pytest.raises(RuntimeError, match="target-32b exchanged payload mismatch"):
         qualification._require_payload_bytes("target-32b", 975_210_494, 975_210_496)
 
 
 def test_72b_payload_must_match_exact_last_layer_size():
     qualification._require_payload_bytes("target-72b", 1_755_369_472, 1_755_369_472)
 
-    with pytest.raises(RuntimeError, match="target-72b trainable payload mismatch"):
+    with pytest.raises(RuntimeError, match="target-72b exchanged payload mismatch"):
         qualification._require_payload_bytes("target-72b", 1_755_369_470, 1_755_369_472)
 
 
@@ -400,6 +451,49 @@ def test_gpu_monitor_fails_when_one_allocated_gpu_never_becomes_active(tmp_path,
 
     assert summary["status"] == "FAIL"
     assert summary["active_gpu_indices"] == list(range(1, 8))
+
+
+def test_allocation_monitor_fails_closed_on_cgroup_oom_or_limit_event(tmp_path):
+    monitor = qualification._AllocationMonitor(tmp_path / "memory.jsonl", tmp_path)
+    monitor.initial_events = {"max": 0, "oom": 0, "oom_kill": 0}
+    monitor.samples = [
+        {
+            "cgroup_memory_current_bytes": 100,
+            "cgroup_memory_peak_bytes": 100,
+            "cgroup_memory_events": {"max": 1, "oom": 1, "oom_kill": 0},
+            "process_tree_rss_bytes": 80,
+            "process_tree_pss_bytes": 60,
+            "system_available_bytes": 1000,
+            "scratch_free_bytes": 2000,
+        }
+    ]
+
+    summary = monitor.close()
+
+    assert summary["status"] == "FAIL"
+    assert summary["fatal_cgroup_event_deltas"] == {"max": 1, "oom": 1, "oom_kill": 0}
+
+
+def test_allocation_monitor_falls_back_when_cgroup_v2_is_unavailable(tmp_path, monkeypatch):
+    usage = type("Usage", (), {"free": 300 * qualification._ONE_GIB})()
+    monkeypatch.setattr(qualification, "_current_cgroup_v2_path", lambda: None)
+    monkeypatch.setattr(qualification._AllocationMonitor, "_process_tree_memory", lambda _self: (100, 80))
+    monkeypatch.setattr(qualification._AllocationMonitor, "_system_available_bytes", lambda _self: 1000)
+    monkeypatch.setattr(qualification.shutil, "disk_usage", lambda _path: usage)
+    monitor = qualification._AllocationMonitor(
+        tmp_path / "memory.jsonl",
+        tmp_path / "job" / "private",
+        interval_seconds=60.0,
+    )
+
+    monitor.start()
+    summary = monitor.close()
+
+    assert summary["status"] == "PASS"
+    assert summary["allocation_wide_cgroup_metrics_available"] is False
+    assert summary["telemetry_scope"] == "process-tree-plus-system"
+    assert summary["peak_process_tree_rss_bytes"] == 100
+    assert summary["minimum_scratch_free_bytes"] == 300 * qualification._ONE_GIB
 
 
 def test_phase_failure_retains_job_id_and_best_effort_logs(tmp_path, monkeypatch):

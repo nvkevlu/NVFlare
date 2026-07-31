@@ -25,6 +25,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import threading
 import time
 import traceback
 from argparse import Namespace
@@ -49,7 +50,7 @@ from provisioned import (  # noqa: E402
 )
 from state_evidence import file_sha256, inspect_persisted_checkpoint  # noqa: E402
 
-_PROFILES = ("full-state", "trainable-multiround", "trainable-32b", "trainable-72b")
+_PROFILES = ("full-state", "trainable-multiround", "trainable-32b", "trainable-72b", "full-model-14b")
 _ONE_GIB = 1024 * 1024 * 1024
 _CLIENT_OPERATION_TIMEOUT_SECONDS = 10800
 _PERSISTENCE_TIMEOUT_SECONDS = 7200.0
@@ -59,6 +60,7 @@ _MIN_SCRATCH_FREE_INODES = 100_000
 _MIN_TARGET_TIMEOUTS_SECONDS = {
     "trainable-32b": {"ready": 1800.0, "stall": 900.0},
     "trainable-72b": {"ready": 7200.0, "stall": 1800.0},
+    "full-model-14b": {"ready": 1800.0, "stall": 1800.0},
 }
 
 
@@ -98,6 +100,22 @@ def _profile_settings(profile: str) -> dict[str, Any]:
             "state_scope": "trainable",
             "target_name": "target-72b",
             "max_payload_bytes": 2 * _ONE_GIB,
+        }
+    if profile == "full-model-14b":
+        return {
+            "gate_rounds": 1,
+            "target_rounds": 1,
+            "gate_local_steps": 2,
+            "target_local_steps": 8,
+            "gate_max_length": 128,
+            "target_max_length": 512,
+            "gate_trainable_target": "all",
+            "target_trainable_target": "all",
+            "state_scope": "full",
+            "target_name": "target-14b-full-model",
+            "max_payload_bytes": 0,
+            "minimum_scratch_free_bytes": 200 * _ONE_GIB,
+            "required_gpu_reserved_headroom_bytes": 16 * _ONE_GIB,
         }
     raise ValueError(f"unsupported qualification profile: {profile}")
 
@@ -217,6 +235,158 @@ class _GpuMonitor:
         }
 
 
+def _read_key_value_file(path: Path) -> dict[str, int]:
+    result = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        key, value = line.split(maxsplit=1)
+        result[key] = int(value)
+    return result
+
+
+def _current_cgroup_v2_path() -> Path | None:
+    for line in Path("/proc/self/cgroup").read_text(encoding="utf-8").splitlines():
+        hierarchy, controllers, relative = line.split(":", maxsplit=2)
+        if hierarchy == "0" and not controllers:
+            path = Path("/sys/fs/cgroup") / relative.lstrip("/")
+            if (path / "memory.current").is_file() and (path / "memory.events").is_file():
+                return path
+    return None
+
+
+class _AllocationMonitor:
+    """Sample allocation-wide host memory and local scratch without Slurm RPCs."""
+
+    def __init__(self, output_path: Path, scratch_root: Path, *, interval_seconds: float = 5.0):
+        self.output_path = output_path
+        self.scratch_root = scratch_root
+        self.scratch_probe = scratch_root
+        self.interval_seconds = interval_seconds
+        self.cgroup_path: Path | None = None
+        self.initial_events: dict[str, int] = {}
+        self.samples: list[dict[str, Any]] = []
+        self.error: str | None = None
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        if self.interval_seconds <= 0:
+            raise ValueError("allocation-monitor interval must be positive")
+        self.output_path.parent.mkdir(parents=True, exist_ok=True)
+        while not self.scratch_probe.exists():
+            if self.scratch_probe.parent == self.scratch_probe:
+                raise RuntimeError(f"cannot locate scratch filesystem for {self.scratch_root}")
+            self.scratch_probe = self.scratch_probe.parent
+        self.cgroup_path = _current_cgroup_v2_path()
+        self.initial_events = (
+            _read_key_value_file(self.cgroup_path / "memory.events") if self.cgroup_path is not None else {}
+        )
+        self._sample()
+        self._thread = threading.Thread(target=self._run, name="allocation-memory-monitor", daemon=True)
+        self._thread.start()
+
+    def _system_available_bytes(self) -> int:
+        for line in Path("/proc/meminfo").read_text(encoding="utf-8").splitlines():
+            if line.startswith("MemAvailable:"):
+                return int(line.split()[1]) * 1024
+        raise RuntimeError("/proc/meminfo does not contain MemAvailable")
+
+    @staticmethod
+    def _process_tree_memory() -> tuple[int, int]:
+        import psutil
+
+        processes = [psutil.Process(os.getpid())]
+        processes.extend(processes[0].children(recursive=True))
+        rss_bytes = 0
+        pss_bytes = 0
+        for process in processes:
+            try:
+                rss_bytes += process.memory_info().rss
+                pss_bytes += getattr(process.memory_full_info(), "pss", 0)
+            except (psutil.AccessDenied, psutil.NoSuchProcess, ProcessLookupError):
+                continue
+        return rss_bytes, pss_bytes
+
+    def _sample(self) -> None:
+        rss_bytes, pss_bytes = self._process_tree_memory()
+        events = _read_key_value_file(self.cgroup_path / "memory.events") if self.cgroup_path is not None else {}
+        memory_peak_path = self.cgroup_path / "memory.peak" if self.cgroup_path is not None else None
+        sample = {
+            "timestamp_unix": time.time(),
+            "cgroup_memory_current_bytes": (
+                int((self.cgroup_path / "memory.current").read_text().strip()) if self.cgroup_path is not None else None
+            ),
+            "cgroup_memory_peak_bytes": (
+                int(memory_peak_path.read_text().strip())
+                if memory_peak_path is not None and memory_peak_path.is_file()
+                else None
+            ),
+            "cgroup_memory_events": events,
+            "process_tree_rss_bytes": rss_bytes,
+            "process_tree_pss_bytes": pss_bytes,
+            "system_available_bytes": self._system_available_bytes(),
+            "scratch_free_bytes": shutil.disk_usage(
+                self.scratch_root if self.scratch_root.exists() else self.scratch_probe
+            ).free,
+        }
+        self.samples.append(sample)
+        with self.output_path.open("a", encoding="utf-8") as stream:
+            stream.write(json.dumps(sample, sort_keys=True) + "\n")
+
+    def _run(self) -> None:
+        try:
+            while not self._stop.wait(self.interval_seconds):
+                self._sample()
+        except Exception as exc:
+            self.error = f"{type(exc).__name__}: {exc}"
+
+    def close(self) -> dict[str, Any]:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=max(5.0, self.interval_seconds * 2))
+        if self.cgroup_path is not None and self.error is None:
+            try:
+                self._sample()
+            except Exception as exc:
+                self.error = f"{type(exc).__name__}: {exc}"
+        final_events = self.samples[-1]["cgroup_memory_events"] if self.samples else {}
+        event_deltas = {
+            key: final_events.get(key, 0) - self.initial_events.get(key, 0)
+            for key in sorted(set(self.initial_events) | set(final_events))
+        }
+        fatal_events = {key: event_deltas.get(key, 0) for key in ("max", "oom", "oom_kill")}
+        status = "PASS" if self.samples and self.error is None and not any(fatal_events.values()) else "FAIL"
+        return {
+            "event": "real_training_allocation_monitor",
+            "status": status,
+            "output_path": str(self.output_path),
+            "cgroup_path": str(self.cgroup_path) if self.cgroup_path else None,
+            "allocation_wide_cgroup_metrics_available": self.cgroup_path is not None,
+            "telemetry_scope": (
+                "allocation-cgroup-plus-process-tree" if self.cgroup_path is not None else "process-tree-plus-system"
+            ),
+            "sample_count": len(self.samples),
+            "peak_cgroup_memory_current_bytes": max(
+                (sample["cgroup_memory_current_bytes"] or 0 for sample in self.samples), default=0
+            ),
+            "peak_cgroup_memory_bytes": max(
+                (sample["cgroup_memory_peak_bytes"] or 0 for sample in self.samples), default=0
+            ),
+            "peak_process_tree_rss_bytes": max(
+                (sample["process_tree_rss_bytes"] for sample in self.samples), default=0
+            ),
+            "peak_process_tree_pss_bytes": max(
+                (sample["process_tree_pss_bytes"] for sample in self.samples), default=0
+            ),
+            "minimum_system_available_bytes": min(
+                (sample["system_available_bytes"] for sample in self.samples), default=0
+            ),
+            "minimum_scratch_free_bytes": min((sample["scratch_free_bytes"] for sample in self.samples), default=0),
+            "cgroup_memory_event_deltas": event_deltas,
+            "fatal_cgroup_event_deltas": fatal_events,
+            "error": self.error,
+        }
+
+
 def _define_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--gate-model-path", required=True, type=Path)
@@ -232,6 +402,8 @@ def _define_parser() -> argparse.ArgumentParser:
     parser.add_argument("--expected-target-safetensor-files", type=int, default=0)
     parser.add_argument("--expected-target-tensor-bytes", type=int, default=0)
     parser.add_argument("--expected-target-payload-bytes", type=int, default=0)
+    parser.add_argument("--expected-target-tensor-count", type=int, default=0)
+    parser.add_argument("--expected-target-trainable-parameters", type=int, default=0)
     parser.add_argument("--private-root", required=True, type=Path)
     parser.add_argument("--evidence-root", required=True, type=Path)
     parser.add_argument("--expected-gpu-name-substring", default="A100-SXM4-80GB")
@@ -340,7 +512,7 @@ def _require_target_identity(
 
 def _require_payload_bytes(phase: str, observed: int, expected: int) -> None:
     if expected and observed != expected:
-        raise RuntimeError(f"{phase} trainable payload mismatch: expected {expected}, observed {observed}")
+        raise RuntimeError(f"{phase} exchanged payload mismatch: expected {expected}, observed {observed}")
 
 
 def _require_transport_timeout_environment() -> dict[str, int]:
@@ -369,6 +541,8 @@ def _phase_args(
     *,
     num_rounds: int = 1,
     local_steps: int = 1,
+    max_length: int = 128,
+    trainable_target: str = "last-layer",
     state_scope: str = "full",
 ) -> Namespace:
     return Namespace(
@@ -380,9 +554,9 @@ def _phase_args(
         nproc_per_node=4,
         num_rounds=num_rounds,
         local_steps=local_steps,
-        max_length=128,
+        max_length=max_length,
         learning_rate=1.0e-5,
-        trainable_target="last-layer",
+        trainable_target=trainable_target,
         run_mode="train",
         state_scope=state_scope,
         timeout_seconds=_CLIENT_OPERATION_TIMEOUT_SECONDS,
@@ -397,6 +571,8 @@ def _validate_phase_inputs(
     *,
     num_rounds: int = 1,
     local_steps: int = 1,
+    max_length: int = 128,
+    trainable_target: str = "last-layer",
     state_scope: str = "full",
 ) -> None:
     config = RealTrainingConfig(
@@ -407,9 +583,9 @@ def _validate_phase_inputs(
         nproc_per_node=4,
         num_rounds=num_rounds,
         local_steps=local_steps,
-        max_length=128,
+        max_length=max_length,
         learning_rate=1.0e-5,
-        trainable_target="last-layer",
+        trainable_target=trainable_target,
         run_mode="train",
         state_scope=state_scope,
     )
@@ -459,7 +635,11 @@ def _write_json(path: Path, value: dict[str, Any]) -> None:
     path.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
-def _require_scratch_capacity(private_root: Path) -> dict[str, Any]:
+def _require_scratch_capacity(
+    private_root: Path,
+    *,
+    required_free_bytes: int = _MIN_SCRATCH_FREE_BYTES,
+) -> dict[str, Any]:
     """Fail before service startup if the selected local scratch filesystem is too full."""
 
     probe = private_root
@@ -476,14 +656,14 @@ def _require_scratch_capacity(private_root: Path) -> dict[str, Any]:
         "scratch_root": str(private_root),
         "probed_path": str(probe),
         "free_bytes": usage.free,
-        "required_free_bytes": _MIN_SCRATCH_FREE_BYTES,
+        "required_free_bytes": required_free_bytes,
         "free_inodes": free_inodes,
         "required_free_inodes": _MIN_SCRATCH_FREE_INODES,
     }
-    if usage.free < _MIN_SCRATCH_FREE_BYTES:
+    if usage.free < required_free_bytes:
         raise RuntimeError(
             f"scratch filesystem for {private_root} has {usage.free} free bytes; "
-            f"at least {_MIN_SCRATCH_FREE_BYTES} are required"
+            f"at least {required_free_bytes} are required"
         )
     if free_inodes < _MIN_SCRATCH_FREE_INODES:
         raise RuntimeError(
@@ -504,10 +684,15 @@ def _run_phase(
     ready_timeout: float,
     stall_timeout: float,
     expected_payload_bytes: int = 0,
+    expected_tensor_count: int = 0,
+    expected_trainable_parameters: int = 0,
     max_payload_bytes: int = 0,
     num_rounds: int = 1,
     local_steps: int = 1,
+    max_length: int = 128,
+    trainable_target: str = "last-layer",
     state_scope: str = "full",
+    required_gpu_reserved_headroom_bytes: int = 0,
 ) -> dict[str, Any]:
     from nvflare.recipe.prod_env import ProdEnv
 
@@ -528,13 +713,15 @@ def _run_phase(
             "nproc_per_client": 4,
             "num_rounds": num_rounds,
             "local_steps": local_steps,
+            "max_length": max_length,
+            "trainable_target": trainable_target,
             "state_scope": state_scope,
+            "expected_payload_bytes": expected_payload_bytes,
+            "expected_tensor_count": expected_tensor_count,
+            "expected_trainable_parameters": expected_trainable_parameters,
             "max_payload_bytes": max_payload_bytes,
-            "dataset_sha256": (
-                {site_name: file_sha256(path) for site_name, path in DATA_FILES.items()}
-                if state_scope == "trainable"
-                else None
-            ),
+            "required_gpu_reserved_headroom_bytes": required_gpu_reserved_headroom_bytes,
+            "dataset_sha256": {site_name: file_sha256(path) for site_name, path in DATA_FILES.items()},
             "gpu_mapping": {"site-1": [0, 1, 2, 3], "site-2": [4, 5, 6, 7]},
             "execution_environment": "ProdEnv",
         },
@@ -550,6 +737,8 @@ def _run_phase(
                 phase_root,
                 num_rounds=num_rounds,
                 local_steps=local_steps,
+                max_length=max_length,
+                trainable_target=trainable_target,
                 state_scope=state_scope,
             )
         )
@@ -588,6 +777,13 @@ def _run_phase(
         )
         persisted_models = watcher.wait_all(timeout=_PERSISTENCE_TIMEOUT_SECONDS)
         persisted = persisted_models[-1]
+        if state_scope == "full" and expected_payload_bytes:
+            for persisted_record in persisted_models:
+                if persisted_record.get("size_bytes", 0) < expected_payload_bytes:
+                    raise RuntimeError(
+                        f"{name} persisted checkpoint is smaller than the exact full-state payload: "
+                        f"{persisted_record.get('size_bytes')} < {expected_payload_bytes}"
+                    )
         collected_roots = federation.collect_job_logs(job_id, phase_root / "logs")
         roots = {site_name: collected_roots[site_name] for site_name in CLIENT_NAMES}
         evidence = validate_production_evidence(
@@ -599,7 +795,20 @@ def _run_phase(
             nproc_per_client=4,
             num_rounds=num_rounds,
             expected_gpu_name_substring=expected_gpu_name_substring,
+            expected_state_scope=state_scope,
+            expected_trainable_target=trainable_target,
+            expected_trainable_parameters=expected_trainable_parameters,
+            expected_dataset_sha256={site_name: file_sha256(path) for site_name, path in DATA_FILES.items()},
+            expected_local_steps=local_steps if trainable_target == "all" else 0,
+            expected_max_length=max_length if trainable_target == "all" else 0,
+            required_gpu_reserved_headroom_bytes=required_gpu_reserved_headroom_bytes,
         )
+        _require_payload_bytes(name, evidence["payload_bytes_per_client"], expected_payload_bytes)
+        if expected_tensor_count and evidence["tensor_count"] != expected_tensor_count:
+            raise RuntimeError(
+                f"{name} exchanged tensor-count mismatch: expected {expected_tensor_count}, "
+                f"observed {evidence['tensor_count']}"
+            )
         trainable_evidence = None
         if state_scope == "trainable":
             if max_payload_bytes <= 0:
@@ -629,8 +838,10 @@ def _run_phase(
             "persisted_models": persisted_models,
             "trainable_state_evidence": trainable_evidence,
             "state_scope": state_scope,
+            "trainable_target": trainable_target,
             "num_rounds": num_rounds,
             "local_steps": local_steps,
+            "max_length": max_length,
             "elapsed_seconds": time.monotonic() - started_at,
             "execution_environment": "ProdEnv",
             "service_topology": "localhost-tls-server-plus-two-real-clients",
@@ -649,8 +860,10 @@ def _run_phase(
             "ready_timeout_seconds": ready_timeout,
             "stall_timeout_seconds": stall_timeout,
             "state_scope": state_scope,
+            "trainable_target": trainable_target,
             "num_rounds": num_rounds,
             "local_steps": local_steps,
+            "max_length": max_length,
             "elapsed_seconds": time.monotonic() - started_at,
             "error": {"type": type(exc).__name__, "message": str(exc)},
         }
@@ -796,6 +1009,11 @@ def main() -> int:
 
     result_path = args.evidence_root / "qualification.json"
     monitor = _GpuMonitor(args.evidence_root / "gpu-samples.csv")
+    allocation_monitor = (
+        _AllocationMonitor(args.evidence_root / "allocation-memory.jsonl", args.private_root)
+        if args.profile == "full-model-14b" and not args.control_plane_only
+        else None
+    )
     result: dict[str, Any] = {
         "event": "real_training_production_qualification",
         "status": "FAIL",
@@ -823,6 +1041,8 @@ def main() -> int:
             "expected_target_safetensor_files": args.expected_target_safetensor_files,
             "expected_target_tensor_bytes": args.expected_target_tensor_bytes,
             "expected_target_payload_bytes": args.expected_target_payload_bytes,
+            "expected_target_tensor_count": args.expected_target_tensor_count,
+            "expected_target_trainable_parameters": args.expected_target_trainable_parameters,
             "expected_gpu_name_substring": args.expected_gpu_name_substring,
             "service_startup_timeout_seconds": args.service_startup_timeout,
             "gate_ready_timeout_seconds": args.gate_ready_timeout,
@@ -844,10 +1064,16 @@ def main() -> int:
             )
         gate_rounds = profile["gate_rounds"]
         target_rounds = profile["target_rounds"]
-        local_steps = profile["local_steps"]
+        gate_local_steps = profile.get("gate_local_steps", profile.get("local_steps", 1))
+        target_local_steps = profile.get("target_local_steps", profile.get("local_steps", 1))
+        gate_max_length = profile.get("gate_max_length", 128)
+        target_max_length = profile.get("target_max_length", 128)
+        gate_trainable_target = profile.get("gate_trainable_target", "last-layer")
+        target_trainable_target = profile.get("target_trainable_target", "last-layer")
         state_scope = profile["state_scope"]
         target_name = profile["target_name"]
         max_payload_bytes = profile["max_payload_bytes"]
+        required_gpu_reserved_headroom_bytes = profile.get("required_gpu_reserved_headroom_bytes", 0)
         if not args.control_plane_only:
             target_identity = _require_target_identity(
                 args.target_model_path,
@@ -866,7 +1092,9 @@ def main() -> int:
                 args.gate_model_revision,
                 args.evidence_root / "gate",
                 num_rounds=gate_rounds,
-                local_steps=local_steps,
+                local_steps=gate_local_steps,
+                max_length=gate_max_length,
+                trainable_target=gate_trainable_target,
                 state_scope=state_scope,
             )
             _validate_phase_inputs(
@@ -874,7 +1102,9 @@ def main() -> int:
                 args.target_model_revision,
                 args.evidence_root / "target",
                 num_rounds=target_rounds,
-                local_steps=local_steps,
+                local_steps=target_local_steps,
+                max_length=target_max_length,
+                trainable_target=target_trainable_target,
                 state_scope=state_scope,
             )
         environment = _environment_check(
@@ -884,9 +1114,14 @@ def main() -> int:
         _write_json(args.evidence_root / "environment.json", environment)
         print(json.dumps(environment, sort_keys=True), flush=True)
         if not args.control_plane_only:
-            scratch_capacity = _require_scratch_capacity(args.private_root)
+            scratch_capacity = _require_scratch_capacity(
+                args.private_root,
+                required_free_bytes=profile.get("minimum_scratch_free_bytes", _MIN_SCRATCH_FREE_BYTES),
+            )
             _write_json(args.evidence_root / "scratch-capacity.json", scratch_capacity)
             print(json.dumps(scratch_capacity, sort_keys=True), flush=True)
+            if allocation_monitor is not None:
+                allocation_monitor.start()
             monitor.start()
 
         with LocalProductionFederation(
@@ -924,10 +1159,15 @@ def main() -> int:
                     ready_timeout=args.gate_ready_timeout,
                     stall_timeout=args.gate_stall_timeout,
                     expected_payload_bytes=0,
+                    expected_tensor_count=0,
+                    expected_trainable_parameters=0,
                     max_payload_bytes=max_payload_bytes,
                     num_rounds=gate_rounds,
-                    local_steps=local_steps,
+                    local_steps=gate_local_steps,
+                    max_length=gate_max_length,
+                    trainable_target=gate_trainable_target,
                     state_scope=state_scope,
+                    required_gpu_reserved_headroom_bytes=required_gpu_reserved_headroom_bytes,
                 )
                 if result["gate"]["status"] != "PASS":
                     raise RuntimeError("1.5B exact-topology gate did not pass")
@@ -941,10 +1181,15 @@ def main() -> int:
                     ready_timeout=args.target_ready_timeout,
                     stall_timeout=args.target_stall_timeout,
                     expected_payload_bytes=args.expected_target_payload_bytes,
+                    expected_tensor_count=args.expected_target_tensor_count,
+                    expected_trainable_parameters=args.expected_target_trainable_parameters,
                     max_payload_bytes=max_payload_bytes,
                     num_rounds=target_rounds,
-                    local_steps=local_steps,
+                    local_steps=target_local_steps,
+                    max_length=target_max_length,
+                    trainable_target=target_trainable_target,
                     state_scope=state_scope,
+                    required_gpu_reserved_headroom_bytes=required_gpu_reserved_headroom_bytes,
                 )
                 result["status"] = "PASS"
         exit_code = 0
@@ -969,6 +1214,25 @@ def main() -> int:
                 result["error"] = {
                     "type": "RuntimeError",
                     "message": "GPU utilization monitor did not produce valid samples",
+                }
+                exit_code = 1
+        if allocation_monitor is not None:
+            try:
+                allocation_summary = allocation_monitor.close()
+            except Exception as allocation_error:
+                allocation_summary = {
+                    "event": "real_training_allocation_monitor",
+                    "status": "FAIL",
+                    "output_path": str(allocation_monitor.output_path),
+                    "error": f"{type(allocation_error).__name__}: {allocation_error}",
+                }
+            result["allocation_monitor"] = allocation_summary
+            _write_json(args.evidence_root / "allocation-monitor.json", allocation_summary)
+            if allocation_summary["status"] != "PASS" and exit_code == 0:
+                result["status"] = "FAIL"
+                result["error"] = {
+                    "type": "RuntimeError",
+                    "message": "allocation memory monitor did not pass",
                 }
                 exit_code = 1
         _write_json(result_path, result)

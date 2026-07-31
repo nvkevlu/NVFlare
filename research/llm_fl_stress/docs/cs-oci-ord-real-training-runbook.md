@@ -13,6 +13,10 @@ The measured July 22 results, including exact job IDs and resource telemetry, ar
 [qualification record](cs-oci-ord-real-training-qualification-2026-07-22.md).
 The prepared eight-GPU follow-up is in the
 [two-client 14B runbook](cs-oci-ord-two-client-14b-runbook.md).
+The separate all-parameter, full-state procedure is in the
+[two-client 14B full-model runbook](cs-oci-ord-two-client-14b-full-model-runbook.md). That runbook is bound to its
+own reviewed release, exact preflight ladder, and claim boundary; it does not retroactively change the historical
+last-layer 14B results documented here.
 The gated last-layer scaling procedure is in the
 [two-client 72B runbook](cs-oci-ord-two-client-72b-runbook.md).
 The completed large-model results are retained in the

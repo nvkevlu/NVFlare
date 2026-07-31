@@ -44,12 +44,24 @@ import nvflare.client as flare
 from nvflare.app_opt.pt.fsdp2_state_bridge import FSDP2StateBridge
 
 try:
-    from .state_evidence import file_sha256, load_text_partition, select_partition_record, tensor_state_summary
+    from .state_evidence import (
+        file_sha256,
+        load_text_partition,
+        select_partition_record,
+        tensor_state_probe,
+        tensor_state_summary,
+    )
 except ImportError:
     custom_root = Path(__file__).resolve().parents[3]
     if str(custom_root) not in sys.path:
         sys.path.insert(0, str(custom_root))
-    from state_evidence import file_sha256, load_text_partition, select_partition_record, tensor_state_summary
+    from state_evidence import (
+        file_sha256,
+        load_text_partition,
+        select_partition_record,
+        tensor_state_probe,
+        tensor_state_summary,
+    )
 
 _TRAINING_TEXT = (
     "Federated learning keeps training data at each participating site.",
@@ -60,6 +72,8 @@ _TRAINING_TEXT = (
 _TRAINABLE_TARGETS = ("last-layer", "lm-head", "all")
 _RUN_MODES = ("exchange-only", "train")
 _STATE_SCOPES = ("full", "trainable")
+_PARAMETER_PROBE_VALUES_PER_TENSOR = 64
+_GRADIENT_NORM_CHUNK_SIZE = 1_048_576
 
 
 def _parse_args() -> argparse.Namespace:
@@ -185,23 +199,214 @@ def _load_model_and_tokenizer(args: argparse.Namespace) -> tuple[torch.nn.Module
     return model, tokenizer
 
 
-def _local_tensor(param: torch.nn.Parameter) -> torch.Tensor:
-    value = param.to_local() if hasattr(param, "to_local") else param
+def _local_tensor(tensor: torch.Tensor) -> torch.Tensor:
+    value = tensor.to_local() if hasattr(tensor, "to_local") else tensor
     return value.detach()
 
 
-def _snapshot_trainable(trainable: list[torch.nn.Parameter]) -> list[torch.Tensor]:
-    return [_local_tensor(param).float().clone() for param in trainable]
+def _parameter_probe_values(tensor: torch.Tensor, max_values: int) -> torch.Tensor:
+    """Select a deterministic bounded sample from a local parameter shard."""
+
+    flat = _local_tensor(tensor).reshape(-1)
+    sample_count = min(flat.numel(), max_values)
+    if sample_count == 0:
+        return flat.clone()
+    if sample_count == 1:
+        indices = torch.zeros(1, dtype=torch.long, device=flat.device)
+    else:
+        positions = torch.arange(sample_count, dtype=torch.long, device=flat.device)
+        indices = positions * (flat.numel() - 1) // (sample_count - 1)
+    return flat.index_select(0, indices).clone()
+
+
+def _snapshot_trainable(
+    trainable: list[torch.nn.Parameter],
+    max_values_per_tensor: int = _PARAMETER_PROBE_VALUES_PER_TENSOR,
+) -> list[torch.Tensor]:
+    """Capture bounded parameter probes without cloning full model shards."""
+
+    if max_values_per_tensor <= 0:
+        raise ValueError("max_values_per_tensor must be greater than zero")
+    return [_parameter_probe_values(param, max_values_per_tensor) for param in trainable]
+
+
+def _parameter_probe_change(
+    trainable: list[torch.nn.Parameter],
+    before: list[torch.Tensor],
+    device: torch.device,
+) -> dict[str, Any]:
+    if len(trainable) != len(before):
+        raise RuntimeError(f"parameter probe length mismatch: {len(trainable)} parameters != {len(before)} probes")
+
+    local_max = torch.zeros((), dtype=torch.float32, device=device)
+    changed_flags = torch.zeros(len(trainable), dtype=torch.int32, device=device)
+    local_sample_count = 0
+    for index, (param, original) in enumerate(zip(trainable, before)):
+        current = _parameter_probe_values(param, _PARAMETER_PROBE_VALUES_PER_TENSOR)
+        if current.shape != original.shape:
+            raise RuntimeError(
+                f"parameter probe shape changed at tensor {index}: {tuple(original.shape)} -> {tuple(current.shape)}"
+            )
+        local_sample_count += current.numel()
+        if current.numel():
+            tensor_max = (current.float() - original.float()).abs().max()
+            local_max = torch.maximum(local_max, tensor_max)
+            changed_flags[index] = (tensor_max > 0.0).to(dtype=torch.int32)
+
+    global_sample_count = torch.tensor(local_sample_count, dtype=torch.int64, device=device)
+    dist.all_reduce(local_max, op=dist.ReduceOp.MAX)
+    dist.all_reduce(changed_flags, op=dist.ReduceOp.MAX)
+    dist.all_reduce(global_sample_count, op=dist.ReduceOp.SUM)
+    return {
+        "strategy": "evenly-spaced-local-shard-values",
+        "max_values_per_parameter_shard": _PARAMETER_PROBE_VALUES_PER_TENSOR,
+        "parameter_tensor_count": len(trainable),
+        "global_sampled_value_count": int(global_sample_count.item()),
+        "globally_changed_parameter_tensor_count": int(changed_flags.sum().item()),
+        "global_max_abs_change": float(local_max.item()),
+    }
 
 
 def _global_max_change(trainable: list[torch.nn.Parameter], before: list[torch.Tensor], device: torch.device) -> float:
-    local_max = torch.zeros((), dtype=torch.float32, device=device)
-    for param, original in zip(trainable, before):
-        current = _local_tensor(param).float()
-        if current.numel():
-            local_max = torch.maximum(local_max, (current - original).abs().max())
-    dist.all_reduce(local_max, op=dist.ReduceOp.MAX)
-    return float(local_max.item())
+    return _parameter_probe_change(trainable, before, device)["global_max_abs_change"]
+
+
+def _model_parameter_evidence(model: torch.nn.Module) -> dict[str, Any]:
+    parameters = list(model.parameters())
+    total_parameters = sum(param.numel() for param in parameters)
+    trainable_parameters = sum(param.numel() for param in parameters if param.requires_grad)
+    total_tensor_count = len(parameters)
+    trainable_tensor_count = sum(1 for param in parameters if param.requires_grad)
+    return {
+        "total_parameters": total_parameters,
+        "trainable_parameters": trainable_parameters,
+        "frozen_parameters": total_parameters - trainable_parameters,
+        "total_tensor_count": total_tensor_count,
+        "trainable_tensor_count": trainable_tensor_count,
+        "frozen_tensor_count": total_tensor_count - trainable_tensor_count,
+        "gradient_checkpointing_enabled": bool(getattr(model, "is_gradient_checkpointing", False)),
+    }
+
+
+def _gradient_probe_parameters(
+    model: torch.nn.Module,
+    trainable_target: str,
+) -> list[tuple[str, int | None, str, torch.nn.Parameter]]:
+    if trainable_target == "all":
+        layers = _decoder_layers(model)
+        requested = (("early", 0), ("middle", len(layers) // 2), ("late", len(layers) - 1))
+        probes = []
+        for position, layer_index in requested:
+            candidate = next(
+                ((name, param) for name, param in layers[layer_index].named_parameters() if param.requires_grad),
+                None,
+            )
+            if candidate is None:
+                raise RuntimeError(f"no trainable gradient probe parameter in decoder layer {layer_index}")
+            relative_name, param = candidate
+            probes.append((position, layer_index, f"model.layers.{layer_index}.{relative_name}", param))
+        return probes
+
+    candidate = next(((name, param) for name, param in model.named_parameters() if param.requires_grad), None)
+    if candidate is None:
+        raise RuntimeError("no trainable parameter is available for gradient probing")
+    name, param = candidate
+    return [("selected", None, name, param)]
+
+
+def _chunked_local_l2_squared(tensor: torch.Tensor, device: torch.device) -> tuple[torch.Tensor, torch.Tensor]:
+    flat = _local_tensor(tensor).reshape(-1)
+    squared = torch.zeros((), dtype=torch.float32, device=device)
+    finite = torch.ones((), dtype=torch.int32, device=device)
+    for start in range(0, flat.numel(), _GRADIENT_NORM_CHUNK_SIZE):
+        values = flat[start : start + _GRADIENT_NORM_CHUNK_SIZE].float()
+        finite = torch.minimum(finite, torch.isfinite(values).all().to(dtype=torch.int32))
+        norm = torch.linalg.vector_norm(values)
+        squared += norm.square()
+    return squared, finite
+
+
+def _gradient_probe_evidence(
+    probes: list[tuple[str, int | None, str, torch.nn.Parameter]],
+    device: torch.device,
+) -> list[dict[str, Any]]:
+    evidence = []
+    for position, layer_index, name, param in probes:
+        gradient = param.grad
+        has_gradient = torch.tensor(int(gradient is not None), dtype=torch.int32, device=device)
+        dist.all_reduce(has_gradient, op=dist.ReduceOp.MIN)
+        if not has_gradient.item():
+            raise RuntimeError(f"gradient probe {position!r} ({name}) is missing on at least one rank")
+        squared, finite = _chunked_local_l2_squared(gradient, device)
+        dist.all_reduce(squared, op=dist.ReduceOp.SUM)
+        dist.all_reduce(finite, op=dist.ReduceOp.MIN)
+        global_l2_norm = float(torch.sqrt(squared).item())
+        if not finite.item():
+            raise RuntimeError(f"gradient probe {position!r} ({name}) is non-finite")
+        if global_l2_norm <= 0.0:
+            raise RuntimeError(f"gradient probe {position!r} ({name}) has zero global L2 norm")
+        evidence.append(
+            {
+                "position": position,
+                "layer_index": layer_index,
+                "parameter": name,
+                "global_l2_norm": global_l2_norm,
+                "finite": True,
+                "nonzero": True,
+            }
+        )
+    return evidence
+
+
+def _optimizer_state_summary(optimizer: torch.optim.Optimizer) -> dict[str, Any]:
+    tensor_count = 0
+    tensor_numel = 0
+    tensor_bytes = 0
+    dtype_histogram: dict[str, dict[str, int]] = {}
+    for state in optimizer.state.values():
+        for value in state.values():
+            if not isinstance(value, torch.Tensor):
+                continue
+            local = _local_tensor(value)
+            numel = local.numel()
+            nbytes = numel * local.element_size()
+            dtype = str(local.dtype).removeprefix("torch.")
+            record = dtype_histogram.setdefault(dtype, {"tensor_count": 0, "numel": 0, "bytes": 0})
+            record["tensor_count"] += 1
+            record["numel"] += numel
+            record["bytes"] += nbytes
+            tensor_count += 1
+            tensor_numel += numel
+            tensor_bytes += nbytes
+    return {
+        "tensor_count": tensor_count,
+        "tensor_numel": tensor_numel,
+        "tensor_bytes": tensor_bytes,
+        "dtype_histogram": dtype_histogram,
+    }
+
+
+def _make_optimizer(trainable: list[torch.nn.Parameter], learning_rate: float) -> torch.optim.AdamW:
+    return torch.optim.AdamW(
+        trainable,
+        lr=learning_rate,
+        foreach=False,
+        fused=False,
+    )
+
+
+def _cuda_memory_snapshot(device: torch.device, phase: str) -> dict[str, Any]:
+    free_bytes, total_bytes = torch.cuda.mem_get_info(device)
+    return {
+        "phase": phase,
+        "allocated_bytes": torch.cuda.memory_allocated(device),
+        "reserved_bytes": torch.cuda.memory_reserved(device),
+        "peak_allocated_bytes": torch.cuda.max_memory_allocated(device),
+        "peak_reserved_bytes": torch.cuda.max_memory_reserved(device),
+        "free_bytes": free_bytes,
+        "total_bytes": total_bytes,
+        "max_rss_bytes": _max_rss_bytes(),
+    }
 
 
 def _training_text(site_name: str, rank: int) -> str:
@@ -240,14 +445,15 @@ def _train_round(
     site_name: str,
     current_round: int,
     dataset_records: list[dict[str, str]] | None,
-) -> tuple[float, float, list[float], list[str]]:
+) -> tuple[float, float, list[float], list[str], dict[str, Any]]:
     model.train()
     prep_error = None
     before = None
     optimizer = None
+    cuda_phases = [_cuda_memory_snapshot(device, "after_state_load")]
     try:
         before = _snapshot_trainable(trainable)
-        optimizer = torch.optim.AdamW(trainable, lr=args.learning_rate)
+        optimizer = _make_optimizer(trainable, args.learning_rate)
     except Exception as exc:
         prep_error = f"rank {rank} training setup: {type(exc).__name__}: {exc}"
     prep_error = _collect_first_error(prep_error)
@@ -255,10 +461,13 @@ def _train_round(
         raise RuntimeError(prep_error)
     if before is None or optimizer is None:
         raise RuntimeError("training setup completed without required objects")
+    cuda_phases.append(_cuda_memory_snapshot(device, "after_optimizer_init"))
 
     last_loss = None
     loss_trajectory = []
     sample_ids = []
+    gradient_probes = _gradient_probe_parameters(model, args.trainable_target)
+    gradient_evidence: list[dict[str, Any]] = []
 
     for local_step in range(args.local_steps):
         if dataset_records is None:
@@ -280,24 +489,69 @@ def _train_round(
         dist.all_reduce(finite, op=dist.ReduceOp.MIN)
         if not finite.item():
             raise RuntimeError("at least one rank produced a non-finite loss")
+        if local_step == 0:
+            cuda_phases.append(_cuda_memory_snapshot(device, "after_first_forward"))
         loss.backward()
+        if local_step == 0:
+            gradient_evidence = _gradient_probe_evidence(gradient_probes, device)
+            cuda_phases.append(_cuda_memory_snapshot(device, "after_first_backward"))
         optimizer.step()
         last_loss = loss.detach()
         loss_sum = last_loss.clone()
         dist.all_reduce(loss_sum, op=dist.ReduceOp.SUM)
-        loss_trajectory.append(float((loss_sum / world_size).item()))
+        mean_step_loss = float((loss_sum / world_size).item())
+        loss_trajectory.append(mean_step_loss)
         sample_ids.append(record["id"])
-        del batch
+        step_memory = _cuda_memory_snapshot(device, f"after_optimizer_step_{local_step + 1}")
+        cuda_phases.append(step_memory)
+        if local_step == 0:
+            cuda_phases.append({**step_memory, "phase": "after_first_optimizer_step"})
+        if local_step == args.local_steps - 1:
+            cuda_phases.append({**step_memory, "phase": "after_final_optimizer_step"})
+        if rank == 0:
+            print(
+                json.dumps(
+                    {
+                        "event": "real_training_step",
+                        "status": "PASS",
+                        "site_name": site_name,
+                        "current_round": current_round,
+                        "local_step": local_step + 1,
+                        "local_steps": args.local_steps,
+                        "loss": mean_step_loss,
+                        "cuda": step_memory,
+                    },
+                    sort_keys=True,
+                ),
+                flush=True,
+            )
+        del batch, output, loss
 
     if last_loss is None:
         raise RuntimeError("training completed without a loss")
     mean_loss = loss_trajectory[-1]
-    max_change = _global_max_change(trainable, before, device)
+    update_probe = _parameter_probe_change(trainable, before, device)
+    max_change = update_probe["global_max_abs_change"]
     if max_change <= 0.0:
-        raise RuntimeError("optimizer step did not change any selected parameter shard")
+        raise RuntimeError("optimizer step did not change any bounded selected-parameter probe")
+    optimizer_state = _optimizer_state_summary(optimizer)
+    if optimizer_state["tensor_count"] <= 0 or optimizer_state["tensor_numel"] <= 0:
+        raise RuntimeError("optimizer step did not initialize tensor state")
+    optimizer_state["config"] = {
+        "name": type(optimizer).__name__,
+        "learning_rate": args.learning_rate,
+        "foreach": False,
+        "fused": False,
+    }
+    training_evidence = {
+        "update_probe": update_probe,
+        "gradient_probes": gradient_evidence,
+        "optimizer_state": optimizer_state,
+        "cuda_phases": cuda_phases,
+    }
     optimizer.zero_grad(set_to_none=True)
     del optimizer, before
-    return mean_loss, max_change, loss_trajectory, sample_ids
+    return mean_loss, max_change, loss_trajectory, sample_ids, training_evidence
 
 
 def _broadcast_rank_zero(value: Any, rank: int) -> Any:
@@ -317,6 +571,61 @@ def _max_rss_bytes() -> int:
     return int(value if sys.platform == "darwin" else value * 1024)
 
 
+def _aggregate_training_evidence(rank_metrics: list[dict[str, Any]]) -> dict[str, Any]:
+    if not rank_metrics:
+        raise RuntimeError("cannot aggregate training evidence without rank metrics")
+    first = rank_metrics[0].get("training_evidence")
+    if not isinstance(first, dict):
+        raise RuntimeError("rank zero did not provide training evidence")
+
+    optimizer_per_rank = []
+    cuda_phases = []
+    dtype_histogram: dict[str, dict[str, int]] = {}
+    global_tensor_count = 0
+    global_tensor_numel = 0
+    global_tensor_bytes = 0
+    expected_optimizer_config = first["optimizer_state"].get("config")
+    for rank_record in rank_metrics:
+        local = rank_record.get("training_evidence")
+        if not isinstance(local, dict):
+            raise RuntimeError(f"rank {rank_record.get('rank')} did not provide training evidence")
+        optimizer_state = local["optimizer_state"]
+        if optimizer_state.get("config") != expected_optimizer_config:
+            raise RuntimeError(f"rank {rank_record['rank']} reported a different optimizer configuration")
+        optimizer_per_rank.append(
+            {
+                "rank": rank_record["rank"],
+                "tensor_count": optimizer_state["tensor_count"],
+                "tensor_numel": optimizer_state["tensor_numel"],
+                "tensor_bytes": optimizer_state["tensor_bytes"],
+                "dtype_histogram": optimizer_state["dtype_histogram"],
+                "config": optimizer_state["config"],
+            }
+        )
+        global_tensor_count += optimizer_state["tensor_count"]
+        global_tensor_numel += optimizer_state["tensor_numel"]
+        global_tensor_bytes += optimizer_state["tensor_bytes"]
+        for dtype, record in optimizer_state["dtype_histogram"].items():
+            combined = dtype_histogram.setdefault(dtype, {"tensor_count": 0, "numel": 0, "bytes": 0})
+            for key in ("tensor_count", "numel", "bytes"):
+                combined[key] += record[key]
+        cuda_phases.append({"rank": rank_record["rank"], "phases": local["cuda_phases"]})
+
+    return {
+        "update_probe": first["update_probe"],
+        "gradient_probes": first["gradient_probes"],
+        "optimizer_state": {
+            "config": expected_optimizer_config,
+            "global_tensor_count": global_tensor_count,
+            "global_tensor_numel": global_tensor_numel,
+            "global_tensor_bytes": global_tensor_bytes,
+            "global_dtype_histogram": dtype_histogram,
+            "per_rank": optimizer_per_rank,
+        },
+        "cuda_phases": cuda_phases,
+    }
+
+
 def _round_metrics(
     rank: int,
     local_rank: int,
@@ -327,7 +636,10 @@ def _round_metrics(
     export_seconds: float,
     loss_trajectory: list[float],
     sample_ids: list[str],
+    training_evidence: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], Optional[list[dict[str, Any]]]]:
+    peak_gpu_reserved_bytes = torch.cuda.max_memory_reserved(device)
+    total_gpu_memory_bytes = torch.cuda.get_device_properties(device).total_memory
     local = {
         "rank": rank,
         "local_rank": local_rank,
@@ -337,11 +649,15 @@ def _round_metrics(
         "export_seconds": export_seconds,
         "max_rss_bytes": _max_rss_bytes(),
         "peak_gpu_allocated_bytes": torch.cuda.max_memory_allocated(device),
-        "peak_gpu_reserved_bytes": torch.cuda.max_memory_reserved(device),
+        "peak_gpu_reserved_bytes": peak_gpu_reserved_bytes,
+        "total_gpu_memory_bytes": total_gpu_memory_bytes,
+        "reserved_headroom_bytes": total_gpu_memory_bytes - peak_gpu_reserved_bytes,
         "gpu_name": torch.cuda.get_device_name(device),
         "loss_trajectory": loss_trajectory,
         "sample_ids": sample_ids,
     }
+    if training_evidence is not None:
+        local["training_evidence"] = training_evidence
     gathered = [None for _ in range(dist.get_world_size())] if rank == 0 else None
     dist.gather_object(local, gathered, dst=0)
     metrics = {
@@ -373,6 +689,8 @@ def _make_round_summary(
     input_state: dict[str, Any] | None = None,
     output_state: dict[str, Any] | None = None,
     dataset_sha256: str | None = None,
+    model_evidence: dict[str, Any] | None = None,
+    training_evidence: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     summary = {
         "event": "real_training_round",
@@ -385,6 +703,7 @@ def _make_round_summary(
         "state_scope": getattr(args, "state_scope", "full"),
         "trainable_target": args.trainable_target,
         "local_steps": args.local_steps,
+        "max_length": args.max_length,
         "world_size": world_size,
         "loss": metrics["loss"],
         "selected_max_abs_change": metrics["selected_max_abs_change"],
@@ -399,6 +718,10 @@ def _make_round_summary(
         summary["input_state"] = input_state
     if output_state is not None:
         summary["output_state"] = output_state
+    if model_evidence is not None:
+        summary["model_evidence"] = model_evidence
+    if training_evidence is not None:
+        summary["training_evidence"] = training_evidence
     if dataset_sha256 is not None:
         summary["dataset_sha256"] = dataset_sha256
         summary["loss_trajectory"] = rank_metrics[0]["loss_trajectory"]
@@ -438,6 +761,7 @@ def _run(args: argparse.Namespace) -> None:
         model, tokenizer = _load_model_and_tokenizer(args)
         dataset_records, dataset_sha256 = _resolve_dataset(args)
         _select_trainable_parameters(model, args.trainable_target)
+        model_evidence = _model_parameter_evidence(model)
         _shard_model(model, world_size)
         # fully_shard may replace registered Parameter objects with DTensor
         # parameters, so collect optimizer references only after sharding.
@@ -458,8 +782,8 @@ def _run(args: argparse.Namespace) -> None:
                 "trainable_target": args.trainable_target,
                 "run_mode": args.run_mode,
                 "state_scope": getattr(args, "state_scope", "full"),
-                "trainable_parameters": sum(param.numel() for param in trainable),
                 "dataset_sha256": dataset_sha256,
+                **model_evidence,
             }
             print(json.dumps(summary, sort_keys=True), flush=True)
 
@@ -480,16 +804,26 @@ def _run(args: argparse.Namespace) -> None:
             max_change = 0.0
             loss_trajectory: list[float] = []
             sample_ids: list[str] = []
+            training_evidence: dict[str, Any] | None = None
             started_at = time.perf_counter()
 
             load_error = None
             try:
-                if rank == 0 and getattr(args, "state_scope", "full") == "trainable":
-                    input_state = tensor_state_summary(received_params)
+                if rank == 0:
+                    input_state = (
+                        tensor_state_summary(received_params)
+                        if getattr(args, "state_scope", "full") == "trainable"
+                        else tensor_state_probe(received_params)
+                    )
                 if getattr(args, "state_scope", "full") == "trainable":
                     load_result = bridge.load_trainable_state_dict(received_params)
                 else:
                     load_result = bridge.load_full_state_dict(received_params)
+                if rank == 0:
+                    if received_params is not None:
+                        received_params.clear()
+                    input_model.params = None
+                    received_params = None
             except Exception as exc:
                 load_error = f"rank {rank} load: {type(exc).__name__}: {exc}"
             round_error = _collect_first_error(load_error)
@@ -498,7 +832,7 @@ def _run(args: argparse.Namespace) -> None:
                 train_error = None
                 try:
                     if args.run_mode == "train":
-                        loss, max_change, loss_trajectory, sample_ids = _train_round(
+                        loss, max_change, loss_trajectory, sample_ids, training_evidence = _train_round(
                             model,
                             tokenizer,
                             trainable,
@@ -523,8 +857,14 @@ def _run(args: argparse.Namespace) -> None:
                         export_result = bridge.export_trainable_state_dict()
                     else:
                         export_result = bridge.export_full_state_dict()
-                    if rank == 0 and getattr(args, "state_scope", "full") == "trainable":
-                        output_state = tensor_state_summary(export_result.state_dict)
+                    if rank == 0:
+                        output_state = (
+                            tensor_state_summary(export_result.state_dict)
+                            if getattr(args, "state_scope", "full") == "trainable"
+                            else tensor_state_probe(export_result.state_dict)
+                        )
+                    if training_evidence is not None:
+                        training_evidence["cuda_phases"].append(_cuda_memory_snapshot(device, "after_state_export"))
                 except Exception as exc:
                     export_error = f"rank {rank} export: {type(exc).__name__}: {exc}"
                 round_error = _collect_first_error(export_error)
@@ -550,11 +890,15 @@ def _run(args: argparse.Namespace) -> None:
                 export_result.stats.duration_seconds,
                 loss_trajectory,
                 sample_ids,
+                training_evidence,
             )
             if rank == 0:
                 assert rank_metrics is not None
                 params = export_result.state_dict
                 round_seconds = time.perf_counter() - started_at
+                aggregate_training_evidence = (
+                    _aggregate_training_evidence(rank_metrics) if training_evidence is not None else None
+                )
                 meta = {
                     "CURRENT_ROUND": current_round,
                     "NUM_STEPS_CURRENT_ROUND": args.local_steps,
@@ -567,7 +911,10 @@ def _run(args: argparse.Namespace) -> None:
                     "SITE_NAME": site_name,
                     "STATE_SCOPE": getattr(args, "state_scope", "full"),
                     "DATASET_SHA256": dataset_sha256,
+                    "MODEL_EVIDENCE": model_evidence,
                 }
+                if aggregate_training_evidence is not None:
+                    meta["TRAINING_EVIDENCE"] = aggregate_training_evidence
                 summary = _make_round_summary(
                     current_round=current_round,
                     site_name=site_name,
@@ -581,6 +928,8 @@ def _run(args: argparse.Namespace) -> None:
                     input_state=input_state,
                     output_state=output_state,
                     dataset_sha256=dataset_sha256,
+                    model_evidence=model_evidence,
+                    training_evidence=aggregate_training_evidence,
                 )
                 flare.send(flare.FLModel(params=params, metrics=metrics, meta=meta))
                 print(json.dumps(summary, sort_keys=True), flush=True)

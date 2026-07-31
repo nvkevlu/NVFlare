@@ -564,6 +564,7 @@ class LocalProductionFederation:
                 text = ""
             prefix = site_name.replace("-", "_")
             progress[f"{prefix}_ready_events"] = text.count('"event": "real_training_client_ready"')
+            progress[f"{prefix}_step_events"] = text.count('"event": "real_training_step"')
             progress[f"{prefix}_stream_progress_events"] = text.count("accepted stream progress ")
             progress[f"{prefix}_round_events"] = text.count('"event": "real_training_round"')
             progress[f"{prefix}_results_submitted"] = text.count("task result sent to server")

@@ -23,6 +23,7 @@ from research.llm_fl_stress.real_training.state_evidence import (
     file_sha256,
     load_text_partition,
     select_partition_record,
+    tensor_state_probe,
     tensor_state_summary,
 )
 
@@ -175,3 +176,19 @@ def test_tensor_summary_hashes_bfloat16_deterministically():
     assert first["tensor_count"] == 2
     assert first["payload_bytes"] == 8
     assert len(first["sha256"]) == 64
+
+
+def test_tensor_state_probe_records_exact_schema_without_full_content_hash():
+    torch = pytest.importorskip("torch")
+    state = {
+        "z": torch.arange(100, dtype=torch.bfloat16),
+        "a": torch.ones(2, dtype=torch.bfloat16),
+    }
+
+    result = tensor_state_probe(state)
+
+    assert result["strategy"] == "schema-sha256-plus-bounded-values"
+    assert result["tensor_count"] == 2
+    assert result["payload_bytes"] == 204
+    assert len(result["schema_sha256"]) == 64
+    assert len(result["samples"]) <= 8

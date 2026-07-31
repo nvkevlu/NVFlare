@@ -113,6 +113,29 @@ def test_trainable_recipe_uses_sparse_server_model_and_distinct_site_data():
     assert recipe.aggregation_weights == {"site-1": 1.0, "site-2": 1.0}
 
 
+def test_full_model_full_state_recipe_uses_full_server_and_distinct_site_data():
+    args = _args(
+        num_clients=2,
+        nproc_per_node=4,
+        local_steps=8,
+        max_length=512,
+        trainable_target="all",
+        state_scope="full",
+    )
+
+    recipe = _build_recipe(args)
+
+    assert recipe.model["path"] == "model.HFTextModel"
+    assert set(recipe.per_site_config) == {"site-1", "site-2"}
+    assert "--trainable-target all" in recipe.per_site_config["site-1"]["train_args"]
+    assert "--state-scope full" in recipe.per_site_config["site-1"]["train_args"]
+    assert "--local-steps 8" in recipe.per_site_config["site-1"]["train_args"]
+    assert "--max-length 512" in recipe.per_site_config["site-1"]["train_args"]
+    assert "--dataset-file data/site-1.jsonl" in recipe.per_site_config["site-1"]["train_args"]
+    assert "--dataset-file data/site-2.jsonl" in recipe.per_site_config["site-2"]["train_args"]
+    assert recipe.aggregation_weights == {"site-1": 1.0, "site-2": 1.0}
+
+
 @pytest.mark.parametrize(
     "name",
     [
@@ -341,6 +364,7 @@ def test_exported_trainable_datasets_resolve_from_client_runtime(tmp_path, monke
     assert preflight["early_flare_init"] is True
     assert preflight["launcher_shutdown_timeout_seconds"] == 600.0
     assert preflight["subprocess_tensor_download_timeout_seconds"] == args.timeout_seconds
+    assert preflight["aggregation_weights"] == {"site-1": 1.0, "site-2": 1.0}
 
     site_2_config_path = job_root / "app_site-2" / "config" / "config_fed_client.json"
     site_2_config = json.loads(site_2_config_path.read_text())
@@ -366,4 +390,24 @@ def test_exported_job_preflight_rejects_short_launcher_shutdown(tmp_path):
     config_path.write_text(json.dumps(config))
 
     with pytest.raises(RuntimeError, match="shutdown_timeout"):
+        validate_exported_job(job_root, args.timeout_seconds)
+
+
+def test_exported_job_preflight_rejects_wrong_aggregation_weights(tmp_path):
+    args = _args(
+        model_name_or_path=Path("/models/Qwen2.5-14B"),
+        model_revision="abc123",
+        num_clients=2,
+        state_scope="full",
+        trainable_target="all",
+    )
+    _build_recipe(args).export(str(tmp_path))
+    job_root = tmp_path / "llm_fsdp2_real_training"
+    config_path = job_root / "app_server" / "config" / "config_fed_server.json"
+    config = json.loads(config_path.read_text())
+    controller = next(workflow for workflow in config["workflows"] if workflow["id"] == "controller")
+    controller["args"]["aggregation_weights"] = {"site-1": 1.0, "site-2": 2.0}
+    config_path.write_text(json.dumps(config))
+
+    with pytest.raises(RuntimeError, match="aggregation_weights mismatch"):
         validate_exported_job(job_root, args.timeout_seconds)

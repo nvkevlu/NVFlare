@@ -138,6 +138,7 @@ def _build_recipe(args: argparse.Namespace):
     from nvflare.fuel.f3.streaming.transfer_progress import STREAMING_IDLE_TIMEOUT, STREAMING_MAX_PEER_SILENCE
 
     trainable_scope = getattr(args, "state_scope", "full") == "trainable"
+    partitioned_training = args.run_mode == "train" and args.num_clients == 2
     if trainable_scope and args.num_clients != 2:
         raise ValueError("trainable-state qualification requires exactly two clients")
     model = {
@@ -152,7 +153,7 @@ def _build_recipe(args: argparse.Namespace):
     )
     per_site_config = None
     aggregation_weights = None
-    if trainable_scope:
+    if partitioned_training:
         per_site_config = {
             site_name: {
                 "train_args": _client_args(
@@ -188,7 +189,7 @@ def _build_recipe(args: argparse.Namespace):
     )
     recipe.add_server_file(str(MODEL_SCRIPT))
     recipe.add_client_file(str(STATE_EVIDENCE_SCRIPT))
-    if trainable_scope:
+    if partitioned_training:
         for site_name, dataset_path in DATA_FILES.items():
             recipe.add_client_file(str(dataset_path), clients=[site_name])
     recipe.add_client_config(
@@ -244,7 +245,7 @@ def _validated_summary(args: argparse.Namespace, config: RealTrainingConfig) -> 
         "state_scope": config.state_scope,
         "dataset_sha256": (
             {site_name: file_sha256(path) for site_name, path in DATA_FILES.items()}
-            if config.state_scope == "trainable"
+            if config.run_mode == "train" and config.num_clients == 2
             else None
         ),
         "expected_gpu_name_substring": args.expected_gpu_name_substring,

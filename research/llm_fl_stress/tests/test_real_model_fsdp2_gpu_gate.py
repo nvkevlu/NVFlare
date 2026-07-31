@@ -57,8 +57,6 @@ def test_training_args_are_exactly_bounded_to_last_layer(tmp_path):
         ("--full-job-memory-gib", "0"),
         ("--full-job-client-count", "0"),
         ("--required-fixed-host-headroom-gib", "0"),
-        ("--max-model-ready-seconds", "0"),
-        ("--max-work-seconds", "0"),
         ("--learning-rate", "0"),
     ],
 )
@@ -77,6 +75,50 @@ def test_capacity_gate_rejects_nonpositive_limits(tmp_path, flag, value):
 
     with pytest.raises(ValueError, match="greater than zero"):
         gate._validate_args(args)
+
+
+@pytest.mark.parametrize("flag", ["--max-model-ready-seconds", "--max-work-seconds"])
+def test_capacity_gate_allows_zero_to_disable_elapsed_time_cutoffs(tmp_path, flag):
+    args = gate._define_parser().parse_args(
+        [
+            "--model-name-or-path",
+            str(tmp_path),
+            "--model-revision",
+            "revision",
+            "--expected-payload-bytes",
+            "1755369472",
+            flag,
+            "0",
+        ]
+    )
+
+    gate._validate_args(args)
+
+
+def test_capacity_gate_configures_all_parameter_full_state_lane(tmp_path):
+    args = gate._define_parser().parse_args(
+        [
+            "--model-name-or-path",
+            str(tmp_path),
+            "--model-revision",
+            "revision",
+            "--expected-payload-bytes",
+            "29540067328",
+            "--expected-tensor-count",
+            "579",
+            "--expected-trainable-parameters",
+            "14770033664",
+            "--trainable-target",
+            "all",
+            "--state-scope",
+            "full",
+        ]
+    )
+
+    gate._validate_args(args)
+    training = gate._training_args(args)
+    assert training.trainable_target == "all"
+    assert training.state_scope == "full"
 
 
 def test_capacity_gate_requires_existing_absolute_model_directory(tmp_path):
@@ -132,11 +174,29 @@ def test_full_job_host_projection_includes_two_clients_checkpoint_and_fixed_head
         "required_fixed_host_headroom_gib": 128,
         "required_fixed_host_headroom_bytes": 128 * gib,
         "checkpoint_bytes": 50 * gib,
+        "server_state_copies": 1,
+        "server_state_reserve_bytes": 50 * gib,
         "one_client_rank_peak_rss_bytes": 100 * gib,
         "projected_full_job_rank_peak_rss_bytes": 200 * gib,
         "projected_full_job_host_bytes": 378 * gib,
         "projected_full_job_host_headroom_bytes": 1222 * gib,
     }
+
+
+def test_full_model_host_projection_reserves_three_server_state_copies():
+    gib = 1024 * 1024 * 1024
+    result = gate._full_job_host_projection(
+        [{"max_rss_bytes": 10 * gib} for _ in range(4)],
+        checkpoint_bytes=30 * gib,
+        full_job_memory_gib=512,
+        full_job_client_count=2,
+        required_fixed_host_headroom_gib=128,
+        server_state_copies=3,
+    )
+
+    assert result["server_state_reserve_bytes"] == 90 * gib
+    assert result["projected_full_job_host_bytes"] == 298 * gib
+    assert result["projected_full_job_host_headroom_bytes"] == 214 * gib
 
 
 @pytest.mark.parametrize(
@@ -165,3 +225,52 @@ def test_rank_zero_final_state_validation_is_synchronized_before_gather():
     gathered = source.index("dist.gather_object(local_metrics, gathered, dst=0)")
 
     assert synchronized < gathered
+
+
+def _aggregated_bf16_adamw_evidence(*, numel=20, nbytes=40, foreach=False, fused=False):
+    return {
+        "optimizer_state": {
+            "config": {"name": "AdamW", "foreach": foreach, "fused": fused},
+            "global_dtype_histogram": {
+                "bfloat16": {"tensor_count": 4, "numel": numel, "bytes": nbytes},
+                "float32": {"tensor_count": 2, "numel": 2, "bytes": 8},
+            },
+        }
+    }
+
+
+def test_capacity_gate_requires_exact_bf16_adamw_moments():
+    result = gate._require_exact_bf16_adamw_moments(_aggregated_bf16_adamw_evidence(), 10)
+
+    assert result == {
+        "status": "PASS",
+        "dtype": "bfloat16",
+        "trainable_parameters": 10,
+        "moment_values": 20,
+        "moment_bytes": 40,
+        "foreach": False,
+        "fused": False,
+    }
+
+
+@pytest.mark.parametrize(
+    ("evidence", "match"),
+    [
+        (_aggregated_bf16_adamw_evidence(numel=19), "moment coverage mismatch"),
+        (_aggregated_bf16_adamw_evidence(nbytes=80), "moment coverage mismatch"),
+        (_aggregated_bf16_adamw_evidence(foreach=True), "unsupported AdamW configuration"),
+    ],
+)
+def test_capacity_gate_rejects_inexact_or_unbounded_adamw_moments(evidence, match):
+    with pytest.raises(RuntimeError, match=match):
+        gate._require_exact_bf16_adamw_moments(evidence, 10)
+
+
+def test_capacity_gate_exposes_aggregated_training_evidence_after_state_export():
+    source = Path(gate.__file__).read_text(encoding="utf-8")
+
+    exported = source.index('training_evidence["cuda_phases"].append')
+    gathered = source.index("dist.gather_object(local_metrics, gathered, dst=0)")
+    exposed = source.index('"training_evidence": aggregate_training_evidence')
+
+    assert exported < gathered < exposed
