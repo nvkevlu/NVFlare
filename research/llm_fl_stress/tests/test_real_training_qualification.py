@@ -162,6 +162,24 @@ def test_full_model_14b_profile_is_all_parameter_full_state_and_amortizes_transf
     }
 
 
+def test_full_model_14b_multiround_profile_runs_only_five_round_target():
+    settings = qualification._profile_settings("full-model-14b-multiround")
+
+    assert settings == {
+        "run_gate": False,
+        "gate_rounds": 0,
+        "target_rounds": 5,
+        "target_local_steps": 2,
+        "target_max_length": 512,
+        "target_trainable_target": "all",
+        "state_scope": "full",
+        "target_name": "target-14b-full-model-multiround",
+        "max_payload_bytes": 0,
+        "minimum_scratch_free_bytes": 200 * qualification._ONE_GIB,
+        "required_gpu_reserved_headroom_bytes": 16 * qualification._ONE_GIB,
+    }
+
+
 def test_full_model_phase_args_propagate_all_and_sequence_length(tmp_path):
     args = qualification._phase_args(
         tmp_path / "model",
@@ -185,6 +203,7 @@ def test_full_model_phase_args_propagate_all_and_sequence_length(tmp_path):
         ("trainable-32b", 1800.0, 900.0),
         ("trainable-72b", 7200.0, 1800.0),
         ("full-model-14b", 1800.0, 1800.0),
+        ("full-model-14b-multiround", 3600.0, 3600.0),
     ],
 )
 def test_large_model_profiles_reject_short_ready_or_stall_watchdogs(profile, ready_timeout, stall_timeout):

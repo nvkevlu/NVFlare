@@ -51,7 +51,8 @@ if [[ "${QUALIFICATION_PROFILE}" != "full-state" &&
     "${QUALIFICATION_PROFILE}" != "trainable-multiround" &&
     "${QUALIFICATION_PROFILE}" != "trainable-32b" &&
     "${QUALIFICATION_PROFILE}" != "trainable-72b" &&
-    "${QUALIFICATION_PROFILE}" != "full-model-14b" ]]; then
+    "${QUALIFICATION_PROFILE}" != "full-model-14b" &&
+    "${QUALIFICATION_PROFILE}" != "full-model-14b-multiround" ]]; then
     echo "Unsupported qualification profile: ${QUALIFICATION_PROFILE}" >&2
     exit 1
 fi
@@ -128,7 +129,16 @@ record_result() {
         printf 'nproc_per_client=4\n'
         printf 'total_gpu_processes=8\n'
         printf 'transport_timeout_seconds=10800\n'
-        if [[ "${QUALIFICATION_PROFILE}" == "full-model-14b" ]]; then
+        if [[ "${QUALIFICATION_PROFILE}" == "full-model-14b-multiround" ]]; then
+            printf 'num_rounds=5\n'
+            printf 'local_steps=2\n'
+            printf 'max_length=512\n'
+            printf 'trainable_target=all\n'
+            printf 'state_scope=full\n'
+            printf 'gate_executed=false\n'
+        fi
+        if [[ "${QUALIFICATION_PROFILE}" == "full-model-14b" ||
+            "${QUALIFICATION_PROFILE}" == "full-model-14b-multiround" ]]; then
             printf 'slurm_mem_per_node_mib=%s\n' "${SLURM_ALLOCATION_MEMORY_MIB:-UNSET}"
             printf 'slurm_gpus_on_node=%s\n' "${SLURM_ALLOCATION_GPUS_ON_NODE:-UNSET}"
             printf 'slurm_job_end_time_epoch=%s\n' "${SLURM_ALLOCATION_END_TIME_EPOCH:-UNSET}"

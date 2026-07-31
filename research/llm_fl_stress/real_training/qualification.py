@@ -50,7 +50,14 @@ from provisioned import (  # noqa: E402
 )
 from state_evidence import file_sha256, inspect_persisted_checkpoint  # noqa: E402
 
-_PROFILES = ("full-state", "trainable-multiround", "trainable-32b", "trainable-72b", "full-model-14b")
+_PROFILES = (
+    "full-state",
+    "trainable-multiround",
+    "trainable-32b",
+    "trainable-72b",
+    "full-model-14b",
+    "full-model-14b-multiround",
+)
 _ONE_GIB = 1024 * 1024 * 1024
 _CLIENT_OPERATION_TIMEOUT_SECONDS = 10800
 _PERSISTENCE_TIMEOUT_SECONDS = 7200.0
@@ -61,6 +68,7 @@ _MIN_TARGET_TIMEOUTS_SECONDS = {
     "trainable-32b": {"ready": 1800.0, "stall": 900.0},
     "trainable-72b": {"ready": 7200.0, "stall": 1800.0},
     "full-model-14b": {"ready": 1800.0, "stall": 1800.0},
+    "full-model-14b-multiround": {"ready": 3600.0, "stall": 3600.0},
 }
 
 
@@ -113,6 +121,20 @@ def _profile_settings(profile: str) -> dict[str, Any]:
             "target_trainable_target": "all",
             "state_scope": "full",
             "target_name": "target-14b-full-model",
+            "max_payload_bytes": 0,
+            "minimum_scratch_free_bytes": 200 * _ONE_GIB,
+            "required_gpu_reserved_headroom_bytes": 16 * _ONE_GIB,
+        }
+    if profile == "full-model-14b-multiround":
+        return {
+            "run_gate": False,
+            "gate_rounds": 0,
+            "target_rounds": 5,
+            "target_local_steps": 2,
+            "target_max_length": 512,
+            "target_trainable_target": "all",
+            "state_scope": "full",
+            "target_name": "target-14b-full-model-multiround",
             "max_payload_bytes": 0,
             "minimum_scratch_free_bytes": 200 * _ONE_GIB,
             "required_gpu_reserved_headroom_bytes": 16 * _ONE_GIB,
@@ -1011,7 +1033,7 @@ def main() -> int:
     monitor = _GpuMonitor(args.evidence_root / "gpu-samples.csv")
     allocation_monitor = (
         _AllocationMonitor(args.evidence_root / "allocation-memory.jsonl", args.private_root)
-        if args.profile == "full-model-14b" and not args.control_plane_only
+        if args.profile in ("full-model-14b", "full-model-14b-multiround") and not args.control_plane_only
         else None
     )
     result: dict[str, Any] = {
@@ -1073,6 +1095,7 @@ def main() -> int:
         state_scope = profile["state_scope"]
         target_name = profile["target_name"]
         max_payload_bytes = profile["max_payload_bytes"]
+        run_gate = profile.get("run_gate", True)
         required_gpu_reserved_headroom_bytes = profile.get("required_gpu_reserved_headroom_bytes", 0)
         if not args.control_plane_only:
             target_identity = _require_target_identity(
@@ -1087,16 +1110,17 @@ def main() -> int:
                 expected_tensor_bytes=args.expected_target_tensor_bytes,
             )
             _write_json(args.evidence_root / "target-identity.json", target_identity)
-            _validate_phase_inputs(
-                args.gate_model_path,
-                args.gate_model_revision,
-                args.evidence_root / "gate",
-                num_rounds=gate_rounds,
-                local_steps=gate_local_steps,
-                max_length=gate_max_length,
-                trainable_target=gate_trainable_target,
-                state_scope=state_scope,
-            )
+            if run_gate:
+                _validate_phase_inputs(
+                    args.gate_model_path,
+                    args.gate_model_revision,
+                    args.evidence_root / "gate",
+                    num_rounds=gate_rounds,
+                    local_steps=gate_local_steps,
+                    max_length=gate_max_length,
+                    trainable_target=gate_trainable_target,
+                    state_scope=state_scope,
+                )
             _validate_phase_inputs(
                 args.target_model_path,
                 args.target_model_revision,
@@ -1149,28 +1173,34 @@ def main() -> int:
                     control_plane_jobs=control_plane_jobs,
                 )
             else:
-                result["gate"] = _run_phase(
-                    federation,
-                    name="gate-1.5b",
-                    model_path=args.gate_model_path,
-                    model_revision=args.gate_model_revision,
-                    evidence_root=args.evidence_root,
-                    expected_gpu_name_substring=args.expected_gpu_name_substring,
-                    ready_timeout=args.gate_ready_timeout,
-                    stall_timeout=args.gate_stall_timeout,
-                    expected_payload_bytes=0,
-                    expected_tensor_count=0,
-                    expected_trainable_parameters=0,
-                    max_payload_bytes=max_payload_bytes,
-                    num_rounds=gate_rounds,
-                    local_steps=gate_local_steps,
-                    max_length=gate_max_length,
-                    trainable_target=gate_trainable_target,
-                    state_scope=state_scope,
-                    required_gpu_reserved_headroom_bytes=required_gpu_reserved_headroom_bytes,
-                )
-                if result["gate"]["status"] != "PASS":
-                    raise RuntimeError("1.5B exact-topology gate did not pass")
+                if run_gate:
+                    result["gate"] = _run_phase(
+                        federation,
+                        name="gate-1.5b",
+                        model_path=args.gate_model_path,
+                        model_revision=args.gate_model_revision,
+                        evidence_root=args.evidence_root,
+                        expected_gpu_name_substring=args.expected_gpu_name_substring,
+                        ready_timeout=args.gate_ready_timeout,
+                        stall_timeout=args.gate_stall_timeout,
+                        expected_payload_bytes=0,
+                        expected_tensor_count=0,
+                        expected_trainable_parameters=0,
+                        max_payload_bytes=max_payload_bytes,
+                        num_rounds=gate_rounds,
+                        local_steps=gate_local_steps,
+                        max_length=gate_max_length,
+                        trainable_target=gate_trainable_target,
+                        state_scope=state_scope,
+                        required_gpu_reserved_headroom_bytes=required_gpu_reserved_headroom_bytes,
+                    )
+                    if result["gate"]["status"] != "PASS":
+                        raise RuntimeError("1.5B exact-topology gate did not pass")
+                else:
+                    result["gate"] = {
+                        "status": "SKIPPED",
+                        "reason": "previously qualified topology; target-only multiround experiment",
+                    }
                 result["target"] = _run_phase(
                     federation,
                     name=target_name,
