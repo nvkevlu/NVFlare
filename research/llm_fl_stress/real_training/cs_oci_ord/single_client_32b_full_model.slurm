@@ -19,15 +19,16 @@ umask 077
 
 PROJECT_ROOT="${PROJECT_ROOT:-/lustre/fs11/portfolios/coreai/projects/coreai_edgeai_flresearch/users/kevlu/nvflare-14b}"
 CONTAINER_IMAGE="${PROJECT_ROOT}/containers/pytorch-25.01-py3.sqsh"
-REPO_ROOT="${PROJECT_ROOT}/repos/NVFlare"
+RUN_REPO_ROOT="${RUN_REPO_ROOT:-}"
+REPO_ROOT="${RUN_REPO_ROOT}"
 VENV_DIR="${PROJECT_ROOT}/envs/nvflare-fsdp2"
+REQUIREMENTS_LOCK="${VENV_DIR}/requirements.lock"
 MODEL_PATH="${PROJECT_ROOT}/models/Qwen2.5-32B-1818d35814b8"
 MODEL_REVISION=1818d35814b8319459f4bd55ed1ac8709630f003
 DATASET_PATH="${REPO_ROOT}/research/llm_fl_stress/real_training/data/site-1.jsonl"
-EXPERIMENT_RELEASE=2026-07-31-single-client-full-model-32b-v1
+EXPERIMENT_RELEASE=2026-07-31-single-client-full-model-32b-v2
 REQUIRED_BASE_RELEASE=2026-07-31-full-model-14b-v12
 REQUIRED_BASE_COMMIT=27c39f637506f7589c8b4536fd3c8b4e4664b82f
-EXPECTED_BRANCH=codex/llm-fl-real-14b
 RELEASE_FILE="${REPO_ROOT}/research/llm_fl_stress/real_training/QUALIFICATION_RELEASE"
 STATIC_PREFLIGHT_SCRIPT="${REPO_ROOT}/research/llm_fl_stress/real_training/model_structure_preflight.py"
 ARTIFACT_ROOT="${PROJECT_ROOT}/artifacts/32b-full-model-single-client-${SLURM_JOB_ID}"
@@ -38,7 +39,7 @@ EXPECTED_TENSOR_COUNT=771
 EXPECTED_STATE_PAYLOAD_BYTES=65527752704
 EXPECTED_CHECKPOINT_FILE_BYTES=65527841752
 MINIMUM_SLURM_MEMORY_MIB=921600
-MINIMUM_SLURM_REMAINING_SECONDS=6600
+MINIMUM_SLURM_REMAINING_SECONDS=6900
 REQUIRED_SLURM_GPUS_ON_NODE=8
 SLURM_ALLOCATION_MEMORY_MIB="${SLURM_MEM_PER_NODE:-UNSET}"
 SLURM_ALLOCATION_GPUS_ON_NODE="${SLURM_GPUS_ON_NODE:-UNSET}"
@@ -46,6 +47,8 @@ SLURM_ALLOCATION_END_TIME_EPOCH="${SLURM_JOB_END_TIME:-UNSET}"
 SLURM_ALLOCATION_CHECK_TIME_EPOCH=UNCOMPUTED
 SLURM_ALLOCATION_REMAINING_SECONDS=UNCOMPUTED
 EXPECTED_HEAD="${EXPECTED_HEAD:-}"
+READINESS_ARTIFACT="${READINESS_ARTIFACT:-}"
+STATIC_RESULT="${STATIC_RESULT:-${PROJECT_ROOT}/artifacts/32b-single-client-static-${EXPECTED_HEAD}.json}"
 
 mkdir -p "${ARTIFACT_ROOT}"
 
@@ -95,6 +98,14 @@ record_result() {
         printf 'required_base_release=%s\n' "${REQUIRED_BASE_RELEASE}"
         printf 'required_base_commit=%s\n' "${REQUIRED_BASE_COMMIT}"
         printf 'expected_head=%s\n' "${EXPECTED_HEAD}"
+        printf 'run_repo_root=%s\n' "${RUN_REPO_ROOT}"
+        printf 'pythonpath=%s\n' "${PYTHONPATH:-UNSET}"
+        printf 'nvflare_expected_source_root=%s\n' "${NVFLARE_EXPECTED_SOURCE_ROOT:-UNSET}"
+        printf 'readiness_artifact=%s\n' "${READINESS_ARTIFACT}"
+        printf 'readiness_artifact_sha256=%s\n' "$(sha256sum "${READINESS_ARTIFACT}" 2>/dev/null | awk '{print $1}' || true)"
+        printf 'static_result=%s\n' "${STATIC_RESULT}"
+        printf 'static_result_sha256=%s\n' "$(sha256sum "${STATIC_RESULT}" 2>/dev/null | awk '{print $1}' || true)"
+        printf 'requirements_lock_sha256=%s\n' "$(sha256sum "${REQUIREMENTS_LOCK}" 2>/dev/null | awk '{print $1}' || true)"
         printf 'git_commit=%s\n' "$(git -C "${REPO_ROOT}" rev-parse HEAD 2>/dev/null || true)"
     } > "${ARTIFACT_ROOT}/manifest.txt"
     return "${status}"
@@ -130,11 +141,23 @@ validate_slurm_allocation() {
 
 validate_slurm_allocation
 
+case "${RUN_REPO_ROOT}" in
+    "${PROJECT_ROOT}"/repos/NVFlare-runs/*) ;;
+    *)
+        echo "RUN_REPO_ROOT must name an immutable release worktree under ${PROJECT_ROOT}/repos/NVFlare-runs/." >&2
+        exit 1
+        ;;
+esac
+if [[ ! -d "${RUN_REPO_ROOT}" ]]; then
+    echo "Immutable release worktree does not exist: ${RUN_REPO_ROOT}" >&2
+    exit 1
+fi
+
 for path in \
     "${CONTAINER_IMAGE}" \
     "${REPO_ROOT}" \
     "${VENV_DIR}/bin/python" \
-    "${VENV_DIR}/requirements.lock" \
+    "${REQUIREMENTS_LOCK}" \
     "${MODEL_PATH}" \
     "${DATASET_PATH}" \
     "${STATIC_PREFLIGHT_SCRIPT}"; do
@@ -148,6 +171,31 @@ if [[ ! "${EXPECTED_HEAD}" =~ ^[0-9a-f]{40}$ ]] ||
     echo "EXPECTED_HEAD must pin the exact reviewed checkout used for this queued job." >&2
     exit 1
 fi
+if [[ -n "$(git -C "${REPO_ROOT}" branch --show-current)" ]]; then
+    echo "RUN_REPO_ROOT must remain a detached immutable release worktree." >&2
+    exit 1
+fi
+if [[ ! -s "${READINESS_ARTIFACT}" ]]; then
+    echo "READINESS_ARTIFACT must name the passing zero-GPU readiness artifact." >&2
+    exit 1
+fi
+if [[ ! -s "${STATIC_RESULT}" ]]; then
+    echo "STATIC_RESULT must name the exact passing zero-GPU structure result." >&2
+    exit 1
+fi
+for required_readiness_value in \
+    '"status": "PASS"' \
+    '"safe_to_submit": true' \
+    "\"git_commit\": \"${EXPECTED_HEAD}\"" \
+    "\"repo_root\": \"${RUN_REPO_ROOT}\"" \
+    "\"pythonpath\": \"${RUN_REPO_ROOT}\"" \
+    "\"nvflare_expected_source_root\": \"${RUN_REPO_ROOT}\"" \
+    "\"required_base_commit\": \"${REQUIRED_BASE_COMMIT}\""; do
+    if ! grep -Fq "${required_readiness_value}" "${READINESS_ARTIFACT}"; then
+        echo "Readiness artifact is not bound to this exact release: ${required_readiness_value}" >&2
+        exit 1
+    fi
+done
 
 CONTAINER_CHECKSUM="${CONTAINER_IMAGE}.sha256"
 CONTAINER_VERIFICATION_MARKER="${CONTAINER_CHECKSUM}.verified"
@@ -239,12 +287,23 @@ if [[ -n "${UNVERIFIED_MODEL_FILE}" ]]; then
     exit 1
 fi
 
+STATIC_RESULT_SHA256="$(sha256sum "${STATIC_RESULT}" | awk '{print $1}')"
+MODEL_MANIFEST_SHA256="$(sha256sum "${MODEL_MANIFEST}" | awk '{print $1}')"
+CONTAINER_MANIFEST_SHA256="$(sha256sum "${CONTAINER_CHECKSUM}" | awk '{print $1}')"
+REQUIREMENTS_LOCK_SHA256="$(sha256sum "${REQUIREMENTS_LOCK}" | awk '{print $1}')"
+for required_readiness_value in \
+    "\"static_result_sha256\": \"${STATIC_RESULT_SHA256}\"" \
+    "\"model_manifest_sha256\": \"${MODEL_MANIFEST_SHA256}\"" \
+    "\"container_manifest_sha256\": \"${CONTAINER_MANIFEST_SHA256}\"" \
+    "\"requirements_lock_sha256\": \"${REQUIREMENTS_LOCK_SHA256}\""; do
+    if ! grep -Fq "${required_readiness_value}" "${READINESS_ARTIFACT}"; then
+        echo "Readiness artifact input changed after validation: ${required_readiness_value}" >&2
+        exit 1
+    fi
+done
+
 if [[ ! -s "${RELEASE_FILE}" ]] || [[ "$(<"${RELEASE_FILE}")" != "${REQUIRED_BASE_RELEASE}" ]]; then
     echo "Checkout does not contain required base qualification release ${REQUIRED_BASE_RELEASE}." >&2
-    exit 1
-fi
-if [[ "$(git -C "${REPO_ROOT}" branch --show-current)" != "${EXPECTED_BRANCH}" ]]; then
-    echo "GPU preflight requires branch ${EXPECTED_BRANCH}." >&2
     exit 1
 fi
 if ! git -C "${REPO_ROOT}" merge-base --is-ancestor "${REQUIRED_BASE_COMMIT}" HEAD; then
@@ -267,6 +326,8 @@ export HF_HOME="${PROJECT_ROOT}/cache/huggingface"
 export TOKENIZERS_PARALLELISM=false
 export WANDB_DISABLED=true
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+export PYTHONPATH="${REPO_ROOT}"
+export NVFLARE_EXPECTED_SOURCE_ROOT="${REPO_ROOT}"
 
 srun --kill-on-bad-exit=1 \
     --container-image="${CONTAINER_IMAGE}" \
@@ -274,8 +335,11 @@ srun --kill-on-bad-exit=1 \
     bash -lc "
         set -Eeuo pipefail
         source '${VENV_DIR}/bin/activate'
+        export PYTHONPATH='${REPO_ROOT}'
+        export NVFLARE_EXPECTED_SOURCE_ROOT='${REPO_ROOT}'
         cd '${REPO_ROOT}'
         mkdir -p '${SCRATCH_ROOT}'
+        python -c 'from pathlib import Path; import nvflare, sys; observed = Path(nvflare.__file__).resolve().parents[1]; expected = Path(sys.argv[1]).resolve(); assert observed == expected, (observed, expected)' '${REPO_ROOT}'
         python research/llm_fl_stress/real_training/dependency_check.py \
           > '${ARTIFACT_ROOT}/dependency-check.json'
         python '${STATIC_PREFLIGHT_SCRIPT}' \

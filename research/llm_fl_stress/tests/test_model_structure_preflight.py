@@ -22,6 +22,7 @@ from research.llm_fl_stress.real_training import model_structure_preflight as pr
 def _model(tmp_path):
     model = tmp_path / "model"
     model.mkdir()
+    (model / "MANIFEST.sha256").write_text("manifest\n", encoding="utf-8")
     (model / "REVISION").write_text("revision\n", encoding="utf-8")
     (model / "config.json").write_text(
         json.dumps(
@@ -82,6 +83,7 @@ def test_structure_preflight_separates_logical_and_physical_bytes(tmp_path, monk
     assert result["parameter_count"] == 6
     assert result["logical_state_payload_bytes"] == 12
     assert result["physical_checkpoint_file_bytes"] == 11
+    assert len(result["model_manifest_sha256"]) == 64
     assert result["tensor_payload_materialized"] is False
     assert result["gpu_required"] is False
 

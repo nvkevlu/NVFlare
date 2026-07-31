@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 import time
 from argparse import Namespace
@@ -43,7 +44,13 @@ from client import (
     _train_round,
 )
 from job import DATA_FILES
-from state_evidence import file_sha256, load_text_partition, tensor_state_probe, tensor_state_summary
+from state_evidence import (
+    file_sha256,
+    load_text_partition,
+    select_partition_record,
+    tensor_state_probe,
+    tensor_state_summary,
+)
 
 from nvflare.app_opt.pt.fsdp2_state_bridge import FSDP2StateBridge
 
@@ -231,6 +238,65 @@ def _validate_rank_metrics(rank_metrics: list[dict], expected_world_size: int) -
         raise RuntimeError(f"capacity gate rank identities are incomplete or duplicated: {ranks}")
     if set(local_ranks) != expected_ranks or len(set(local_ranks)) != expected_world_size:
         raise RuntimeError(f"capacity gate local-rank identities are incomplete or duplicated: {local_ranks}")
+
+
+def _validate_training_contract(
+    rank_metrics: list[dict],
+    dataset_records: list[dict[str, str]],
+    *,
+    world_size: int,
+    local_steps: int,
+) -> dict:
+    """Require exact finite-step and non-repeating dataset coverage across all ranks."""
+
+    expected_ids = [
+        select_partition_record(
+            dataset_records,
+            current_round=0,
+            local_step=local_step,
+            rank=rank,
+            world_size=world_size,
+            local_steps=local_steps,
+        )["id"]
+        for local_step in range(local_steps)
+        for rank in range(world_size)
+    ]
+    observed_ids = []
+    for record in rank_metrics:
+        rank = record["rank"]
+        sample_ids = record.get("sample_ids")
+        losses = record.get("loss_trajectory")
+        if not isinstance(sample_ids, list) or len(sample_ids) != local_steps:
+            raise RuntimeError(
+                f"rank {rank} sample coverage mismatch: expected {local_steps} IDs, observed {sample_ids!r}"
+            )
+        if (
+            not isinstance(losses, list)
+            or len(losses) != local_steps
+            or not all(
+                isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+                for value in losses
+            )
+        ):
+            raise RuntimeError(
+                f"rank {rank} loss trajectory must contain exactly {local_steps} finite values: {losses!r}"
+            )
+        observed_ids.extend(sample_ids)
+
+    if len(set(observed_ids)) != len(observed_ids):
+        raise RuntimeError(f"capacity gate reused dataset sample IDs: {observed_ids}")
+    if set(observed_ids) != set(expected_ids):
+        raise RuntimeError(
+            "capacity gate dataset coverage mismatch: "
+            f"expected={sorted(expected_ids)}, observed={sorted(observed_ids)}"
+        )
+    return {
+        "status": "PASS",
+        "sample_count": len(observed_ids),
+        "unique_sample_count": len(set(observed_ids)),
+        "finite_loss_count": world_size * local_steps,
+        "sample_ids": sorted(observed_ids),
+    }
 
 
 def _model_dtype_evidence(model: torch.nn.Module) -> dict:
@@ -507,6 +573,12 @@ def _run(args: argparse.Namespace) -> None:
         if rank == 0:
             assert gathered is not None
             _validate_rank_metrics(gathered, args.expected_world_size)
+            training_contract = _validate_training_contract(
+                gathered,
+                dataset_records,
+                world_size=world_size,
+                local_steps=args.local_steps,
+            )
             aggregate_training_evidence = _aggregate_training_evidence(gathered)
             optimizer_moment_evidence = None
             if args.trainable_target == "all":
@@ -583,6 +655,7 @@ def _run(args: argparse.Namespace) -> None:
                 "final_state": final_summary,
                 "training_evidence": aggregate_training_evidence,
                 "optimizer_moment_evidence": optimizer_moment_evidence,
+                "training_contract": training_contract,
                 "ranks": gathered,
             }
             _write_result(args.result_path, result)

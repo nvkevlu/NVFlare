@@ -53,6 +53,9 @@ The completed five-round follow-up, including bounded BF16 FedAvg continuity and
 in the
 [multiround runbook](docs/cs-oci-ord-two-client-14b-full-model-multiround-runbook.md) and
 [multiround qualification record](docs/cs-oci-ord-two-client-14b-full-model-multiround-qualification-2026-07-31.md).
+The next distinct capacity experiment is the
+[single-client 32B full-model runbook](docs/cs-oci-ord-single-client-32b-full-model-runbook.md); it uses one
+immutable eight-rank release checkout and does not repeat the completed topology gates.
 The completed trainable-state scaling results are in the
 [two-client 32B qualification record](docs/cs-oci-ord-two-client-32b-qualification-2026-07-29.md) and
 [two-client 72B qualification record](docs/cs-oci-ord-two-client-72b-qualification-2026-07-30.md).

@@ -18,6 +18,7 @@ The exact contract is:
 
 | Property | Required value |
 | --- | ---: |
+| Experiment release | `2026-07-31-single-client-full-model-32b-v2` |
 | Model / revision | `Qwen/Qwen2.5-32B` / `1818d35814b8319459f4bd55ed1ac8709630f003` |
 | Architecture / dtype | Qwen2 causal LM / entirely BF16 parameters |
 | Layers / hidden / intermediate | 64 / 5,120 / 27,648 |
@@ -59,8 +60,9 @@ There is no application total-runtime cutoff and no model-ready or post-ready el
 PyTorch distributed timeout protects collective operations; it is longer than the Slurm allocation and is not a
 healthy-run deadline. Slurm requests a graceful `TERM` five minutes before the two-hour wall; accounting and signal
 delivery granularity make the effective workload ceiling approximately 114–115 minutes. The wrapper requires at least
-6,600 seconds remaining before model loading, leaving at least 110 minutes for the experiment and roughly four minutes
-of additional margin. It never requeues or automatically retries.
+6,900 seconds remaining at wrapper startup. After the five-minute pre-wall `TERM`, that guarantees at least 110
+minutes for the experiment and normally leaves almost five additional minutes. It never requeues or automatically
+retries.
 
 ## 1. Install and bind the reviewed checkout
 
@@ -68,24 +70,37 @@ Transfer the bundle, checksum, and head file with the Data Copier procedure in t
 cluster:
 
 ```bash
+set -Eeuo pipefail
 export PROJECT_ROOT=/lustre/fs11/portfolios/coreai/projects/coreai_edgeai_flresearch/users/kevlu/nvflare-14b
-export REPO_ROOT="$PROJECT_ROOT/repos/NVFlare"
+export SOURCE_REPO_ROOT="$PROJECT_ROOT/repos/NVFlare"
 export BUNDLE="$PROJECT_ROOT/incoming/nvflare-32b-single-client.bundle"
 export HEAD_FILE="$BUNDLE.head"
 
 cd "$(dirname "$BUNDLE")"
 sha256sum --check "$(basename "$BUNDLE").sha256"
-git -C "$REPO_ROOT" bundle verify "$BUNDLE"
-git -C "$REPO_ROOT" fetch "$BUNDLE" refs/heads/codex/llm-fl-real-14b
-git -C "$REPO_ROOT" merge --ff-only FETCH_HEAD
+test -z "$(git -C "$SOURCE_REPO_ROOT" status --porcelain --untracked-files=all)"
+git -C "$SOURCE_REPO_ROOT" bundle verify "$BUNDLE"
+git -C "$SOURCE_REPO_ROOT" fetch "$BUNDLE" refs/heads/codex/llm-fl-real-14b
+git -C "$SOURCE_REPO_ROOT" merge --ff-only FETCH_HEAD
 
 export EXPECTED_HEAD="$(cat "$HEAD_FILE")"
-test "$(git -C "$REPO_ROOT" rev-parse HEAD)" = "$EXPECTED_HEAD"
-test -z "$(git -C "$REPO_ROOT" status --porcelain --untracked-files=all)"
-git -C "$REPO_ROOT" status --short --branch
+test "$(git -C "$SOURCE_REPO_ROOT" rev-parse HEAD)" = "$EXPECTED_HEAD"
+test -z "$(git -C "$SOURCE_REPO_ROOT" status --porcelain --untracked-files=all)"
+
+# Create a detached release worktree so later updates to the shared source
+# checkout cannot invalidate a job that waits in the queue.
+export RUN_REPO_ROOT="$PROJECT_ROOT/repos/NVFlare-runs/32b-single-client-${EXPECTED_HEAD}"
+mkdir -p "$(dirname "$RUN_REPO_ROOT")"
+if [[ ! -e "$RUN_REPO_ROOT" ]]; then
+  git -C "$SOURCE_REPO_ROOT" worktree add --detach "$RUN_REPO_ROOT" "$EXPECTED_HEAD"
+fi
+test "$(git -C "$RUN_REPO_ROOT" rev-parse HEAD)" = "$EXPECTED_HEAD"
+test -z "$(git -C "$RUN_REPO_ROOT" status --porcelain --untracked-files=all)"
+git -C "$RUN_REPO_ROOT" status --short --branch
 ```
 
-Do not submit from a dirty checkout or replace `EXPECTED_HEAD` with whatever happens to be checked out.
+Do not modify or remove `RUN_REPO_ROOT` until the queued job has finished. The wrapper accepts only this detached,
+clean, exact-head release worktree; later work can safely continue in `SOURCE_REPO_ROOT`.
 
 ## 2. Run the zero-GPU readiness check
 
@@ -96,13 +111,16 @@ counts, and the 48 unique training records.
 ```bash
 ssh kevlu@cs-oci-ord-dc-02.nvidia.com
 
+set -Eeuo pipefail
 export PROJECT_ROOT=/lustre/fs11/portfolios/coreai/projects/coreai_edgeai_flresearch/users/kevlu/nvflare-14b
-export REPO_ROOT="$PROJECT_ROOT/repos/NVFlare"
 export CONTAINER_IMAGE="$PROJECT_ROOT/containers/pytorch-25.01-py3.sqsh"
 export MODEL_PATH="$PROJECT_ROOT/models/Qwen2.5-32B-1818d35814b8"
 export MODEL_REVISION=1818d35814b8319459f4bd55ed1ac8709630f003
-export STATIC_RESULT="$PROJECT_ROOT/artifacts/32b-single-client-static.json"
 export EXPECTED_HEAD="$(cat "$PROJECT_ROOT/incoming/nvflare-32b-single-client.bundle.head")"
+export RUN_REPO_ROOT="$PROJECT_ROOT/repos/NVFlare-runs/32b-single-client-${EXPECTED_HEAD}"
+export STATIC_RESULT="$PROJECT_ROOT/artifacts/32b-single-client-static-${EXPECTED_HEAD}.json"
+export READINESS_ARTIFACT="$PROJECT_ROOT/artifacts/32b-single-client-readiness-${EXPECTED_HEAD}.json"
+unset NCCL_P2P_DISABLE
 
 mkdir -p "$(dirname "$STATIC_RESULT")"
 
@@ -120,10 +138,13 @@ Inside the container:
 ```bash
 set -Eeuo pipefail
 source "$PROJECT_ROOT/envs/nvflare-fsdp2/bin/activate"
-cd "$REPO_ROOT"
+export PYTHONPATH="$RUN_REPO_ROOT"
+export NVFLARE_EXPECTED_SOURCE_ROOT="$RUN_REPO_ROOT"
+cd "$RUN_REPO_ROOT"
 
 test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD"
 test -z "$(git status --porcelain --untracked-files=all)"
+python -c 'from pathlib import Path; import nvflare, sys; observed = Path(nvflare.__file__).resolve().parents[1]; expected = Path(sys.argv[1]).resolve(); assert observed == expected, (observed, expected)' "$RUN_REPO_ROOT"
 
 # The already-staged 32B snapshot needs one full integrity reread before any
 # GPU submission. Do this here on the Data Copier, never inside the allocation.
@@ -149,35 +170,54 @@ python research/llm_fl_stress/real_training/model_structure_preflight.py \
   --expected-parameters 32763876352 \
   --expected-tensor-bytes 65527752704 \
   --expected-checkpoint-file-bytes 65527841752 \
-  --dataset-file research/llm_fl_stress/real_training/data/site-1.jsonl \
+  --dataset-file "$RUN_REPO_ROOT/research/llm_fl_stress/real_training/data/site-1.jsonl" \
   --minimum-dataset-records 48 \
   | tee "$STATIC_RESULT"
 
 grep -q '"status": "PASS"' "$STATIC_RESULT"
 test -s "$CONTAINER_IMAGE.sha256.verified"
 test -s "$MODEL_PATH/MANIFEST.sha256.verified"
+
+python \
+  research/llm_fl_stress/real_training/cs_oci_ord/validate_32b_single_client_readiness.py \
+  --project-root "$PROJECT_ROOT" \
+  --repo-root "$RUN_REPO_ROOT" \
+  --expected-head "$EXPECTED_HEAD" \
+  --static-result "$STATIC_RESULT" \
+  | tee "$READINESS_ARTIFACT"
+
+grep -q '"safe_to_submit": true' "$READINESS_ARTIFACT"
+grep -q '"status": "PASS"' "$READINESS_ARTIFACT"
 echo "32B zero-GPU readiness PASS"
 ```
 
 Exit the container after the check. Do not submit the GPU experiment if this command fails. The structural check reads
 metadata and safetensor headers without materializing tensors, but the one-time manifest verification deliberately
 rereads all approximately 62 GB of checkpoint files from storage. Perform that I/O on the Data Copier; it still does
-not justify a separate CPU or GPU gate allocation.
+not justify a separate CPU or GPU gate allocation. The final readiness JSON binds the immutable Git head, static
+result, model manifest, container checksum, dependency lock, and exact 32B contract; do not submit without it.
 
 ## 3. Submit the one result-producing GPU job
 
 From a login node:
 
 ```bash
+set -Eeuo pipefail
 export PROJECT_ROOT=/lustre/fs11/portfolios/coreai/projects/coreai_edgeai_flresearch/users/kevlu/nvflare-14b
-export REPO_ROOT="$PROJECT_ROOT/repos/NVFlare"
-cd "$REPO_ROOT"
-
 export EXPECTED_HEAD="$(cat "$PROJECT_ROOT/incoming/nvflare-32b-single-client.bundle.head")"
+export RUN_REPO_ROOT="$PROJECT_ROOT/repos/NVFlare-runs/32b-single-client-${EXPECTED_HEAD}"
+export STATIC_RESULT="$PROJECT_ROOT/artifacts/32b-single-client-static-${EXPECTED_HEAD}.json"
+export READINESS_ARTIFACT="$PROJECT_ROOT/artifacts/32b-single-client-readiness-${EXPECTED_HEAD}.json"
+export PYTHONPATH="$RUN_REPO_ROOT"
+export NVFLARE_EXPECTED_SOURCE_ROOT="$RUN_REPO_ROOT"
+cd "$RUN_REPO_ROOT"
+
 test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD"
 test -z "$(git status --porcelain --untracked-files=all)"
 CONTAINER_IMAGE="$PROJECT_ROOT/containers/pytorch-25.01-py3.sqsh"
 MODEL_PATH="$PROJECT_ROOT/models/Qwen2.5-32B-1818d35814b8"
+test -s "$STATIC_RESULT"
+test -s "$READINESS_ARTIFACT"
 test -s "$CONTAINER_IMAGE.sha256.verified"
 test -s "$MODEL_PATH/MANIFEST.sha256.verified"
 sha256sum --check "$CONTAINER_IMAGE.sha256.verified"
@@ -190,11 +230,33 @@ test -z "$(find "$MODEL_PATH" -path "$MODEL_PATH/.cache" -prune -o \
   ! -path "$MODEL_PATH/MANIFEST.sha256" \
   ! -path "$MODEL_PATH/MANIFEST.sha256.verified" \
   -newer "$MODEL_PATH/MANIFEST.sha256.verified" -print -quit)"
+
+# Rebind the zero-GPU readiness artifact to the still-current small files.
+STATIC_RESULT_SHA256="$(sha256sum "$STATIC_RESULT" | awk '{print $1}')"
+MODEL_MANIFEST_SHA256="$(sha256sum "$MODEL_PATH/MANIFEST.sha256" | awk '{print $1}')"
+CONTAINER_MANIFEST_SHA256="$(sha256sum "$CONTAINER_IMAGE.sha256" | awk '{print $1}')"
+REQUIREMENTS_LOCK_SHA256="$(sha256sum "$PROJECT_ROOT/envs/nvflare-fsdp2/requirements.lock" | awk '{print $1}')"
+for REQUIRED_READINESS_VALUE in \
+  '"status": "PASS"' \
+  '"safe_to_submit": true' \
+  "\"git_commit\": \"$EXPECTED_HEAD\"" \
+  "\"repo_root\": \"$RUN_REPO_ROOT\"" \
+  "\"pythonpath\": \"$RUN_REPO_ROOT\"" \
+  "\"nvflare_expected_source_root\": \"$RUN_REPO_ROOT\"" \
+  '"required_base_commit": "27c39f637506f7589c8b4536fd3c8b4e4664b82f"' \
+  "\"static_result_sha256\": \"$STATIC_RESULT_SHA256\"" \
+  "\"model_manifest_sha256\": \"$MODEL_MANIFEST_SHA256\"" \
+  "\"container_manifest_sha256\": \"$CONTAINER_MANIFEST_SHA256\"" \
+  "\"requirements_lock_sha256\": \"$REQUIREMENTS_LOCK_SHA256\""
+do
+  grep -Fq "$REQUIRED_READINESS_VALUE" "$READINESS_ARTIFACT"
+done
+
 unset NCCL_P2P_DISABLE
 
 JOB_ID=$(sbatch --parsable \
-  --export=ALL,EXPECTED_HEAD="$EXPECTED_HEAD" \
-  research/llm_fl_stress/real_training/cs_oci_ord/single_client_32b_full_model.slurm)
+  --export=ALL,EXPECTED_HEAD="$EXPECTED_HEAD",RUN_REPO_ROOT="$RUN_REPO_ROOT",READINESS_ARTIFACT="$READINESS_ARTIFACT" \
+  "$RUN_REPO_ROOT/research/llm_fl_stress/real_training/cs_oci_ord/single_client_32b_full_model.slurm")
 echo "JOB_ID=$JOB_ID"
 
 GPU_LOG="$PROJECT_ROOT/logs/coreai_edgeai_flresearch-kevlu:nvflare-32b-single-client-$JOB_ID.out"
@@ -206,31 +268,54 @@ tail --retry -F "$GPU_LOG"
 
 `tail` does not poll Slurm. `Ctrl-C` stops only the local tail. Do not use `watch squeue`; the cluster rate-limits
 repeated scheduler RPCs. If `squeue` later says the job ID is invalid, the job has left the live queue—use `sacct`.
+Keep `RUN_REPO_ROOT`, the readiness artifact, and their referenced marker files unchanged until Slurm finishes.
 
 ## 4. Accept or reject the result once
 
 ```bash
+set -Eeuo pipefail
+export PROJECT_ROOT=/lustre/fs11/portfolios/coreai/projects/coreai_edgeai_flresearch/users/kevlu/nvflare-14b
+export JOB_ID=<completed-job-id>
+
 sacct -j "$JOB_ID" \
   --format=JobID,JobName%44,State,Elapsed,ExitCode,AllocTRES,MaxRSS -X
 
 ARTIFACT="$PROJECT_ROOT/artifacts/32b-full-model-single-client-$JOB_ID"
+GPU_LOG="$PROJECT_ROOT/logs/coreai_edgeai_flresearch-kevlu:nvflare-32b-single-client-$JOB_ID.out"
+GPU_ERR="$PROJECT_ROOT/logs/coreai_edgeai_flresearch-kevlu:nvflare-32b-single-client-$JOB_ID.err"
+for REQUIRED_FILE in \
+  manifest.txt \
+  static-model-preflight.json \
+  capacity-experiment.json \
+  qualification.json \
+  gpu-monitor.json \
+  allocation-monitor.json
+do
+  test -s "$ARTIFACT/$REQUIRED_FILE"
+done
 cat "$ARTIFACT/manifest.txt"
 cat "$ARTIFACT/static-model-preflight.json"
 cat "$ARTIFACT/capacity-experiment.json"
 cat "$ARTIFACT/qualification.json"
 cat "$ARTIFACT/gpu-monitor.json"
 cat "$ARTIFACT/allocation-monitor.json"
+
+grep -R -nE \
+  'Traceback|CUDA out of memory|OutOfMemoryError|NCCL.*(WARN|ERROR)|EXECUTION_EXCEPTION|SYSTEM_PANIC|UnsafeComponentError' \
+  "$ARTIFACT" "$GPU_LOG" "$GPU_ERR" || true
 ```
 
 Run the analyzer with the pinned container and virtual environment, not the older login-node Python. On a Data
 Copier:
 
 ```bash
+set -Eeuo pipefail
 export PROJECT_ROOT=/lustre/fs11/portfolios/coreai/projects/coreai_edgeai_flresearch/users/kevlu/nvflare-14b
-export REPO_ROOT="$PROJECT_ROOT/repos/NVFlare"
 export CONTAINER_IMAGE="$PROJECT_ROOT/containers/pytorch-25.01-py3.sqsh"
 export JOB_ID=<completed-job-id>
 export ARTIFACT="$PROJECT_ROOT/artifacts/32b-full-model-single-client-$JOB_ID"
+export EXPECTED_HEAD="$(awk -F= '$1 == "expected_head" {print $2}' "$ARTIFACT/manifest.txt")"
+export RUN_REPO_ROOT="$PROJECT_ROOT/repos/NVFlare-runs/32b-single-client-${EXPECTED_HEAD}"
 
 enroot start --mount "$PROJECT_ROOT:$PROJECT_ROOT" "$CONTAINER_IMAGE"
 ```
@@ -238,8 +323,15 @@ enroot start --mount "$PROJECT_ROOT:$PROJECT_ROOT" "$CONTAINER_IMAGE"
 Inside the container:
 
 ```bash
+set -Eeuo pipefail
 source "$PROJECT_ROOT/envs/nvflare-fsdp2/bin/activate"
-cd "$REPO_ROOT"
+export PYTHONPATH="$RUN_REPO_ROOT"
+export NVFLARE_EXPECTED_SOURCE_ROOT="$RUN_REPO_ROOT"
+cd "$RUN_REPO_ROOT"
+
+test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD"
+test -z "$(git status --porcelain --untracked-files=all)"
+python -c 'from pathlib import Path; import nvflare, sys; observed = Path(nvflare.__file__).resolve().parents[1]; expected = Path(sys.argv[1]).resolve(); assert observed == expected, (observed, expected)' "$RUN_REPO_ROOT"
 
 python research/llm_fl_stress/real_training/telemetry_analysis.py \
   --artifact-root "$ARTIFACT" \
@@ -255,6 +347,7 @@ Accept the experiment only when:
 - all 32,763,876,352 parameters and all 771 parameter tensors are BF16 and trainable;
 - six finite-loss steps completed, gradients are finite and nonzero in early, middle, and late layers, and the
   bounded update probe changed;
+- the training contract reports exactly 48 unique sample IDs and 48 finite rank-step losses;
 - AdamW evidence reports exactly 65,527,752,704 BF16 moment values occupying 131,055,505,408 bytes;
 - initial load and final export each report 771 tensors and 65,527,752,704 bytes with an unchanged schema;
 - all eight GPUs show activity, while measured per-rank peaks and headroom are retained without an arbitrary
@@ -267,3 +360,4 @@ Accept the experiment only when:
 If the job fails, inspect the retained JSON and stderr once. Do not automatically retry. A successful result closes
 the single-client 32B capacity gap; the remaining untested 32B question would be actual 65.5 GB NVFLARE transport
 and multi-client aggregation, which requires a deliberately different experiment and likely more than one node.
+Do not run `model_32b_preflight.slurm`; that wrapper belongs to the already-completed sparse two-client lane.

@@ -15,6 +15,8 @@
 """Fail a CPU preparation job if the pinned distributed APIs are unavailable."""
 
 import json
+import os
+from pathlib import Path
 
 import torch
 import torchvision
@@ -49,6 +51,12 @@ def main() -> None:
         raise RuntimeError("torchvision compiled operators did not register torchvision::nms")
     if transformers.__version__ != "4.57.6":
         raise RuntimeError(f"expected Transformers 4.57.6, got {transformers.__version__}")
+    nvflare_source_root = Path(nvflare.__file__).resolve().parents[1]
+    expected_source_root = os.environ.get("NVFLARE_EXPECTED_SOURCE_ROOT")
+    if expected_source_root and nvflare_source_root != Path(expected_source_root).resolve():
+        raise RuntimeError(
+            f"NVFLARE imported from {nvflare_source_root}, expected immutable source {Path(expected_source_root).resolve()}"
+        )
     result = {
         "event": "real_training_dependency_check",
         "status": "PASS",
@@ -58,6 +66,8 @@ def main() -> None:
         "transformers_version": transformers.__version__,
         "qwen2_model_class": Qwen2ForCausalLM.__name__,
         "nvflare_version": nvflare.__version__,
+        "nvflare_source_root": str(nvflare_source_root),
+        "expected_nvflare_source_root": str(Path(expected_source_root).resolve()) if expected_source_root else None,
     }
     print(json.dumps(result, sort_keys=True))
 

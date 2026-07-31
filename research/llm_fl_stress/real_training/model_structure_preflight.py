@@ -43,6 +43,9 @@ def validate_model_structure(
     expected_tensor_bytes: int,
     expected_checkpoint_file_bytes: int,
 ) -> dict:
+    manifest_path = model_path / "MANIFEST.sha256"
+    if not manifest_path.is_file():
+        raise RuntimeError(f"staged model manifest is missing: {manifest_path}")
     revision_path = model_path / "REVISION"
     if not revision_path.is_file() or revision_path.read_text(encoding="utf-8").strip() != model_revision:
         raise RuntimeError(f"staged model revision does not match {model_revision}")
@@ -91,6 +94,7 @@ def validate_model_structure(
         "status": "PASS",
         "model_path": str(model_path),
         "model_revision": model_revision,
+        "model_manifest_sha256": file_sha256(manifest_path),
         "config": expected_config,
         "parameter_count": expected_parameters,
         "parameter_dtype": "bfloat16",

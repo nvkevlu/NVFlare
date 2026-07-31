@@ -266,6 +266,50 @@ def test_capacity_gate_accepts_exact_eight_rank_identity_set():
     gate._validate_rank_metrics([{"rank": rank, "local_rank": rank} for rank in range(8)], 8)
 
 
+def _training_contract_records(world_size=8, local_steps=6):
+    return [
+        {
+            "rank": rank,
+            "sample_ids": [f"sample-{local_step * world_size + rank}" for local_step in range(local_steps)],
+            "loss_trajectory": [float(local_step + rank) for local_step in range(local_steps)],
+        }
+        for rank in range(world_size)
+    ]
+
+
+def test_capacity_gate_requires_exact_unique_training_coverage():
+    dataset = [{"id": f"sample-{index}", "text": f"text {index}"} for index in range(48)]
+
+    result = gate._validate_training_contract(
+        _training_contract_records(),
+        dataset,
+        world_size=8,
+        local_steps=6,
+    )
+
+    assert result["status"] == "PASS"
+    assert result["sample_count"] == 48
+    assert result["unique_sample_count"] == 48
+    assert result["finite_loss_count"] == 48
+
+
+@pytest.mark.parametrize(
+    ("mutate", "match"),
+    [
+        (lambda records: records[0]["sample_ids"].__setitem__(0, records[1]["sample_ids"][0]), "reused"),
+        (lambda records: records[0].__setitem__("loss_trajectory", [1.0]), "loss trajectory"),
+        (lambda records: records[0]["loss_trajectory"].__setitem__(0, float("nan")), "loss trajectory"),
+    ],
+)
+def test_capacity_gate_rejects_incomplete_or_invalid_training_coverage(mutate, match):
+    dataset = [{"id": f"sample-{index}", "text": f"text {index}"} for index in range(48)]
+    records = _training_contract_records()
+    mutate(records)
+
+    with pytest.raises(RuntimeError, match=match):
+        gate._validate_training_contract(records, dataset, world_size=8, local_steps=6)
+
+
 def test_capacity_gate_writes_one_atomic_result_document(tmp_path):
     result_path = tmp_path / "evidence" / "capacity-experiment.json"
     result = {"event": "real_model_fsdp2_gpu_capacity_gate", "status": "PASS"}
