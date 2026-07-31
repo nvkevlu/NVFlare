@@ -1,5 +1,10 @@
 # CS-OCI-ORD two-client Qwen2.5-72B last-layer qualification
 
+**Qualification status:** Passed on 2026-07-30 as Slurm job `31158690` (`COMPLETED 0:0` in 28:13).
+See [the retained qualification report](cs-oci-ord-two-client-72b-qualification-2026-07-30.md) for the exact
+topology, training, aggregation, persistence, memory, GPU, transfer, and evidence boundaries. Do not repeat the
+qualification unless a new experiment requires a materially different proof.
+
 ## Claim and success boundary
 
 This runbook prepares one defensible claim:

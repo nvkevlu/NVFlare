@@ -2,6 +2,13 @@
 
 Date: 2026-07-30
 
+## Subsequent execution
+
+The reviewed procedure subsequently passed as Slurm job `31158690` (`COMPLETED 0:0` in 28:13). The
+[dated qualification report](cs-oci-ord-two-client-72b-qualification-2026-07-30.md) records the final topology,
+training, aggregation, persistence, resource telemetry, and evidence boundaries. This audit remains the historical
+pre-run readiness decision.
+
 ## Decision
 
 No known software, configuration, model-identity, transport-size, GPU-memory, host-memory, scratch-capacity, or

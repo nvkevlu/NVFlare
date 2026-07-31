@@ -15,6 +15,9 @@ The prepared eight-GPU follow-up is in the
 [two-client 14B runbook](cs-oci-ord-two-client-14b-runbook.md).
 The gated last-layer scaling procedure is in the
 [two-client 72B runbook](cs-oci-ord-two-client-72b-runbook.md).
+The completed large-model results are retained in the
+[two-client 32B qualification record](cs-oci-ord-two-client-32b-qualification-2026-07-29.md) and
+[two-client 72B qualification record](cs-oci-ord-two-client-72b-qualification-2026-07-30.md).
 
 ## Operating rules
 

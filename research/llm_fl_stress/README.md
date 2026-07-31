@@ -42,6 +42,9 @@ telemetry, corrected failures, and boundaries of what the result proves.
 The [CS-OCI-ORD two-client 14B runbook](docs/cs-oci-ord-two-client-14b-runbook.md)
 defines the next colocated eight-GPU test, its zero-GPU validation, disjoint
 four-rank client groups, and fail-closed two-of-two evidence contract.
+The completed trainable-state scaling results are in the
+[two-client 32B qualification record](docs/cs-oci-ord-two-client-32b-qualification-2026-07-29.md) and
+[two-client 72B qualification record](docs/cs-oci-ord-two-client-72b-qualification-2026-07-30.md).
 The prepared one-server/three-client follow-up is in the
 [three-client 32B runbook](docs/three-client-32b-run.md).
 
