@@ -46,7 +46,9 @@ The dedicated
 [two-client 14B full-model runbook](docs/cs-oci-ord-two-client-14b-full-model-runbook.md)
 defines the separate all-parameter plus full-state qualification lane, including
 its exact-model CPU and four-GPU gates, two-hour production envelope, BF16 AdamW
-caveat, and evidence boundary. It is a prepared procedure, not a historical pass.
+caveat, and evidence boundary. The completed result and resource measurements are
+in the
+[two-client 14B full-model qualification record](docs/cs-oci-ord-two-client-14b-full-model-qualification-2026-07-31.md).
 The completed trainable-state scaling results are in the
 [two-client 32B qualification record](docs/cs-oci-ord-two-client-32b-qualification-2026-07-29.md) and
 [two-client 72B qualification record](docs/cs-oci-ord-two-client-72b-qualification-2026-07-30.md).

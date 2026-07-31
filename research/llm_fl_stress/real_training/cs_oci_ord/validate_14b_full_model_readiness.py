@@ -302,7 +302,7 @@ def _model_manifest_entries(path: Path) -> dict[str, str]:
             bool(separator) and bool(re.fullmatch(r"[0-9a-f]{64}", digest)),
             f"invalid checksum manifest line {path}:{line_number}",
         )
-        normalized = relative.removeprefix("./")
+        normalized = relative[2:] if relative.startswith("./") else relative
         relative_path = Path(normalized)
         _require(
             bool(normalized) and not relative_path.is_absolute() and ".." not in relative_path.parts,

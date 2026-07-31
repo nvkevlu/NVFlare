@@ -1,8 +1,10 @@
 # CS-OCI-ORD two-client Qwen2.5-14B full-model qualification
 
-**Qualification status:** Prepared, not yet run. This procedure is bound to release
-`2026-07-31-full-model-14b-v12` and the clean bundle head captured during transfer. Do not describe the lane as
-qualified until the final eight-GPU Slurm job and every retained evidence check below pass.
+**Qualification status:** Passed on 2026-07-31 as Slurm job `31218631`. See the
+[retained qualification report](cs-oci-ord-two-client-14b-full-model-qualification-2026-07-31.md) for exact
+measurements, evidence, and non-claims. The recorded pass is bound to release
+`2026-07-31-full-model-14b-v12` and commit `c748a2a0e85def7c9226d9a71a4e7c537bd0c0c7`; reuse from another commit
+requires fresh exact-HEAD gates.
 
 ## Claim and evidence boundary
 
@@ -434,7 +436,9 @@ the timeout design is reviewed; do not weaken or bypass the readiness validator.
 
 The read-only validator binds the three passing gate IDs to the exact current source, release, model/container
 freshness markers, recipe, resources, and evidence. It does not invoke Slurm, import the training stack, read all
-model weights, or start services.
+model weights, or start services. It intentionally supports the cluster login node's Python 3.8 interpreter and
+must remain standard-library-only. Do not introduce Python 3.9-or-newer syntax or runtime APIs into this standalone
+validator without also changing and validating the documented execution environment.
 
 ```bash
 export PROJECT_ROOT=/lustre/fs11/portfolios/coreai/projects/coreai_edgeai_flresearch/users/kevlu/nvflare-14b

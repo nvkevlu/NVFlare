@@ -362,6 +362,10 @@ commit, recomputes the capacity arithmetic, rejects `NCCL_P2P_DISABLE`, and reje
 a dirty tree, or any wrong release/configuration value. Other manual overrides listed below are removed, and the
 final wrapper supplies fixed reviewed values rather than accepting replacements.
 
+The validator intentionally supports the cluster login node's Python 3.8 interpreter and remains
+standard-library-only. Do not add Python 3.9-or-newer syntax or runtime APIs without changing and validating the
+documented execution environment.
+
 ```bash
 export PROJECT_ROOT=/lustre/fs11/portfolios/coreai/projects/coreai_edgeai_flresearch/users/kevlu/nvflare-14b
 export REPO_ROOT="$PROJECT_ROOT/repos/NVFlare"

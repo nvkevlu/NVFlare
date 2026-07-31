@@ -262,7 +262,7 @@ def _manifest_entries(path: Path) -> set[str]:
             bool(separator) and bool(re.fullmatch(r"[0-9a-f]{64}", digest)),
             f"invalid checksum manifest line {path}:{line_number}",
         )
-        normalized = relative.removeprefix("./")
+        normalized = relative[2:] if relative.startswith("./") else relative
         _require(bool(normalized) and normalized not in result, f"invalid or duplicate path in {path}: {relative!r}")
         result.add(normalized)
     return result

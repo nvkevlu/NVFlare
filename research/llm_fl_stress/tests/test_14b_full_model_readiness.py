@@ -50,6 +50,21 @@ def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def test_model_manifest_entries_accepts_optional_dot_slash(tmp_path):
+    manifest = tmp_path / "MANIFEST.sha256"
+    config_digest = "a" * 64
+    tokenizer_digest = "b" * 64
+    manifest.write_text(
+        f"{config_digest}  ./config.json\n{tokenizer_digest}  tokenizer.json\n",
+        encoding="utf-8",
+    )
+
+    assert readiness._model_manifest_entries(manifest) == {
+        "config.json": config_digest,
+        "tokenizer.json": tokenizer_digest,
+    }
+
+
 def _write_verification_marker(source: Path, marker: Path, protected: list[Path]) -> None:
     marker.write_text(_sha256(source) + "\n", encoding="utf-8")
     latest = max(path.stat().st_mtime_ns for path in [source, *protected])
