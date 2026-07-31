@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Measure one real model's four-rank FSDP2 training and state-exchange capacity."""
+"""Measure one real model's exact-rank FSDP2 training and state-exchange capacity."""
 
 from __future__ import annotations
 
@@ -55,6 +55,7 @@ def _define_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model-name-or-path", required=True, type=Path)
     parser.add_argument("--model-revision", required=True)
+    parser.add_argument("--expected-world-size", type=int, default=4)
     parser.add_argument("--expected-payload-bytes", required=True, type=int)
     parser.add_argument("--expected-tensor-count", type=int, default=0)
     parser.add_argument("--expected-trainable-parameters", type=int, default=0)
@@ -70,18 +71,20 @@ def _define_parser() -> argparse.ArgumentParser:
     parser.add_argument("--full-job-client-count", type=int, default=2)
     parser.add_argument("--required-fixed-host-headroom-gib", type=int, default=128)
     parser.add_argument("--server-state-copies", type=int, default=1)
+    parser.add_argument("--host-projection-mode", choices=("enforce", "report-only"), default="enforce")
     parser.add_argument("--max-model-ready-seconds", type=float, default=2400.0)
     parser.add_argument("--max-work-seconds", type=float, default=1200.0)
+    parser.add_argument("--result-path", type=Path)
     return parser
 
 
 def _validate_args(args: argparse.Namespace) -> None:
     for name in (
         "expected_payload_bytes",
+        "expected_world_size",
         "local_steps",
         "max_length",
         "timeout_seconds",
-        "required_headroom_mib",
         "full_job_memory_gib",
         "full_job_client_count",
         "required_fixed_host_headroom_gib",
@@ -94,6 +97,7 @@ def _validate_args(args: argparse.Namespace) -> None:
     for name in (
         "expected_tensor_count",
         "expected_trainable_parameters",
+        "required_headroom_mib",
         "max_model_ready_seconds",
         "max_work_seconds",
     ):
@@ -101,12 +105,16 @@ def _validate_args(args: argparse.Namespace) -> None:
             raise ValueError(f"--{name.replace('_', '-')} must not be negative")
     if not args.model_name_or_path.is_absolute() or not args.model_name_or_path.is_dir():
         raise ValueError("--model-name-or-path must be an existing absolute directory")
-    if args.full_job_client_count < 2:
-        raise ValueError("--full-job-client-count must be at least two for the two-client production projection")
+    if args.full_job_client_count < 1:
+        raise ValueError("--full-job-client-count must be at least one")
+    if args.result_path is not None and not args.result_path.is_absolute():
+        raise ValueError("--result-path must be absolute when provided")
     if args.state_scope == "trainable" and args.trainable_target != "last-layer":
         raise ValueError("--state-scope=trainable requires --trainable-target=last-layer")
     if args.trainable_target == "all" and args.expected_trainable_parameters <= 0:
         raise ValueError("--trainable-target=all requires --expected-trainable-parameters")
+    if args.trainable_target == "all" and args.expected_tensor_count <= 0:
+        raise ValueError("--trainable-target=all requires --expected-tensor-count")
 
 
 def _training_args(args: argparse.Namespace) -> Namespace:
@@ -125,27 +133,45 @@ def _training_args(args: argparse.Namespace) -> Namespace:
 def _full_job_host_projection(
     rank_metrics: list[dict],
     *,
-    checkpoint_bytes: int,
+    state_payload_bytes: int,
+    checkpoint_file_bytes: int,
     full_job_memory_gib: int,
     full_job_client_count: int,
     required_fixed_host_headroom_gib: int,
     server_state_copies: int = 1,
 ) -> dict:
-    """Project two-client peak host use from the exact one-client, four-rank capacity gate."""
+    """Project full-job host use without treating safetensor headers as in-memory state."""
 
     rank_peak_rss = [record.get("max_rss_bytes") for record in rank_metrics]
-    if not rank_peak_rss or not all(isinstance(value, int) and value > 0 for value in rank_peak_rss):
+    if not rank_peak_rss or not all(
+        isinstance(value, int) and not isinstance(value, bool) and value > 0 for value in rank_peak_rss
+    ):
         raise RuntimeError(f"capacity gate has invalid rank peak RSS values: {rank_peak_rss}")
-    if checkpoint_bytes <= 0:
-        raise RuntimeError(f"capacity gate has invalid checkpoint bytes: {checkpoint_bytes}")
+    if state_payload_bytes <= 0:
+        raise RuntimeError(f"capacity gate has invalid state payload bytes: {state_payload_bytes}")
+    if checkpoint_file_bytes < state_payload_bytes:
+        raise RuntimeError(
+            "capacity gate checkpoint file bytes cannot be smaller than the logical state payload: "
+            f"checkpoint_file_bytes={checkpoint_file_bytes}, state_payload_bytes={state_payload_bytes}"
+        )
 
     one_client_rank_peak_rss_bytes = sum(rank_peak_rss)
     projected_full_job_rank_peak_rss_bytes = one_client_rank_peak_rss_bytes * full_job_client_count
     required_fixed_host_headroom_bytes = required_fixed_host_headroom_gib * _GIB
     full_job_memory_bytes = full_job_memory_gib * _GIB
-    server_state_reserve_bytes = checkpoint_bytes * server_state_copies
-    projected_full_job_host_bytes = (
-        projected_full_job_rank_peak_rss_bytes + server_state_reserve_bytes + required_fixed_host_headroom_bytes
+    # Preserve the original physical-file projection fields for existing 14B
+    # readiness artifacts, but make the logical-state projection explicit and
+    # use it for the capacity decision. Safetensor headers are not another copy
+    # of the server model in memory.
+    physical_server_state_reserve_bytes = checkpoint_file_bytes * server_state_copies
+    projected_physical_full_job_host_bytes = (
+        projected_full_job_rank_peak_rss_bytes
+        + physical_server_state_reserve_bytes
+        + required_fixed_host_headroom_bytes
+    )
+    logical_server_state_reserve_bytes = state_payload_bytes * server_state_copies
+    projected_logical_full_job_host_bytes = (
+        projected_full_job_rank_peak_rss_bytes + logical_server_state_reserve_bytes + required_fixed_host_headroom_bytes
     )
     return {
         "full_job_memory_gib": full_job_memory_gib,
@@ -153,13 +179,111 @@ def _full_job_host_projection(
         "full_job_client_count": full_job_client_count,
         "required_fixed_host_headroom_gib": required_fixed_host_headroom_gib,
         "required_fixed_host_headroom_bytes": required_fixed_host_headroom_bytes,
-        "checkpoint_bytes": checkpoint_bytes,
+        "checkpoint_bytes": checkpoint_file_bytes,
+        "checkpoint_file_bytes": checkpoint_file_bytes,
+        "checkpoint_file_overhead_bytes": checkpoint_file_bytes - state_payload_bytes,
+        "logical_state_payload_bytes": state_payload_bytes,
         "server_state_copies": server_state_copies,
-        "server_state_reserve_bytes": server_state_reserve_bytes,
+        "server_state_reserve_bytes": physical_server_state_reserve_bytes,
+        "physical_server_state_reserve_bytes": physical_server_state_reserve_bytes,
+        "logical_server_state_reserve_bytes": logical_server_state_reserve_bytes,
         "one_client_rank_peak_rss_bytes": one_client_rank_peak_rss_bytes,
         "projected_full_job_rank_peak_rss_bytes": projected_full_job_rank_peak_rss_bytes,
-        "projected_full_job_host_bytes": projected_full_job_host_bytes,
-        "projected_full_job_host_headroom_bytes": full_job_memory_bytes - projected_full_job_host_bytes,
+        "projected_full_job_host_bytes": projected_physical_full_job_host_bytes,
+        "projected_full_job_host_headroom_bytes": full_job_memory_bytes - projected_physical_full_job_host_bytes,
+        "physical_host_projection_basis": "checkpoint-files",
+        "projected_physical_full_job_host_bytes": projected_physical_full_job_host_bytes,
+        "projected_physical_full_job_host_headroom_bytes": (
+            full_job_memory_bytes - projected_physical_full_job_host_bytes
+        ),
+        "logical_host_projection_basis": "logical-state-payload",
+        "projected_logical_full_job_host_bytes": projected_logical_full_job_host_bytes,
+        "projected_logical_full_job_host_headroom_bytes": (
+            full_job_memory_bytes - projected_logical_full_job_host_bytes
+        ),
+    }
+
+
+def _write_result(path: Path | None, result: dict) -> None:
+    if path is None:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.tmp")
+    temporary.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    temporary.replace(path)
+
+
+def _validate_rank_metrics(rank_metrics: list[dict], expected_world_size: int) -> None:
+    if len(rank_metrics) != expected_world_size:
+        raise RuntimeError(
+            f"capacity gate expected {expected_world_size} gathered rank records, found {len(rank_metrics)}"
+        )
+    if not all(isinstance(record, dict) for record in rank_metrics):
+        raise RuntimeError("capacity gate gathered a non-mapping rank record")
+    expected_ranks = set(range(expected_world_size))
+    ranks = [record.get("rank") for record in rank_metrics]
+    local_ranks = [record.get("local_rank") for record in rank_metrics]
+    if any(not isinstance(value, int) or isinstance(value, bool) for value in ranks):
+        raise RuntimeError(f"capacity gate has invalid rank identities: {ranks}")
+    if any(not isinstance(value, int) or isinstance(value, bool) for value in local_ranks):
+        raise RuntimeError(f"capacity gate has invalid local-rank identities: {local_ranks}")
+    if set(ranks) != expected_ranks or len(set(ranks)) != expected_world_size:
+        raise RuntimeError(f"capacity gate rank identities are incomplete or duplicated: {ranks}")
+    if set(local_ranks) != expected_ranks or len(set(local_ranks)) != expected_world_size:
+        raise RuntimeError(f"capacity gate local-rank identities are incomplete or duplicated: {local_ranks}")
+
+
+def _model_dtype_evidence(model: torch.nn.Module) -> dict:
+    histogram = {}
+    payload_bytes = 0
+    for parameter in model.parameters():
+        dtype = str(parameter.dtype)
+        if dtype.startswith("torch."):
+            dtype = dtype[len("torch.") :]
+        item = histogram.setdefault(dtype, {"tensor_count": 0, "numel": 0, "bytes": 0})
+        numel = parameter.numel()
+        nbytes = numel * parameter.element_size()
+        item["tensor_count"] += 1
+        item["numel"] += numel
+        item["bytes"] += nbytes
+        payload_bytes += nbytes
+    return {"parameter_dtype_histogram": histogram, "parameter_payload_bytes": payload_bytes}
+
+
+def _require_exact_bf16_model(
+    dtype_evidence: dict,
+    *,
+    expected_parameters: int,
+    expected_tensor_count: int,
+    expected_payload_bytes: int,
+) -> dict:
+    histogram = dtype_evidence.get("parameter_dtype_histogram")
+    if not isinstance(histogram, dict) or set(histogram) != {"bfloat16"}:
+        raise RuntimeError(f"capacity gate model is not entirely BF16: {histogram!r}")
+    observed = histogram["bfloat16"]
+    expected = {
+        "tensor_count": expected_tensor_count,
+        "numel": expected_parameters,
+        "bytes": 2 * expected_parameters,
+    }
+    if observed != expected:
+        raise RuntimeError(f"capacity gate BF16 model coverage mismatch: expected {expected}, observed {observed!r}")
+    if expected_payload_bytes != expected["bytes"]:
+        raise RuntimeError(
+            "capacity gate expected payload is inconsistent with the exact BF16 parameter count: "
+            f"expected_payload_bytes={expected_payload_bytes}, bf16_parameter_bytes={expected['bytes']}"
+        )
+    if dtype_evidence.get("parameter_payload_bytes") != expected_payload_bytes:
+        raise RuntimeError(
+            "capacity gate model parameter payload mismatch: "
+            f"expected {expected_payload_bytes}, observed {dtype_evidence.get('parameter_payload_bytes')!r}"
+        )
+    return {
+        "status": "PASS",
+        "dtype": "bfloat16",
+        "parameter_count": expected_parameters,
+        "parameter_tensor_count": expected_tensor_count,
+        "parameter_payload_bytes": expected_payload_bytes,
     }
 
 
@@ -222,8 +346,10 @@ def _run(args: argparse.Namespace) -> None:
     training_args = _training_args(args)
     rank, world_size, local_rank, device = _setup_distributed(args.timeout_seconds)
     try:
-        if world_size != 4:
-            raise RuntimeError(f"real-model capacity gate requires exactly four ranks, found {world_size}")
+        if world_size != args.expected_world_size:
+            raise RuntimeError(
+                f"real-model capacity gate requires exactly {args.expected_world_size} ranks, found {world_size}"
+            )
         gpu_name = torch.cuda.get_device_name(device)
         if args.expected_gpu_name_substring not in gpu_name:
             raise RuntimeError(f"GPU name must contain {args.expected_gpu_name_substring!r}, observed {gpu_name!r}")
@@ -233,6 +359,7 @@ def _run(args: argparse.Namespace) -> None:
         model, tokenizer = _load_model_and_tokenizer(training_args)
         _select_trainable_parameters(model, training_args.trainable_target)
         model_evidence = _model_parameter_evidence(model)
+        model_dtype_evidence = _model_dtype_evidence(model)
         if args.expected_trainable_parameters and (
             model_evidence["trainable_parameters"] != args.expected_trainable_parameters
         ):
@@ -245,6 +372,14 @@ def _run(args: argparse.Namespace) -> None:
             or model_evidence["frozen_parameters"] != 0
         ):
             raise RuntimeError(f"all-parameter selection evidence is invalid: {model_evidence}")
+        exact_bf16_model_evidence = None
+        if args.trainable_target == "all":
+            exact_bf16_model_evidence = _require_exact_bf16_model(
+                model_dtype_evidence,
+                expected_parameters=args.expected_trainable_parameters,
+                expected_tensor_count=args.expected_tensor_count,
+                expected_payload_bytes=args.expected_payload_bytes,
+            )
         _shard_model(model, world_size)
         trainable = [parameter for parameter in model.parameters() if parameter.requires_grad]
         if not trainable:
@@ -371,6 +506,7 @@ def _run(args: argparse.Namespace) -> None:
 
         if rank == 0:
             assert gathered is not None
+            _validate_rank_metrics(gathered, args.expected_world_size)
             aggregate_training_evidence = _aggregate_training_evidence(gathered)
             optimizer_moment_evidence = None
             if args.trainable_target == "all":
@@ -379,12 +515,13 @@ def _run(args: argparse.Namespace) -> None:
                     model_evidence["trainable_parameters"],
                 )
             required_headroom_bytes = args.required_headroom_mib * _MIB
-            checkpoint_bytes = sum(
+            checkpoint_file_bytes = sum(
                 path.stat().st_size for path in args.model_name_or_path.glob("model*.safetensors") if path.is_file()
             )
             host_projection = _full_job_host_projection(
                 gathered,
-                checkpoint_bytes=checkpoint_bytes,
+                state_payload_bytes=final_export.stats.payload_bytes,
+                checkpoint_file_bytes=checkpoint_file_bytes,
                 full_job_memory_gib=args.full_job_memory_gib,
                 full_job_client_count=args.full_job_client_count,
                 required_fixed_host_headroom_gib=args.required_fixed_host_headroom_gib,
@@ -409,25 +546,34 @@ def _run(args: argparse.Namespace) -> None:
                 failures.append(
                     f"post-ready work took {observed_max_work_seconds:.3f}s, " f"exceeding {args.max_work_seconds:.3f}s"
                 )
-            if host_projection["projected_full_job_host_headroom_bytes"] < 0:
+            if (
+                args.host_projection_mode == "enforce"
+                and host_projection["projected_logical_full_job_host_headroom_bytes"] < 0
+            ):
                 failures.append(
-                    f"projected full-job host bytes {host_projection['projected_full_job_host_bytes']} exceed "
+                    "projected logical full-job host bytes "
+                    f"{host_projection['projected_logical_full_job_host_bytes']} exceed "
                     f"{args.full_job_memory_gib} GiB ({host_projection['full_job_memory_bytes']} bytes)"
                 )
             result = {
                 "event": "real_model_fsdp2_gpu_capacity_gate",
+                "experiment_scope": "single-client-fsdp2-capacity",
                 "status": "FAIL" if failures else "PASS",
                 "model_path": str(args.model_name_or_path),
                 "model_revision": args.model_revision,
                 "world_size": world_size,
+                "expected_world_size": args.expected_world_size,
                 "trainable_target": args.trainable_target,
                 "state_scope": args.state_scope,
                 **model_evidence,
+                **model_dtype_evidence,
+                "exact_bf16_model_evidence": exact_bf16_model_evidence,
                 "local_steps": args.local_steps,
                 "max_length": args.max_length,
                 "payload_bytes": final_export.stats.payload_bytes,
                 "tensor_count": final_export.stats.tensor_count,
                 "required_headroom_mib": args.required_headroom_mib,
+                "host_projection_mode": args.host_projection_mode,
                 "max_model_ready_seconds": args.max_model_ready_seconds,
                 "observed_max_model_ready_seconds": observed_max_model_ready_seconds,
                 "max_work_seconds": args.max_work_seconds,
@@ -439,6 +585,7 @@ def _run(args: argparse.Namespace) -> None:
                 "optimizer_moment_evidence": optimizer_moment_evidence,
                 "ranks": gathered,
             }
+            _write_result(args.result_path, result)
             print(json.dumps(result, sort_keys=True), flush=True)
             if final_export.state_dict is not None:
                 final_export.state_dict.clear()

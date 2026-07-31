@@ -210,6 +210,77 @@ def test_72b_gpu_gate_is_real_four_rank_training_with_headroom_requirement():
     assert "real_model_fsdp2_gpu_gate.py" in wrapper
 
 
+def test_32b_single_client_experiment_pins_exact_eight_rank_capacity_contract():
+    wrapper = (
+        Path(__file__).resolve().parents[1] / "real_training" / "cs_oci_ord" / "single_client_32b_full_model.slurm"
+    ).read_text()
+
+    for token in (
+        "#SBATCH --cpus-per-task=64",
+        "#SBATCH --gpus-per-node=8",
+        "#SBATCH --mem=900G",
+        "#SBATCH --time=02:00:00",
+        "#SBATCH --signal=TERM@300",
+        "#SBATCH --no-requeue",
+        'MODEL_PATH="${PROJECT_ROOT}/models/Qwen2.5-32B-1818d35814b8"',
+        'DATASET_PATH="${REPO_ROOT}/research/llm_fl_stress/real_training/data/site-1.jsonl"',
+        "1818d35814b8319459f4bd55ed1ac8709630f003",
+        "EXPECTED_PARAMETERS=32763876352",
+        "EXPECTED_TENSOR_COUNT=771",
+        "EXPECTED_STATE_PAYLOAD_BYTES=65527752704",
+        "EXPECTED_CHECKPOINT_FILE_BYTES=65527841752",
+        "MINIMUM_SLURM_MEMORY_MIB=921600",
+        "MINIMUM_SLURM_REMAINING_SECONDS=6600",
+        "REQUIRED_SLURM_GPUS_ON_NODE=8",
+        'SLURM_ALLOCATION_MEMORY_MIB="${SLURM_MEM_PER_NODE:-UNSET}"',
+        'SLURM_ALLOCATION_GPUS_ON_NODE="${SLURM_GPUS_ON_NODE:-UNSET}"',
+        'SLURM_ALLOCATION_END_TIME_EPOCH="${SLURM_JOB_END_TIME:-UNSET}"',
+        'EXPECTED_HEAD="${EXPECTED_HEAD:-}"',
+        "EXPECTED_HEAD must pin the exact reviewed checkout",
+        "printf 'expected_head=%s\\n'",
+        "EXPERIMENT_RELEASE=2026-07-31-single-client-full-model-32b-v1",
+        "REQUIRED_BASE_RELEASE=2026-07-31-full-model-14b-v12",
+        "printf 'experiment_release=%s\\n'",
+        "printf 'required_base_release=%s\\n'",
+        "model_structure_preflight.py",
+        "--expected-hidden-size 5120",
+        "--expected-intermediate-size 27648",
+        "--expected-num-hidden-layers 64",
+        "--expected-num-attention-heads 40",
+        "--expected-num-key-value-heads 8",
+        "--expected-safetensor-files 17",
+        "--expected-tensor-count '${EXPECTED_TENSOR_COUNT}'",
+        "--expected-parameters '${EXPECTED_PARAMETERS}'",
+        "--expected-tensor-bytes '${EXPECTED_STATE_PAYLOAD_BYTES}'",
+        "--expected-checkpoint-file-bytes '${EXPECTED_CHECKPOINT_FILE_BYTES}'",
+        "--dataset-file '${DATASET_PATH}'",
+        "--minimum-dataset-records 48",
+        '\\"indexed_tensor_count\\": 771',
+        "capacity_experiment.py",
+        "--gpu-count 8",
+        "--nproc_per_node=8",
+        "--expected-world-size 8",
+        "--trainable-target all",
+        "--state-scope full",
+        "--local-steps 6",
+        "--max-length 512",
+        "--required-headroom-mib 0",
+        "--full-job-memory-gib 900",
+        "--full-job-client-count 1",
+        "--required-fixed-host-headroom-gib 64",
+        "--server-state-copies 1",
+        "--host-projection-mode report-only",
+        "--max-model-ready-seconds 0",
+        "--max-work-seconds 0",
+        "--result-path '${RESULT_PATH}'",
+    ):
+        assert token in wrapper
+
+    assert "NCCL_P2P_DISABLE" in wrapper
+    assert "validate_slurm_allocation" in wrapper
+    assert "--nproc_per_node=4" not in wrapper
+
+
 def test_72b_cpu_preflight_checks_sparse_state_and_exported_job():
     wrapper = (
         Path(__file__).resolve().parents[1] / "real_training" / "cs_oci_ord" / "model_72b_preflight.slurm"
