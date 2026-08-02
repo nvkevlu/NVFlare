@@ -26,7 +26,7 @@ REQUIREMENTS_LOCK="${VENV_DIR}/requirements.lock"
 MODEL_PATH="${PROJECT_ROOT}/models/Qwen2.5-32B-1818d35814b8"
 MODEL_REVISION=1818d35814b8319459f4bd55ed1ac8709630f003
 DATASET_PATH="${REPO_ROOT}/research/llm_fl_stress/real_training/data/site-1.jsonl"
-EXPERIMENT_RELEASE=2026-07-31-single-client-full-model-32b-v2
+EXPERIMENT_RELEASE=2026-08-02-single-client-full-model-32b-v3
 REQUIRED_BASE_RELEASE=2026-07-31-full-model-14b-v12
 REQUIRED_BASE_COMMIT=27c39f637506f7589c8b4536fd3c8b4e4664b82f
 RELEASE_FILE="${REPO_ROOT}/research/llm_fl_stress/real_training/QUALIFICATION_RELEASE"
@@ -339,8 +339,10 @@ srun --kill-on-bad-exit=1 \
         export NVFLARE_EXPECTED_SOURCE_ROOT='${REPO_ROOT}'
         cd '${REPO_ROOT}'
         mkdir -p '${SCRATCH_ROOT}'
-        python -c 'from pathlib import Path; import nvflare, sys; observed = Path(nvflare.__file__).resolve().parents[1]; expected = Path(sys.argv[1]).resolve(); assert observed == expected, (observed, expected)' '${REPO_ROOT}'
         python research/llm_fl_stress/real_training/dependency_check.py \
+          --metadata-only \
+          --expected-source-root '${REPO_ROOT}' \
+          --expected-prefix '${VENV_DIR}' \
           > '${ARTIFACT_ROOT}/dependency-check.json'
         python '${STATIC_PREFLIGHT_SCRIPT}' \
           --model-name-or-path '${MODEL_PATH}' \

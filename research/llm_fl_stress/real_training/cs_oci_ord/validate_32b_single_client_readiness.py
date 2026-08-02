@@ -33,7 +33,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 EXPECTED_RELEASE = "2026-07-31-full-model-14b-v12"
-EXPERIMENT_RELEASE = "2026-07-31-single-client-full-model-32b-v2"
+EXPERIMENT_RELEASE = "2026-08-02-single-client-full-model-32b-v3"
 REQUIRED_BASE_COMMIT = "27c39f637506f7589c8b4536fd3c8b4e4664b82f"
 MODEL_DIR = "Qwen2.5-32B-1818d35814b8"
 MODEL_REVISION = "1818d35814b8319459f4bd55ed1ac8709630f003"

@@ -18,7 +18,7 @@ The exact contract is:
 
 | Property | Required value |
 | --- | ---: |
-| Experiment release | `2026-07-31-single-client-full-model-32b-v2` |
+| Experiment release | `2026-08-02-single-client-full-model-32b-v3` |
 | Model / revision | `Qwen/Qwen2.5-32B` / `1818d35814b8319459f4bd55ed1ac8709630f003` |
 | Architecture / dtype | Qwen2 causal LM / entirely BF16 parameters |
 | Layers / hidden / intermediate | 64 / 5,120 / 27,648 |
@@ -66,19 +66,22 @@ retries.
 
 ## 1. Install and bind the reviewed checkout
 
-Transfer the bundle, checksum, and head file with the Data Copier procedure in the main cluster runbook. On the
-cluster:
+Transfer the small `nvflare-32b-import-cleanup.bundle`, checksum, and head file with the Data Copier procedure in the
+main cluster runbook. This incremental bundle requires the already-installed reviewed commit
+`0beb6021bc27c4b33c9bb4177d613c2aa6588054`; the commands fail before changing the checkout if that prerequisite is
+not the clean current HEAD. On the cluster:
 
 ```bash
 set -Eeuo pipefail
 export PROJECT_ROOT=/lustre/fs11/portfolios/coreai/projects/coreai_edgeai_flresearch/users/kevlu/nvflare-14b
 export SOURCE_REPO_ROOT="$PROJECT_ROOT/repos/NVFlare"
-export BUNDLE="$PROJECT_ROOT/incoming/nvflare-32b-single-client.bundle"
+export BUNDLE="$PROJECT_ROOT/incoming/nvflare-32b-import-cleanup.bundle"
 export HEAD_FILE="$BUNDLE.head"
 
 cd "$(dirname "$BUNDLE")"
 sha256sum --check "$(basename "$BUNDLE").sha256"
 test -z "$(git -C "$SOURCE_REPO_ROOT" status --porcelain --untracked-files=all)"
+test "$(git -C "$SOURCE_REPO_ROOT" rev-parse HEAD)" = 0beb6021bc27c4b33c9bb4177d613c2aa6588054
 git -C "$SOURCE_REPO_ROOT" bundle verify "$BUNDLE"
 git -C "$SOURCE_REPO_ROOT" fetch "$BUNDLE" refs/heads/codex/llm-fl-real-14b
 git -C "$SOURCE_REPO_ROOT" merge --ff-only FETCH_HEAD
@@ -116,7 +119,7 @@ export PROJECT_ROOT=/lustre/fs11/portfolios/coreai/projects/coreai_edgeai_flrese
 export CONTAINER_IMAGE="$PROJECT_ROOT/containers/pytorch-25.01-py3.sqsh"
 export MODEL_PATH="$PROJECT_ROOT/models/Qwen2.5-32B-1818d35814b8"
 export MODEL_REVISION=1818d35814b8319459f4bd55ed1ac8709630f003
-export EXPECTED_HEAD="$(cat "$PROJECT_ROOT/incoming/nvflare-32b-single-client.bundle.head")"
+export EXPECTED_HEAD="$(cat "$PROJECT_ROOT/incoming/nvflare-32b-import-cleanup.bundle.head")"
 export RUN_REPO_ROOT="$PROJECT_ROOT/repos/NVFlare-runs/32b-single-client-${EXPECTED_HEAD}"
 export STATIC_RESULT="$PROJECT_ROOT/artifacts/32b-single-client-static-${EXPECTED_HEAD}.json"
 export READINESS_ARTIFACT="$PROJECT_ROOT/artifacts/32b-single-client-readiness-${EXPECTED_HEAD}.json"
@@ -124,11 +127,12 @@ unset NCCL_P2P_DISABLE
 
 mkdir -p "$(dirname "$STATIC_RESULT")"
 
-# One-time container integrity reread on the Data Copier. The GPU wrapper
-# later checks only this small freshness marker.
-sha256sum --check "$CONTAINER_IMAGE.sha256"
-sha256sum "$CONTAINER_IMAGE.sha256" > "$CONTAINER_IMAGE.sha256.verified"
+# Reuse the existing container verification evidence. Rehash the 25 GB image
+# only if this marker is missing or a freshness check below fails.
+test -s "$CONTAINER_IMAGE.sha256.verified"
 sha256sum --check "$CONTAINER_IMAGE.sha256.verified"
+test ! "$CONTAINER_IMAGE" -nt "$CONTAINER_IMAGE.sha256.verified"
+test ! "$CONTAINER_IMAGE.sha256" -nt "$CONTAINER_IMAGE.sha256.verified"
 
 enroot start --mount "$PROJECT_ROOT:$PROJECT_ROOT" "$CONTAINER_IMAGE"
 ```
@@ -144,19 +148,17 @@ cd "$RUN_REPO_ROOT"
 
 test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD"
 test -z "$(git status --porcelain --untracked-files=all)"
-python -c 'from pathlib import Path; import nvflare, sys; observed = Path(nvflare.__file__).resolve().parents[1]; expected = Path(sys.argv[1]).resolve(); assert observed == expected, (observed, expected)' "$RUN_REPO_ROOT"
-
-# The already-staged 32B snapshot needs one full integrity reread before any
-# GPU submission. Do this here on the Data Copier, never inside the allocation.
 test -s "$MODEL_PATH/MANIFEST.sha256"
-(
-  cd "$MODEL_PATH"
-  sha256sum --check MANIFEST.sha256
-  sha256sum MANIFEST.sha256 > MANIFEST.sha256.verified
-  sha256sum --check MANIFEST.sha256.verified
-)
+test -s "$MODEL_PATH/MANIFEST.sha256.verified"
+cd "$MODEL_PATH"
+sha256sum --check MANIFEST.sha256.verified
+test ! MANIFEST.sha256 -nt MANIFEST.sha256.verified
+cd "$RUN_REPO_ROOT"
 
-python research/llm_fl_stress/real_training/dependency_check.py
+python research/llm_fl_stress/real_training/dependency_check.py \
+  --metadata-only \
+  --expected-source-root "$RUN_REPO_ROOT" \
+  --expected-prefix "$PROJECT_ROOT/envs/nvflare-fsdp2"
 python research/llm_fl_stress/real_training/model_structure_preflight.py \
   --model-name-or-path "$MODEL_PATH" \
   --model-revision "$MODEL_REVISION" \
@@ -192,10 +194,11 @@ echo "32B zero-GPU readiness PASS"
 ```
 
 Exit the container after the check. Do not submit the GPU experiment if this command fails. The structural check reads
-metadata and safetensor headers without materializing tensors, but the one-time manifest verification deliberately
-rereads all approximately 62 GB of checkpoint files from storage. Perform that I/O on the Data Copier; it still does
-not justify a separate CPU or GPU gate allocation. The final readiness JSON binds the immutable Git head, static
-result, model manifest, container checksum, dependency lock, and exact 32B contract; do not submit without it.
+metadata and safetensor headers without materializing tensors. Existing model and container verification markers are
+reused and checked for freshness, so this code-only update does not reread either large payload. The metadata-only
+dependency check uses package metadata and import resolution without executing NVFLARE, PyTorch, torchvision, or
+Transformers. The final readiness JSON binds the immutable Git head, static result, model manifest, container checksum,
+dependency lock, and exact 32B contract; do not submit without it.
 
 ## 3. Submit the one result-producing GPU job
 
@@ -204,7 +207,7 @@ From a login node:
 ```bash
 set -Eeuo pipefail
 export PROJECT_ROOT=/lustre/fs11/portfolios/coreai/projects/coreai_edgeai_flresearch/users/kevlu/nvflare-14b
-export EXPECTED_HEAD="$(cat "$PROJECT_ROOT/incoming/nvflare-32b-single-client.bundle.head")"
+export EXPECTED_HEAD="$(cat "$PROJECT_ROOT/incoming/nvflare-32b-import-cleanup.bundle.head")"
 export RUN_REPO_ROOT="$PROJECT_ROOT/repos/NVFlare-runs/32b-single-client-${EXPECTED_HEAD}"
 export STATIC_RESULT="$PROJECT_ROOT/artifacts/32b-single-client-static-${EXPECTED_HEAD}.json"
 export READINESS_ARTIFACT="$PROJECT_ROOT/artifacts/32b-single-client-readiness-${EXPECTED_HEAD}.json"
@@ -331,7 +334,10 @@ cd "$RUN_REPO_ROOT"
 
 test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD"
 test -z "$(git status --porcelain --untracked-files=all)"
-python -c 'from pathlib import Path; import nvflare, sys; observed = Path(nvflare.__file__).resolve().parents[1]; expected = Path(sys.argv[1]).resolve(); assert observed == expected, (observed, expected)' "$RUN_REPO_ROOT"
+python research/llm_fl_stress/real_training/dependency_check.py \
+  --metadata-only \
+  --expected-source-root "$RUN_REPO_ROOT" \
+  --expected-prefix "$PROJECT_ROOT/envs/nvflare-fsdp2"
 
 python research/llm_fl_stress/real_training/telemetry_analysis.py \
   --artifact-root "$ARTIFACT" \

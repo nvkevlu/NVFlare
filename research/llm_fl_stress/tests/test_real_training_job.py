@@ -247,12 +247,15 @@ def test_32b_single_client_experiment_pins_exact_eight_rank_capacity_contract():
         '\\"requirements_lock_sha256\\"',
         'export PYTHONPATH="${REPO_ROOT}"',
         'export NVFLARE_EXPECTED_SOURCE_ROOT="${REPO_ROOT}"',
-        "nvflare.__file__",
+        "dependency_check.py",
+        "--metadata-only",
+        "--expected-source-root '${REPO_ROOT}'",
+        "--expected-prefix '${VENV_DIR}'",
         "printf 'pythonpath=%s\\n'",
         "printf 'nvflare_expected_source_root=%s\\n'",
         "EXPECTED_HEAD must pin the exact reviewed checkout",
         "printf 'expected_head=%s\\n'",
-        "EXPERIMENT_RELEASE=2026-07-31-single-client-full-model-32b-v2",
+        "EXPERIMENT_RELEASE=2026-08-02-single-client-full-model-32b-v3",
         "REQUIRED_BASE_RELEASE=2026-07-31-full-model-14b-v12",
         "printf 'experiment_release=%s\\n'",
         "printf 'required_base_release=%s\\n'",
@@ -293,6 +296,24 @@ def test_32b_single_client_experiment_pins_exact_eight_rank_capacity_contract():
     assert "NCCL_P2P_DISABLE" in wrapper
     assert "validate_slurm_allocation" in wrapper
     assert "--nproc_per_node=4" not in wrapper
+    assert "import nvflare" not in wrapper
+    assert "nvflare.__file__" not in wrapper
+
+
+def test_32b_single_client_runbook_uses_only_metadata_checks_for_code_update():
+    runbook = (
+        Path(__file__).resolve().parents[1] / "docs" / "cs-oci-ord-single-client-32b-full-model-runbook.md"
+    ).read_text()
+
+    assert "nvflare-32b-import-cleanup.bundle" in runbook
+    assert "0beb6021bc27c4b33c9bb4177d613c2aa6588054" in runbook
+    assert runbook.count("--metadata-only") == 2
+    assert '--expected-source-root "$RUN_REPO_ROOT"' in runbook
+    assert '--expected-prefix "$PROJECT_ROOT/envs/nvflare-fsdp2"' in runbook
+    assert "nvflare.__file__" not in runbook
+    assert "import nvflare" not in runbook
+    assert "sha256sum --check MANIFEST.sha256\n" not in runbook
+    assert 'sha256sum --check "$CONTAINER_IMAGE.sha256"\n' not in runbook
 
 
 def test_72b_cpu_preflight_checks_sparse_state_and_exported_job():
