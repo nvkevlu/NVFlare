@@ -1,5 +1,11 @@
 # CS-OCI-ORD single-client Qwen2.5-32B full-model capacity experiment
 
+**Qualification status:** Passed on 2026-08-02 as Slurm job `31351265` (`COMPLETED 0:0` in 14:03).
+See the
+[retained qualification record](cs-oci-ord-single-client-32b-full-model-qualification-2026-08-02.md) for the exact
+training, state-bridge, memory, utilization, timing, and claim-boundary evidence. Do not rerun this unchanged
+experiment; any later GPU allocation should answer a distinct question.
+
 ## Purpose and claim boundary
 
 This experiment answers the next distinct resource question without repeating the already-passing control-plane,
@@ -53,8 +59,9 @@ The persistent BF16 planning subtotal per rank, before activations and communica
 The experiment records actual allocator peaks and free memory at every important phase. It deliberately sets no
 minimum-headroom pass threshold on this first 32B measurement: a successful workload is not relabeled as failed by
 an arbitrary reserve. The host projection is also report-only because summing independent per-rank RSS maxima and a
-full-state reserve is conservative and not a simultaneous measurement. The allocation monitor is the authoritative
-source for actual cgroup memory pressure and OOM events.
+full-state reserve is conservative and not a simultaneous measurement. When allocation cgroup metrics are exposed,
+the allocation monitor is authoritative for cgroup memory pressure and OOM events; otherwise it retains only
+process-tree and system telemetry and does not make a cgroup-wide claim.
 
 There is no application total-runtime cutoff and no model-ready or post-ready elapsed cutoff. The 10,800-second
 PyTorch distributed timeout protects collective operations; it is longer than the Slurm allocation and is not a

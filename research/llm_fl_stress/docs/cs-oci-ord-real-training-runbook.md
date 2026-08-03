@@ -22,8 +22,11 @@ Its completed result is retained in the
 The completed five-round continuation and its bounded FedAvg-continuity evidence are retained in the
 [multiround runbook](cs-oci-ord-two-client-14b-full-model-multiround-runbook.md) and
 [multiround qualification record](cs-oci-ord-two-client-14b-full-model-multiround-qualification-2026-07-31.md).
-The prepared next capacity experiment is the
-[single-client 32B full-model runbook](cs-oci-ord-single-client-32b-full-model-runbook.md).
+The completed single-client 32B full-model capacity experiment is retained in its
+[runbook](cs-oci-ord-single-client-32b-full-model-runbook.md) and
+[qualification record](cs-oci-ord-single-client-32b-full-model-qualification-2026-08-02.md). Slurm job `31351265`
+closed the single-client 32B fit and full-state bridge question; loader efficiency and multi-client full-state
+federation remain separate follow-up questions.
 The gated last-layer scaling procedure is in the
 [two-client 72B runbook](cs-oci-ord-two-client-72b-runbook.md).
 The completed large-model results are retained in the

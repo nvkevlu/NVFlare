@@ -53,9 +53,12 @@ The completed five-round follow-up, including bounded BF16 FedAvg continuity and
 in the
 [multiround runbook](docs/cs-oci-ord-two-client-14b-full-model-multiround-runbook.md) and
 [multiround qualification record](docs/cs-oci-ord-two-client-14b-full-model-multiround-qualification-2026-07-31.md).
-The next distinct capacity experiment is the
-[single-client 32B full-model runbook](docs/cs-oci-ord-single-client-32b-full-model-runbook.md); it uses one
-immutable eight-rank release checkout and does not repeat the completed topology gates.
+The completed single-client 32B full-model capacity experiment is retained in the
+[runbook](docs/cs-oci-ord-single-client-32b-full-model-runbook.md) and
+[qualification record](docs/cs-oci-ord-single-client-32b-full-model-qualification-2026-08-02.md). Slurm job
+`31351265` established that one eight-rank FSDP2 client can train and bridge the full 32B BF16 state; immediate
+follow-up questions include loader efficiency and a deliberately separate multi-client full-state federation
+experiment.
 The completed trainable-state scaling results are in the
 [two-client 32B qualification record](docs/cs-oci-ord-two-client-32b-qualification-2026-07-29.md) and
 [two-client 72B qualification record](docs/cs-oci-ord-two-client-72b-qualification-2026-07-30.md).
