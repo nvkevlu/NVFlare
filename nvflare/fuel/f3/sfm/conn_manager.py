@@ -20,6 +20,7 @@ from typing import Dict, List, Optional
 
 import msgpack
 
+from nvflare.fuel.f3.cellnet.defs import MessageHeaderKey
 from nvflare.fuel.f3.cellnet.fqcn import FQCN
 from nvflare.fuel.f3.cellnet.identity import CellIdentityResolver, get_param, is_admin_listener, is_mtls_connection
 from nvflare.fuel.f3.comm_error import CommError
@@ -36,6 +37,7 @@ from nvflare.fuel.f3.sfm.prefix import PREFIX_LEN, Prefix
 from nvflare.fuel.f3.sfm.sfm_conn import SfmConnection
 from nvflare.fuel.f3.sfm.sfm_endpoint import SfmEndpoint
 from nvflare.fuel.f3.stats_pool import StatsPoolManager
+from nvflare.fuel.f3.streaming.stream_const import STREAM_CHANNEL, STREAM_DATA_TOPIC
 from nvflare.fuel.utils.admin_name_utils import is_valid_admin_client_name
 from nvflare.fuel.utils.buffer_list import BufferList
 from nvflare.security.logging import secure_format_exception, secure_format_traceback
@@ -207,14 +209,12 @@ class ConnManager(ConnMonitor):
             CommError: If any error happens while sending the data
         """
 
-        # Flatten buffer list so drivers don't have to deal with it
-        if isinstance(payload, list):
-            flat_payload = BufferList(payload).flatten()
-        else:
-            flat_payload = payload
-
         if endpoint.name == self.local_endpoint.name:
-            self.send_loopback_message(endpoint, app_id, headers, flat_payload)
+            # Preserve the historical loopback payload type.  Remote lists are
+            # assembled once with the SFM prefix and headers by SfmConnection.
+            if isinstance(payload, list):
+                payload = BufferList(payload).flatten()
+            self.send_loopback_message(endpoint, app_id, headers, payload)
             return
 
         sfm_endpoint = self.sfm_endpoints.get(endpoint.name)
@@ -236,7 +236,7 @@ class ConnManager(ConnMonitor):
         # TODO: If multiple connections, should retry a diff connection on errors
         start = time.perf_counter()
 
-        sfm_conn.send_data(app_id, stream_id, headers, flat_payload)
+        sfm_conn.send_data(app_id, stream_id, headers, payload)
 
         self.send_frame_stats.record_value(
             category=sfm_conn.conn.connector.driver.get_name(), value=time.perf_counter() - start
@@ -344,6 +344,18 @@ class ConnManager(ConnMonitor):
 
         try:
             prefix = Prefix.from_bytes(frame)
+            frame_len = len(frame)
+            payload_start = PREFIX_LEN + prefix.header_len
+            if prefix.length != frame_len:
+                raise CommError(
+                    CommError.BAD_DATA,
+                    f"SFM frame length mismatch: declared {prefix.length}, received {frame_len}",
+                )
+            if payload_start > prefix.length:
+                raise CommError(
+                    CommError.BAD_DATA,
+                    f"SFM header length {prefix.header_len} exceeds frame length {prefix.length}",
+                )
             log.debug(f"Received frame: {prefix} on {sfm_conn.conn}")
 
             if prefix.header_len == 0:
@@ -363,8 +375,21 @@ class ConnManager(ConnMonitor):
                 log.debug(f"PONG received for {sfm_conn.conn}")
                 # No action is needed for PONG. The last_activity is already updated
             elif prefix.type == Types.DATA:
-                if prefix.length > PREFIX_LEN + prefix.header_len:
-                    payload = frame[PREFIX_LEN + prefix.header_len :]
+                if prefix.length > payload_start:
+                    if (
+                        headers
+                        and headers.get(MessageHeaderKey.CHANNEL) == STREAM_CHANNEL
+                        and headers.get(MessageHeaderKey.TOPIC) == STREAM_DATA_TOPIC
+                        and not headers.get(MessageHeaderKey.SECURE, False)
+                    ):
+                        # Streaming consumers already accept BytesAlike.  Keep a
+                        # bounded view so BlobTask can copy the chunk directly
+                        # into its destination instead of first copying it here.
+                        payload = memoryview(frame)[payload_start : prefix.length]
+                    else:
+                        # Preserve the historical concrete payload type for
+                        # arbitrary Cell applications.
+                        payload = frame[payload_start : prefix.length]
                 else:
                     payload = None
 

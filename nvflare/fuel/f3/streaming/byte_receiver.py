@@ -689,7 +689,7 @@ class RxStream(Stream):
         super().__init__(task.size, task.headers)
         self.task = task
 
-    def read(self, size: int) -> bytes:
+    def read(self, size: int) -> BytesAlike:
         if self.closed:
             raise StreamError("Read from closed stream")
 
