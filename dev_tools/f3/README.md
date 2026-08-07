@@ -63,6 +63,13 @@ python dev_tools/f3/tensor_download_bench.py send \
 `--modes memory,disk` (default) runs both modes. Use `--modes memory` or
 `--modes disk` to run only one. `--repeat N` repeats for stable median values.
 
+For a fair legacy-path control using the same candidate binary and F3 settings,
+add `--disable-direct` to the sender command. The sender coordinates this with
+the receiver for each run; the receiver needs no extra flag. Eligible tensor
+counts are still reported, while validation requires zero observed direct items.
+Omitting the flag preserves the default requirement that every eligible
+memory-mode tensor uses the negotiated direct path.
+
 The memory-mode receiver needs enough RAM for the full model plus transient
 serialisation buffers. Put `--offload-dir` on fast local storage for a
 meaningful disk result.

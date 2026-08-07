@@ -21,6 +21,7 @@ import torch
 
 from dev_tools.f3 import tensor_download_bench
 from dev_tools.f3.tensor_download_bench import (
+    DIRECT_NEGOTIATION_KEY,
     DIRECT_TENSOR_MIN_BYTES,
     MODE_DISK,
     MODE_MEMORY,
@@ -151,6 +152,92 @@ def test_direct_path_counts_and_hashes_large_direct_sample(tmp_path):
     assert result["fallback_bytes"] == tensor_nbytes(small)
     assert result["direct_sample_key"] == "large_weight"
     assert result["direct_sample_materialized_bytes"] >= DIRECT_TENSOR_MIN_BYTES
+
+
+def test_disabled_direct_control_reports_eligibility_and_zero_direct_items(tmp_path):
+    large = torch.arange(DIRECT_TENSOR_MIN_BYTES, dtype=torch.uint8)
+    small = torch.tensor([7.0])
+    payload = build_transfer_payload(tmp_path / "model.pt", {"large": large, "small": small})
+
+    result = validate_received_payload(
+        payload,
+        MODE_MEMORY,
+        direct_negotiation_enabled=False,
+    )
+
+    assert result[DIRECT_NEGOTIATION_KEY] is False
+    assert result["direct_eligible_items"] == 1
+    assert result["direct_eligible_bytes"] == DIRECT_TENSOR_MIN_BYTES
+    assert result["direct_items"] == 0
+    assert result["direct_bytes"] == 0
+    assert result["fallback_items"] == 2
+    assert result["fallback_bytes"] == DIRECT_TENSOR_MIN_BYTES + tensor_nbytes(small)
+    assert result["direct_sample_sha256"] == direct_tensor_fingerprint(large)
+
+
+def test_disabled_direct_control_rejects_observed_direct_item(tmp_path):
+    large = torch.zeros(DIRECT_TENSOR_MIN_BYTES, dtype=torch.uint8)
+    payload = build_transfer_payload(tmp_path / "model.pt", {"large": large})
+    direct_stats = {
+        "items": 1,
+        "tensor_bytes": tensor_nbytes(large),
+        "wire_bytes": tensor_nbytes(large),
+        "tensor_ids": {id(large)},
+    }
+
+    with pytest.raises(ValueError, match=r"expected 0 item\(s\) / 0 bytes"):
+        validate_received_payload(
+            payload,
+            MODE_MEMORY,
+            direct_stats,
+            direct_negotiation_enabled=False,
+        )
+
+
+def test_direct_tracking_suppresses_capability_advertisement_for_control(monkeypatch):
+    tracker = DirectPathTracker()
+    original_consume_direct_chunk = tensor_download_bench.TensorConsumer.consume_direct_chunk
+    original_get_initial_state = tensor_download_bench.TensorConsumer.get_initial_state
+
+    with monkeypatch.context() as patch:
+        patch.setattr(tensor_download_bench, "_DIRECT_PATH_TRACKER", tracker)
+        patch.setattr(tensor_download_bench, "_DIRECT_PATH_TRACKING_INSTALLED", False)
+        # Register undo entries for the production methods that the installer
+        # deliberately replaces for the lifetime of the benchmark receiver.
+        patch.setattr(
+            tensor_download_bench.TensorConsumer,
+            "consume_direct_chunk",
+            original_consume_direct_chunk,
+        )
+        patch.setattr(tensor_download_bench.TensorConsumer, "get_initial_state", original_get_initial_state)
+        tensor_download_bench.install_direct_path_tracking()
+        consumer = tensor_download_bench.TensorConsumer(None, {})
+
+        tracker.reset("control", direct_negotiation_enabled=False)
+        assert consumer.get_initial_state() is None
+
+        tracker.reset("candidate", direct_negotiation_enabled=True)
+        assert consumer.get_initial_state() == original_get_initial_state(consumer)
+
+
+@pytest.mark.parametrize(
+    ("extra_args", "expected_enabled"),
+    [([], True), (["--disable-direct"], False)],
+)
+def test_sender_cli_coordinates_direct_negotiation(monkeypatch, extra_args, expected_enabled):
+    captured = {}
+    monkeypatch.setattr(
+        tensor_download_bench,
+        "resolve_cell_security",
+        lambda *args, **kwargs: (False, {}),
+    )
+    monkeypatch.setattr(tensor_download_bench, "f3_config_summary", lambda: "test config")
+    monkeypatch.setattr(tensor_download_bench, "run_sender", lambda **kwargs: captured.update(kwargs))
+    monkeypatch.setattr("sys.argv", ["tensor_download_bench.py", "send", *extra_args])
+
+    tensor_download_bench.main()
+
+    assert captured[DIRECT_NEGOTIATION_KEY] is expected_enabled
 
 
 def test_direct_tensor_fingerprint_hashes_raw_storage():

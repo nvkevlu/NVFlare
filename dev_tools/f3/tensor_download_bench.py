@@ -99,6 +99,7 @@ MODES = (MODE_MEMORY, MODE_DISK)
 
 MODE_HEADER = "tensor_bench_mode"
 RUN_ID_HEADER = "tensor_bench_run_id"
+DIRECT_NEGOTIATION_KEY = "direct_negotiation_enabled"
 
 DEFAULT_CHECKPOINT = "/tmp/gpt-j-6b/pytorch_model.bin"
 DEFAULT_TIMEOUT = 3600.0
@@ -362,18 +363,26 @@ class DirectPathTracker:
     def __init__(self):
         self._lock = threading.Lock()
         self._run_id = None
+        self._direct_negotiation_enabled = True
         self._items = 0
         self._tensor_bytes = 0
         self._wire_bytes = 0
         self._tensor_ids = set()
 
-    def reset(self, run_id: str):
+    def reset(self, run_id: str, direct_negotiation_enabled: bool = True):
+        if type(direct_negotiation_enabled) is not bool:
+            raise TypeError("direct_negotiation_enabled must be a bool")
         with self._lock:
             self._run_id = run_id
+            self._direct_negotiation_enabled = direct_negotiation_enabled
             self._items = 0
             self._tensor_bytes = 0
             self._wire_bytes = 0
             self._tensor_ids = set()
+
+    def negotiation_enabled(self) -> bool:
+        with self._lock:
+            return self._direct_negotiation_enabled
 
     def record(self, items):
         with self._lock:
@@ -405,19 +414,26 @@ _DIRECT_PATH_TRACKING_INSTALLED = False
 
 
 def install_direct_path_tracking():
-    """Wrap the benchmark receiver's direct decoder without changing production code."""
+    """Instrument direct decoding and apply the benchmark's per-run negotiation policy."""
     global _DIRECT_PATH_TRACKING_INSTALLED
     if _DIRECT_PATH_TRACKING_INSTALLED:
         return
 
-    original = TensorConsumer.consume_direct_chunk
+    original_consume_direct_chunk = TensorConsumer.consume_direct_chunk
+    original_get_initial_state = TensorConsumer.get_initial_state
 
     def tracked_consume_direct_chunk(consumer, data):
-        items = original(consumer, data)
+        items = original_consume_direct_chunk(consumer, data)
         _DIRECT_PATH_TRACKER.record(items)
         return items
 
+    def benchmark_get_initial_state(consumer):
+        if not _DIRECT_PATH_TRACKER.negotiation_enabled():
+            return None
+        return original_get_initial_state(consumer)
+
     TensorConsumer.consume_direct_chunk = tracked_consume_direct_chunk
+    TensorConsumer.get_initial_state = benchmark_get_initial_state
     _DIRECT_PATH_TRACKING_INSTALLED = True
 
 
@@ -439,7 +455,14 @@ def _validate_tensor_sample(tensors: Mapping, sample: dict, label: str) -> torch
     return sample_tensor
 
 
-def validate_received_payload(payload: dict, mode: str, direct_path_stats: Optional[dict] = None) -> dict:
+def validate_received_payload(
+    payload: dict,
+    mode: str,
+    direct_path_stats: Optional[dict] = None,
+    direct_negotiation_enabled: bool = True,
+) -> dict:
+    if type(direct_negotiation_enabled) is not bool:
+        raise TypeError("direct_negotiation_enabled must be a bool")
     if not isinstance(payload, dict):
         raise TypeError(f"transfer payload must be a dict, got {type(payload).__name__}")
     tensors = payload.get("tensors")
@@ -498,8 +521,9 @@ def validate_received_payload(payload: dict, mode: str, direct_path_stats: Optio
     direct_bytes = direct_path_stats.get("tensor_bytes", 0)
     direct_wire_bytes = direct_path_stats.get("wire_bytes", 0)
     direct_tensor_ids = direct_path_stats.get("tensor_ids", frozenset())
-    expected_direct_items = eligible_items if mode == MODE_MEMORY else 0
-    expected_direct_bytes = eligible_bytes if mode == MODE_MEMORY else 0
+    expect_direct = mode == MODE_MEMORY and direct_negotiation_enabled
+    expected_direct_items = eligible_items if expect_direct else 0
+    expected_direct_bytes = eligible_bytes if expect_direct else 0
     if direct_items != expected_direct_items or direct_bytes != expected_direct_bytes:
         raise ValueError(
             f"{mode} mode used the direct path for {direct_items} item(s) / {direct_bytes} bytes; "
@@ -521,7 +545,7 @@ def validate_received_payload(payload: dict, mode: str, direct_path_stats: Optio
             )
         if mode == MODE_MEMORY:
             direct_sample_tensor = _validate_tensor_sample(tensors, direct_sample, "direct sample")
-            if id(direct_sample_tensor) not in direct_tensor_ids:
+            if direct_negotiation_enabled and id(direct_sample_tensor) not in direct_tensor_ids:
                 raise ValueError(f"direct sample tensor {direct_sample_key!r} was not observed on the direct path")
             direct_sample_sha256 = (
                 sample_sha256
@@ -542,6 +566,7 @@ def validate_received_payload(payload: dict, mode: str, direct_path_stats: Optio
         "sample_key": sample_key,
         "sample_materialized_bytes": tensor_nbytes(sample_tensor),
         "sample_sha256": sample_sha256,
+        DIRECT_NEGOTIATION_KEY: direct_negotiation_enabled,
         "direct_eligible_items": eligible_items,
         "direct_eligible_bytes": eligible_bytes,
         "direct_items": direct_items,
@@ -595,6 +620,7 @@ class TensorBenchmarkReceiver:
         self._lock = threading.Lock()
         self._run_id = None
         self._mode = None
+        self._direct_negotiation_enabled = True
         self._sampler = None
         self._configured_at = None
 
@@ -605,10 +631,13 @@ class TensorBenchmarkReceiver:
                 raise TypeError("configuration payload must be a dict")
             run_id = payload.get("run_id")
             mode = payload.get("mode")
+            direct_negotiation_enabled = payload.get(DIRECT_NEGOTIATION_KEY, True)
             if not isinstance(run_id, str) or not run_id:
                 raise ValueError("run_id must be a non-empty string")
             if mode not in MODES:
                 raise ValueError(f"mode must be one of {MODES}, got {mode!r}")
+            if type(direct_negotiation_enabled) is not bool:
+                raise ValueError(f"{DIRECT_NEGOTIATION_KEY} must be a bool")
 
             with self._lock:
                 if self._sampler is not None:
@@ -621,12 +650,22 @@ class TensorBenchmarkReceiver:
                 )
                 self._run_id = run_id
                 self._mode = mode
-                _DIRECT_PATH_TRACKER.reset(run_id)
+                self._direct_negotiation_enabled = direct_negotiation_enabled
+                _DIRECT_PATH_TRACKER.reset(run_id, direct_negotiation_enabled)
                 self._sampler = ResourceSampler(self.sample_interval)
                 self._sampler.start()
                 self._configured_at = time.perf_counter()
-            print(f"[recv] ready for run={run_id} mode={mode}")
-            return make_reply(ReturnCode.OK, body={"status": "ready", "run_id": run_id, "mode": mode})
+            direct_status = "enabled" if direct_negotiation_enabled else "disabled-control"
+            print(f"[recv] ready for run={run_id} mode={mode} direct-negotiation={direct_status}")
+            return make_reply(
+                ReturnCode.OK,
+                body={
+                    "status": "ready",
+                    "run_id": run_id,
+                    "mode": mode,
+                    DIRECT_NEGOTIATION_KEY: direct_negotiation_enabled,
+                },
+            )
         except Exception as ex:
             return make_reply(ReturnCode.INVALID_REQUEST, error=str(ex))
 
@@ -643,6 +682,7 @@ class TensorBenchmarkReceiver:
                     )
                 sampler = self._sampler
                 configured_at = self._configured_at
+                direct_negotiation_enabled = self._direct_negotiation_enabled
                 self._sampler = None
                 self._configured_at = None
 
@@ -650,7 +690,12 @@ class TensorBenchmarkReceiver:
             receiver_observed_seconds = callback_started - configured_at
             validation_started = time.perf_counter()
             direct_path_stats = _DIRECT_PATH_TRACKER.snapshot(run_id)
-            validation = validate_received_payload(request.payload, mode, direct_path_stats)
+            validation = validate_received_payload(
+                request.payload,
+                mode,
+                direct_path_stats,
+                direct_negotiation_enabled=direct_negotiation_enabled,
+            )
             validation_seconds = time.perf_counter() - validation_started
             disk_bytes = directory_size(self.offload_root) if mode == MODE_DISK else 0
             callback_seconds = time.perf_counter() - callback_started
@@ -675,6 +720,7 @@ class TensorBenchmarkReceiver:
                 f"validation={validation_seconds:,.3f}s callback={callback_seconds:,.3f}s "
                 f"rss_delta={format_bytes(memory['rss_peak_delta_bytes'])} "
                 f"disk={format_bytes(disk_bytes)} "
+                f"direct-negotiation={'enabled' if direct_negotiation_enabled else 'disabled-control'} "
                 f"direct={validation['direct_items']:,}/{format_bytes(validation['direct_bytes'])} "
                 f"eligible={validation['direct_eligible_items']:,}/"
                 f"{format_bytes(validation['direct_eligible_bytes'])} "
@@ -747,6 +793,7 @@ def run_one_sender_mode(
     mode: str,
     repetition: int,
     timeout: float,
+    direct_negotiation_enabled: bool = True,
 ) -> dict:
     run_id = f"{mode}-{repetition}-{uuid.uuid4().hex[:8]}"
     payload = build_transfer_payload(checkpoint, tensors)
@@ -761,10 +808,18 @@ def run_one_sender_mode(
         channel=CHANNEL,
         topic=CONFIGURE_TOPIC,
         target=RX_FQCN,
-        request=Message(payload={"run_id": run_id, "mode": mode}),
+        request=Message(
+            payload={
+                "run_id": run_id,
+                "mode": mode,
+                DIRECT_NEGOTIATION_KEY: direct_negotiation_enabled,
+            }
+        ),
         timeout=timeout,
     )
-    check_reply(config_reply, f"configure {mode} mode")
+    configured = check_reply(config_reply, f"configure {mode} mode")
+    if configured.get(DIRECT_NEGOTIATION_KEY) is not direct_negotiation_enabled:
+        raise RuntimeError("receiver did not acknowledge the requested direct-negotiation setting")
 
     request = Message(
         headers={MODE_HEADER: mode, RUN_ID_HEADER: run_id},
@@ -777,6 +832,7 @@ def run_one_sender_mode(
         f"[send] starting mode={mode} repetition={repetition}: "
         f"{len(tensors):,} tensor references ({unique_count:,} unique), "
         f"{format_bytes(transfer_bytes)} transfer / {format_bytes(tensor_bytes)} logical to {url}; "
+        f"direct-negotiation={'enabled' if direct_negotiation_enabled else 'disabled-control'}, "
         f"direct-eligible={direct_path['eligible_items']:,}/{format_bytes(direct_path['eligible_bytes'])}, "
         f"eligibility-fallback={direct_path['fallback_items']:,}/"
         f"{format_bytes(direct_path['fallback_bytes'])}"
@@ -796,6 +852,8 @@ def run_one_sender_mode(
         sender_memory = sampler.stop()
     response_seconds = time.perf_counter() - started
     result = check_reply(reply, f"{mode} transfer")
+    if result.get(DIRECT_NEGOTIATION_KEY) is not direct_negotiation_enabled:
+        raise RuntimeError("receiver result does not match the requested direct-negotiation setting")
     sender_validation_started = time.perf_counter()
     validate_sender_fingerprints(result, payload, tensors, mode)
     sender_validation_seconds = time.perf_counter() - sender_validation_started
@@ -824,6 +882,7 @@ def run_one_sender_mode(
         f"sender_rss_delta={format_bytes(sender_memory['rss_peak_delta_bytes'])} "
         f"receiver_rss_delta={format_bytes(result['rss_peak_delta_bytes'])} "
         f"receiver_disk={format_bytes(result['disk_offload_bytes'])} "
+        f"direct-negotiation={'enabled' if direct_negotiation_enabled else 'disabled-control'} "
         f"direct={result['direct_items']:,}/{format_bytes(result['direct_bytes'])} "
         f"fallback={result['fallback_items']:,}/{format_bytes(result['fallback_bytes'])} "
         f"direct_sample={result['direct_sample_key']!r}"
@@ -856,6 +915,7 @@ def run_sender(
     max_bytes: Optional[int],
     connection_security: str = ConnectionSecurity.CLEAR,
     credentials_dir: Optional[Path] = None,
+    direct_negotiation_enabled: bool = True,
 ):
     secure, credentials = resolve_cell_security(TX_FQCN, url, connection_security, credentials_dir)
     register_tensor_decomposer()
@@ -874,7 +934,18 @@ def run_sender(
     try:
         for repetition in range(1, repeat + 1):
             for mode in modes:
-                results.append(run_one_sender_mode(cell, url, checkpoint, tensors, mode, repetition, timeout))
+                results.append(
+                    run_one_sender_mode(
+                        cell,
+                        url,
+                        checkpoint,
+                        tensors,
+                        mode,
+                        repetition,
+                        timeout,
+                        direct_negotiation_enabled=direct_negotiation_enabled,
+                    )
+                )
         print_summary(results)
     finally:
         cell.stop()
@@ -935,6 +1006,11 @@ def main():
         type=byte_size_arg,
         help="select the smallest tensors up to this binary size for a smoke test, e.g. 128M or 2G",
     )
+    sender.add_argument(
+        "--disable-direct",
+        action="store_true",
+        help="disable direct tensor negotiation for a legacy-path control run (receiver is configured automatically)",
+    )
     sender.add_argument("--f3-config", help="optional native F3 comm_config.yml")
     add_cell_security_args(sender)
 
@@ -987,6 +1063,7 @@ def main():
             max_bytes=args.max_bytes,
             connection_security=args.connection_security,
             credentials_dir=args.credentials_dir,
+            direct_negotiation_enabled=not args.disable_direct,
         )
 
 
