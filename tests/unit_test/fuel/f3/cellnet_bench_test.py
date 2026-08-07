@@ -18,6 +18,8 @@ from unittest.mock import MagicMock
 import pytest
 
 from dev_tools.f3 import cellnet_bench
+from nvflare.apis.fl_constant import ConnectionSecurity
+from nvflare.fuel.f3.drivers.driver_params import DriverParams
 from nvflare.fuel.f3.streaming.byte_receiver import ACK_INTERVAL
 from nvflare.fuel.f3.streaming.byte_streamer import STREAM_CHUNK_SIZE, STREAM_WINDOW_SIZE
 from nvflare.fuel.f3.streaming.stream_const import STREAM_ACK_INTERVAL, STREAM_RETRY_MAX_PENDING_BYTES
@@ -181,11 +183,86 @@ def test_generated_stream_uses_configured_block_size():
     assert len(stream.read(block_size)) == 17
 
 
-def test_cellnet_sender_cleans_sampler_and_cell_when_send_fails(monkeypatch):
+def _make_credentials_dir(tmp_path, *names):
+    for name in names:
+        (tmp_path / name).write_text(f"placeholder {name}", encoding="utf-8")
+    return tmp_path
+
+
+def test_build_cell_credentials_clear_does_not_use_credentials():
+    assert cellnet_bench.build_cell_credentials(cellnet_bench.TX_FQCN, ConnectionSecurity.CLEAR, None) == (False, {})
+
+
+@pytest.mark.parametrize(
+    "role,security,files,expected_keys",
+    [
+        (
+            cellnet_bench.RX_FQCN,
+            ConnectionSecurity.TLS,
+            ("rootCA.pem", "server.crt", "server.key"),
+            (DriverParams.CA_CERT, DriverParams.SERVER_CERT, DriverParams.SERVER_KEY),
+        ),
+        (
+            cellnet_bench.TX_FQCN,
+            ConnectionSecurity.TLS,
+            ("rootCA.pem",),
+            (DriverParams.CA_CERT,),
+        ),
+    ],
+)
+def test_build_cell_credentials_resolves_role_files(tmp_path, role, security, files, expected_keys):
+    credential_dir = _make_credentials_dir(tmp_path, *files)
+
+    secure, credentials = cellnet_bench.build_cell_credentials(role, security, credential_dir)
+
+    assert secure is True
+    assert credentials[DriverParams.CONNECTION_SECURITY.value] == security
+    assert set(credentials) == {DriverParams.CONNECTION_SECURITY.value, *(key.value for key in expected_keys)}
+    for key in expected_keys:
+        assert credentials[key.value].startswith(str(credential_dir))
+
+
+def test_build_cell_credentials_reports_missing_role_files(tmp_path):
+    _make_credentials_dir(tmp_path, "rootCA.pem")
+
+    with pytest.raises(ValueError, match=r"missing: server\.crt, server\.key"):
+        cellnet_bench.build_cell_credentials(cellnet_bench.RX_FQCN, ConnectionSecurity.TLS, tmp_path)
+
+
+def test_grpc_tls_profile_selects_synchronous_grpc():
+    profile = cellnet_bench.Path(cellnet_bench.__file__).with_name("grpc_tls") / "comm_config.yml"
+    with profile.open(encoding="utf-8") as stream:
+        config = cellnet_bench.normalize_f3_config(cellnet_bench.yaml.safe_load(stream))
+
+    cellnet_bench.validate_f3_config(config)
+    assert config["adhoc_conn_scheme"] == "grpc"
+    assert config["internal_conn_scheme"] == "grpc"
+    assert config["use_aio_grpc"] is False
+    assert config["grpc"]["max_workers"] == 100
+    assert config["streaming_chunk_size"] == cellnet_bench.MB
+    assert config["streaming_window_size"] == 64 * cellnet_bench.MB
+
+
+@pytest.mark.parametrize(
+    "role,url,security,credentials_dir,error",
+    [
+        (cellnet_bench.TX_FQCN, "tcp://receiver:8002", ConnectionSecurity.TLS, None, "requires a grpc"),
+        (cellnet_bench.TX_FQCN, "grpcs://receiver:8002", ConnectionSecurity.CLEAR, None, "requires"),
+        (cellnet_bench.TX_FQCN, "grpc://receiver:8002", ConnectionSecurity.TLS, None, "is required"),
+    ],
+)
+def test_resolve_cell_security_rejects_inconsistent_configuration(role, url, security, credentials_dir, error):
+    with pytest.raises(ValueError, match=error):
+        cellnet_bench.resolve_cell_security(role, url, security, credentials_dir)
+
+
+def test_cellnet_sender_passes_tls_credentials_and_cleans_up_on_failure(monkeypatch, tmp_path):
     class FakeCell:
         instance = None
 
         def __init__(self, *args, **kwargs):
+            self.args = args
+            self.kwargs = kwargs
             self.connected_cb = None
             self.stopped = False
             FakeCell.instance = self
@@ -214,10 +291,72 @@ def test_cellnet_sender_cleans_sampler_and_cell_when_send_fails(monkeypatch):
     monkeypatch.setattr(cellnet_bench, "StreamCell", FakeStreamCell)
     monkeypatch.setattr(cellnet_bench, "MemSampler", lambda: sampler)
     monkeypatch.setattr(cellnet_bench.time, "sleep", lambda _seconds: None)
+    credentials_dir = _make_credentials_dir(tmp_path, "rootCA.pem")
 
     with pytest.raises(RuntimeError, match="send failed"):
-        cellnet_bench.run_sender("tcp://receiver:8002", 1024, reliable=True)
+        cellnet_bench.run_sender(
+            "grpc://receiver:8002",
+            1024,
+            reliable=True,
+            connection_security=ConnectionSecurity.TLS,
+            credentials_dir=credentials_dir,
+        )
 
     sampler.start.assert_called_once_with()
     sampler.stop.assert_called_once_with()
     assert FakeCell.instance.stopped
+    assert FakeCell.instance.args == (cellnet_bench.TX_FQCN, "grpc://receiver:8002")
+    assert FakeCell.instance.kwargs["secure"] is True
+    assert FakeCell.instance.kwargs["credentials"] == {
+        DriverParams.CONNECTION_SECURITY.value: ConnectionSecurity.TLS,
+        DriverParams.CA_CERT.value: str(credentials_dir / "rootCA.pem"),
+    }
+
+
+def test_cellnet_receiver_passes_tls_server_credentials(monkeypatch, tmp_path):
+    class FakeCell:
+        instance = None
+
+        def __init__(self, *args, **kwargs):
+            self.args = args
+            self.kwargs = kwargs
+            self.stopped = False
+            FakeCell.instance = self
+
+        def start(self):
+            pass
+
+        def stop(self):
+            self.stopped = True
+
+    class FakeStreamCell:
+        def __init__(self, cell):
+            pass
+
+        def register_stream_cb(self, *args, **kwargs):
+            pass
+
+    monkeypatch.setattr(cellnet_bench, "CoreCell", FakeCell)
+    monkeypatch.setattr(cellnet_bench, "StreamCell", FakeStreamCell)
+
+    def stop_receiver(_seconds):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(cellnet_bench.time, "sleep", stop_receiver)
+    credentials_dir = _make_credentials_dir(tmp_path, "rootCA.pem", "server.crt", "server.key")
+
+    cellnet_bench.run_receiver(
+        "grpc://0.0.0.0:8002",
+        connection_security=ConnectionSecurity.TLS,
+        credentials_dir=credentials_dir,
+    )
+
+    assert FakeCell.instance.stopped
+    assert FakeCell.instance.args == (cellnet_bench.RX_FQCN, "grpc://0.0.0.0:8002")
+    assert FakeCell.instance.kwargs["secure"] is True
+    assert FakeCell.instance.kwargs["credentials"] == {
+        DriverParams.CONNECTION_SECURITY.value: ConnectionSecurity.TLS,
+        DriverParams.CA_CERT.value: str(credentials_dir / "rootCA.pem"),
+        DriverParams.SERVER_CERT.value: str(credentials_dir / "server.crt"),
+        DriverParams.SERVER_KEY.value: str(credentials_dir / "server.key"),
+    }

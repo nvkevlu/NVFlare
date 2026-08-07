@@ -27,6 +27,9 @@ Run the sender on the host containing the checkpoint:
 The sender runs both memory and disk-offload modes by default. The timed result
 includes FOBS decomposition, Download Service transfer, receiver reconstruction,
 and validation. Use the same optional comm_config.yml on both hosts to tune F3.
+For production-equivalent transport TLS, use grpc:// URLs with the synchronous
+gRPC profile plus --connection-security tls and role-specific --credentials-dir
+paths. Cell end-to-end message encryption remains disabled.
 """
 
 import argparse
@@ -45,9 +48,9 @@ from typing import Optional
 
 import psutil
 import torch
-from safetensors.torch import save as save_tensors
 
 import nvflare.fuel.utils.fobs as fobs
+from nvflare.apis.fl_constant import ConnectionSecurity
 
 # This repository-local benchmark intentionally follows the internal disk-offload
 # context keys so it exercises the same path as production workflows.
@@ -56,15 +59,33 @@ from nvflare.app_common.utils.tensor_disk_offload_context import (
     _TENSOR_DISK_OFFLOAD_ROOT_DIR,
 )
 from nvflare.app_opt.pt.decomposers import TensorDecomposer
+from nvflare.app_opt.pt.tensor_downloader import TensorConsumer, _can_stream_tensor_directly
 from nvflare.fuel.f3.cellnet.cell import Cell
 from nvflare.fuel.f3.cellnet.defs import MessageHeaderKey, ReturnCode
 from nvflare.fuel.f3.cellnet.utils import make_reply
 from nvflare.fuel.f3.message import Message
+from nvflare.fuel.utils.fobs.datum import TEN_MEGA
 
 try:
-    from .cellnet_bench import GB, MB, configure_f3, f3_config_summary, parse_byte_size
+    from .cellnet_bench import (
+        GB,
+        MB,
+        add_cell_security_args,
+        configure_f3,
+        f3_config_summary,
+        parse_byte_size,
+        resolve_cell_security,
+    )
 except ImportError:
-    from cellnet_bench import GB, MB, configure_f3, f3_config_summary, parse_byte_size
+    from cellnet_bench import (
+        GB,
+        MB,
+        add_cell_security_args,
+        configure_f3,
+        f3_config_summary,
+        parse_byte_size,
+        resolve_cell_security,
+    )
 
 CHANNEL = "tensor_download_bench"
 CONFIGURE_TOPIC = "configure"
@@ -83,6 +104,7 @@ DEFAULT_CHECKPOINT = "/tmp/gpt-j-6b/pytorch_model.bin"
 DEFAULT_TIMEOUT = 3600.0
 DEFAULT_CONNECT_TIMEOUT = 30.0
 DEFAULT_SAMPLE_INTERVAL = 0.05
+DIRECT_TENSOR_MIN_BYTES = TEN_MEGA
 
 
 def format_bytes(num_bytes: int) -> str:
@@ -126,6 +148,17 @@ def unique_tensor_stats(tensors: Mapping[str, torch.Tensor]) -> tuple[int, int]:
     return len(unique_tensors), sum(tensor_nbytes(tensor) for tensor in unique_tensors.values())
 
 
+def unique_tensor_items(tensors: Mapping[str, torch.Tensor]):
+    """Yield one deterministic key/tensor pair for each transfer item."""
+    seen = set()
+    for key, tensor in sorted(tensors.items()):
+        tensor_id = id(tensor)
+        if tensor_id in seen:
+            continue
+        seen.add(tensor_id)
+        yield key, tensor
+
+
 def tensor_key_digest(keys) -> str:
     digest = hashlib.sha256()
     for key in sorted(keys):
@@ -135,11 +168,50 @@ def tensor_key_digest(keys) -> str:
 
 
 def tensor_fingerprint(tensor: torch.Tensor) -> str:
-    """Return a deterministic hash without depending on NumPy dtype support."""
+    """Hash contiguous tensor storage without serializing or copying it."""
     tensor = tensor.detach().cpu()
     if not tensor.is_contiguous():
         tensor = tensor.contiguous()
-    return hashlib.sha256(save_tensors({"sample": tensor})).hexdigest()
+    byte_view = tensor.reshape(-1).view(torch.uint8).numpy()
+    return hashlib.sha256(memoryview(byte_view)).hexdigest()
+
+
+def direct_tensor_fingerprint(tensor: torch.Tensor) -> str:
+    """Hash direct-path tensor bytes without serializing or copying the payload."""
+    if not _can_stream_tensor_directly(tensor):
+        raise ValueError("direct tensor fingerprint requires a supported contiguous CPU tensor")
+    return tensor_fingerprint(tensor)
+
+
+def direct_path_manifest(tensors: Mapping[str, torch.Tensor]) -> dict:
+    """Describe the unique transfer items that can use the direct-memory path."""
+    eligible = []
+    fallback = []
+    for key, tensor in unique_tensor_items(tensors):
+        item = (key, tensor, tensor_nbytes(tensor))
+        if key != "__metadata__" and item[2] >= DIRECT_TENSOR_MIN_BYTES and _can_stream_tensor_directly(tensor):
+            eligible.append(item)
+        else:
+            fallback.append(item)
+
+    # Select the smallest eligible item for post-transfer direct-path validation.
+    direct_sample = None
+    if eligible:
+        sample_key, sample_tensor, sample_bytes = min(eligible, key=lambda item: (item[2], item[0]))
+        direct_sample = {
+            "key": sample_key,
+            "shape": list(sample_tensor.shape),
+            "dtype": str(sample_tensor.dtype),
+            "num_bytes": sample_bytes,
+        }
+
+    return {
+        "eligible_items": len(eligible),
+        "eligible_bytes": sum(item[2] for item in eligible),
+        "fallback_items": len(fallback),
+        "fallback_bytes": sum(item[2] for item in fallback),
+        "sample": direct_sample,
+    }
 
 
 def unwrap_state_dict(checkpoint) -> Mapping:
@@ -215,8 +287,8 @@ def build_transfer_payload(checkpoint: Path, tensors: dict[str, torch.Tensor]) -
             "shape": list(sample_tensor.shape),
             "dtype": str(sample_tensor.dtype),
             "num_bytes": tensor_nbytes(sample_tensor),
-            "sha256": tensor_fingerprint(sample_tensor),
         },
+        "direct_path": direct_path_manifest(tensors),
         "tensors": tensors,
     }
 
@@ -284,7 +356,90 @@ def received_unique_tensor_count(tensors: Mapping, mode: str) -> int:
     return len(identities)
 
 
-def validate_received_payload(payload: dict, mode: str) -> dict:
+class DirectPathTracker:
+    """Per-run receiver evidence recorded by TensorConsumer's direct decoder."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._run_id = None
+        self._items = 0
+        self._tensor_bytes = 0
+        self._wire_bytes = 0
+        self._tensor_ids = set()
+
+    def reset(self, run_id: str):
+        with self._lock:
+            self._run_id = run_id
+            self._items = 0
+            self._tensor_bytes = 0
+            self._wire_bytes = 0
+            self._tensor_ids = set()
+
+    def record(self, items):
+        with self._lock:
+            if self._run_id is None:
+                return
+            for item in items:
+                tensor = getattr(item, "tensor", None)
+                if not isinstance(tensor, torch.Tensor):
+                    continue
+                self._items += 1
+                self._tensor_bytes += tensor_nbytes(tensor)
+                self._wire_bytes += len(item)
+                self._tensor_ids.add(id(tensor))
+
+    def snapshot(self, run_id: str) -> dict:
+        with self._lock:
+            if run_id != self._run_id:
+                raise ValueError(f"direct-path metrics are for run {self._run_id!r}, not {run_id!r}")
+            return {
+                "items": self._items,
+                "tensor_bytes": self._tensor_bytes,
+                "wire_bytes": self._wire_bytes,
+                "tensor_ids": frozenset(self._tensor_ids),
+            }
+
+
+_DIRECT_PATH_TRACKER = DirectPathTracker()
+_DIRECT_PATH_TRACKING_INSTALLED = False
+
+
+def install_direct_path_tracking():
+    """Wrap the benchmark receiver's direct decoder without changing production code."""
+    global _DIRECT_PATH_TRACKING_INSTALLED
+    if _DIRECT_PATH_TRACKING_INSTALLED:
+        return
+
+    original = TensorConsumer.consume_direct_chunk
+
+    def tracked_consume_direct_chunk(consumer, data):
+        items = original(consumer, data)
+        _DIRECT_PATH_TRACKER.record(items)
+        return items
+
+    TensorConsumer.consume_direct_chunk = tracked_consume_direct_chunk
+    _DIRECT_PATH_TRACKING_INSTALLED = True
+
+
+def _validate_tensor_sample(tensors: Mapping, sample: dict, label: str) -> torch.Tensor:
+    if not isinstance(sample, dict):
+        raise TypeError(f"{label} must be a dict")
+    sample_key = sample.get("key")
+    if sample_key not in tensors:
+        raise ValueError(f"{label} tensor {sample_key!r} is missing")
+    sample_tensor = materialize_tensor(tensors[sample_key])
+    actual = {
+        "shape": list(sample_tensor.shape),
+        "dtype": str(sample_tensor.dtype),
+        "num_bytes": tensor_nbytes(sample_tensor),
+    }
+    for field, value in actual.items():
+        if value != sample.get(field):
+            raise ValueError(f"{label} tensor {field} mismatch: received {value!r}, expected {sample.get(field)!r}")
+    return sample_tensor
+
+
+def validate_received_payload(payload: dict, mode: str, direct_path_stats: Optional[dict] = None) -> dict:
     if not isinstance(payload, dict):
         raise TypeError(f"transfer payload must be a dict, got {type(payload).__name__}")
     tensors = payload.get("tensors")
@@ -315,18 +470,69 @@ def validate_received_payload(payload: dict, mode: str) -> dict:
 
     sample = payload.get("sample", {})
     sample_key = sample.get("key")
-    if sample_key not in tensors:
-        raise ValueError(f"sample tensor {sample_key!r} is missing")
-    sample_tensor = materialize_tensor(tensors[sample_key])
-    actual = {
-        "shape": list(sample_tensor.shape),
-        "dtype": str(sample_tensor.dtype),
-        "num_bytes": tensor_nbytes(sample_tensor),
-        "sha256": tensor_fingerprint(sample_tensor),
-    }
-    for field, value in actual.items():
-        if value != sample.get(field):
-            raise ValueError(f"sample tensor {field} mismatch: received {value!r}, expected {sample.get(field)!r}")
+    sample_tensor = _validate_tensor_sample(tensors, sample, "sample")
+    sample_sha256 = tensor_fingerprint(sample_tensor)
+
+    direct_path = payload.get("direct_path")
+    if not isinstance(direct_path, dict):
+        raise TypeError("payload direct_path must be a dict")
+    eligible_items = direct_path.get("eligible_items")
+    eligible_bytes = direct_path.get("eligible_bytes")
+    eligibility_fallback_items = direct_path.get("fallback_items")
+    eligibility_fallback_bytes = direct_path.get("fallback_bytes")
+    for name, value in (
+        ("eligible_items", eligible_items),
+        ("eligible_bytes", eligible_bytes),
+        ("fallback_items", eligibility_fallback_items),
+        ("fallback_bytes", eligibility_fallback_bytes),
+    ):
+        if type(value) is not int or value < 0:
+            raise ValueError(f"direct_path {name} must be a non-negative integer")
+    if eligible_items + eligibility_fallback_items != actual_unique_count:
+        raise ValueError("direct-path eligible/fallback item counts do not match unique tensor count")
+    if eligible_bytes + eligibility_fallback_bytes != payload.get("transfer_bytes"):
+        raise ValueError("direct-path eligible/fallback bytes do not match transfer bytes")
+
+    direct_path_stats = direct_path_stats or {}
+    direct_items = direct_path_stats.get("items", 0)
+    direct_bytes = direct_path_stats.get("tensor_bytes", 0)
+    direct_wire_bytes = direct_path_stats.get("wire_bytes", 0)
+    direct_tensor_ids = direct_path_stats.get("tensor_ids", frozenset())
+    expected_direct_items = eligible_items if mode == MODE_MEMORY else 0
+    expected_direct_bytes = eligible_bytes if mode == MODE_MEMORY else 0
+    if direct_items != expected_direct_items or direct_bytes != expected_direct_bytes:
+        raise ValueError(
+            f"{mode} mode used the direct path for {direct_items} item(s) / {direct_bytes} bytes; "
+            f"expected {expected_direct_items} item(s) / {expected_direct_bytes} bytes"
+        )
+
+    direct_sample = direct_path.get("sample")
+    direct_sample_key = None
+    direct_sample_bytes = 0
+    direct_sample_sha256 = None
+    if eligible_items:
+        direct_sample_key = direct_sample.get("key")
+        direct_sample_bytes = direct_sample.get("num_bytes")
+        if type(direct_sample_bytes) is not int:
+            raise ValueError("direct sample num_bytes must be an integer")
+        if direct_sample_bytes < DIRECT_TENSOR_MIN_BYTES:
+            raise ValueError(
+                f"direct sample is only {direct_sample_bytes} bytes; expected at least {DIRECT_TENSOR_MIN_BYTES}"
+            )
+        if mode == MODE_MEMORY:
+            direct_sample_tensor = _validate_tensor_sample(tensors, direct_sample, "direct sample")
+            if id(direct_sample_tensor) not in direct_tensor_ids:
+                raise ValueError(f"direct sample tensor {direct_sample_key!r} was not observed on the direct path")
+            direct_sample_sha256 = (
+                sample_sha256
+                if direct_sample_tensor is sample_tensor
+                else direct_tensor_fingerprint(direct_sample_tensor)
+            )
+    elif direct_sample is not None:
+        raise ValueError("direct_path sample must be absent when there are no eligible tensors")
+
+    fallback_items = actual_unique_count - direct_items
+    fallback_bytes = payload.get("transfer_bytes") - direct_bytes
 
     return {
         "tensor_count": len(tensors),
@@ -335,6 +541,18 @@ def validate_received_payload(payload: dict, mode: str) -> dict:
         "transfer_bytes": payload.get("transfer_bytes"),
         "sample_key": sample_key,
         "sample_materialized_bytes": tensor_nbytes(sample_tensor),
+        "sample_sha256": sample_sha256,
+        "direct_eligible_items": eligible_items,
+        "direct_eligible_bytes": eligible_bytes,
+        "direct_items": direct_items,
+        "direct_bytes": direct_bytes,
+        "direct_wire_bytes": direct_wire_bytes,
+        "fallback_items": fallback_items,
+        "fallback_bytes": fallback_bytes,
+        "direct_sample_key": direct_sample_key,
+        "direct_sample_bytes": direct_sample_bytes,
+        "direct_sample_materialized_bytes": direct_sample_bytes if mode == MODE_MEMORY else 0,
+        "direct_sample_sha256": direct_sample_sha256,
     }
 
 
@@ -346,6 +564,27 @@ def check_reply(reply: Message, action: str) -> dict:
     if not isinstance(reply.payload, dict):
         raise RuntimeError(f"{action} returned an invalid response: {type(reply.payload).__name__}")
     return reply.payload
+
+
+def validate_sender_fingerprints(result: dict, payload: dict, tensors: Mapping[str, torch.Tensor], mode: str):
+    """Compare receiver digests after the timed transfer has completed."""
+    sample_key = payload["sample"]["key"]
+    sample_sha256 = tensor_fingerprint(tensors[sample_key])
+    if sample_sha256 != result.get("sample_sha256"):
+        raise ValueError(
+            f"sample tensor sha256 mismatch: receiver {result.get('sample_sha256')!r}, sender {sample_sha256!r}"
+        )
+
+    if mode == MODE_MEMORY:
+        direct_sample_key = payload["direct_path"]["sample"]["key"]
+        direct_sha256 = direct_tensor_fingerprint(tensors[direct_sample_key])
+        if direct_sha256 != result.get("direct_sample_sha256"):
+            raise ValueError(
+                "direct sample tensor sha256 mismatch: "
+                f"receiver {result.get('direct_sample_sha256')!r}, sender {direct_sha256!r}"
+            )
+    elif result.get("direct_sample_sha256") is not None:
+        raise ValueError("disk mode must not materialize or hash the direct sample")
 
 
 class TensorBenchmarkReceiver:
@@ -382,6 +621,7 @@ class TensorBenchmarkReceiver:
                 )
                 self._run_id = run_id
                 self._mode = mode
+                _DIRECT_PATH_TRACKER.reset(run_id)
                 self._sampler = ResourceSampler(self.sample_interval)
                 self._sampler.start()
                 self._configured_at = time.perf_counter()
@@ -407,16 +647,20 @@ class TensorBenchmarkReceiver:
                 self._configured_at = None
 
             memory = sampler.stop()
-            validation = validate_received_payload(request.payload, mode)
+            receiver_observed_seconds = callback_started - configured_at
+            validation_started = time.perf_counter()
+            direct_path_stats = _DIRECT_PATH_TRACKER.snapshot(run_id)
+            validation = validate_received_payload(request.payload, mode, direct_path_stats)
+            validation_seconds = time.perf_counter() - validation_started
             disk_bytes = directory_size(self.offload_root) if mode == MODE_DISK else 0
             callback_seconds = time.perf_counter() - callback_started
-            receiver_observed_seconds = time.perf_counter() - configured_at
             result = {
                 "status": "ok",
                 "run_id": run_id,
                 "mode": mode,
                 "receiver_callback_seconds": callback_seconds,
                 "receiver_observed_seconds": receiver_observed_seconds,
+                "receiver_validation_seconds": validation_seconds,
                 "disk_offload_bytes": disk_bytes,
                 **memory,
                 **validation,
@@ -428,9 +672,14 @@ class TensorBenchmarkReceiver:
                 f"transfer={format_bytes(validation['transfer_bytes'])} "
                 f"logical={format_bytes(validation['tensor_bytes'])} observed={receiver_observed_seconds:,.3f}s "
                 f"({mib_s:,.1f} MiB/s, {gbit_s:,.3f} Gbit/s) "
-                f"callback={callback_seconds:,.3f}s "
+                f"validation={validation_seconds:,.3f}s callback={callback_seconds:,.3f}s "
                 f"rss_delta={format_bytes(memory['rss_peak_delta_bytes'])} "
-                f"disk={format_bytes(disk_bytes)}"
+                f"disk={format_bytes(disk_bytes)} "
+                f"direct={validation['direct_items']:,}/{format_bytes(validation['direct_bytes'])} "
+                f"eligible={validation['direct_eligible_items']:,}/"
+                f"{format_bytes(validation['direct_eligible_bytes'])} "
+                f"fallback={validation['fallback_items']:,}/{format_bytes(validation['fallback_bytes'])} "
+                f"direct_sample={validation['direct_sample_key']!r}"
             )
 
             # Release materialized tensors or lazy references. Lazy-reference
@@ -456,7 +705,15 @@ def register_tensor_decomposer():
     fobs.register(TensorDecomposer)
 
 
-def run_receiver(url: str, offload_dir: Optional[Path], sample_interval: float):
+def run_receiver(
+    url: str,
+    offload_dir: Optional[Path],
+    sample_interval: float,
+    connection_security: str = ConnectionSecurity.CLEAR,
+    credentials_dir: Optional[Path] = None,
+):
+    secure, credentials = resolve_cell_security(RX_FQCN, url, connection_security, credentials_dir)
+    install_direct_path_tracking()
     register_tensor_decomposer()
     base_dir = None
     if offload_dir is not None:
@@ -464,12 +721,12 @@ def run_receiver(url: str, offload_dir: Optional[Path], sample_interval: float):
         base_dir.mkdir(parents=True, exist_ok=True)
     offload_root = Path(tempfile.mkdtemp(prefix="nvflare_tensor_bench_", dir=base_dir))
 
-    cell = Cell(RX_FQCN, url, secure=False, credentials={})
+    cell = Cell(RX_FQCN, url, secure=secure, credentials=credentials)
     receiver = TensorBenchmarkReceiver(cell, offload_root, sample_interval)
     cell.register_request_cb(channel=CHANNEL, topic=CONFIGURE_TOPIC, cb=receiver.configure)
     cell.register_request_cb(channel=CHANNEL, topic=TRANSFER_TOPIC, cb=receiver.transfer)
     cell.start()
-    print(f"[recv] listening on {url}")
+    print(f"[recv] listening on {url}, connection_security={connection_security}")
     print(f"[recv] disk-offload root: {offload_root}")
     print("[recv] waiting for memory and disk benchmark runs (Ctrl-C to stop)")
     try:
@@ -492,6 +749,14 @@ def run_one_sender_mode(
     timeout: float,
 ) -> dict:
     run_id = f"{mode}-{repetition}-{uuid.uuid4().hex[:8]}"
+    payload = build_transfer_payload(checkpoint, tensors)
+    direct_path = payload["direct_path"]
+    if mode == MODE_MEMORY and direct_path["eligible_items"] == 0:
+        raise ValueError(
+            "memory mode requires at least one direct-path eligible tensor; "
+            "increase --max-bytes or use the full checkpoint"
+        )
+
     config_reply = cell.send_request(
         channel=CHANNEL,
         topic=CONFIGURE_TOPIC,
@@ -503,7 +768,7 @@ def run_one_sender_mode(
 
     request = Message(
         headers={MODE_HEADER: mode, RUN_ID_HEADER: run_id},
-        payload=build_transfer_payload(checkpoint, tensors),
+        payload=payload,
     )
     tensor_bytes = request.payload["tensor_bytes"]
     transfer_bytes = request.payload["transfer_bytes"]
@@ -511,7 +776,10 @@ def run_one_sender_mode(
     print(
         f"[send] starting mode={mode} repetition={repetition}: "
         f"{len(tensors):,} tensor references ({unique_count:,} unique), "
-        f"{format_bytes(transfer_bytes)} transfer / {format_bytes(tensor_bytes)} logical to {url}"
+        f"{format_bytes(transfer_bytes)} transfer / {format_bytes(tensor_bytes)} logical to {url}; "
+        f"direct-eligible={direct_path['eligible_items']:,}/{format_bytes(direct_path['eligible_bytes'])}, "
+        f"eligibility-fallback={direct_path['fallback_items']:,}/"
+        f"{format_bytes(direct_path['fallback_bytes'])}"
     )
     sampler = ResourceSampler()
     sampler.start()
@@ -526,12 +794,20 @@ def run_one_sender_mode(
         )
     finally:
         sender_memory = sampler.stop()
-    elapsed = time.perf_counter() - started
+    response_seconds = time.perf_counter() - started
     result = check_reply(reply, f"{mode} transfer")
-    mib_s, gbit_s = throughput(transfer_bytes, elapsed)
+    sender_validation_started = time.perf_counter()
+    validate_sender_fingerprints(result, payload, tensors, mode)
+    sender_validation_seconds = time.perf_counter() - sender_validation_started
+    validated_end_to_end_seconds = response_seconds + sender_validation_seconds
+    transfer_seconds = result["receiver_observed_seconds"]
+    mib_s, gbit_s = throughput(transfer_bytes, transfer_seconds)
     result.update(
         {
-            "end_to_end_seconds": elapsed,
+            "end_to_end_seconds": validated_end_to_end_seconds,
+            "transfer_seconds": transfer_seconds,
+            "response_seconds": response_seconds,
+            "sender_validation_seconds": sender_validation_seconds,
             "mib_per_second": mib_s,
             "gbit_per_second": gbit_s,
             "sender_rss_baseline_bytes": sender_memory["rss_baseline_bytes"],
@@ -541,21 +817,27 @@ def run_one_sender_mode(
     )
     print(
         f"[send] RESULT mode={mode} repetition={repetition}: {format_bytes(transfer_bytes)} transferred "
-        f"in {elapsed:,.3f}s ({mib_s:,.1f} MiB/s, {gbit_s:,.3f} Gbit/s) "
+        f"in {transfer_seconds:,.3f}s ({mib_s:,.1f} MiB/s, {gbit_s:,.3f} Gbit/s) "
+        f"validated_e2e={validated_end_to_end_seconds:,.3f}s "
+        f"validation=recv:{result['receiver_validation_seconds']:,.3f}s/"
+        f"send:{sender_validation_seconds:,.3f}s "
         f"sender_rss_delta={format_bytes(sender_memory['rss_peak_delta_bytes'])} "
         f"receiver_rss_delta={format_bytes(result['rss_peak_delta_bytes'])} "
-        f"receiver_disk={format_bytes(result['disk_offload_bytes'])}"
+        f"receiver_disk={format_bytes(result['disk_offload_bytes'])} "
+        f"direct={result['direct_items']:,}/{format_bytes(result['direct_bytes'])} "
+        f"fallback={result['fallback_items']:,}/{format_bytes(result['fallback_bytes'])} "
+        f"direct_sample={result['direct_sample_key']!r}"
     )
     return result
 
 
 def print_summary(results: list[dict]):
     print("\nSUMMARY (end-to-end TensorDecomposer + Download Service)")
-    print("mode       run   seconds      MiB/s    Gbit/s   sender RSS Δ  receiver RSS Δ  receiver disk")
+    print("mode       run transfer_s      MiB/s    Gbit/s   sender RSS Δ  receiver RSS Δ  receiver disk")
     for index, result in enumerate(results, start=1):
         print(
             f"{result['mode']:<10} {index:>3} "
-            f"{result['end_to_end_seconds']:>9.3f} "
+            f"{result['transfer_seconds']:>10.3f} "
             f"{result['mib_per_second']:>10.1f} "
             f"{result['gbit_per_second']:>9.3f} "
             f"{format_bytes(result['sender_rss_peak_delta_bytes']):>14} "
@@ -572,15 +854,18 @@ def run_sender(
     timeout: float,
     connect_timeout: float,
     max_bytes: Optional[int],
+    connection_security: str = ConnectionSecurity.CLEAR,
+    credentials_dir: Optional[Path] = None,
 ):
+    secure, credentials = resolve_cell_security(TX_FQCN, url, connection_security, credentials_dir)
     register_tensor_decomposer()
     tensors = load_checkpoint(checkpoint, max_bytes=max_bytes)
 
     connected = threading.Event()
-    cell = Cell(TX_FQCN, url, secure=False, credentials={})
+    cell = Cell(TX_FQCN, url, secure=secure, credentials=credentials)
     cell.set_cell_connected_cb(lambda agent: connected.set())
     cell.start()
-    print(f"[send] connecting to {url} ...")
+    print(f"[send] connecting to {url}, connection_security={connection_security} ...")
     if not connected.wait(timeout=connect_timeout):
         cell.stop()
         raise RuntimeError(f"could not connect to receiver at {url} within {connect_timeout:g} seconds")
@@ -616,6 +901,7 @@ def main():
         help=f"RSS sampling interval in seconds (default {DEFAULT_SAMPLE_INTERVAL})",
     )
     receiver.add_argument("--f3-config", help="optional native F3 comm_config.yml")
+    add_cell_security_args(receiver)
 
     sender = subparsers.add_parser("send", help="transfer a PyTorch checkpoint to the receiver")
     sender.add_argument("--url", default="tcp://localhost:8002", help="receiver URL")
@@ -650,6 +936,7 @@ def main():
         help="select the smallest tensors up to this binary size for a smoke test, e.g. 128M or 2G",
     )
     sender.add_argument("--f3-config", help="optional native F3 comm_config.yml")
+    add_cell_security_args(sender)
 
     args = parser.parse_args()
     logging.basicConfig(
@@ -675,8 +962,20 @@ def main():
         print(f"[config] loaded F3 settings from {config_path}")
     print(f"[config] {f3_config_summary()}")
 
+    try:
+        role = RX_FQCN if args.role == "recv" else TX_FQCN
+        resolve_cell_security(role, args.url, args.connection_security, args.credentials_dir)
+    except ValueError as ex:
+        parser.error(str(ex))
+
     if args.role == "recv":
-        run_receiver(args.url, args.offload_dir, args.sample_interval)
+        run_receiver(
+            args.url,
+            args.offload_dir,
+            args.sample_interval,
+            args.connection_security,
+            args.credentials_dir,
+        )
     else:
         run_sender(
             url=args.url,
@@ -686,6 +985,8 @@ def main():
             timeout=args.timeout,
             connect_timeout=args.connect_timeout,
             max_bytes=args.max_bytes,
+            connection_security=args.connection_security,
+            credentials_dir=args.credentials_dir,
         )
 
 
