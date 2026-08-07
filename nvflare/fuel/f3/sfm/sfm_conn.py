@@ -27,6 +27,29 @@ from nvflare.fuel.f3.sfm.prefix import PREFIX_LEN, Prefix
 log = logging.getLogger(__name__)
 
 
+def _normalize_payload_parts(payload):
+    """Return contiguous byte-oriented parts suitable for frame assembly."""
+    if payload is None:
+        return ()
+
+    items = payload if isinstance(payload, list) else (payload,)
+    parts = []
+    for item in items:
+        if not isinstance(item, (bytes, bytearray, memoryview)):
+            raise TypeError(f"payload item must be bytes-like but got {type(item)}")
+
+        if isinstance(item, memoryview):
+            if not item.c_contiguous:
+                item = item.tobytes()
+            elif item.ndim != 1 or item.format != "B":
+                item = item.cast("B")
+
+        if item:
+            parts.append(item)
+
+    return tuple(parts)
+
+
 class SfmConnection:
     """A wrapper of driver connection.
 
@@ -122,27 +145,25 @@ class SfmConnection:
         headers_bytes = self.headers_to_bytes(headers)
         header_len = len(headers_bytes) if headers_bytes else 0
 
-        length = PREFIX_LEN + header_len
+        payload_parts = _normalize_payload_parts(payload)
 
-        if payload:
-            length += len(payload)
+        length = PREFIX_LEN + header_len + sum(len(part) for part in payload_parts)
 
         prefix.length = length
         prefix.header_len = header_len
         prefix.sequence = self.next_sequence()
 
-        buffer: bytearray = bytearray(length)
+        prefix_buffer = bytearray(PREFIX_LEN)
+        prefix.to_buffer(prefix_buffer, 0)
 
-        offset = 0
-        prefix.to_buffer(buffer, offset)
-        offset += PREFIX_LEN
-
+        # Assemble the immutable transport frame once.  The gRPC drivers call
+        # bytes(frame); bytes(existing_bytes) is an identity operation, whereas
+        # the previous bytearray assembly forced a second full-frame copy.
+        parts = [prefix_buffer]
         if headers_bytes:
-            buffer[offset:] = headers_bytes
-            offset += header_len
-
-        if payload:
-            buffer[offset:] = payload
+            parts.append(headers_bytes)
+        parts.extend(payload_parts)
+        buffer = b"".join(parts)
 
         log.debug(f"Sending frame: {prefix} on {self.conn}")
         # Only one thread can send data on a connection. Otherwise, the frames may interleave.
