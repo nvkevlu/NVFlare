@@ -15,7 +15,7 @@ import logging
 import threading
 from typing import Callable, Optional
 
-from nvflare.fuel.f3.cellnet.defs import Encoding
+from nvflare.fuel.f3.cellnet.defs import Encoding, MessagePropKey
 from nvflare.fuel.f3.comm_config import CommConfigurator
 from nvflare.fuel.f3.connection import BytesAlike
 from nvflare.fuel.f3.message import Message
@@ -31,7 +31,13 @@ log = logging.getLogger(__name__)
 
 
 class BlobStream(Stream):
-    def __init__(self, blob: BytesAlike, headers: Optional[dict], allow_segmented: bool = False):
+    def __init__(
+        self,
+        blob: BytesAlike,
+        headers: Optional[dict],
+        allow_segmented: bool = False,
+        reliable_retry_safe: bool = False,
+    ):
         if not isinstance(blob, list):
             self.blob_view = self._byte_view(blob)
             self.buffer_list = None
@@ -40,6 +46,7 @@ class BlobStream(Stream):
             self.buffer_list = BufferList(self.blob_view)
 
         self.allow_segmented = allow_segmented and self.buffer_list is not None
+        self.reliable_retry_safe = bool(reliable_retry_safe)
 
         size = self.buffer_len(self.blob_view)
         super().__init__(size, headers)
@@ -283,7 +290,13 @@ class BlobStreamer:
             and isinstance(message.payload, list)
             and message.get_header(StreamHeaderKey.PAYLOAD_ENCODING) == Encoding.BYTES
         )
-        blob_stream = BlobStream(message.payload, message.headers, allow_segmented=allow_segmented)
+        reliable_retry_safe = not secure and message.get_prop(MessagePropKey.RELIABLE_RETRY_SAFE, False) is True
+        blob_stream = BlobStream(
+            message.payload,
+            message.headers,
+            allow_segmented=allow_segmented,
+            reliable_retry_safe=reliable_retry_safe,
+        )
         return self.byte_streamer.send(
             channel,
             topic,

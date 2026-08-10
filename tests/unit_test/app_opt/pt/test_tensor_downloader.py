@@ -304,6 +304,7 @@ def test_bounded_direct_batch_round_trip_is_writable_owned_and_byte_accounted(mo
     assert len(chunks) == 1
     assert isinstance(chunks[0], DirectDownloadChunk)
     assert chunks[0].item_count == 3
+    assert chunks[0].reliable_retry_safe is True
     payload = bytearray(b"".join(chunks[0].data))
     received = consumer.consume_direct_chunk(payload)
     assert [item.key for item in received] == list(tensors)
@@ -318,6 +319,15 @@ def test_bounded_direct_batch_round_trip_is_writable_owned_and_byte_accounted(mo
     gc.collect()
     first[0] = 9
     assert first[0].item() == 9
+
+
+def test_direct_batch_retry_safety_is_fail_closed():
+    safe = DirectDownloadChunk(b"safe", reliable_retry_safe=True)
+    unsafe = DirectDownloadChunk(b"unsafe")
+
+    batch = tensor_downloader._serialize_direct_tensor_batch([safe, unsafe])
+
+    assert batch.reliable_retry_safe is False
 
 
 def test_direct_batch_retry_reuses_cached_snapshots_and_advances_logical_count(monkeypatch):
@@ -612,6 +622,7 @@ def test_negotiated_single_receiver_produces_direct_large_tensor():
     assert rc == ProduceRC.OK
     assert torch.equal(result["weight"], tensor)
     assert isinstance(received[0], _StreamedTensorItem)
+    assert items[0].reliable_retry_safe is True
     assert state[tensor_downloader._TENSOR_STREAM_STATE_KEY] == tensor_downloader._TENSOR_STREAM_MEMORY_V1
 
 

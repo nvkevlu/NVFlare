@@ -20,7 +20,7 @@ from unittest.mock import Mock, patch
 import pytest
 
 from nvflare.fuel.f3.cellnet.core_cell import CoreCell
-from nvflare.fuel.f3.cellnet.defs import Encoding, MessageHeaderKey, ReturnCode
+from nvflare.fuel.f3.cellnet.defs import Encoding, MessageHeaderKey, MessagePropKey, ReturnCode
 from nvflare.fuel.f3.cellnet.utils import new_cell_message
 from nvflare.fuel.f3.streaming.download_service import (
     Consumer,
@@ -121,7 +121,11 @@ class TestDownloadService:
 
         class DirectDownloadable(MockDownloadable):
             def produce(self, state, requester):
-                return ProduceRC.OK, [DirectDownloadChunk([b"prefix", memoryview(b"body")], item_count=3)], {"next": 3}
+                return (
+                    ProduceRC.OK,
+                    [DirectDownloadChunk([b"prefix", memoryview(b"body")], item_count=3, reliable_retry_safe=True)],
+                    {"next": 3},
+                )
 
         service = _make_isolated_download_service()
         tx = _Transaction(timeout=10.0, num_receivers=1)
@@ -136,6 +140,7 @@ class TestDownloadService:
         assert reply.get_header(MessageHeaderKey.RETURN_CODE) == ReturnCode.OK
         assert reply.get_header("direct_download") is True
         assert reply.get_header(StreamHeaderKey.PAYLOAD_ENCODING) == Encoding.BYTES
+        assert reply.get_prop(MessagePropKey.RELIABLE_RETRY_SAFE) is True
         wire = bytearray(b"".join(reply.payload))
         status, state, body = _decode_direct_control(wire)
         assert status == ProduceRC.OK
@@ -157,6 +162,11 @@ class TestDownloadService:
     def test_direct_chunk_rejects_invalid_item_count(self, item_count):
         with pytest.raises(ValueError, match="positive integer"):
             DirectDownloadChunk(b"body", item_count=item_count)
+
+    @pytest.mark.parametrize("reliable_retry_safe", [None, 0, 1, "true"])
+    def test_direct_chunk_rejects_invalid_retry_safety(self, reliable_retry_safe):
+        with pytest.raises(ValueError, match="must be a bool"):
+            DirectDownloadChunk(b"body", reliable_retry_safe=reliable_retry_safe)
 
     @pytest.mark.parametrize("wire", [bytearray(b"short"), bytearray(b"BADMAGIC" + bytes(64))])
     def test_direct_control_rejects_malformed_payload(self, wire):

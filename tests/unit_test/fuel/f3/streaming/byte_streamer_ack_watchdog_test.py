@@ -656,6 +656,66 @@ class TestReliableByteStreamer:
         assert message.get_header(MessageHeaderKey.PAYLOAD_ENCODING) == Encoding.BYTES
         assert task.pending_message_bytes == 4
 
+    def test_retry_safe_reliable_stream_retains_direct_views(self, monkeypatch, retry_scheduler):
+        task, _ = self._make_reliable_task(monkeypatch, retry_scheduler)
+        task.reliable_retry_safe = True
+        first = bytearray(b"ab")
+        second = bytearray(b"cd")
+        first_view = memoryview(first)
+        second_view = memoryview(second)
+        task.direct_buf = [first_view, second_view]
+        task.buffer_size = 4
+
+        task.send_pending_buffer()
+
+        _start, _last_retry, message = task.pending_messages[0]
+        assert message.payload == [first_view, second_view]
+        assert message.payload[0] is first_view
+        assert message.payload[1] is second_view
+        assert task.pending_message_bytes == 4
+
+    def test_retry_safe_direct_views_remain_owned_for_retry(self, monkeypatch, retry_scheduler):
+        task, cell = self._make_reliable_task(monkeypatch, retry_scheduler)
+        task.reliable_retry_safe = True
+        first_view = memoryview(bytearray(b"ab"))
+        second_view = memoryview(bytearray(b"cd"))
+        task.direct_buf = [first_view, second_view]
+        task.buffer_size = 4
+
+        task.send_pending_buffer()
+        _start, last_retry, message = task.pending_messages[0]
+        task.direct_buf = None
+        first_view = None
+        second_view = None
+        task.retry_wait = 0.01
+        task.retry_timeout = 10.0
+        cell.fire_and_forget.reset_mock()
+        cell.fire_and_forget.return_value = None
+        monkeypatch.setattr(byte_streamer_module.time, "monotonic", lambda: last_retry + 1.0)
+
+        assert task.retry_task() == task.retry_wait
+        assert [bytes(part) for part in message.payload] == [b"ab", b"cd"]
+        cell.fire_and_forget.assert_called_once_with(
+            STREAM_CHANNEL,
+            STREAM_DATA_TOPIC,
+            "peer",
+            message,
+            secure=False,
+            optional=False,
+        )
+
+    def test_retry_safe_reliable_stream_still_snapshots_reusable_buffer(self, monkeypatch, retry_scheduler):
+        task, _ = self._make_reliable_task(monkeypatch, retry_scheduler)
+        task.reliable_retry_safe = True
+        task.buffer[0:4] = b"abcd"
+        task.buffer_size = 4
+
+        task.send_pending_buffer()
+
+        _start, _last_retry, message = task.pending_messages[0]
+        task.buffer[0:4] = b"wxyz"
+        assert message.payload == b"abcd"
+
     def test_reliable_send_blocks_concurrent_error_stop_until_send_returns(self, monkeypatch, retry_scheduler):
         task, cell = self._make_reliable_task(monkeypatch, retry_scheduler)
         task.buffer[0:1] = b"x"

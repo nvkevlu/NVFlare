@@ -164,7 +164,11 @@ def _serialize_direct_tensor_batch(items: List[DirectDownloadChunk]) -> DirectDo
         if padding_size:
             buffers.append(bytes(padding_size))
 
-    result = DirectDownloadChunk(buffers, item_count=len(items))
+    result = DirectDownloadChunk(
+        buffers,
+        item_count=len(items),
+        reliable_retry_safe=all(item.reliable_retry_safe for item in items),
+    )
     if len(result) > _DIRECT_TENSOR_BATCH_MAX_BYTES:
         raise ValueError(f"direct tensor batch exceeds {_DIRECT_TENSOR_BATCH_MAX_BYTES} bytes")
     return result
@@ -185,7 +189,7 @@ def _serialize_tensor_item(key: str, tensor: torch.Tensor, stream_tensor: bool =
         return save_tensors({key: tensor})
     snapshot = tensor.detach().clone(memory_format=torch.contiguous_format)
     body = memoryview(snapshot.reshape(-1).view(torch.uint8).numpy())
-    return DirectDownloadChunk([prefix, body])
+    return DirectDownloadChunk([prefix, body], reliable_retry_safe=True)
 
 
 def _writable_direct_buffer(data) -> memoryview:
