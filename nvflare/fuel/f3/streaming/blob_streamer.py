@@ -39,16 +39,18 @@ def _make_blob_size_error(size: int, limit: int) -> BlobSizeError:
 
 
 class BlobStream(Stream):
-    def __init__(self, blob: BytesAlike, headers: Optional[dict]):
-        size = self.buffer_len(blob)
-        super().__init__(size, headers)
-
+    def __init__(self, blob: BytesAlike, headers: Optional[dict], allow_segmented: bool = False):
         if not isinstance(blob, list):
-            self.blob_view = wrap_view(blob)
+            self.blob_view = self._byte_view(blob)
             self.buffer_list = None
         else:
-            self.blob_view = [wrap_view(b) for b in blob]
+            self.blob_view = [self._byte_view(b) for b in blob]
             self.buffer_list = BufferList(self.blob_view)
+
+        self.allow_segmented = allow_segmented and self.buffer_list is not None
+
+        size = self.buffer_len(self.blob_view)
+        super().__init__(size, headers)
 
     def read(self, chunk_size: int) -> BytesAlike:
 
@@ -60,7 +62,11 @@ class BlobStream(Stream):
             next_pos = self.get_size()
 
         if self.buffer_list:
-            buf = self.buffer_list.read(self.pos, next_pos)
+            if self.allow_segmented and next_pos - self.pos == chunk_size:
+                parts = self.buffer_list.read_views(self.pos, next_pos)
+                buf = parts[0] if len(parts) == 1 else parts
+            else:
+                buf = self.buffer_list.read(self.pos, next_pos)
         else:
             buf = self.blob_view[self.pos : next_pos]
 
@@ -74,6 +80,15 @@ class BlobStream(Stream):
             return len(buffer)
 
         return sum(len(buf) for buf in buffer)
+
+    @staticmethod
+    def _byte_view(buffer: BytesAlike) -> memoryview:
+        view = wrap_view(buffer)
+        if not view.c_contiguous:
+            return memoryview(view.tobytes())
+        if view.ndim != 1 or view.format != "B":
+            return view.cast("B")
+        return view
 
 
 class BlobTask:
@@ -288,7 +303,12 @@ class BlobStreamer:
         if not isinstance(message.payload, (bytes, bytearray, memoryview, list)):
             raise StreamError(f"BLOB is invalid type: {type(message.payload)}")
 
-        blob_stream = BlobStream(message.payload, message.headers)
+        allow_segmented = (
+            not secure
+            and isinstance(message.payload, list)
+            and message.get_header(StreamHeaderKey.PAYLOAD_ENCODING) == Encoding.BYTES
+        )
+        blob_stream = BlobStream(message.payload, message.headers, allow_segmented=allow_segmented)
         return self.byte_streamer.send(
             channel,
             topic,

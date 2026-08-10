@@ -26,7 +26,7 @@ from nvflare.fuel.f3.cellnet.core_cell import (
     _is_failed_cert_exchange,
     _validate_url,
 )
-from nvflare.fuel.f3.cellnet.defs import MessageHeaderKey, ReturnCode
+from nvflare.fuel.f3.cellnet.defs import Encoding, MessageHeaderKey, ReturnCode
 from nvflare.fuel.f3.cellnet.fqcn import FqcnInfo
 from nvflare.fuel.f3.endpoint import Endpoint
 from nvflare.fuel.f3.message import Message
@@ -221,6 +221,56 @@ def test_encrypt_and_decrypt_secure_payload():
     cell.decrypt_payload(message)
     assert message.payload == b"clear"
     assert not message.get_header(MessageHeaderKey.ENCRYPTED, False)
+
+
+def test_message_size_uses_segmented_payload_byte_count():
+    typed = memoryview(bytearray(range(8))).cast("I")
+    message = Message(payload=[b"ab", typed])
+
+    assert CoreCell._msg_size_mbs(message) == 10 / (1024 * 1024)
+
+
+def test_direct_cell_flattens_segmented_bytes_without_mutating_original():
+    cell = _cell()
+    target = MagicMock()
+    cell.ALL_CELLS = {"site-2": target}
+    cell.max_msg_size = 1024
+    cell.encrypt_payload = MagicMock()
+    cell.sent_msg_size_pool = MagicMock()
+    cell._stats_category = MagicMock(return_value="test")
+    original_parts = [memoryview(b"ab"), memoryview(b"cd")]
+    message = Message(
+        headers={
+            MessageHeaderKey.DESTINATION: "site-2",
+            MessageHeaderKey.PAYLOAD_ENCODING: Encoding.BYTES,
+        },
+        payload=original_parts,
+    )
+    marker = object()
+    message.set_prop("test_marker", marker)
+
+    assert cell._send_to_endpoint(Endpoint("site-2"), message) == ""
+
+    delivered = target.process_message.call_args.kwargs["message"]
+    assert bytes(delivered.payload) == b"abcd"
+    assert not isinstance(delivered.payload, list)
+    assert message.payload is original_parts
+    assert delivered.get_prop("test_marker") is marker
+
+
+def test_segmented_payload_cannot_bypass_max_message_size():
+    cell = _cell()
+    cell.max_msg_size = 3
+    cell.encrypt_payload = MagicMock()
+    cell.log_error = MagicMock()
+    cell.communicator = MagicMock()
+    message = Message(
+        headers={MessageHeaderKey.PAYLOAD_ENCODING: Encoding.BYTES},
+        payload=[b"ab", b"cd"],
+    )
+
+    assert cell._send_to_endpoint(Endpoint("site-2"), message) == ReturnCode.MSG_TOO_BIG
+    cell.communicator.send.assert_not_called()
 
 
 @pytest.mark.parametrize("cell_cipher, expected", [(None, False), (MagicMock(), True)])

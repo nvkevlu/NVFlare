@@ -18,8 +18,9 @@ from concurrent.futures import TimeoutError, as_completed
 from typing import Callable, Optional
 
 from nvflare.fuel.f3.cellnet.core_cell import CoreCell
-from nvflare.fuel.f3.cellnet.defs import MessageHeaderKey
+from nvflare.fuel.f3.cellnet.defs import Encoding, MessageHeaderKey
 from nvflare.fuel.f3.comm_config import CommConfigurator
+from nvflare.fuel.f3.connection import BytesAlike
 from nvflare.fuel.f3.message import Message
 from nvflare.fuel.f3.mpm import MainProcessMonitor
 from nvflare.fuel.f3.stats_pool import StatsPoolManager
@@ -64,9 +65,30 @@ def _payload_size(payload) -> int:
         return 0
 
     if isinstance(payload, list):
-        return sum(len(item) for item in payload)
+        return sum(item.nbytes if isinstance(item, memoryview) else len(item) for item in payload)
 
-    return len(payload)
+    return payload.nbytes if isinstance(payload, memoryview) else len(payload)
+
+
+def _normalize_payload_part(part):
+    if not isinstance(part, (bytes, bytearray, memoryview)):
+        raise StreamError(f"Stream returned invalid payload part type: {type(part)}")
+
+    if isinstance(part, memoryview):
+        if not part.c_contiguous:
+            return part.tobytes()
+        if part.ndim != 1 or part.format != "B":
+            return part.cast("B")
+
+    return part
+
+
+def _normalize_payload(payload):
+    if payload is None:
+        return None
+    if isinstance(payload, list):
+        return [_normalize_payload_part(part) for part in payload]
+    return _normalize_payload_part(payload)
 
 
 def _snapshot_payload(payload):
@@ -74,9 +96,18 @@ def _snapshot_payload(payload):
         return None
 
     if isinstance(payload, list):
-        return [bytes(item) for item in payload]
+        return [bytes(_normalize_payload_part(item)) for item in payload]
 
-    return bytes(payload)
+    return bytes(_normalize_payload_part(payload))
+
+
+def _copy_payload(destination: memoryview, offset: int, payload) -> None:
+    parts = payload if isinstance(payload, list) else (payload,)
+    for part in parts:
+        part = _normalize_payload_part(part)
+        part_size = len(part)
+        destination[offset : offset + part_size] = part
+        offset += part_size
 
 
 class ReliableRetryScheduler:
@@ -215,7 +246,7 @@ class TxTask(StreamTaskSpec):
         self.sid = gen_stream_id()
         self.buffer = wrap_view(bytearray(chunk_size))
         # Optimization to send the original buffer without copying
-        self.direct_buf: Optional[bytes] = None
+        self.direct_buf: Optional[BytesAlike] = None
         self.buffer_size = 0
         self.channel = channel
         self.topic = topic
@@ -279,8 +310,9 @@ class TxTask(StreamTaskSpec):
                 read_size = self.chunk_size
             else:
                 read_size = self.chunk_size - self.buffer_size
-            buf = self.stream.read(read_size)
-            if not buf:
+            buf = _normalize_payload(self.stream.read(read_size))
+            size = _payload_size(buf)
+            if size == 0:
                 # End of Stream
                 if not self.send_pending_buffer(final=True):
                     return
@@ -316,7 +348,6 @@ class TxTask(StreamTaskSpec):
                     self.ack_waiter.wait(timeout=wait_timeout)
                     window = self.offset - self.offset_ack
 
-            size = len(buf)
             if size > read_size:
                 raise StreamError(f"{self} Stream returns invalid size: {size} (requested {read_size})")
 
@@ -330,7 +361,7 @@ class TxTask(StreamTaskSpec):
             if size == self.chunk_size:
                 self.direct_buf = buf
             else:
-                self.buffer[self.buffer_size : self.buffer_size + size] = buf
+                _copy_payload(self.buffer, self.buffer_size, buf)
             self.buffer_size += size
 
     def send_pending_buffer(self, final=False):
@@ -338,12 +369,19 @@ class TxTask(StreamTaskSpec):
         if self.buffer_size == 0:
             payload = bytes(0)
         elif self.buffer_size == self.chunk_size:
-            if self.direct_buf:
+            if self.direct_buf is not None:
                 payload = self.direct_buf
             else:
                 payload = self.buffer
         else:
             payload = self.buffer[0 : self.buffer_size]
+
+        payload = _normalize_payload(payload)
+
+        # Cell end-to-end encryption accepts one contiguous bytes-like payload.
+        # Transport TLS is below CellNet and keeps the segmented fast path.
+        if self.secure and isinstance(payload, list):
+            payload = b"".join(payload)
 
         if self.reliable:
             payload = _snapshot_payload(payload)
@@ -352,6 +390,13 @@ class TxTask(StreamTaskSpec):
 
         if self.headers:
             message.add_headers(self.headers)
+
+        # Stream chunks are raw bytes. Without this explicit marker, CellNet
+        # would FOBS-encode a segmented list instead of preserving its parts.
+        # Apply it after inherited headers so callers cannot accidentally
+        # reinterpret a segmented byte chunk as a FOBS application object.
+        if isinstance(payload, list):
+            message.set_header(MessageHeaderKey.PAYLOAD_ENCODING, Encoding.BYTES)
 
         stream_headers = {
             StreamHeaderKey.CHANNEL: self.channel,

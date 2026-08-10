@@ -20,7 +20,6 @@ import nvflare.fuel.utils.fobs as fobs
 from nvflare.fuel.f3.cellnet.defs import Encoding, MessageHeaderKey
 from nvflare.fuel.f3.message import Message
 from nvflare.fuel.f3.streaming.stream_const import StreamHeaderKey
-from nvflare.fuel.utils.buffer_list import BufferList
 
 cell_mapping = {
     "O": MessageHeaderKey.ORIGIN,
@@ -102,7 +101,9 @@ def buffer_len(buffer: Any):
     if not buffer:
         buf_len = 0
     elif isinstance(buffer, list):
-        buf_len = BufferList(buffer).get_size()
+        buf_len = sum(item.nbytes if isinstance(item, memoryview) else len(item) for item in buffer)
+    elif isinstance(buffer, memoryview):
+        buf_len = buffer.nbytes
     else:
         buf_len = len(buffer)
 
