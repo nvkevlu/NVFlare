@@ -17,7 +17,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from nvflare.fuel.f3.cellnet.defs import Encoding
+from nvflare.fuel.f3.cellnet.defs import Encoding, MessagePropKey
 from nvflare.fuel.f3.comm_config import CommConfigurator
 from nvflare.fuel.f3.message import Message
 from nvflare.fuel.f3.streaming.blob_streamer import BlobHandler, BlobStream, BlobStreamer, BlobTask
@@ -114,6 +114,25 @@ def test_blob_streamer_limits_segmented_reads_to_unencrypted_bytes(encoding, sec
         assert [bytes(part) for part in chunk] == [b"abc", b"de"]
     else:
         assert bytes(chunk) == b"abcde"
+
+
+@pytest.mark.parametrize("secure,expected", [(False, True), (True, False)])
+def test_blob_streamer_propagates_local_retry_safety_only_without_cell_encryption(secure, expected):
+    captured = {}
+    byte_streamer = MagicMock()
+
+    def capture_send(_channel, _topic, _target, _headers, stream, *_args, **_kwargs):
+        captured["stream"] = stream
+        return StreamFuture(stream_id=21)
+
+    byte_streamer.send.side_effect = capture_send
+    streamer = BlobStreamer(byte_streamer, MagicMock())
+    message = Message(headers={StreamHeaderKey.PAYLOAD_ENCODING: Encoding.BYTES}, payload=[b"abc", b"def"])
+    message.set_prop(MessagePropKey.RELIABLE_RETRY_SAFE, True)
+
+    streamer.send("ch", "tp", "peer", message, secure=secure, optional=False)
+
+    assert captured["stream"].reliable_retry_safe is expected
 
 
 def test_read_stream_fails_on_buffer_overrun():

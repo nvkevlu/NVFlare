@@ -65,6 +65,9 @@ class MessagePropKey:
     ENDPOINT = CELLNET_PREFIX + "endpoint"
     COMMON_NAME = CELLNET_PREFIX + "common_name"
     FUTURES = CELLNET_PREFIX + "futures"
+    # Local-only ownership promise used by reliable streaming. This property
+    # is never serialized as a Cell header.
+    RELIABLE_RETRY_SAFE = CELLNET_PREFIX + "reliable_retry_safe"
 
 
 class Encoding:

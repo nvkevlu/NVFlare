@@ -26,7 +26,7 @@ import msgpack
 from nvflare.apis.fl_constant import SystemConfigs
 from nvflare.apis.signal import Signal
 from nvflare.fuel.f3.cellnet.cell import Cell
-from nvflare.fuel.f3.cellnet.defs import Encoding, MessageHeaderKey, ReturnCode
+from nvflare.fuel.f3.cellnet.defs import Encoding, MessageHeaderKey, MessagePropKey, ReturnCode
 from nvflare.fuel.f3.cellnet.utils import make_reply, new_cell_message
 from nvflare.fuel.f3.message import Message
 from nvflare.fuel.f3.streaming.stream_const import StreamHeaderKey
@@ -194,13 +194,16 @@ class Downloadable(ABC):
 class DirectDownloadChunk:
     """A bytes-like chunk sent as the reply payload instead of through FOBS."""
 
-    def __init__(self, data, item_count: int = 1):
+    def __init__(self, data, item_count: int = 1, reliable_retry_safe: bool = False):
         buffers = data if isinstance(data, list) else [data]
         if not buffers or any(not isinstance(item, (bytes, bytearray, memoryview)) for item in buffers):
             raise TypeError("direct chunk data must be bytes-like or a non-empty list of bytes-like buffers")
         if type(item_count) is not int or item_count <= 0:
             raise ValueError(f"item_count must be a positive integer but got {item_count!r}")
+        if type(reliable_retry_safe) is not bool:
+            raise ValueError(f"reliable_retry_safe must be a bool but got {reliable_retry_safe!r}")
         self.item_count = item_count
+        self.reliable_retry_safe = reliable_retry_safe
         self.data = []
         for item in buffers:
             view = memoryview(item)
@@ -1654,6 +1657,8 @@ class DownloadService:
                 if direct_chunk is not None:
                     reply = make_reply(ReturnCode.OK)
                     reply.payload = [_encode_direct_control(rc, new_state), *direct_chunk.data]
+                    if direct_chunk.reliable_retry_safe:
+                        reply.set_prop(MessagePropKey.RELIABLE_RETRY_SAFE, True)
                     reply.set_header(_PropKey.DIRECT, True)
                     reply.set_header(StreamHeaderKey.PAYLOAD_ENCODING, Encoding.BYTES)
                     return reply

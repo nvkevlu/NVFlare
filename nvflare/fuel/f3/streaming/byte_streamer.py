@@ -253,6 +253,7 @@ class TxTask(StreamTaskSpec):
         self.target = target
         self.headers = headers
         self.stream = stream
+        self.reliable_retry_safe = bool(getattr(stream, "reliable_retry_safe", False))
         self.stream_future = None
         self.task_future = None
         self.ack_waiter = threading.Event()
@@ -366,6 +367,8 @@ class TxTask(StreamTaskSpec):
 
     def send_pending_buffer(self, final=False):
 
+        forwarded_directly = self.direct_buf is not None
+
         if self.buffer_size == 0:
             payload = bytes(0)
         elif self.buffer_size == self.chunk_size:
@@ -383,7 +386,11 @@ class TxTask(StreamTaskSpec):
         if self.secure and isinstance(payload, list):
             payload = b"".join(payload)
 
-        if self.reliable:
+        # A retry-safe stream owns immutable backing storage for directly
+        # forwarded full chunks. Pending retry messages may retain those views
+        # without another bytes copy. Partial chunks still use the reusable
+        # TxTask buffer and must always be snapshotted.
+        if self.reliable and not (self.reliable_retry_safe and forwarded_directly):
             payload = _snapshot_payload(payload)
 
         message = Message(None, payload)
