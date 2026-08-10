@@ -39,6 +39,49 @@ def test_read_bytes_within_one_buffer_returns_bytes():
     assert result == b"bcde"
 
 
+def test_read_views_across_buffers_does_not_flatten():
+    first = bytearray(b"abc")
+    second = bytearray(b"def")
+
+    result = BufferList([first, second]).read_views(1, 5)
+
+    assert [bytes(part) for part in result] == [b"bc", b"de"]
+    assert all(isinstance(part, memoryview) for part in result)
+    first[1] = ord("X")
+    second[0] = ord("Y")
+    assert [bytes(part) for part in result] == [b"Xc", b"Ye"]
+
+
+def test_read_views_honors_discarded_absolute_offsets():
+    buffer_list = BufferList([b"abc", b"def", b"ghi"])
+    buffer_list.discard_before(3)
+
+    assert [bytes(part) for part in buffer_list.read_views(4, 8)] == [b"ef", b"gh"]
+    with pytest.raises(ValueError, match="precedes discarded data"):
+        buffer_list.read_views(2, 3)
+
+
+@pytest.mark.parametrize(
+    "start,end,error",
+    [
+        (-1, 0, "start must be non-negative"),
+        (2, 1, "must not be less than start"),
+        (0, 4, "exceeds available data"),
+    ],
+)
+def test_read_views_rejects_invalid_ranges(start, end, error):
+    with pytest.raises(ValueError, match=error):
+        BufferList([b"abc"]).read_views(start, end)
+
+
+def test_read_views_handles_empty_and_exact_boundary_ranges():
+    buffer_list = BufferList([b"abc", b"", b"def"])
+
+    assert buffer_list.read_views(3, 3) == []
+    assert [bytes(part) for part in buffer_list.read_views(0, 3)] == [b"abc"]
+    assert [bytes(part) for part in buffer_list.read_views(3, 6)] == [b"def"]
+
+
 def test_read_bytes_rejects_end_past_available_data():
     with pytest.raises(ValueError, match="exceeds available data"):
         BufferList([b"abc"]).read_bytes(0, 4)

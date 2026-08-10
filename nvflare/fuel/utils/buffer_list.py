@@ -72,6 +72,42 @@ class BufferList:
 
         return buffer
 
+    def read_views(self, start: int, end: int) -> list[memoryview]:
+        """Return zero-copy views covering an absolute byte range.
+
+        Unlike :meth:`read`, a range spanning multiple buffers is not flattened
+        into a temporary bytearray. The returned views retain their exporters.
+        """
+        if start < 0:
+            raise ValueError(f"start must be non-negative, got {start}")
+        if start < self.start_offset:
+            raise ValueError(f"start {start} precedes discarded data at offset {self.start_offset}")
+        if end < start:
+            raise ValueError(f"end {end} must not be less than start {start}")
+        available_end = self.start_offset + self.get_size()
+        if end > available_end:
+            raise ValueError(f"end {end} exceeds available data ending at {available_end}")
+        if start == end:
+            return []
+
+        parts = []
+        view_start = self.start_offset
+        for buffer in self.buf_list or []:
+            view_end = view_start + len(buffer)
+            if view_end <= start:
+                view_start = view_end
+                continue
+            if view_start >= end:
+                break
+
+            part_start = max(start, view_start) - view_start
+            part_end = min(end, view_end) - view_start
+            if part_end > part_start:
+                parts.append(memoryview(buffer)[part_start:part_end])
+            view_start = view_end
+
+        return parts
+
     def read_bytes(self, start: int, end: int) -> bytes:
         """Read a range into one immutable bytes allocation.
 

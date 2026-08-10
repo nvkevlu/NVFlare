@@ -19,7 +19,7 @@ from unittest.mock import MagicMock
 import pytest
 
 import nvflare.fuel.f3.streaming.byte_streamer as byte_streamer_module
-from nvflare.fuel.f3.cellnet.defs import MessageHeaderKey
+from nvflare.fuel.f3.cellnet.defs import Encoding, MessageHeaderKey
 from nvflare.fuel.f3.comm_config import CommConfigurator
 from nvflare.fuel.f3.message import Message
 from nvflare.fuel.f3.streaming.byte_streamer import TxTask
@@ -62,6 +62,30 @@ class OversizedReadStream(Stream):
 
     def read(self, size):
         return b"x" * (size + 1)
+
+
+class SegmentedStream(Stream):
+    def __init__(self, parts):
+        super().__init__(
+            size=sum(part.nbytes if isinstance(part, memoryview) else len(part) for part in parts), headers={}
+        )
+        self.parts = parts
+        self.done = False
+
+    def read(self, size):
+        if self.done:
+            return b""
+        self.done = True
+        assert sum(part.nbytes if isinstance(part, memoryview) else len(part) for part in self.parts) <= size
+        return self.parts
+
+
+class OversizedSegmentedStream(Stream):
+    def __init__(self):
+        super().__init__(size=5, headers={})
+
+    def read(self, _size):
+        return [memoryview(b"abc"), memoryview(b"de")]
 
 
 class TestByteStreamerAckWatchdog:
@@ -203,6 +227,125 @@ class TestByteStreamerAckWatchdog:
 
         with pytest.raises(StreamError, match=r"invalid size: 9 \(requested 8\)"):
             task.send_loop()
+
+    def test_segmented_full_chunk_is_forwarded_without_flattening(self, monkeypatch):
+        task, cell = self._make_task(
+            monkeypatch,
+            window_size=1024,
+            ack_wait=0.5,
+            ack_progress_timeout=2.0,
+            ack_progress_check_interval=0.01,
+            chunks=[b""],
+            chunk_size=4,
+        )
+        task.stream = SegmentedStream([memoryview(b"ab"), memoryview(b"cd")])
+        task.stream_future.set_size(4)
+
+        task.send_loop()
+
+        message = cell.fire_and_forget.call_args.args[3]
+        assert isinstance(message.payload, list)
+        assert [bytes(part) for part in message.payload] == [b"ab", b"cd"]
+        assert message.get_header(MessageHeaderKey.PAYLOAD_ENCODING) == Encoding.BYTES
+        assert message.get_header(StreamHeaderKey.DATA_TYPE) == StreamDataType.FINAL
+        assert message.get_header(StreamHeaderKey.OFFSET) == 0
+        assert task.stream_future.result(timeout=0.1) == 4
+
+    def test_segmented_stream_cannot_return_more_bytes_than_requested(self, monkeypatch):
+        task, _ = self._make_task(
+            monkeypatch,
+            window_size=1024,
+            ack_wait=0.5,
+            ack_progress_timeout=2.0,
+            ack_progress_check_interval=0.01,
+            chunks=[b""],
+            chunk_size=4,
+        )
+        task.stream = OversizedSegmentedStream()
+
+        with pytest.raises(StreamError, match=r"invalid size: 5 \(requested 4\)"):
+            task.send_loop()
+
+    def test_segmented_short_read_is_copied_into_pending_buffer(self, monkeypatch):
+        task, cell = self._make_task(
+            monkeypatch,
+            window_size=1024,
+            ack_wait=0.5,
+            ack_progress_timeout=2.0,
+            ack_progress_check_interval=0.01,
+            chunks=[b""],
+            chunk_size=8,
+        )
+        task.stream = SegmentedStream([memoryview(b"ab"), memoryview(b"cd")])
+        task.stream_future.set_size(4)
+
+        task.send_loop()
+
+        message = cell.fire_and_forget.call_args.args[3]
+        assert bytes(message.payload) == b"abcd"
+        assert not isinstance(message.payload, list)
+
+    @pytest.mark.parametrize("chunk_size", [8, 16])
+    def test_typed_segment_uses_byte_size_for_full_and_short_reads(self, monkeypatch, chunk_size):
+        task, cell = self._make_task(
+            monkeypatch,
+            window_size=1024,
+            ack_wait=0.5,
+            ack_progress_timeout=2.0,
+            ack_progress_check_interval=0.01,
+            chunks=[b""],
+            chunk_size=chunk_size,
+        )
+        typed = memoryview(bytearray(range(8))).cast("I")
+        task.stream = SegmentedStream([typed])
+        task.stream_future.set_size(8)
+
+        task.send_loop()
+
+        message = cell.fire_and_forget.call_args.args[3]
+        actual = b"".join(message.payload) if isinstance(message.payload, list) else bytes(message.payload)
+        assert actual == bytes(range(8))
+        assert task.stream_future.result(timeout=0.1) == 8
+
+    def test_non_contiguous_segment_is_normalized_before_accounting(self, monkeypatch):
+        task, cell = self._make_task(
+            monkeypatch,
+            window_size=1024,
+            ack_wait=0.5,
+            ack_progress_timeout=2.0,
+            ack_progress_check_interval=0.01,
+            chunks=[b""],
+            chunk_size=4,
+        )
+        source = memoryview(bytearray(b"abcdefgh"))[::2]
+        task.stream = SegmentedStream([source])
+        task.stream_future.set_size(4)
+
+        task.send_loop()
+
+        message = cell.fire_and_forget.call_args.args[3]
+        assert b"".join(message.payload) == b"aceg"
+        assert task.stream_future.result(timeout=0.1) == 4
+
+    def test_secure_segmented_chunk_uses_contiguous_fallback(self, monkeypatch):
+        task, cell = self._make_task(
+            monkeypatch,
+            window_size=1024,
+            ack_wait=0.5,
+            ack_progress_timeout=2.0,
+            ack_progress_check_interval=0.01,
+            chunks=[b""],
+            chunk_size=4,
+        )
+        task.secure = True
+        task.stream = SegmentedStream([memoryview(b"ab"), memoryview(b"cd")])
+        task.stream_future.set_size(4)
+
+        task.send_loop()
+
+        message = cell.fire_and_forget.call_args.args[3]
+        assert message.payload == b"abcd"
+        assert not isinstance(message.payload, list)
 
     def test_watchdog_stops_when_no_ack_progress(self, monkeypatch):
         task, _ = self._make_task(
@@ -496,6 +639,22 @@ class TestReliableByteStreamer:
         assert next_message.get_header(StreamHeaderKey.WINDOW_SIZE) == task.window_size
         assert next_message.get_header(StreamHeaderKey.ACK_INTERVAL) is None
         assert next_message.get_header(StreamHeaderKey.RETRY_MAX_PENDING_BYTES) is None
+
+    def test_reliable_stream_snapshots_segmented_retry_payload(self, monkeypatch, retry_scheduler):
+        task, _ = self._make_reliable_task(monkeypatch, retry_scheduler)
+        first = bytearray(b"ab")
+        second = bytearray(b"cd")
+        task.direct_buf = [memoryview(first), memoryview(second)]
+        task.buffer_size = 4
+
+        task.send_pending_buffer()
+
+        _start, _last_retry, message = task.pending_messages[0]
+        first[:] = b"wx"
+        second[:] = b"yz"
+        assert message.payload == [b"ab", b"cd"]
+        assert message.get_header(MessageHeaderKey.PAYLOAD_ENCODING) == Encoding.BYTES
+        assert task.pending_message_bytes == 4
 
     def test_reliable_send_blocks_concurrent_error_stop_until_send_returns(self, monkeypatch, retry_scheduler):
         task, cell = self._make_reliable_task(monkeypatch, retry_scheduler)

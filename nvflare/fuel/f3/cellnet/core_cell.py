@@ -31,6 +31,7 @@ from nvflare.fuel.f3.cellnet.defs import (
     CellChannel,
     CellChannelTopic,
     CellPropertyKey,
+    Encoding,
     InvalidRequest,
     InvalidSession,
     MessageHeaderKey,
@@ -48,7 +49,7 @@ from nvflare.fuel.f3.cellnet.identity import (
     is_mtls_config,
 )
 from nvflare.fuel.f3.cellnet.registry import Callback, Registry
-from nvflare.fuel.f3.cellnet.utils import decode_payload, encode_payload, format_log_message, make_reply
+from nvflare.fuel.f3.cellnet.utils import buffer_len, decode_payload, encode_payload, format_log_message, make_reply
 from nvflare.fuel.f3.comm_config import CommConfigurator
 from nvflare.fuel.f3.communicator import Communicator, MessageReceiver
 from nvflare.fuel.f3.connection import Connection
@@ -1265,10 +1266,7 @@ class CoreCell(MessageReceiver, EndpointMonitor):
             self.encrypt_payload(message)
 
             message.set_header(MessageHeaderKey.SEND_TIME, time.time())
-            if not message.payload:
-                msg_size = 0
-            else:
-                msg_size = len(message.payload)
+            msg_size = buffer_len(message.payload)
 
             if msg_size > self.max_msg_size:
                 err_text = f"message is too big ({msg_size} > {self.max_msg_size}"
@@ -1278,6 +1276,25 @@ class CoreCell(MessageReceiver, EndpointMonitor):
                 direct_cell = self.ALL_CELLS.get(to_endpoint.name)
                 msg_size_mbs = self._msg_size_mbs(message)
                 if direct_cell:
+                    # A remote SFM connection accepts segmented BYTES payloads,
+                    # but an in-process Cell callback historically receives one
+                    # contiguous bytes-like value. Preserve that loopback contract.
+                    if (
+                        isinstance(message.payload, list)
+                        and message.get_header(MessageHeaderKey.PAYLOAD_ENCODING) == Encoding.BYTES
+                    ):
+                        parts = []
+                        for part in message.payload:
+                            view = memoryview(part)
+                            if not view.c_contiguous:
+                                part = view.tobytes()
+                            elif view.ndim != 1 or view.format != "B":
+                                part = view.cast("B")
+                            parts.append(part)
+                        flat_message = copy.copy(message)
+                        flat_message.headers = copy.copy(message.headers)
+                        flat_message.payload = b"".join(parts)
+                        message = flat_message
                     # create a thread and fire the cell's process_message!
                     # self.DIRECT_MSG_EXECUTOR.submit(self._send_direct_message, direct_cell, message)
                     self._send_direct_message(direct_cell, message)
@@ -1947,11 +1964,7 @@ class CoreCell(MessageReceiver, EndpointMonitor):
 
     @staticmethod
     def _msg_size_mbs(message: Message):
-        if message.payload:
-            msg_size = len(message.payload)
-        else:
-            msg_size = 0
-        return msg_size / _ONE_MB
+        return buffer_len(message.payload) / _ONE_MB
 
     def _process_received_msg(self, endpoint: Endpoint, connection: Connection, message: Message):
         route = message.get_header(MessageHeaderKey.ROUTE)

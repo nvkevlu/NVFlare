@@ -13,12 +13,14 @@
 # limitations under the License.
 
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 
 from nvflare.fuel.f3.cellnet.defs import Encoding
 from nvflare.fuel.f3.comm_config import CommConfigurator
-from nvflare.fuel.f3.streaming.blob_streamer import BlobHandler, BlobTask
+from nvflare.fuel.f3.message import Message
+from nvflare.fuel.f3.streaming.blob_streamer import BlobHandler, BlobStream, BlobStreamer, BlobTask
 from nvflare.fuel.f3.streaming.stream_const import StreamHeaderKey
 from nvflare.fuel.f3.streaming.stream_types import Stream, StreamError, StreamFuture
 
@@ -32,6 +34,86 @@ class _FakeStream(Stream):
         if not self._chunks:
             return b""
         return self._chunks.pop(0)
+
+
+def test_blob_stream_returns_segmented_views_across_buffer_boundaries():
+    prefix = bytearray(b"abc")
+    body = bytearray(b"defghi")
+    stream = BlobStream([prefix, body], headers={}, allow_segmented=True)
+
+    first = stream.read(5)
+    second = stream.read(5)
+
+    assert isinstance(first, list)
+    assert [bytes(part) for part in first] == [b"abc", b"de"]
+    assert isinstance(second, memoryview)
+    assert bytes(second) == b"fghi"
+    prefix[0] = ord("X")
+    body[0] = ord("Y")
+    assert [bytes(part) for part in first] == [b"Xbc", b"Ye"]
+
+
+def test_blob_stream_exact_boundary_keeps_single_view():
+    stream = BlobStream([b"abc", b"def"], headers={}, allow_segmented=True)
+
+    first = stream.read(3)
+    second = stream.read(3)
+
+    assert isinstance(first, memoryview)
+    assert isinstance(second, memoryview)
+    assert bytes(first) == b"abc"
+    assert bytes(second) == b"def"
+
+
+def test_blob_stream_flattens_segmented_final_short_read():
+    stream = BlobStream([b"abc", b"def"], headers={}, allow_segmented=True)
+
+    result = stream.read(8)
+
+    assert isinstance(result, bytearray)
+    assert bytes(result) == b"abcdef"
+
+
+def test_blob_stream_normalizes_typed_memoryview_to_bytes():
+    typed = memoryview(bytearray(range(8))).cast("I")
+    stream = BlobStream([typed], headers={}, allow_segmented=True)
+
+    result = stream.read(8)
+
+    assert stream.get_size() == 8
+    assert isinstance(result, memoryview)
+    assert result.format == "B"
+    assert len(result) == 8
+
+
+@pytest.mark.parametrize(
+    "encoding,secure,expect_segmented",
+    [
+        (Encoding.BYTES, False, True),
+        (Encoding.BYTES, True, False),
+        (Encoding.FOBS, False, False),
+    ],
+)
+def test_blob_streamer_limits_segmented_reads_to_unencrypted_bytes(encoding, secure, expect_segmented):
+    captured = {}
+    byte_streamer = MagicMock()
+
+    def capture_send(_channel, _topic, _target, _headers, stream, *_args, **_kwargs):
+        captured["stream"] = stream
+        return StreamFuture(stream_id=20)
+
+    byte_streamer.send.side_effect = capture_send
+    streamer = BlobStreamer(byte_streamer, MagicMock())
+    message = Message(headers={StreamHeaderKey.PAYLOAD_ENCODING: encoding}, payload=[b"abc", b"def"])
+
+    streamer.send("ch", "tp", "peer", message, secure=secure, optional=False)
+
+    chunk = captured["stream"].read(5)
+    assert isinstance(chunk, list) is expect_segmented
+    if expect_segmented:
+        assert [bytes(part) for part in chunk] == [b"abc", b"de"]
+    else:
+        assert bytes(chunk) == b"abcde"
 
 
 def test_read_stream_fails_on_buffer_overrun():
