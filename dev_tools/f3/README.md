@@ -8,6 +8,7 @@ two machines, plus a sample tuning config.
 | `tensor_download_bench.py` | End-to-end PyTorch tensor transfer through FOBS and the F3 Download Service |
 | `cellnet_bench.py` | Raw F3 cellnet streaming and baseline raw-TCP ceiling |
 | `comm_config.yml` | Sample F3 tuning config for high-bandwidth networks |
+| `grpc_tls/comm_config.yml` | Synchronous gRPC profile for production-equivalent transport-TLS tests |
 
 Start the receiver on the destination machine first; then start the sender.
 Use the same Python environment (`nvflare` must be importable) on both hosts.
@@ -31,6 +32,21 @@ actually transfers (aliased or tied tensors count once). The logical model size
 is reported separately. Sender and receiver peak RSS deltas and receiver disk
 consumption are included in the summary.
 
+Each run also reports direct-path eligible, observed-direct, and fallback tensor
+counts and bytes, plus the direct reply count and items-per-reply distribution.
+Memory-mode validation hashes a tensor of at least 10 MiB and
+requires that exact received tensor to have been produced by the direct decoder;
+this avoids accidentally validating only a small legacy-path tensor. Disk mode
+requires zero observed direct-path items and does not materialize the direct
+sample. A memory run fails early if its tensor selection has no direct-eligible
+item. Direct validation uses a zero-copy raw-byte hash on both endpoints after
+the timed transfer, so it neither pre-warms mmap pages nor inflates transfer time.
+
+The primary throughput uses the receiver-observed interval ending when the full
+request reaches the transfer callback. The sender also reports validated
+end-to-end time and receiver validation time separately, so correctness checking
+does not make the transport appear slower.
+
 ### Quick start
 
 ```bash
@@ -47,6 +63,20 @@ python dev_tools/f3/tensor_download_bench.py send \
 
 `--modes memory,disk` (default) runs both modes. Use `--modes memory` or
 `--modes disk` to run only one. `--repeat N` repeats for stable median values.
+
+For a fair legacy-path control using the same candidate binary and F3 settings,
+add `--disable-direct` to the sender command. The sender coordinates this with
+the receiver for each run; the receiver needs no extra flag. Eligible tensor
+counts are still reported, while validation requires zero observed direct items.
+Omitting the flag preserves the default requirement that every eligible
+memory-mode tensor uses the negotiated direct path.
+
+To isolate bounded multi-tensor replies without falling back to safetensors,
+add `--disable-direct-batch`. This keeps the direct-memory V1 path enabled but
+forces one tensor per Download Service reply. Compare it with the default on the
+same candidate binary; `direct-replies`, `batched-replies`, and `items/reply` in
+the result prove which policy was exercised. `--disable-direct` also disables
+batch negotiation automatically.
 
 The memory-mode receiver needs enough RAM for the full model plus transient
 serialisation buffers. Put `--offload-dir` on fast local storage for a
@@ -82,6 +112,38 @@ python dev_tools/f3/tensor_download_bench.py send \
     --checkpoint /path/to/pytorch_model.bin \
     --f3-config dev_tools/f3/comm_config.yml
 ```
+
+### Production-equivalent synchronous gRPC with TLS
+
+Use the supplied gRPC profile on both endpoints. Credential material remains
+outside this repository: the receiver directory must contain `rootCA.pem`,
+`server.crt`, and `server.key`; the sender directory must contain `rootCA.pem`.
+
+```bash
+# Receiver
+python dev_tools/f3/tensor_download_bench.py recv \
+    --url grpc://0.0.0.0:8002 \
+    --offload-dir /fast/local/nvme \
+    --f3-config dev_tools/f3/grpc_tls/comm_config.yml \
+    --connection-security tls \
+    --credentials-dir /path/to/server/startup
+
+# Sender
+python dev_tools/f3/tensor_download_bench.py send \
+    --url grpc://<receiver-host>:8002 \
+    --checkpoint /path/to/pytorch_model.bin \
+    --modes memory \
+    --repeat 5 \
+    --f3-config dev_tools/f3/grpc_tls/comm_config.yml \
+    --connection-security tls \
+    --credentials-dir /path/to/client/startup
+```
+
+The sender URL hostname must match a SAN in the server certificate. This mode
+measures production-equivalent gRPC transport TLS; Cell end-to-end message
+encryption remains disabled so its cost is not conflated with the transport.
+Clear mode remains available for controls, but is not the production-equivalent
+result.
 
 ---
 
@@ -119,6 +181,11 @@ python dev_tools/f3/cellnet_bench.py send \
     --url tcp://<receiver-host>:8002 \
     --f3-config dev_tools/f3/comm_config.yml
 ```
+
+The same `--connection-security`, `--credentials-dir`, and
+`grpc_tls/comm_config.yml` combination can be used with `cellnet_bench.py` to
+measure raw F3 throughput over synchronous gRPC/TLS. Raw `--transport tcp`
+does not accept TLS credential options because it intentionally bypasses F3.
 
 ### Raw TCP ceiling
 
