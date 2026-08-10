@@ -21,6 +21,7 @@ import torch
 
 from dev_tools.f3 import tensor_download_bench
 from dev_tools.f3.tensor_download_bench import (
+    DIRECT_BATCH_NEGOTIATION_KEY,
     DIRECT_NEGOTIATION_KEY,
     DIRECT_TENSOR_MIN_BYTES,
     MODE_DISK,
@@ -148,6 +149,9 @@ def test_direct_path_counts_and_hashes_large_direct_sample(tmp_path):
     assert result["direct_items"] == 1
     assert result["direct_bytes"] == DIRECT_TENSOR_MIN_BYTES
     assert result["direct_wire_bytes"] == DIRECT_TENSOR_MIN_BYTES + 128
+    assert result["direct_replies"] == 1
+    assert result["direct_batch_replies"] == 0
+    assert result["direct_reply_item_counts"] == (1,)
     assert result["fallback_items"] == 1
     assert result["fallback_bytes"] == tensor_nbytes(small)
     assert result["direct_sample_key"] == "large_weight"
@@ -173,6 +177,25 @@ def test_disabled_direct_control_reports_eligibility_and_zero_direct_items(tmp_p
     assert result["fallback_items"] == 2
     assert result["fallback_bytes"] == DIRECT_TENSOR_MIN_BYTES + tensor_nbytes(small)
     assert result["direct_sample_sha256"] == direct_tensor_fingerprint(large)
+
+
+def test_direct_tracker_records_items_per_reply():
+    tracker = DirectPathTracker()
+    tracker.reset("batched")
+
+    class DirectItem:
+        def __init__(self, value):
+            self.tensor = torch.tensor([value], dtype=torch.float32)
+
+        def __len__(self):
+            return tensor_nbytes(self.tensor) + 64
+
+    tracker.record([DirectItem(1), DirectItem(2), DirectItem(3)])
+    tracker.record([DirectItem(4)])
+
+    snapshot = tracker.snapshot("batched")
+    assert snapshot["reply_item_counts"] == (3, 1)
+    assert snapshot["items"] == 4
 
 
 def test_disabled_direct_control_rejects_observed_direct_item(tmp_path):
@@ -213,18 +236,28 @@ def test_direct_tracking_suppresses_capability_advertisement_for_control(monkeyp
         tensor_download_bench.install_direct_path_tracking()
         consumer = tensor_download_bench.TensorConsumer(None, {})
 
-        tracker.reset("control", direct_negotiation_enabled=False)
+        tracker.reset("control", direct_negotiation_enabled=False, direct_batch_negotiation_enabled=False)
         assert consumer.get_initial_state() is None
 
         tracker.reset("candidate", direct_negotiation_enabled=True)
         assert consumer.get_initial_state() == original_get_initial_state(consumer)
 
+        tracker.reset("v1-control", direct_negotiation_enabled=True, direct_batch_negotiation_enabled=False)
+        v1_state = consumer.get_initial_state()
+        expected_v1_state = dict(original_get_initial_state(consumer))
+        expected_v1_state.pop(tensor_download_bench._TENSOR_BATCH_STATE_KEY)
+        assert v1_state == expected_v1_state
+
 
 @pytest.mark.parametrize(
-    ("extra_args", "expected_enabled"),
-    [([], True), (["--disable-direct"], False)],
+    ("extra_args", "expected_direct", "expected_batch"),
+    [
+        ([], True, True),
+        (["--disable-direct-batch"], True, False),
+        (["--disable-direct"], False, False),
+    ],
 )
-def test_sender_cli_coordinates_direct_negotiation(monkeypatch, extra_args, expected_enabled):
+def test_sender_cli_coordinates_direct_negotiation(monkeypatch, extra_args, expected_direct, expected_batch):
     captured = {}
     monkeypatch.setattr(
         tensor_download_bench,
@@ -237,7 +270,8 @@ def test_sender_cli_coordinates_direct_negotiation(monkeypatch, extra_args, expe
 
     tensor_download_bench.main()
 
-    assert captured[DIRECT_NEGOTIATION_KEY] is expected_enabled
+    assert captured[DIRECT_NEGOTIATION_KEY] is expected_direct
+    assert captured[DIRECT_BATCH_NEGOTIATION_KEY] is expected_batch
 
 
 def test_direct_tensor_fingerprint_hashes_raw_storage():

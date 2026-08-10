@@ -39,10 +39,17 @@ _ACTIVE_DISK_TENSOR_CONSUMERS = weakref.WeakSet()
 _ACTIVE_DISK_TENSOR_CONSUMERS_LOCK = threading.Lock()
 _TENSOR_STREAM_STATE_KEY = "__nvflare_tensor_stream__"
 _TENSOR_STREAM_MEMORY_V1 = "direct_memory_v1"
+_TENSOR_BATCH_STATE_KEY = "__nvflare_tensor_batch__"
+_TENSOR_BATCH_BOUNDED_V1 = "bounded_direct_v1"
 _DIRECT_TENSOR_MAGIC = b"NVTDIR01"
 _DIRECT_TENSOR_HEADER = struct.Struct("<8sII")
 _DIRECT_TENSOR_ALIGNMENT = 64
 _DIRECT_TENSOR_MAX_METADATA = 1024 * 1024
+_DIRECT_TENSOR_BATCH_MAGIC = b"NVTDIR02"
+_DIRECT_TENSOR_BATCH_HEADER = struct.Struct("<8sII")
+_DIRECT_TENSOR_BATCH_LENGTH = struct.Struct("<Q")
+_DIRECT_TENSOR_BATCH_MAX_ITEMS = 8
+_DIRECT_TENSOR_BATCH_MAX_BYTES = 256 * 1024 * 1024
 
 _SAFETENSORS_DTYPE_NAMES = (
     ("float64", "F64"),
@@ -99,21 +106,18 @@ def _can_stream_tensor_directly(tensor: torch.Tensor) -> bool:
     )
 
 
-def _serialize_tensor_item(key: str, tensor: torch.Tensor, stream_tensor: bool = False):
-    """Create a snapshot for one tensor download item.
+def _align_direct_size(size: int) -> int:
+    return (size + _DIRECT_TENSOR_ALIGNMENT - 1) // _DIRECT_TENSOR_ALIGNMENT * _DIRECT_TENSOR_ALIGNMENT
 
-    Negotiated large tensors use a raw bytes-like reply so F3 receives directly
-    into writable storage. Legacy peers and small/unsupported tensors retain
-    the existing safetensors representation.
-    """
+
+def _direct_tensor_prefix(key: str, tensor: torch.Tensor) -> Optional[bytes]:
     if (
-        not stream_tensor
-        or not isinstance(key, str)
+        not isinstance(key, str)
         or key == "__metadata__"
         or tensor.numel() * tensor.element_size() < TEN_MEGA
         or not _can_stream_tensor_directly(tensor)
     ):
-        return save_tensors({key: tensor})
+        return None
 
     metadata = {
         "key": key,
@@ -123,15 +127,186 @@ def _serialize_tensor_item(key: str, tensor: torch.Tensor, stream_tensor: bool =
     }
     metadata_bytes = json.dumps(metadata, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     if len(metadata_bytes) > _DIRECT_TENSOR_MAX_METADATA:
-        return save_tensors({key: tensor})
+        return None
     unpadded_size = _DIRECT_TENSOR_HEADER.size + len(metadata_bytes)
-    header_size = (unpadded_size + _DIRECT_TENSOR_ALIGNMENT - 1) // _DIRECT_TENSOR_ALIGNMENT
-    header_size *= _DIRECT_TENSOR_ALIGNMENT
-    prefix = _DIRECT_TENSOR_HEADER.pack(_DIRECT_TENSOR_MAGIC, len(metadata_bytes), header_size)
-    prefix += metadata_bytes + bytes(header_size - unpadded_size)
+    header_size = _align_direct_size(unpadded_size)
+    return (
+        _DIRECT_TENSOR_HEADER.pack(_DIRECT_TENSOR_MAGIC, len(metadata_bytes), header_size)
+        + metadata_bytes
+        + bytes(header_size - unpadded_size)
+    )
+
+
+def _direct_tensor_batch_size(segment_sizes: List[int]) -> int:
+    header_size = _align_direct_size(
+        _DIRECT_TENSOR_BATCH_HEADER.size + len(segment_sizes) * _DIRECT_TENSOR_BATCH_LENGTH.size
+    )
+    return header_size + sum(_align_direct_size(size) for size in segment_sizes)
+
+
+def _serialize_direct_tensor_batch(items: List[DirectDownloadChunk]) -> DirectDownloadChunk:
+    if not 2 <= len(items) <= _DIRECT_TENSOR_BATCH_MAX_ITEMS:
+        raise ValueError(f"direct tensor batch must contain 2-{_DIRECT_TENSOR_BATCH_MAX_ITEMS} items")
+    if any(not isinstance(item, DirectDownloadChunk) or item.item_count != 1 for item in items):
+        raise TypeError("direct tensor batches can contain only single-tensor direct chunks")
+
+    segment_sizes = [len(item) for item in items]
+    header_unpadded_size = _DIRECT_TENSOR_BATCH_HEADER.size + len(items) * _DIRECT_TENSOR_BATCH_LENGTH.size
+    header_size = _align_direct_size(header_unpadded_size)
+    header = _DIRECT_TENSOR_BATCH_HEADER.pack(_DIRECT_TENSOR_BATCH_MAGIC, len(items), header_size)
+    header += b"".join(_DIRECT_TENSOR_BATCH_LENGTH.pack(size) for size in segment_sizes)
+    header += bytes(header_size - header_unpadded_size)
+
+    buffers = [header]
+    for item, segment_size in zip(items, segment_sizes):
+        buffers.extend(item.data)
+        padding_size = _align_direct_size(segment_size) - segment_size
+        if padding_size:
+            buffers.append(bytes(padding_size))
+
+    result = DirectDownloadChunk(buffers, item_count=len(items))
+    if len(result) > _DIRECT_TENSOR_BATCH_MAX_BYTES:
+        raise ValueError(f"direct tensor batch exceeds {_DIRECT_TENSOR_BATCH_MAX_BYTES} bytes")
+    return result
+
+
+def _serialize_tensor_item(key: str, tensor: torch.Tensor, stream_tensor: bool = False):
+    """Create a snapshot for one tensor download item.
+
+    Negotiated large tensors use a raw bytes-like reply so F3 receives directly
+    into writable storage. Legacy peers and small/unsupported tensors retain
+    the existing safetensors representation.
+    """
+    if not stream_tensor:
+        return save_tensors({key: tensor})
+
+    prefix = _direct_tensor_prefix(key, tensor)
+    if prefix is None:
+        return save_tensors({key: tensor})
     snapshot = tensor.detach().clone(memory_format=torch.contiguous_format)
     body = memoryview(snapshot.reshape(-1).view(torch.uint8).numpy())
     return DirectDownloadChunk([prefix, body])
+
+
+def _writable_direct_buffer(data) -> memoryview:
+    buffer = memoryview(data)
+    if not buffer.c_contiguous:
+        raise ValueError("direct tensor payload must be C-contiguous")
+    if buffer.readonly:
+        raise ValueError("direct tensor payload must be writable")
+    return buffer.cast("B")
+
+
+def _deserialize_direct_tensor_v1(buffer: memoryview) -> _StreamedTensorItem:
+    if len(buffer) < _DIRECT_TENSOR_HEADER.size:
+        raise ValueError("direct tensor payload is too short")
+    magic, metadata_size, header_size = _DIRECT_TENSOR_HEADER.unpack_from(buffer)
+    if magic != _DIRECT_TENSOR_MAGIC:
+        raise ValueError("invalid direct tensor magic")
+    expected_header_size = _align_direct_size(_DIRECT_TENSOR_HEADER.size + metadata_size)
+    if metadata_size > _DIRECT_TENSOR_MAX_METADATA or header_size != expected_header_size or header_size > len(buffer):
+        raise ValueError("invalid direct tensor header size")
+    if any(buffer[_DIRECT_TENSOR_HEADER.size + metadata_size : header_size]):
+        raise ValueError("invalid direct tensor header padding")
+    try:
+        metadata = json.loads(
+            bytes(buffer[_DIRECT_TENSOR_HEADER.size : _DIRECT_TENSOR_HEADER.size + metadata_size]),
+            object_pairs_hook=_reject_duplicate_json_keys,
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError) as ex:
+        raise ValueError("invalid direct tensor metadata") from ex
+    if not isinstance(metadata, dict) or set(metadata) != {"key", "dtype", "shape", "size"}:
+        raise ValueError("invalid direct tensor metadata schema")
+
+    key = metadata.get("key")
+    if not isinstance(key, str) or key == "__metadata__":
+        raise ValueError(f"invalid direct tensor key {key!r}")
+    dtype_code = metadata.get("dtype")
+    dtype_by_code = {code: dtype for dtype, code in _SAFETENSORS_DTYPES.items()}
+    dtype = dtype_by_code.get(dtype_code)
+    if dtype is None:
+        raise ValueError(f"unsupported direct tensor dtype {dtype_code!r}")
+
+    shape = metadata.get("shape")
+    if not isinstance(shape, list) or len(shape) > 64 or any(type(dim) is not int or dim < 0 for dim in shape):
+        raise ValueError(f"invalid direct tensor shape {shape!r}")
+
+    body_size = len(buffer) - header_size
+    if type(metadata.get("size")) is not int or metadata["size"] != body_size:
+        raise ValueError(f"direct tensor size {metadata.get('size')!r} does not match {body_size}-byte payload")
+
+    element_size = torch.empty((), dtype=dtype).element_size()
+    max_numel = body_size // element_size
+    numel = 0 if 0 in shape else 1
+    if numel:
+        for dim in shape:
+            if dim and numel > max_numel // dim:
+                raise ValueError("direct tensor shape exceeds the payload size")
+            numel *= dim
+    expected_size = numel * element_size
+    if expected_size != body_size:
+        raise ValueError(f"direct tensor shape and dtype require {expected_size} bytes but payload has {body_size}")
+
+    try:
+        if numel:
+            tensor = torch.frombuffer(buffer, dtype=dtype, count=numel, offset=header_size).reshape(tuple(shape))
+        else:
+            tensor = torch.empty(tuple(shape), dtype=dtype)
+    except (RuntimeError, ValueError) as ex:
+        raise ValueError(f"invalid direct tensor shape {shape!r}") from ex
+    return _StreamedTensorItem(key, tensor, len(buffer))
+
+
+def _deserialize_direct_tensor_batch(buffer: memoryview) -> List[_StreamedTensorItem]:
+    if len(buffer) > _DIRECT_TENSOR_BATCH_MAX_BYTES:
+        raise ValueError("direct tensor batch exceeds the negotiated byte limit")
+    if len(buffer) < _DIRECT_TENSOR_BATCH_HEADER.size:
+        raise ValueError("direct tensor batch is too short")
+
+    magic, item_count, header_size = _DIRECT_TENSOR_BATCH_HEADER.unpack_from(buffer)
+    if magic != _DIRECT_TENSOR_BATCH_MAGIC:
+        raise ValueError("invalid direct tensor batch magic")
+    if not 2 <= item_count <= _DIRECT_TENSOR_BATCH_MAX_ITEMS:
+        raise ValueError("invalid direct tensor batch item count")
+    table_end = _DIRECT_TENSOR_BATCH_HEADER.size + item_count * _DIRECT_TENSOR_BATCH_LENGTH.size
+    expected_header_size = _align_direct_size(table_end)
+    if header_size != expected_header_size or header_size > len(buffer):
+        raise ValueError("invalid direct tensor batch header size")
+    if any(buffer[table_end:header_size]):
+        raise ValueError("invalid direct tensor batch header padding")
+
+    segment_sizes = [
+        _DIRECT_TENSOR_BATCH_LENGTH.unpack_from(
+            buffer, _DIRECT_TENSOR_BATCH_HEADER.size + index * _DIRECT_TENSOR_BATCH_LENGTH.size
+        )[0]
+        for index in range(item_count)
+    ]
+    if any(size == 0 for size in segment_sizes):
+        raise ValueError("direct tensor batch contains an empty segment")
+
+    items = []
+    keys = set()
+    cursor = header_size
+    for segment_size in segment_sizes:
+        slot_size = _align_direct_size(segment_size)
+        if slot_size > len(buffer) - cursor:
+            raise ValueError("direct tensor batch segment exceeds payload size")
+        segment_end = cursor + segment_size
+        slot_end = cursor + slot_size
+        item = _deserialize_direct_tensor_v1(buffer[cursor:segment_end])
+        if item.key in keys:
+            raise ValueError(f"duplicate direct tensor batch key {item.key!r}")
+        keys.add(item.key)
+        if any(buffer[segment_end:slot_end]):
+            raise ValueError("invalid direct tensor batch segment padding")
+        item.wire_size = slot_size
+        items.append(item)
+        cursor = slot_end
+
+    if cursor != len(buffer):
+        raise ValueError("direct tensor batch has trailing data")
+    items[0].wire_size += header_size
+    return items
 
 
 def cleanup_active_disk_tensor_downloads(reason: str = "download aborted") -> None:
@@ -152,6 +327,7 @@ class TensorDownloadable(CacheableObject):
         self._prefetch_futures = {}
         self._released = False
         self._stream_tensors = None
+        self._batch_tensors = None
         super().__init__(tensors, max_chunk_size)
 
     def get_item_count(self) -> int:
@@ -159,15 +335,31 @@ class TensorDownloadable(CacheableObject):
 
     def produce(self, state: dict, requester: str):
         requested_mode = state.get(_TENSOR_STREAM_STATE_KEY) if isinstance(state, dict) else None
+        requested_batch = state.get(_TENSOR_BATCH_STATE_KEY) if isinstance(state, dict) else None
         with self._prefetch_lock:
             if self._stream_tensors is None:
                 self._stream_tensors = bool(self.num_receivers == 1 and requested_mode == _TENSOR_STREAM_MEMORY_V1)
+            if self._batch_tensors is None:
+                self._batch_tensors = bool(
+                    self._stream_tensors and self.num_receivers == 1 and requested_batch == _TENSOR_BATCH_BOUNDED_V1
+                )
             stream_tensors = self._stream_tensors
+            batch_tensors = self._batch_tensors
 
         rc, data, new_state = super().produce(state, requester)
+        if (
+            batch_tensors
+            and rc == ProduceRC.OK
+            and isinstance(data, list)
+            and len(data) >= 2
+            and all(isinstance(item, DirectDownloadChunk) for item in data)
+        ):
+            data = [_serialize_direct_tensor_batch(data)]
         if stream_tensors and rc == ProduceRC.OK:
             new_state = dict(new_state)
             new_state[_TENSOR_STREAM_STATE_KEY] = _TENSOR_STREAM_MEMORY_V1
+            if batch_tensors:
+                new_state[_TENSOR_BATCH_STATE_KEY] = _TENSOR_BATCH_BOUNDED_V1
         return rc, data, new_state
 
     def produce_item(self, index: int):
@@ -202,7 +394,51 @@ class TensorDownloadable(CacheableObject):
         tensor = base_obj[self.keys[index]]
         return tensor.numel() * tensor.element_size()
 
+    def _direct_item_size(self, index: int) -> Optional[int]:
+        base_obj = self.base_obj
+        if base_obj is None:
+            return None
+        key = self.keys[index]
+        tensor = base_obj[key]
+        prefix = _direct_tensor_prefix(key, tensor)
+        if prefix is None:
+            return None
+        return len(prefix) + tensor.numel() * tensor.element_size()
+
+    def can_add_item(self, index: int, current_items: list, current_size: int, item: Any = None) -> bool:
+        with self._prefetch_lock:
+            batch_tensors = bool(self._batch_tensors)
+        if not batch_tensors or not current_items:
+            return super().can_add_item(index, current_items, current_size, item)
+
+        current_items_are_direct = all(isinstance(current, DirectDownloadChunk) for current in current_items)
+        if item is None:
+            candidate_size = self._direct_item_size(index)
+            candidate_is_direct = candidate_size is not None
+        else:
+            candidate_is_direct = isinstance(item, DirectDownloadChunk)
+            candidate_size = len(item) if candidate_is_direct else None
+
+        if current_items_are_direct != candidate_is_direct:
+            return False
+        if not current_items_are_direct:
+            return super().can_add_item(index, current_items, current_size, item)
+        if len(current_items) >= _DIRECT_TENSOR_BATCH_MAX_ITEMS:
+            return False
+
+        segment_sizes = [len(current) for current in current_items]
+        segment_sizes.append(candidate_size)
+        return _direct_tensor_batch_size(segment_sizes) <= _DIRECT_TENSOR_BATCH_MAX_BYTES
+
     def is_item_exclusive(self, index: int, item: Any = None) -> bool:
+        with self._prefetch_lock:
+            batch_tensors = bool(self._batch_tensors)
+        if batch_tensors:
+            if isinstance(item, DirectDownloadChunk):
+                return False
+            if item is None and self._direct_item_size(index) is not None:
+                return False
+
         if item is not None:
             return isinstance(item, DirectDownloadChunk)
 
@@ -234,93 +470,37 @@ class TensorDownloadable(CacheableObject):
 
 class TensorConsumer(ItemConsumer):
 
-    def __init__(self, tensors_received_cb, cb_kwargs):
+    def __init__(self, tensors_received_cb, cb_kwargs, enable_direct_batch: bool = True):
         ItemConsumer.__init__(self)
         self.tensors_received_cb = tensors_received_cb
         self.cb_kwargs = cb_kwargs
+        self.enable_direct_batch = enable_direct_batch
         if tensors_received_cb is not None and not callable(tensors_received_cb):
             raise ValueError("tensors_received_cb must be callable")
 
     def get_initial_state(self) -> Optional[dict]:
         if sys.byteorder != "little":
             return None
-        return {_TENSOR_STREAM_STATE_KEY: _TENSOR_STREAM_MEMORY_V1}
+        state = {_TENSOR_STREAM_STATE_KEY: _TENSOR_STREAM_MEMORY_V1}
+        if self.enable_direct_batch:
+            state[_TENSOR_BATCH_STATE_KEY] = _TENSOR_BATCH_BOUNDED_V1
+        return state
 
     def consume_direct_chunk(self, data) -> List[_StreamedTensorItem]:
         if sys.byteorder != "little":
             raise ValueError("direct tensor replies require a little-endian receiver")
 
-        buffer = memoryview(data)
-        if not buffer.c_contiguous:
-            raise ValueError("direct tensor payload must be C-contiguous")
-        if buffer.readonly:
-            raise ValueError("direct tensor payload must be writable")
-        buffer = buffer.cast("B")
-        if len(buffer) < _DIRECT_TENSOR_HEADER.size:
+        buffer = _writable_direct_buffer(data)
+        if len(buffer) < len(_DIRECT_TENSOR_MAGIC):
             raise ValueError("direct tensor payload is too short")
-        magic, metadata_size, header_size = _DIRECT_TENSOR_HEADER.unpack_from(buffer)
-        if magic != _DIRECT_TENSOR_MAGIC:
-            raise ValueError("invalid direct tensor magic")
-        expected_header_size = (
-            (_DIRECT_TENSOR_HEADER.size + metadata_size + _DIRECT_TENSOR_ALIGNMENT - 1)
-            // _DIRECT_TENSOR_ALIGNMENT
-            * _DIRECT_TENSOR_ALIGNMENT
-        )
-        if (
-            metadata_size > _DIRECT_TENSOR_MAX_METADATA
-            or header_size != expected_header_size
-            or header_size > len(buffer)
-        ):
-            raise ValueError("invalid direct tensor header size")
-        if any(buffer[_DIRECT_TENSOR_HEADER.size + metadata_size : header_size]):
-            raise ValueError("invalid direct tensor header padding")
-        try:
-            metadata = json.loads(
-                bytes(buffer[_DIRECT_TENSOR_HEADER.size : _DIRECT_TENSOR_HEADER.size + metadata_size]),
-                object_pairs_hook=_reject_duplicate_json_keys,
-            )
-        except (UnicodeDecodeError, json.JSONDecodeError) as ex:
-            raise ValueError("invalid direct tensor metadata") from ex
-        if not isinstance(metadata, dict) or set(metadata) != {"key", "dtype", "shape", "size"}:
-            raise ValueError("invalid direct tensor metadata schema")
-
-        key = metadata.get("key")
-        if not isinstance(key, str) or key == "__metadata__":
-            raise ValueError(f"invalid direct tensor key {key!r}")
-        dtype_code = metadata.get("dtype")
-        dtype_by_code = {code: dtype for dtype, code in _SAFETENSORS_DTYPES.items()}
-        dtype = dtype_by_code.get(dtype_code)
-        if dtype is None:
-            raise ValueError(f"unsupported direct tensor dtype {dtype_code!r}")
-
-        shape = metadata.get("shape")
-        if not isinstance(shape, list) or len(shape) > 64 or any(type(dim) is not int or dim < 0 for dim in shape):
-            raise ValueError(f"invalid direct tensor shape {shape!r}")
-
-        body_size = len(buffer) - header_size
-        if type(metadata.get("size")) is not int or metadata["size"] != body_size:
-            raise ValueError(f"direct tensor size {metadata.get('size')!r} does not match {body_size}-byte payload")
-
-        element_size = torch.empty((), dtype=dtype).element_size()
-        max_numel = body_size // element_size
-        numel = 0 if 0 in shape else 1
-        if numel:
-            for dim in shape:
-                if dim and numel > max_numel // dim:
-                    raise ValueError("direct tensor shape exceeds the payload size")
-                numel *= dim
-        expected_size = numel * element_size
-        if expected_size != body_size:
-            raise ValueError(f"direct tensor shape and dtype require {expected_size} bytes but payload has {body_size}")
-
-        try:
-            if numel:
-                tensor = torch.frombuffer(buffer, dtype=dtype, count=numel, offset=header_size).reshape(tuple(shape))
-            else:
-                tensor = torch.empty(tuple(shape), dtype=dtype)
-        except (RuntimeError, ValueError) as ex:
-            raise ValueError(f"invalid direct tensor shape {shape!r}") from ex
-        return [_StreamedTensorItem(key, tensor, len(buffer))]
+        magic = bytes(buffer[: len(_DIRECT_TENSOR_MAGIC)])
+        if magic == _DIRECT_TENSOR_MAGIC:
+            return [_deserialize_direct_tensor_v1(buffer)]
+        if magic == _DIRECT_TENSOR_BATCH_MAGIC:
+            if not self.enable_direct_batch:
+                raise ValueError("received a direct tensor batch without negotiating batch support")
+            return _deserialize_direct_tensor_batch(buffer)
+        raise ValueError("invalid direct tensor magic")
 
     def consume_items(self, items: List[Any], result: Any) -> Any:
         if not isinstance(items, list):

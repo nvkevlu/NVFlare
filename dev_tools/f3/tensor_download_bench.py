@@ -59,7 +59,7 @@ from nvflare.app_common.utils.tensor_disk_offload_context import (
     _TENSOR_DISK_OFFLOAD_ROOT_DIR,
 )
 from nvflare.app_opt.pt.decomposers import TensorDecomposer
-from nvflare.app_opt.pt.tensor_downloader import TensorConsumer, _can_stream_tensor_directly
+from nvflare.app_opt.pt.tensor_downloader import _TENSOR_BATCH_STATE_KEY, TensorConsumer, _can_stream_tensor_directly
 from nvflare.fuel.f3.cellnet.cell import Cell
 from nvflare.fuel.f3.cellnet.defs import MessageHeaderKey, ReturnCode
 from nvflare.fuel.f3.cellnet.utils import make_reply
@@ -100,6 +100,7 @@ MODES = (MODE_MEMORY, MODE_DISK)
 MODE_HEADER = "tensor_bench_mode"
 RUN_ID_HEADER = "tensor_bench_run_id"
 DIRECT_NEGOTIATION_KEY = "direct_negotiation_enabled"
+DIRECT_BATCH_NEGOTIATION_KEY = "direct_batch_negotiation_enabled"
 
 DEFAULT_CHECKPOINT = "/tmp/gpt-j-6b/pytorch_model.bin"
 DEFAULT_TIMEOUT = 3600.0
@@ -364,30 +365,46 @@ class DirectPathTracker:
         self._lock = threading.Lock()
         self._run_id = None
         self._direct_negotiation_enabled = True
+        self._direct_batch_negotiation_enabled = True
         self._items = 0
         self._tensor_bytes = 0
         self._wire_bytes = 0
         self._tensor_ids = set()
+        self._reply_item_counts = []
 
-    def reset(self, run_id: str, direct_negotiation_enabled: bool = True):
+    def reset(
+        self,
+        run_id: str,
+        direct_negotiation_enabled: bool = True,
+        direct_batch_negotiation_enabled: bool = True,
+    ):
         if type(direct_negotiation_enabled) is not bool:
             raise TypeError("direct_negotiation_enabled must be a bool")
+        if type(direct_batch_negotiation_enabled) is not bool:
+            raise TypeError("direct_batch_negotiation_enabled must be a bool")
         with self._lock:
             self._run_id = run_id
             self._direct_negotiation_enabled = direct_negotiation_enabled
+            self._direct_batch_negotiation_enabled = direct_batch_negotiation_enabled
             self._items = 0
             self._tensor_bytes = 0
             self._wire_bytes = 0
             self._tensor_ids = set()
+            self._reply_item_counts = []
 
     def negotiation_enabled(self) -> bool:
         with self._lock:
             return self._direct_negotiation_enabled
 
+    def batch_negotiation_enabled(self) -> bool:
+        with self._lock:
+            return self._direct_batch_negotiation_enabled
+
     def record(self, items):
         with self._lock:
             if self._run_id is None:
                 return
+            self._reply_item_counts.append(len(items))
             for item in items:
                 tensor = getattr(item, "tensor", None)
                 if not isinstance(tensor, torch.Tensor):
@@ -406,6 +423,7 @@ class DirectPathTracker:
                 "tensor_bytes": self._tensor_bytes,
                 "wire_bytes": self._wire_bytes,
                 "tensor_ids": frozenset(self._tensor_ids),
+                "reply_item_counts": tuple(self._reply_item_counts),
             }
 
 
@@ -430,7 +448,11 @@ def install_direct_path_tracking():
     def benchmark_get_initial_state(consumer):
         if not _DIRECT_PATH_TRACKER.negotiation_enabled():
             return None
-        return original_get_initial_state(consumer)
+        state = original_get_initial_state(consumer)
+        if state is not None and not _DIRECT_PATH_TRACKER.batch_negotiation_enabled():
+            state = dict(state)
+            state.pop(_TENSOR_BATCH_STATE_KEY, None)
+        return state
 
     TensorConsumer.consume_direct_chunk = tracked_consume_direct_chunk
     TensorConsumer.get_initial_state = benchmark_get_initial_state
@@ -460,9 +482,12 @@ def validate_received_payload(
     mode: str,
     direct_path_stats: Optional[dict] = None,
     direct_negotiation_enabled: bool = True,
+    direct_batch_negotiation_enabled: bool = True,
 ) -> dict:
     if type(direct_negotiation_enabled) is not bool:
         raise TypeError("direct_negotiation_enabled must be a bool")
+    if type(direct_batch_negotiation_enabled) is not bool:
+        raise TypeError("direct_batch_negotiation_enabled must be a bool")
     if not isinstance(payload, dict):
         raise TypeError(f"transfer payload must be a dict, got {type(payload).__name__}")
     tensors = payload.get("tensors")
@@ -521,6 +546,12 @@ def validate_received_payload(
     direct_bytes = direct_path_stats.get("tensor_bytes", 0)
     direct_wire_bytes = direct_path_stats.get("wire_bytes", 0)
     direct_tensor_ids = direct_path_stats.get("tensor_ids", frozenset())
+    reply_item_counts = direct_path_stats.get("reply_item_counts")
+    direct_reply_item_counts = (
+        tuple(reply_item_counts) if reply_item_counts is not None else tuple(1 for _ in range(direct_items))
+    )
+    if sum(direct_reply_item_counts) != direct_items:
+        raise ValueError("direct reply item counts do not match the observed direct item count")
     expect_direct = mode == MODE_MEMORY and direct_negotiation_enabled
     expected_direct_items = eligible_items if expect_direct else 0
     expected_direct_bytes = eligible_bytes if expect_direct else 0
@@ -567,11 +598,15 @@ def validate_received_payload(
         "sample_materialized_bytes": tensor_nbytes(sample_tensor),
         "sample_sha256": sample_sha256,
         DIRECT_NEGOTIATION_KEY: direct_negotiation_enabled,
+        DIRECT_BATCH_NEGOTIATION_KEY: direct_batch_negotiation_enabled,
         "direct_eligible_items": eligible_items,
         "direct_eligible_bytes": eligible_bytes,
         "direct_items": direct_items,
         "direct_bytes": direct_bytes,
         "direct_wire_bytes": direct_wire_bytes,
+        "direct_replies": len(direct_reply_item_counts),
+        "direct_batch_replies": sum(count > 1 for count in direct_reply_item_counts),
+        "direct_reply_item_counts": direct_reply_item_counts,
         "fallback_items": fallback_items,
         "fallback_bytes": fallback_bytes,
         "direct_sample_key": direct_sample_key,
@@ -621,6 +656,7 @@ class TensorBenchmarkReceiver:
         self._run_id = None
         self._mode = None
         self._direct_negotiation_enabled = True
+        self._direct_batch_negotiation_enabled = True
         self._sampler = None
         self._configured_at = None
 
@@ -632,12 +668,17 @@ class TensorBenchmarkReceiver:
             run_id = payload.get("run_id")
             mode = payload.get("mode")
             direct_negotiation_enabled = payload.get(DIRECT_NEGOTIATION_KEY, True)
+            direct_batch_negotiation_enabled = payload.get(DIRECT_BATCH_NEGOTIATION_KEY, True)
             if not isinstance(run_id, str) or not run_id:
                 raise ValueError("run_id must be a non-empty string")
             if mode not in MODES:
                 raise ValueError(f"mode must be one of {MODES}, got {mode!r}")
             if type(direct_negotiation_enabled) is not bool:
                 raise ValueError(f"{DIRECT_NEGOTIATION_KEY} must be a bool")
+            if type(direct_batch_negotiation_enabled) is not bool:
+                raise ValueError(f"{DIRECT_BATCH_NEGOTIATION_KEY} must be a bool")
+            if direct_batch_negotiation_enabled and not direct_negotiation_enabled:
+                raise ValueError("direct batch negotiation requires direct negotiation")
 
             with self._lock:
                 if self._sampler is not None:
@@ -651,12 +692,21 @@ class TensorBenchmarkReceiver:
                 self._run_id = run_id
                 self._mode = mode
                 self._direct_negotiation_enabled = direct_negotiation_enabled
-                _DIRECT_PATH_TRACKER.reset(run_id, direct_negotiation_enabled)
+                self._direct_batch_negotiation_enabled = direct_batch_negotiation_enabled
+                _DIRECT_PATH_TRACKER.reset(
+                    run_id,
+                    direct_negotiation_enabled,
+                    direct_batch_negotiation_enabled,
+                )
                 self._sampler = ResourceSampler(self.sample_interval)
                 self._sampler.start()
                 self._configured_at = time.perf_counter()
             direct_status = "enabled" if direct_negotiation_enabled else "disabled-control"
-            print(f"[recv] ready for run={run_id} mode={mode} direct-negotiation={direct_status}")
+            batch_status = "enabled" if direct_batch_negotiation_enabled else "disabled-control"
+            print(
+                f"[recv] ready for run={run_id} mode={mode} direct-negotiation={direct_status} "
+                f"direct-batch={batch_status}"
+            )
             return make_reply(
                 ReturnCode.OK,
                 body={
@@ -664,6 +714,7 @@ class TensorBenchmarkReceiver:
                     "run_id": run_id,
                     "mode": mode,
                     DIRECT_NEGOTIATION_KEY: direct_negotiation_enabled,
+                    DIRECT_BATCH_NEGOTIATION_KEY: direct_batch_negotiation_enabled,
                 },
             )
         except Exception as ex:
@@ -683,6 +734,7 @@ class TensorBenchmarkReceiver:
                 sampler = self._sampler
                 configured_at = self._configured_at
                 direct_negotiation_enabled = self._direct_negotiation_enabled
+                direct_batch_negotiation_enabled = self._direct_batch_negotiation_enabled
                 self._sampler = None
                 self._configured_at = None
 
@@ -695,6 +747,7 @@ class TensorBenchmarkReceiver:
                 mode,
                 direct_path_stats,
                 direct_negotiation_enabled=direct_negotiation_enabled,
+                direct_batch_negotiation_enabled=direct_batch_negotiation_enabled,
             )
             validation_seconds = time.perf_counter() - validation_started
             disk_bytes = directory_size(self.offload_root) if mode == MODE_DISK else 0
@@ -721,7 +774,11 @@ class TensorBenchmarkReceiver:
                 f"rss_delta={format_bytes(memory['rss_peak_delta_bytes'])} "
                 f"disk={format_bytes(disk_bytes)} "
                 f"direct-negotiation={'enabled' if direct_negotiation_enabled else 'disabled-control'} "
+                f"direct-batch={'enabled' if direct_batch_negotiation_enabled else 'disabled-control'} "
                 f"direct={validation['direct_items']:,}/{format_bytes(validation['direct_bytes'])} "
+                f"direct-replies={validation['direct_replies']:,} "
+                f"batched-replies={validation['direct_batch_replies']:,} "
+                f"items/reply={validation['direct_reply_item_counts']} "
                 f"eligible={validation['direct_eligible_items']:,}/"
                 f"{format_bytes(validation['direct_eligible_bytes'])} "
                 f"fallback={validation['fallback_items']:,}/{format_bytes(validation['fallback_bytes'])} "
@@ -794,7 +851,9 @@ def run_one_sender_mode(
     repetition: int,
     timeout: float,
     direct_negotiation_enabled: bool = True,
+    direct_batch_negotiation_enabled: bool = True,
 ) -> dict:
+    direct_batch_negotiation_enabled = direct_negotiation_enabled and direct_batch_negotiation_enabled
     run_id = f"{mode}-{repetition}-{uuid.uuid4().hex[:8]}"
     payload = build_transfer_payload(checkpoint, tensors)
     direct_path = payload["direct_path"]
@@ -813,6 +872,7 @@ def run_one_sender_mode(
                 "run_id": run_id,
                 "mode": mode,
                 DIRECT_NEGOTIATION_KEY: direct_negotiation_enabled,
+                DIRECT_BATCH_NEGOTIATION_KEY: direct_batch_negotiation_enabled,
             }
         ),
         timeout=timeout,
@@ -820,6 +880,8 @@ def run_one_sender_mode(
     configured = check_reply(config_reply, f"configure {mode} mode")
     if configured.get(DIRECT_NEGOTIATION_KEY) is not direct_negotiation_enabled:
         raise RuntimeError("receiver did not acknowledge the requested direct-negotiation setting")
+    if configured.get(DIRECT_BATCH_NEGOTIATION_KEY) is not direct_batch_negotiation_enabled:
+        raise RuntimeError("receiver did not acknowledge the requested direct-batch setting")
 
     request = Message(
         headers={MODE_HEADER: mode, RUN_ID_HEADER: run_id},
@@ -833,6 +895,7 @@ def run_one_sender_mode(
         f"{len(tensors):,} tensor references ({unique_count:,} unique), "
         f"{format_bytes(transfer_bytes)} transfer / {format_bytes(tensor_bytes)} logical to {url}; "
         f"direct-negotiation={'enabled' if direct_negotiation_enabled else 'disabled-control'}, "
+        f"direct-batch={'enabled' if direct_batch_negotiation_enabled else 'disabled-control'}, "
         f"direct-eligible={direct_path['eligible_items']:,}/{format_bytes(direct_path['eligible_bytes'])}, "
         f"eligibility-fallback={direct_path['fallback_items']:,}/"
         f"{format_bytes(direct_path['fallback_bytes'])}"
@@ -854,6 +917,8 @@ def run_one_sender_mode(
     result = check_reply(reply, f"{mode} transfer")
     if result.get(DIRECT_NEGOTIATION_KEY) is not direct_negotiation_enabled:
         raise RuntimeError("receiver result does not match the requested direct-negotiation setting")
+    if result.get(DIRECT_BATCH_NEGOTIATION_KEY) is not direct_batch_negotiation_enabled:
+        raise RuntimeError("receiver result does not match the requested direct-batch setting")
     sender_validation_started = time.perf_counter()
     validate_sender_fingerprints(result, payload, tensors, mode)
     sender_validation_seconds = time.perf_counter() - sender_validation_started
@@ -883,7 +948,11 @@ def run_one_sender_mode(
         f"receiver_rss_delta={format_bytes(result['rss_peak_delta_bytes'])} "
         f"receiver_disk={format_bytes(result['disk_offload_bytes'])} "
         f"direct-negotiation={'enabled' if direct_negotiation_enabled else 'disabled-control'} "
+        f"direct-batch={'enabled' if direct_batch_negotiation_enabled else 'disabled-control'} "
         f"direct={result['direct_items']:,}/{format_bytes(result['direct_bytes'])} "
+        f"direct-replies={result['direct_replies']:,} "
+        f"batched-replies={result['direct_batch_replies']:,} "
+        f"items/reply={result['direct_reply_item_counts']} "
         f"fallback={result['fallback_items']:,}/{format_bytes(result['fallback_bytes'])} "
         f"direct_sample={result['direct_sample_key']!r}"
     )
@@ -916,6 +985,7 @@ def run_sender(
     connection_security: str = ConnectionSecurity.CLEAR,
     credentials_dir: Optional[Path] = None,
     direct_negotiation_enabled: bool = True,
+    direct_batch_negotiation_enabled: bool = True,
 ):
     secure, credentials = resolve_cell_security(TX_FQCN, url, connection_security, credentials_dir)
     register_tensor_decomposer()
@@ -944,6 +1014,7 @@ def run_sender(
                         repetition,
                         timeout,
                         direct_negotiation_enabled=direct_negotiation_enabled,
+                        direct_batch_negotiation_enabled=direct_batch_negotiation_enabled,
                     )
                 )
         print_summary(results)
@@ -1011,6 +1082,11 @@ def main():
         action="store_true",
         help="disable direct tensor negotiation for a legacy-path control run (receiver is configured automatically)",
     )
+    sender.add_argument(
+        "--disable-direct-batch",
+        action="store_true",
+        help="keep direct tensor replies enabled but disable bounded multi-tensor replies for a V1 control run",
+    )
     sender.add_argument("--f3-config", help="optional native F3 comm_config.yml")
     add_cell_security_args(sender)
 
@@ -1064,6 +1140,7 @@ def main():
             connection_security=args.connection_security,
             credentials_dir=args.credentials_dir,
             direct_negotiation_enabled=not args.disable_direct,
+            direct_batch_negotiation_enabled=not args.disable_direct and not args.disable_direct_batch,
         )
 
 

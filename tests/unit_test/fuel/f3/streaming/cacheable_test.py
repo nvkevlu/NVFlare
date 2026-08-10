@@ -51,6 +51,11 @@ class MockItemConsumer(ItemConsumer):
         return result
 
 
+class RejectingAdmissionCacheable(MockCacheableObject):
+    def can_add_item(self, index, current_items, current_size, item=None):
+        return False
+
+
 class TestCacheableObject:
     """Test suite for CacheableObject."""
 
@@ -91,6 +96,15 @@ class TestCacheableObject:
         assert len(data) == 3  # All items fit in one chunk
         assert state["start"] == 0
         assert state["count"] == 3
+
+    def test_first_item_is_always_emitted_even_if_admission_hook_rejects(self):
+        obj = RejectingAdmissionCacheable([b"oversized", b"next"], max_chunk_size=1)
+
+        rc, data, state = obj.produce({}, "receiver1")
+
+        assert rc == ProduceRC.OK
+        assert data == [b"oversized"]
+        assert state == {"start": 0, "count": 1}
 
     def test_cacheable_object_produce_subsequent_request(self):
         """Test producing chunks on subsequent requests."""

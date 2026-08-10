@@ -194,10 +194,13 @@ class Downloadable(ABC):
 class DirectDownloadChunk:
     """A bytes-like chunk sent as the reply payload instead of through FOBS."""
 
-    def __init__(self, data):
+    def __init__(self, data, item_count: int = 1):
         buffers = data if isinstance(data, list) else [data]
         if not buffers or any(not isinstance(item, (bytes, bytearray, memoryview)) for item in buffers):
             raise TypeError("direct chunk data must be bytes-like or a non-empty list of bytes-like buffers")
+        if type(item_count) is not int or item_count <= 0:
+            raise ValueError(f"item_count must be a positive integer but got {item_count!r}")
+        self.item_count = item_count
         self.data = []
         for item in buffers:
             view = memoryview(item)
@@ -1623,7 +1626,14 @@ class DownloadService:
                 # Sum chunk lengths for lists (len(list) counts items, not bytes).
                 if data is not None:
                     bytes_delta = sum(len(c) for c in data) if isinstance(data, list) else len(data)
-                    items_delta = len(data) if isinstance(data, list) else None
+                    if isinstance(data, list):
+                        items_delta = sum(
+                            item.item_count if isinstance(item, DirectDownloadChunk) else 1 for item in data
+                        )
+                    elif isinstance(data, DirectDownloadChunk):
+                        items_delta = data.item_count
+                    else:
+                        items_delta = None
                     tx.add_total_bytes(bytes_delta)
                     ref.emit_progress(
                         receiver_id=requester,

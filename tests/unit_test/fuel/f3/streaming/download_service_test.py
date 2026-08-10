@@ -121,11 +121,12 @@ class TestDownloadService:
 
         class DirectDownloadable(MockDownloadable):
             def produce(self, state, requester):
-                return ProduceRC.OK, [DirectDownloadChunk([b"prefix", memoryview(b"body")])], {"next": 1}
+                return ProduceRC.OK, [DirectDownloadChunk([b"prefix", memoryview(b"body")], item_count=3)], {"next": 3}
 
         service = _make_isolated_download_service()
         tx = _Transaction(timeout=10.0, num_receivers=1)
         ref = tx.add_object(DirectDownloadable([]))
+        ref.emit_progress = Mock()
         with service._tx_lock:
             service._tx_table[tx.tid] = tx
             service._ref_table[ref.rid] = ref
@@ -138,8 +139,9 @@ class TestDownloadService:
         wire = bytearray(b"".join(reply.payload))
         status, state, body = _decode_direct_control(wire)
         assert status == ProduceRC.OK
-        assert state == {"next": 1}
+        assert state == {"next": 3}
         assert bytes(body) == b"prefixbody"
+        assert any(call.kwargs.get("items_delta") == 3 for call in ref.emit_progress.call_args_list)
 
     def test_direct_control_round_trip_keeps_writable_body_view(self):
         wire = bytearray(_encode_direct_control(ProduceRC.OK, {"start": 3, "count": 1}) + b"body")
@@ -150,6 +152,11 @@ class TestDownloadService:
         assert status == ProduceRC.OK
         assert state == {"start": 3, "count": 1}
         assert bytes(body) == b"Body"
+
+    @pytest.mark.parametrize("item_count", [0, -1, True, 1.5])
+    def test_direct_chunk_rejects_invalid_item_count(self, item_count):
+        with pytest.raises(ValueError, match="positive integer"):
+            DirectDownloadChunk(b"body", item_count=item_count)
 
     @pytest.mark.parametrize("wire", [bytearray(b"short"), bytearray(b"BADMAGIC" + bytes(64))])
     def test_direct_control_rejects_malformed_payload(self, wire):

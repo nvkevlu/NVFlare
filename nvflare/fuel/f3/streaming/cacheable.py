@@ -92,6 +92,23 @@ class CacheableObject(Downloadable):
         """
         return False
 
+    def can_add_item(self, index: int, current_items: list, current_size: int, item: Any = None) -> bool:
+        """Whether ``index`` can be added to the current reply.
+
+        The default preserves the historical max-chunk and exclusive-item
+        behavior. Subclasses may override this to apply a separate bounded
+        grouping policy while leaving cache/state accounting in this class.
+        """
+        if item is None:
+            if not current_items:
+                return True
+            if self.is_item_exclusive(index):
+                return False
+            estimated_size = self.get_item_size(index)
+            return estimated_size is None or current_size + estimated_size < self.max_chunk_size
+
+        return not current_items or current_size + len(item) < self.max_chunk_size
+
     def set_transaction(self, tx_id, ref_id):
         tx_info = DownloadService.get_transaction_info(tx_id)
         self.num_receivers = tx_info.num_receivers
@@ -204,15 +221,11 @@ class CacheableObject(Downloadable):
         should_prefetch = True
 
         for i in range(start, self.size):
-            if result:
-                if self.is_item_exclusive(i):
-                    break
-                estimated_size = self.get_item_size(i)
-                if estimated_size is not None and total_size + estimated_size >= self.max_chunk_size:
-                    break
+            if result and not self.can_add_item(i, result, total_size):
+                break
             item = self._get_item(i, requester)
             item_size = len(item)
-            if not result or total_size + item_size < self.max_chunk_size:
+            if not result or self.can_add_item(i, result, total_size, item):
                 result.append(item)
                 total_size += item_size
                 if self.is_item_exclusive(i, item):

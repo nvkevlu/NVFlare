@@ -33,7 +33,8 @@ is reported separately. Sender and receiver peak RSS deltas and receiver disk
 consumption are included in the summary.
 
 Each run also reports direct-path eligible, observed-direct, and fallback tensor
-counts and bytes. Memory-mode validation hashes a tensor of at least 10 MiB and
+counts and bytes, plus the direct reply count and items-per-reply distribution.
+Memory-mode validation hashes a tensor of at least 10 MiB and
 requires that exact received tensor to have been produced by the direct decoder;
 this avoids accidentally validating only a small legacy-path tensor. Disk mode
 requires zero observed direct-path items and does not materialize the direct
@@ -69,6 +70,13 @@ the receiver for each run; the receiver needs no extra flag. Eligible tensor
 counts are still reported, while validation requires zero observed direct items.
 Omitting the flag preserves the default requirement that every eligible
 memory-mode tensor uses the negotiated direct path.
+
+To isolate bounded multi-tensor replies without falling back to safetensors,
+add `--disable-direct-batch`. This keeps the direct-memory V1 path enabled but
+forces one tensor per Download Service reply. Compare it with the default on the
+same candidate binary; `direct-replies`, `batched-replies`, and `items/reply` in
+the result prove which policy was exercised. `--disable-direct` also disables
+batch negotiation automatically.
 
 The memory-mode receiver needs enough RAM for the full model plus transient
 serialisation buffers. Put `--offload-dir` on fast local storage for a

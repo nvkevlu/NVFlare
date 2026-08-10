@@ -20,7 +20,9 @@ not in TensorDownloadable itself. These tests verify the Downloadable's basic be
 
 import gc
 import json
+import multiprocessing as mp
 import time
+import uuid
 
 import pytest
 import torch
@@ -47,6 +49,51 @@ from nvflare.fuel.utils.network_utils import get_open_ports
 def _materialize_item(item) -> bytes:
     """Apply the same FOBS externalize/internalize step used by Cell messages."""
     return fobs.loads(fobs.dumps(item, buffer_list=True))
+
+
+def _run_batched_tensor_client(port: int, server_name: str, ref_id: str, result_queue):
+    client_name = f"tensor-client-{uuid.uuid4().hex[:8]}"
+    client = Cell(client_name, f"tcp://localhost:{port}", secure=False, credentials={})
+    direct_calls = []
+    original_consume_direct = TensorConsumer.consume_direct_chunk
+
+    def track_direct_buffer(consumer, data):
+        view = memoryview(data)
+        items = original_consume_direct(consumer, data)
+        direct_calls.append((len(items), view.readonly, view.c_contiguous, len(view)))
+        return items
+
+    TensorConsumer.consume_direct_chunk = track_direct_buffer
+    try:
+        client.core_cell.start()
+        deadline = time.monotonic() + 10.0
+        while not client.core_cell.is_cell_connected(server_name) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        if not client.core_cell.is_cell_connected(server_name):
+            raise RuntimeError(f"client did not connect to {server_name}")
+
+        error, result = download_tensors(server_name, ref_id, 30.0, client)
+        if error:
+            raise RuntimeError(error)
+        expected_keys = {f"weight_{index}" for index in range(3)}
+        if set(result) != expected_keys:
+            raise RuntimeError(f"unexpected tensor keys: {sorted(result)}")
+        for index in range(3):
+            tensor = result[f"weight_{index}"]
+            if not torch.all(tensor == index):
+                raise RuntimeError(f"tensor weight_{index} did not round-trip")
+
+        retained = result["weight_0"]
+        del result
+        gc.collect()
+        retained[0] = 7
+        result_queue.put(("ok", direct_calls, int(retained[0])))
+    except Exception as ex:
+        result_queue.put(("error", repr(ex)))
+    finally:
+        TensorConsumer.consume_direct_chunk = original_consume_direct
+        client.core_cell.stop()
+        CoreCell.ALL_CELLS.pop(client_name, None)
 
 
 class TestTensorDownloadableBasic:
@@ -237,6 +284,269 @@ def test_direct_tensor_retains_received_buffer_ownership(monkeypatch):
     assert torch.equal(tensor, torch.arange(1, 5, dtype=torch.float32))
 
 
+def test_bounded_direct_batch_round_trip_is_writable_owned_and_byte_accounted(monkeypatch):
+    monkeypatch.setattr(tensor_downloader, "TEN_MEGA", 0)
+    tensors = {
+        "odd_uint8": torch.tensor([1, 2, 3], dtype=torch.uint8),
+        "matrix": torch.arange(6, dtype=torch.float64).reshape(2, 3),
+        "vector": torch.arange(5, dtype=torch.float32),
+    }
+    expected = {key: tensor.clone() for key, tensor in tensors.items()}
+    downloadable = TensorDownloadable(tensors, max_chunk_size=1)
+    downloadable.num_receivers = 1
+    consumer = TensorConsumer(None, {})
+
+    rc, chunks, state = downloadable.produce(consumer.get_initial_state(), "receiver")
+
+    assert rc == ProduceRC.OK
+    assert state["count"] == 3
+    assert state[tensor_downloader._TENSOR_BATCH_STATE_KEY] == tensor_downloader._TENSOR_BATCH_BOUNDED_V1
+    assert len(chunks) == 1
+    assert isinstance(chunks[0], DirectDownloadChunk)
+    assert chunks[0].item_count == 3
+    payload = bytearray(b"".join(chunks[0].data))
+    received = consumer.consume_direct_chunk(payload)
+    assert [item.key for item in received] == list(tensors)
+    assert sum(len(item) for item in received) == len(payload)
+    for item in received:
+        assert torch.equal(item.tensor, expected[item.key])
+
+    first = received[0].tensor
+    del chunks
+    del payload
+    del received
+    gc.collect()
+    first[0] = 9
+    assert first[0].item() == 9
+
+
+def test_direct_batch_retry_reuses_cached_snapshots_and_advances_logical_count(monkeypatch):
+    monkeypatch.setattr(tensor_downloader, "TEN_MEGA", 0)
+    tensors = {f"weight_{index}": torch.arange(8, dtype=torch.float32) + index for index in range(3)}
+    expected = {key: tensor.clone() for key, tensor in tensors.items()}
+    downloadable = TensorDownloadable(tensors, max_chunk_size=1)
+    downloadable.num_receivers = 1
+    initial_state = TensorConsumer(None, {}).get_initial_state()
+
+    rc, first, next_state = downloadable.produce(initial_state, "receiver")
+    first_wire = b"".join(first[0].data)
+    for tensor in tensors.values():
+        tensor.fill_(99)
+    rc_retry, retry, retry_state = downloadable.produce(initial_state, "receiver")
+
+    assert rc == rc_retry == ProduceRC.OK
+    assert retry_state == next_state
+    assert b"".join(retry[0].data) == first_wire
+    decoded = TensorConsumer(None, {}).consume_direct_chunk(bytearray(first_wire))
+    assert all(torch.equal(item.tensor, expected[item.key]) for item in decoded)
+
+    rc_eof, data, state = downloadable.produce(next_state, "receiver")
+    assert rc_eof == ProduceRC.EOF
+    assert data is None
+    assert state == {}
+
+
+def test_v1_only_consumer_keeps_single_tensor_replies(monkeypatch):
+    monkeypatch.setattr(tensor_downloader, "TEN_MEGA", 0)
+    tensors = {f"weight_{index}": torch.arange(8, dtype=torch.float32) for index in range(3)}
+    downloadable = TensorDownloadable(tensors, max_chunk_size=1)
+    downloadable.num_receivers = 1
+    consumer = TensorConsumer(None, {}, enable_direct_batch=False)
+
+    rc, chunks, state = downloadable.produce(consumer.get_initial_state(), "receiver")
+
+    assert rc == ProduceRC.OK
+    assert len(chunks) == 1
+    assert chunks[0].item_count == 1
+    assert state["count"] == 1
+    assert tensor_downloader._TENSOR_BATCH_STATE_KEY not in state
+
+    batch = tensor_downloader._serialize_direct_tensor_batch(
+        [
+            _serialize_tensor_item("one", torch.arange(8, dtype=torch.float32), stream_tensor=True),
+            _serialize_tensor_item("two", torch.arange(8, dtype=torch.float32), stream_tensor=True),
+        ]
+    )
+    with pytest.raises(ValueError, match="without negotiating"):
+        consumer.consume_direct_chunk(bytearray(b"".join(batch.data)))
+
+
+def test_bounded_direct_batch_never_mixes_legacy_items(monkeypatch):
+    monkeypatch.setattr(tensor_downloader, "TEN_MEGA", 1024)
+    tensors = {
+        "small_before": torch.ones(8),
+        "direct_one": torch.ones(512),
+        "direct_two": torch.ones(512),
+        "small_after": torch.ones(8),
+    }
+    downloadable = TensorDownloadable(tensors, max_chunk_size=1024 * 1024)
+    downloadable.num_receivers = 1
+    state = TensorConsumer(None, {}).get_initial_state()
+
+    _, first, state = downloadable.produce(state, "receiver")
+    _, second, state = downloadable.produce(state, "receiver")
+    _, third, _ = downloadable.produce(state, "receiver")
+
+    assert len(first) == 1 and isinstance(first[0], bytes)
+    assert len(second) == 1 and second[0].item_count == 2
+    assert len(third) == 1 and isinstance(third[0], bytes)
+
+
+def test_direct_batch_respects_exact_byte_cap(monkeypatch):
+    monkeypatch.setattr(tensor_downloader, "TEN_MEGA", 0)
+    tensors = {f"weight_{index}": torch.arange(100, dtype=torch.uint8) for index in range(4)}
+    sample_items = [_serialize_tensor_item(key, tensor, stream_tensor=True) for key, tensor in tensors.items()]
+    three_item_cap = tensor_downloader._direct_tensor_batch_size([len(item) for item in sample_items[:3]])
+    monkeypatch.setattr(tensor_downloader, "_DIRECT_TENSOR_BATCH_MAX_BYTES", three_item_cap)
+    downloadable = TensorDownloadable(tensors, max_chunk_size=1)
+    downloadable.num_receivers = 1
+    state = TensorConsumer(None, {}).get_initial_state()
+
+    _, first, state = downloadable.produce(state, "receiver")
+    _, second, _ = downloadable.produce(state, "receiver")
+
+    assert first[0].item_count == 3
+    assert len(first[0]) == three_item_cap
+    assert second[0].item_count == 1
+
+
+def test_direct_batch_respects_item_cap(monkeypatch):
+    monkeypatch.setattr(tensor_downloader, "TEN_MEGA", 0)
+    monkeypatch.setattr(tensor_downloader, "_DIRECT_TENSOR_BATCH_MAX_ITEMS", 3)
+    tensors = {f"weight_{index}": torch.arange(8, dtype=torch.float32) for index in range(5)}
+    downloadable = TensorDownloadable(tensors, max_chunk_size=1)
+    downloadable.num_receivers = 1
+    state = TensorConsumer(None, {}).get_initial_state()
+
+    _, first, state = downloadable.produce(state, "receiver")
+    _, second, _ = downloadable.produce(state, "receiver")
+
+    assert first[0].item_count == 3
+    assert second[0].item_count == 2
+
+
+def test_direct_tensor_larger_than_batch_cap_remains_v1(monkeypatch):
+    monkeypatch.setattr(tensor_downloader, "TEN_MEGA", 0)
+    monkeypatch.setattr(tensor_downloader, "_DIRECT_TENSOR_BATCH_MAX_BYTES", 128)
+    tensors = {
+        "oversized": torch.arange(256, dtype=torch.float32),
+        "next": torch.arange(8, dtype=torch.float32),
+    }
+    downloadable = TensorDownloadable(tensors, max_chunk_size=1)
+    downloadable.num_receivers = 1
+
+    _, first, state = downloadable.produce(TensorConsumer(None, {}).get_initial_state(), "receiver")
+
+    assert len(first) == 1
+    assert first[0].item_count == 1
+    assert len(first[0]) > tensor_downloader._DIRECT_TENSOR_BATCH_MAX_BYTES
+    assert state["count"] == 1
+
+
+def test_direct_batch_rejects_malformed_envelopes(monkeypatch):
+    monkeypatch.setattr(tensor_downloader, "TEN_MEGA", 0)
+    first = _serialize_tensor_item("one", torch.arange(3, dtype=torch.uint8), stream_tensor=True)
+    second = _serialize_tensor_item("two", torch.arange(4, dtype=torch.float32), stream_tensor=True)
+    batch = tensor_downloader._serialize_direct_tensor_batch([first, second])
+    valid = bytearray(b"".join(batch.data))
+    consumer = TensorConsumer(None, {})
+
+    with pytest.raises(ValueError, match="writable"):
+        consumer.consume_direct_chunk(bytes(valid))
+
+    with monkeypatch.context() as patch:
+        patch.setattr(tensor_downloader, "_DIRECT_TENSOR_BATCH_MAX_BYTES", len(valid) - 1)
+        with pytest.raises(ValueError, match="byte limit"):
+            consumer.consume_direct_chunk(bytearray(valid))
+
+    bad_count = bytearray(valid)
+    magic, _count, header_size = tensor_downloader._DIRECT_TENSOR_BATCH_HEADER.unpack_from(bad_count)
+    tensor_downloader._DIRECT_TENSOR_BATCH_HEADER.pack_into(bad_count, 0, magic, 1, header_size)
+    with pytest.raises(ValueError, match="item count"):
+        consumer.consume_direct_chunk(bad_count)
+
+    for item_count in (0, tensor_downloader._DIRECT_TENSOR_BATCH_MAX_ITEMS + 1):
+        bad_count = bytearray(valid)
+        tensor_downloader._DIRECT_TENSOR_BATCH_HEADER.pack_into(bad_count, 0, magic, item_count, header_size)
+        with pytest.raises(ValueError, match="item count"):
+            consumer.consume_direct_chunk(bad_count)
+
+    bad_header_size = bytearray(valid)
+    tensor_downloader._DIRECT_TENSOR_BATCH_HEADER.pack_into(
+        bad_header_size, 0, magic, 2, header_size + tensor_downloader._DIRECT_TENSOR_ALIGNMENT
+    )
+    with pytest.raises(ValueError, match="header size"):
+        consumer.consume_direct_chunk(bad_header_size)
+
+    bad_length = bytearray(valid)
+    tensor_downloader._DIRECT_TENSOR_BATCH_LENGTH.pack_into(
+        bad_length, tensor_downloader._DIRECT_TENSOR_BATCH_HEADER.size, len(valid)
+    )
+    with pytest.raises(ValueError, match="segment exceeds"):
+        consumer.consume_direct_chunk(bad_length)
+
+    huge_length = bytearray(valid)
+    tensor_downloader._DIRECT_TENSOR_BATCH_LENGTH.pack_into(
+        huge_length, tensor_downloader._DIRECT_TENSOR_BATCH_HEADER.size, (1 << 64) - 1
+    )
+    with pytest.raises(ValueError, match="segment exceeds"):
+        consumer.consume_direct_chunk(huge_length)
+
+    with pytest.raises(ValueError, match="segment exceeds"):
+        consumer.consume_direct_chunk(bytearray(valid[:-1]))
+
+    empty_segment = bytearray(valid)
+    tensor_downloader._DIRECT_TENSOR_BATCH_LENGTH.pack_into(
+        empty_segment, tensor_downloader._DIRECT_TENSOR_BATCH_HEADER.size, 0
+    )
+    with pytest.raises(ValueError, match="empty segment"):
+        consumer.consume_direct_chunk(empty_segment)
+
+    bad_header_padding = bytearray(valid)
+    table_end = (
+        tensor_downloader._DIRECT_TENSOR_BATCH_HEADER.size + 2 * tensor_downloader._DIRECT_TENSOR_BATCH_LENGTH.size
+    )
+    bad_header_padding[table_end] = 1
+    with pytest.raises(ValueError, match="header padding"):
+        consumer.consume_direct_chunk(bad_header_padding)
+
+    nested = bytearray(valid)
+    nested[header_size : header_size + len(tensor_downloader._DIRECT_TENSOR_BATCH_MAGIC)] = (
+        tensor_downloader._DIRECT_TENSOR_BATCH_MAGIC
+    )
+    with pytest.raises(ValueError, match="direct tensor magic"):
+        consumer.consume_direct_chunk(nested)
+
+    malformed_second = bytearray(valid)
+    first_size = tensor_downloader._DIRECT_TENSOR_BATCH_LENGTH.unpack_from(
+        malformed_second, tensor_downloader._DIRECT_TENSOR_BATCH_HEADER.size
+    )[0]
+    second_start = header_size + tensor_downloader._align_direct_size(first_size)
+    malformed_second[second_start : second_start + len(tensor_downloader._DIRECT_TENSOR_MAGIC)] = b"BADMAGIC"
+    with pytest.raises(ValueError, match="direct tensor magic"):
+        consumer.consume_direct_chunk(malformed_second)
+
+    trailing = bytearray(valid + b"x")
+    with pytest.raises(ValueError, match="trailing data"):
+        consumer.consume_direct_chunk(trailing)
+
+    duplicate = tensor_downloader._serialize_direct_tensor_batch(
+        [first, _serialize_tensor_item("one", torch.arange(5, dtype=torch.uint8), stream_tensor=True)]
+    )
+    with pytest.raises(ValueError, match="duplicate"):
+        consumer.consume_direct_chunk(bytearray(b"".join(duplicate.data)))
+
+    nonzero_padding = bytearray(valid)
+    first_size = tensor_downloader._DIRECT_TENSOR_BATCH_LENGTH.unpack_from(
+        nonzero_padding, tensor_downloader._DIRECT_TENSOR_BATCH_HEADER.size
+    )[0]
+    first_padding = header_size + first_size
+    assert first_padding < header_size + tensor_downloader._align_direct_size(first_size)
+    nonzero_padding[first_padding] = 1
+    with pytest.raises(ValueError, match="segment padding"):
+        consumer.consume_direct_chunk(nonzero_padding)
+
+
 def test_direct_tensor_rejects_readonly_or_malformed_payload(monkeypatch):
     monkeypatch.setattr(tensor_downloader, "TEN_MEGA", 0)
     item = _serialize_tensor_item("weight", torch.arange(4, dtype=torch.float32), stream_tensor=True)
@@ -315,6 +625,7 @@ def test_multi_receiver_stays_on_legacy_path():
     assert rc == ProduceRC.OK
     assert isinstance(items[0], bytes)
     assert tensor_downloader._TENSOR_STREAM_STATE_KEY not in state
+    assert tensor_downloader._TENSOR_BATCH_STATE_KEY not in state
 
 
 def test_legacy_receiver_state_keeps_new_sender_on_legacy_path():
@@ -369,50 +680,53 @@ def test_non_contiguous_tensor_retains_safetensors_validation():
         _serialize_tensor_item("weight", tensor, stream_tensor=True)
 
 
-@pytest.mark.timeout(30)
-def test_direct_tensor_round_trip_over_real_cell_is_writable_and_owned(monkeypatch):
-    monkeypatch.setattr(tensor_downloader, "TEN_MEGA", 0)
-    direct_buffers = []
-    original_consume_direct = TensorConsumer.consume_direct_chunk
-
-    def track_direct_buffer(self, data):
-        view = memoryview(data)
-        direct_buffers.append((view.readonly, view.c_contiguous))
-        return original_consume_direct(self, data)
-
-    monkeypatch.setattr(TensorConsumer, "consume_direct_chunk", track_direct_buffer)
-
+@pytest.mark.timeout(60)
+def test_direct_tensor_batch_round_trip_over_remote_cell_is_writable_and_owned():
     port = get_open_ports(1)[0]
+    # The passive root endpoint identity used by the TCP driver is "server".
+    # The peer is still guaranteed remote because it lives in a spawned process.
     server_name = "server"
     server = Cell(server_name, f"tcp://localhost:{port}", secure=False, credentials={})
-    client = Cell(f"tensor-client-{port}", f"tcp://localhost:{port}", secure=False, credentials={})
     downloader = None
+    client_process = None
+    context = mp.get_context("spawn")
+    result_queue = context.Queue()
     server.core_cell.start()
-    client.core_cell.start()
     try:
-        deadline = time.monotonic() + 5.0
-        while not client.core_cell.is_cell_connected(server_name) and time.monotonic() < deadline:
-            time.sleep(0.05)
-        assert client.core_cell.is_cell_connected(server_name)
-
-        source = torch.arange(4096, dtype=torch.float32)
+        # This ~30 MiB NVTDIR02 envelope crosses many 1 MiB F3 frames.
+        # Odd tensor lengths also exercise padding between child slots.
+        source = {
+            f"weight_{index}": torch.full(
+                (tensor_downloader.TEN_MEGA + index + 1,),
+                index,
+                dtype=torch.uint8,
+            )
+            for index in range(3)
+        }
         downloader = ObjectDownloader(cell=server, timeout=20.0, num_receivers=1)
-        ref_id = add_tensors(downloader, {"weight": source}, max_chunk_size=1024)
+        ref_id = add_tensors(downloader, source, max_chunk_size=1024)
+        client_process = context.Process(
+            target=_run_batched_tensor_client,
+            args=(port, server_name, ref_id, result_queue),
+        )
+        client_process.start()
 
-        error, result = download_tensors(server_name, ref_id, 10.0, client)
-
-        assert error is None
-        assert direct_buffers == [(False, True)]
-        tensor = result["weight"]
-        del result
-        gc.collect()
-        assert torch.equal(tensor, source)
-        tensor.add_(1)
-        assert torch.equal(tensor, source + 1)
+        status, *details = result_queue.get(timeout=45)
+        assert status == "ok", details
+        direct_calls, retained_value = details
+        assert len(direct_calls) == 1
+        item_count, readonly, contiguous, wire_size = direct_calls[0]
+        assert (item_count, readonly, contiguous) == (3, False, True)
+        assert wire_size > 3 * tensor_downloader.TEN_MEGA
+        assert retained_value == 7
     finally:
         if downloader is not None:
             downloader.delete_transaction()
-        client.core_cell.stop()
+        if client_process is not None:
+            client_process.join(timeout=10)
+            if client_process.is_alive():
+                client_process.terminate()
+                client_process.join(timeout=5)
         server.core_cell.stop()
-        CoreCell.ALL_CELLS.pop(client.core_cell.get_fqcn(), None)
         CoreCell.ALL_CELLS.pop(server.core_cell.get_fqcn(), None)
+    assert client_process is not None and client_process.exitcode == 0
