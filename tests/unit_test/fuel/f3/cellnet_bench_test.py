@@ -208,6 +208,18 @@ def test_build_cell_credentials_clear_does_not_use_credentials():
             ("rootCA.pem",),
             (DriverParams.CA_CERT,),
         ),
+        (
+            cellnet_bench.RX_FQCN,
+            ConnectionSecurity.MTLS,
+            ("rootCA.pem", "server.crt", "server.key"),
+            (DriverParams.CA_CERT, DriverParams.SERVER_CERT, DriverParams.SERVER_KEY),
+        ),
+        (
+            cellnet_bench.TX_FQCN,
+            ConnectionSecurity.MTLS,
+            ("rootCA.pem", "client.crt", "client.key"),
+            (DriverParams.CA_CERT, DriverParams.CLIENT_CERT, DriverParams.CLIENT_KEY),
+        ),
     ],
 )
 def test_build_cell_credentials_resolves_role_files(tmp_path, role, security, files, expected_keys):
@@ -248,12 +260,31 @@ def test_grpc_tls_profile_selects_synchronous_grpc():
     [
         (cellnet_bench.TX_FQCN, "tcp://receiver:8002", ConnectionSecurity.TLS, None, "requires a grpc"),
         (cellnet_bench.TX_FQCN, "grpcs://receiver:8002", ConnectionSecurity.CLEAR, None, "requires"),
+        (cellnet_bench.TX_FQCN, "stcp://receiver:8002", ConnectionSecurity.CLEAR, None, "requires"),
         (cellnet_bench.TX_FQCN, "grpc://receiver:8002", ConnectionSecurity.TLS, None, "is required"),
     ],
 )
 def test_resolve_cell_security_rejects_inconsistent_configuration(role, url, security, credentials_dir, error):
     with pytest.raises(ValueError, match=error):
         cellnet_bench.resolve_cell_security(role, url, security, credentials_dir)
+
+
+def test_resolve_cell_security_enables_stcp_hostname_verification(tmp_path):
+    credentials_dir = _make_credentials_dir(tmp_path, "rootCA.pem")
+
+    secure, credentials = cellnet_bench.resolve_cell_security(
+        cellnet_bench.TX_FQCN,
+        "stcp://receiver.example.test:8002",
+        ConnectionSecurity.TLS,
+        credentials_dir,
+    )
+
+    assert secure is True
+    assert credentials == {
+        DriverParams.CONNECTION_SECURITY.value: ConnectionSecurity.TLS,
+        DriverParams.CA_CERT.value: str(credentials_dir / "rootCA.pem"),
+        DriverParams.VERIFY_HOSTNAME.value: True,
+    }
 
 
 def test_cellnet_sender_passes_tls_credentials_and_cleans_up_on_failure(monkeypatch, tmp_path):

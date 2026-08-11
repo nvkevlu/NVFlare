@@ -35,6 +35,7 @@ class DriverParams(str, Enum):
     CLIENT_KEY = "client_key"
     CONNECTION_SECURITY = "connection_security"
     CUSTOM_CA_CERT = "custom_ca_cert"
+    VERIFY_HOSTNAME = "verify_hostname"
     SECURE = "secure"
     PORTS = "ports"
     SOCKET = "socket"

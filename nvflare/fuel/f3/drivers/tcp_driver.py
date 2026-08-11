@@ -85,7 +85,10 @@ class TcpDriver(BaseDriver):
 
         context = get_ssl_context(params, ssl_server=False)
         if context:
-            sock = context.wrap_socket(sock)
+            if context.check_hostname:
+                sock = context.wrap_socket(sock, server_hostname=host)
+            else:
+                sock = context.wrap_socket(sock)
 
         sock.connect((host, port))
 

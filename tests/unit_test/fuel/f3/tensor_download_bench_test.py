@@ -355,7 +355,14 @@ def test_memory_run_requires_a_direct_eligible_tensor(tmp_path):
     cell.send_request.assert_not_called()
 
 
-def test_tensor_sender_passes_tls_credentials(monkeypatch, tmp_path):
+@pytest.mark.parametrize(
+    "url, expected_extra_credentials",
+    [
+        ("grpc://receiver:8002", {}),
+        ("stcp://receiver.example.test:8002", {DriverParams.VERIFY_HOSTNAME.value: True}),
+    ],
+)
+def test_tensor_sender_passes_tls_credentials(monkeypatch, tmp_path, url, expected_extra_credentials):
     class FakeCell:
         instance = None
 
@@ -383,7 +390,7 @@ def test_tensor_sender_passes_tls_credentials(monkeypatch, tmp_path):
     (credentials_dir / "rootCA.pem").write_text("placeholder rootCA.pem", encoding="utf-8")
 
     tensor_download_bench.run_sender(
-        url="grpc://receiver:8002",
+        url=url,
         checkpoint=tmp_path / "model.pt",
         modes=(),
         repeat=1,
@@ -395,12 +402,14 @@ def test_tensor_sender_passes_tls_credentials(monkeypatch, tmp_path):
     )
 
     assert FakeCell.instance.stopped
-    assert FakeCell.instance.args == (tensor_download_bench.TX_FQCN, "grpc://receiver:8002")
+    assert FakeCell.instance.args == (tensor_download_bench.TX_FQCN, url)
     assert FakeCell.instance.kwargs["secure"] is True
-    assert FakeCell.instance.kwargs["credentials"] == {
+    expected_credentials = {
         DriverParams.CONNECTION_SECURITY.value: ConnectionSecurity.TLS,
         DriverParams.CA_CERT.value: str(credentials_dir / "rootCA.pem"),
     }
+    expected_credentials.update(expected_extra_credentials)
+    assert FakeCell.instance.kwargs["credentials"] == expected_credentials
 
 
 def test_tensor_receiver_passes_tls_server_credentials(monkeypatch, tmp_path):

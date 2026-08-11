@@ -34,10 +34,11 @@ Optional F3 tuning (use the same YAML on both endpoints):
     python dev_tools/f3/cellnet_bench.py send --url tcp://<receiver-host>:8002 \
         --f3-config dev_tools/f3/comm_config.yml
 
-Production-equivalent synchronous gRPC transport TLS uses grpc:// URLs, the
-dev_tools/f3/grpc_tls/comm_config.yml profile, --connection-security tls, and
-role-specific --credentials-dir paths. Credential material is never stored by
-this benchmark. Cell end-to-end message encryption remains disabled.
+Secure F3 transport tests use grpc:// or stcp:// URLs, --connection-security
+tls or mtls, and role-specific --credentials-dir paths. STCP keeps F3 over
+native TCP/TLS while removing gRPC and enables certificate hostname
+verification. Credential material is never stored by this benchmark. Cell
+end-to-end message encryption remains disabled.
 
 Raw TCP receiver and sender (no F3):
 
@@ -102,13 +103,17 @@ DEFAULT_F3_WINDOW_SIZE = STREAM_WINDOW_SIZE
 CELL_SECURITY_CHOICES = (
     ConnectionSecurity.CLEAR,
     ConnectionSecurity.TLS,
+    ConnectionSecurity.MTLS,
 )
 GRPC_SCHEMES = {"grpc", "grpcs"}
 SECURE_GRPC_SCHEMES = {"agrpcs", "grpcs", "ngrpcs"}
+STCP_SCHEMES = {"stcp"}
+SECURE_CELL_SCHEMES = SECURE_GRPC_SCHEMES | STCP_SCHEMES
+TLS_CELL_SCHEMES = GRPC_SCHEMES | STCP_SCHEMES
 ROOT_CA_FILE = "rootCA.pem"
 ROLE_CREDENTIAL_FILES = {
     RX_FQCN: ("server.crt", "server.key"),
-    TX_FQCN: (),
+    TX_FQCN: ("client.crt", "client.key"),
 }
 
 BYTE_SIZE_PATTERN = re.compile(r"\s*(\d+(?:\.\d+)?)\s*([KMGT]?)(?:I?B)?\s*", re.IGNORECASE)
@@ -295,12 +300,15 @@ def add_cell_security_args(parser: argparse.ArgumentParser):
         "--connection-security",
         choices=CELL_SECURITY_CHOICES,
         default=ConnectionSecurity.CLEAR,
-        help="F3 connection security: clear or TLS (default clear)",
+        help="F3 connection security: clear, TLS, or mTLS (default clear)",
     )
     parser.add_argument(
         "--credentials-dir",
         type=Path,
-        help=("directory containing rootCA.pem on both endpoints plus server.crt/server.key on the receiver"),
+        help=(
+            "directory containing rootCA.pem on both endpoints, server.crt/server.key on the receiver, "
+            "and client.crt/client.key on the sender for mTLS"
+        ),
     )
 
 
@@ -325,7 +333,7 @@ def build_cell_credentials(role: str, connection_security: str, credentials_dir:
         raise ValueError(f"credentials directory does not exist: {credential_root}")
 
     required_files = [ROOT_CA_FILE]
-    if role == RX_FQCN:
+    if role == RX_FQCN or connection_security == ConnectionSecurity.MTLS:
         role_cert, role_key = ROLE_CREDENTIAL_FILES[role]
         required_files.extend((role_cert, role_key))
     resolved_files = {name: credential_root / name for name in required_files}
@@ -337,23 +345,32 @@ def build_cell_credentials(role: str, connection_security: str, credentials_dir:
         DriverParams.CONNECTION_SECURITY.value: connection_security,
         DriverParams.CA_CERT.value: str(resolved_files[ROOT_CA_FILE]),
     }
-    if role == RX_FQCN:
-        credentials[DriverParams.SERVER_CERT.value] = str(resolved_files[role_cert])
-        credentials[DriverParams.SERVER_KEY.value] = str(resolved_files[role_key])
+    if role == RX_FQCN or connection_security == ConnectionSecurity.MTLS:
+        cert_param = DriverParams.SERVER_CERT if role == RX_FQCN else DriverParams.CLIENT_CERT
+        key_param = DriverParams.SERVER_KEY if role == RX_FQCN else DriverParams.CLIENT_KEY
+        credentials[cert_param.value] = str(resolved_files[role_cert])
+        credentials[key_param.value] = str(resolved_files[role_key])
     return True, credentials
 
 
 def resolve_cell_security(
     role: str, url: str, connection_security: str, credentials_dir: Optional[Path]
 ) -> tuple[bool, dict]:
-    """Validate that secure benchmark runs use the production gRPC transport."""
+    """Validate the requested F3 transport security and resolve its credentials."""
     scheme = urlparse(url).scheme.lower()
     if connection_security == ConnectionSecurity.CLEAR:
-        if scheme in SECURE_GRPC_SCHEMES:
-            raise ValueError(f"URL scheme {scheme!r} requires --connection-security tls")
-    elif scheme not in GRPC_SCHEMES:
-        raise ValueError(f"--connection-security {connection_security} requires a grpc:// or grpcs:// URL, got {url!r}")
-    return build_cell_credentials(role, connection_security, credentials_dir)
+        if scheme in SECURE_CELL_SCHEMES:
+            raise ValueError(f"URL scheme {scheme!r} requires --connection-security tls or mtls")
+    elif scheme not in TLS_CELL_SCHEMES:
+        raise ValueError(
+            f"--connection-security {connection_security} requires a grpc://, grpcs://, or stcp:// URL, got {url!r}"
+        )
+    secure, credentials = build_cell_credentials(role, connection_security, credentials_dir)
+    if secure and scheme in STCP_SCHEMES and role == TX_FQCN:
+        # Native TCP TLS otherwise checks only the issuing CA. The benchmark
+        # always verifies the receiver URL host against its certificate SAN.
+        credentials[DriverParams.VERIFY_HOSTNAME.value] = True
+    return secure, credentials
 
 
 def parse_tcp_url(url: str) -> tuple[str, int]:

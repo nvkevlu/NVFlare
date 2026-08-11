@@ -54,6 +54,20 @@ def ssl_required(params: dict) -> bool:
     return scheme in SECURE_SCHEMES or str2bool(params.get(DriverParams.SECURE.value))
 
 
+def verify_hostname_required(params: dict) -> bool:
+    value = params.get(DriverParams.VERIFY_HOSTNAME.value, False)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        parsed = str2bool(value)
+        if parsed is not None:
+            return parsed
+    raise CommError(
+        CommError.BAD_CONFIG,
+        f"{DriverParams.VERIFY_HOSTNAME.value} must be a bool or boolean string, got {value!r}",
+    )
+
+
 def get_ssl_context(params: dict, ssl_server: bool) -> Optional[SSLContext]:
     if not ssl_required(params):
         params[DriverParams.IMPLEMENTED_CONN_SEC.value] = "clear"
@@ -101,8 +115,12 @@ def get_ssl_context(params: dict, ssl_server: bool) -> Optional[SSLContext]:
         role = "Server" if ssl_server else "Client"
         raise CommError(CommError.BAD_CONFIG, f"{role} certificate parameters are missing for scheme {scheme}")
 
+    verify_hostname = verify_hostname_required(params)
     ctx.minimum_version = ssl.TLSVersion.TLSv1_2
-    ctx.check_hostname = False
+    # Historically the native TLS drivers validated only the certificate chain.
+    # Keep that behavior unless the connector explicitly requests hostname
+    # verification so existing deployments can adopt it deliberately.
+    ctx.check_hostname = not ssl_server and verify_hostname
     ctx.load_verify_locations(ca_path)
     if cert_path:
         ctx.load_cert_chain(certfile=cert_path, keyfile=key_path)

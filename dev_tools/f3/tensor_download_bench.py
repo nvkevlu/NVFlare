@@ -27,9 +27,10 @@ Run the sender on the host containing the checkpoint:
 The sender runs both memory and disk-offload modes by default. The timed result
 includes FOBS decomposition, Download Service transfer, receiver reconstruction,
 and validation. Use the same optional comm_config.yml on both hosts to tune F3.
-For production-equivalent transport TLS, use grpc:// URLs with the synchronous
-gRPC profile plus --connection-security tls and role-specific --credentials-dir
-paths. Cell end-to-end message encryption remains disabled.
+For secure transport tests, use grpc:// or stcp:// URLs with
+--connection-security tls or mtls and role-specific --credentials-dir paths.
+STCP keeps F3 over native TCP/TLS while removing gRPC and enables certificate
+hostname verification. Cell end-to-end message encryption remains disabled.
 """
 
 import argparse
