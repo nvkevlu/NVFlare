@@ -119,3 +119,7 @@ class Driver(ABC):
     def register_conn_monitor(self, monitor: ConnMonitor):
         """Register a monitor for connection state change, including new connections"""
         self.conn_monitor = monitor
+
+    def get_max_connections_per_endpoint(self) -> int:
+        """Return the maximum number of physical connections retained for one endpoint."""
+        return 1

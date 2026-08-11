@@ -29,9 +29,10 @@ DEFAULT_SEND_STALL_CONSECUTIVE_CHECKS = 3
 
 
 class HeartbeatMonitor(Thread):
-    def __init__(self, conns: Dict[str, SfmConnection]):
+    def __init__(self, conns: Dict[str, SfmConnection], conns_lock=None):
         Thread.__init__(self, name="hb_mon", daemon=True)
         self.conns = conns
+        self.conns_lock = conns_lock
         self.stopped = Event()
         self.curr_time = 0
         config = CommConfigurator()
@@ -64,7 +65,14 @@ class HeartbeatMonitor(Thread):
     def _check_heartbeat(self):
 
         active_keys = set()
-        for sfm_conn in self.conns.values():
+        # Connections can be added or removed concurrently as a native-TLS
+        # lane cohort reconnects. Take the snapshot under ConnManager's lock.
+        if self.conns_lock:
+            with self.conns_lock:
+                connections = list(self.conns.values())
+        else:
+            connections = list(self.conns.values())
+        for sfm_conn in connections:
             conn_key = sfm_conn.get_name() if hasattr(sfm_conn, "get_name") else str(id(sfm_conn))
             active_keys.add(conn_key)
 

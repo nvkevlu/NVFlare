@@ -99,7 +99,7 @@ class ConnManager(ConnMonitor):
                 "sfm_send_frame", "SFM send_frame time in secs", scope=local_endpoint.name
             )
         self.send_frame_stats = stats
-        self.heartbeat_monitor = HeartbeatMonitor(self.sfm_conns)
+        self.heartbeat_monitor = HeartbeatMonitor(self.sfm_conns, self.lock)
 
     def add_connector(self, driver: Driver, params: dict, mode: Mode) -> str:
 
@@ -179,7 +179,7 @@ class ConnManager(ConnMonitor):
             log.debug(f"Endpoint {name} doesn't exist or already removed")
             return
 
-        for sfm_conn in sfm_endpoint.connections:
+        for sfm_conn in sfm_endpoint.get_connections():
             sfm_conn.conn.close()
 
         self.sfm_endpoints.pop(name)
@@ -192,7 +192,7 @@ class ConnManager(ConnMonitor):
             log.debug("Endpoint {name} doesn't exist")
             return None
 
-        return sfm_endpoint.connections
+        return sfm_endpoint.get_connections()
 
     def send_message(self, endpoint: Endpoint, app_id: int, headers: Optional[dict], payload: BytesAlike):
         """Send a message to endpoint for app
@@ -227,8 +227,12 @@ class ConnManager(ConnMonitor):
 
         stream_id = sfm_endpoint.next_stream_id()
 
-        # When multiple connections, round-robin by stream ID
-        sfm_conn = sfm_endpoint.get_connection(stream_id)
+        is_stream_data = bool(
+            headers
+            and headers.get(MessageHeaderKey.CHANNEL) == STREAM_CHANNEL
+            and headers.get(MessageHeaderKey.TOPIC) == STREAM_DATA_TOPIC
+        )
+        sfm_conn = sfm_endpoint.get_connection(stream_id, bulk=is_stream_data)
         if not sfm_conn:
             log.error("Logic error, ready endpoint has no connections")
             raise CommError(CommError.ERROR, f"Endpoint {endpoint.name} has no connection")
@@ -364,10 +368,14 @@ class ConnManager(ConnMonitor):
                 headers = msgpack.unpackb(frame[PREFIX_LEN : PREFIX_LEN + prefix.header_len])
 
             if prefix.type in (Types.HELLO, Types.READY):
-                if prefix.type == Types.HELLO:
-                    sfm_conn.send_handshake(Types.READY)
-
                 data = self.get_dict_payload(prefix, frame)
+                if prefix.type == Types.HELLO:
+                    # Echo the active side's lane assignment in READY while
+                    # preserving the historical READY-before-monitor ordering.
+                    sfm_conn.lane = data.get(HandshakeKeys.CONNECTION_LANE, sfm_conn.lane)
+                    sfm_conn.pool_size = data.get(HandshakeKeys.CONNECTION_POOL_SIZE, sfm_conn.pool_size)
+                    sfm_conn.pool_id = data.get(HandshakeKeys.CONNECTION_POOL_ID, sfm_conn.pool_id)
+                    sfm_conn.send_handshake(Types.READY)
                 self.update_endpoint(sfm_conn, data)
             elif prefix.type == Types.PING:
                 sfm_conn.send_heartbeat(Types.PONG)
@@ -442,6 +450,38 @@ class ConnManager(ConnMonitor):
                 CommError.BAD_DATA, f"Duplicate endpoint name {endpoint_name} for connection {sfm_conn.get_name()}"
             )
 
+        lane = data.pop(HandshakeKeys.CONNECTION_LANE, sfm_conn.lane)
+        pool_size = data.pop(HandshakeKeys.CONNECTION_POOL_SIZE, sfm_conn.pool_size)
+        pool_id = data.pop(HandshakeKeys.CONNECTION_POOL_ID, sfm_conn.pool_id)
+        if isinstance(lane, bool) or not isinstance(lane, int) or lane < 0:
+            sfm_conn.conn.close()
+            raise CommError(CommError.BAD_DATA, f"Invalid connection lane {lane!r} for {sfm_conn.get_name()}")
+        if isinstance(pool_size, bool) or not isinstance(pool_size, int) or pool_size < 1:
+            sfm_conn.conn.close()
+            raise CommError(CommError.BAD_DATA, f"Invalid connection pool size {pool_size!r} for {sfm_conn.get_name()}")
+        if pool_id is not None and (not isinstance(pool_id, str) or not pool_id or len(pool_id) > 64):
+            sfm_conn.conn.close()
+            raise CommError(CommError.BAD_DATA, f"Invalid connection pool ID for {sfm_conn.get_name()}")
+        if pool_size > 1 and not pool_id:
+            sfm_conn.conn.close()
+            raise CommError(CommError.BAD_DATA, f"Missing connection pool ID for {sfm_conn.get_name()}")
+
+        driver = getattr(sfm_conn.conn.connector, "driver", None)
+        max_connections_getter = getattr(driver, "get_max_connections_per_endpoint", None)
+        max_connections = max_connections_getter() if callable(max_connections_getter) else 1
+        if isinstance(max_connections, bool) or not isinstance(max_connections, int) or max_connections < 1:
+            max_connections = 1
+        if pool_size > max_connections or lane >= pool_size:
+            sfm_conn.conn.close()
+            raise CommError(
+                CommError.BAD_DATA,
+                f"Connection lane/pool {lane}/{pool_size} exceeds local endpoint limit {max_connections} "
+                f"for {sfm_conn.get_name()}",
+            )
+        sfm_conn.lane = lane
+        sfm_conn.pool_size = pool_size
+        sfm_conn.pool_id = pool_id
+
         conn_props = sfm_conn.conn.get_conn_properties()
         # Passive mTLS connections must always present the connecting peer's CN.
         # Active mTLS connections enforce the same binding when the driver exposes
@@ -466,23 +506,31 @@ class ConnManager(ConnMonitor):
                     raise CommError(CommError.BAD_DATA, str(ex))
 
         endpoint = Endpoint(endpoint_name, data)
-        endpoint.state = EndpointState.READY
         if conn_props:
             endpoint.conn_props.update(conn_props)
 
-        sfm_endpoint = self.sfm_endpoints.get(endpoint_name)
-        if sfm_endpoint:
-            old_state = sfm_endpoint.endpoint.state
+        with self.lock:
+            sfm_endpoint = self.sfm_endpoints.get(endpoint_name)
+            if sfm_endpoint:
+                old_state = sfm_endpoint.endpoint.state
+            else:
+                old_state = EndpointState.IDLE
+                sfm_endpoint = SfmEndpoint(endpoint, max_connections=max_connections)
+
+            try:
+                evicted = sfm_endpoint.add_connection(sfm_conn)
+            except ValueError as ex:
+                sfm_conn.conn.close()
+                raise CommError(CommError.BAD_DATA, str(ex)) from ex
+            sfm_conn.sfm_endpoint = sfm_endpoint
             sfm_endpoint.endpoint = endpoint
-        else:
-            old_state = EndpointState.IDLE
-            sfm_endpoint = SfmEndpoint(endpoint)
+            endpoint.state = EndpointState.READY if sfm_endpoint.is_ready() else EndpointState.IDLE
+            self.sfm_endpoints[endpoint_name] = sfm_endpoint
+            notify = endpoint.state != old_state
 
-        sfm_endpoint.add_connection(sfm_conn)
-        sfm_conn.sfm_endpoint = sfm_endpoint
-        self.sfm_endpoints[endpoint_name] = sfm_endpoint
-
-        if endpoint.state != old_state:
+        for old_conn in evicted:
+            old_conn.conn.close()
+        if notify:
             self.notify_monitors(endpoint)
 
     def notify_monitors(self, endpoint: Endpoint):
@@ -511,7 +559,7 @@ class ConnManager(ConnMonitor):
             sfm_conn.send_handshake(Types.HELLO)
 
     def close_connection(self, connection: Connection):
-
+        notify_endpoint = None
         with self.lock:
             name = connection.name
             if name not in self.sfm_conns:
@@ -527,10 +575,13 @@ class ConnManager(ConnMonitor):
             old_state = sfm_endpoint.endpoint.state
             sfm_endpoint.remove_connection(sfm_conn)
 
-            state = EndpointState.READY if sfm_endpoint.connections else EndpointState.DISCONNECTED
+            state = EndpointState.READY if sfm_endpoint.is_ready() else EndpointState.DISCONNECTED
             sfm_endpoint.endpoint.state = state
             if old_state != state:
-                self.notify_monitors(sfm_endpoint.endpoint)
+                notify_endpoint = sfm_endpoint.endpoint
+
+        if notify_endpoint:
+            self.notify_monitors(notify_endpoint)
 
     def send_loopback_message(self, endpoint: Endpoint, app_id: int, headers: Optional[dict], payload: BytesAlike):
         """Send message to itself"""

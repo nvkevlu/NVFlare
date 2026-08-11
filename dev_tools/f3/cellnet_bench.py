@@ -66,6 +66,7 @@ from pathlib import Path
 from typing import Optional
 from urllib.parse import urlparse
 
+import psutil
 import yaml
 
 from nvflare.apis.fl_constant import ConnectionSecurity
@@ -99,6 +100,8 @@ DEFAULT_TCP_WARMUP_SIZE = GB
 DEFAULT_TARGET_GBPS = 25.0
 DEFAULT_F3_CHUNK_SIZE = STREAM_CHUNK_SIZE
 DEFAULT_F3_WINDOW_SIZE = STREAM_WINDOW_SIZE
+DEFAULT_TCP_SEND_QUEUE_SIZE = 64 * MB
+MAX_TCP_BULK_LANES = 4
 
 CELL_SECURITY_CHOICES = (
     ConnectionSecurity.CLEAR,
@@ -131,6 +134,7 @@ F3_BYTE_SIZE_KEYS = {
     "streaming_window_size",
     "streaming_ack_interval",
     "streaming_retry_max_pending_bytes",
+    "tcp_send_queue_bytes",
 }
 GRPC_BYTE_SIZE_OPTIONS = {
     "grpc.max_send_message_length",
@@ -244,6 +248,22 @@ def validate_f3_config(config: dict):
                 f"streaming_ack_interval ({ack_interval:,}) must not exceed streaming_window_size ({window_size:,})"
             )
 
+    async_send = config.get("tcp_async_send", False)
+    if not isinstance(async_send, bool):
+        raise ValueError(f"tcp_async_send must be a boolean, got {async_send!r}")
+    bulk_lanes = config.get("tcp_bulk_lanes", 0)
+    if isinstance(bulk_lanes, bool) or not isinstance(bulk_lanes, int) or not 0 <= bulk_lanes <= MAX_TCP_BULK_LANES:
+        raise ValueError(f"tcp_bulk_lanes must be between 0 and {MAX_TCP_BULK_LANES}, got {bulk_lanes!r}")
+    if bulk_lanes and not async_send:
+        raise ValueError("tcp_bulk_lanes requires tcp_async_send: true")
+    if async_send:
+        queue_size = _positive_int(config, "tcp_send_queue_bytes", DEFAULT_TCP_SEND_QUEUE_SIZE)
+        if queue_size <= chunk_size:
+            raise ValueError(f"tcp_send_queue_bytes ({queue_size:,}) must exceed streaming_chunk_size ({chunk_size:,})")
+    handshake_timeout = config.get("tcp_handshake_timeout", 10.0)
+    if isinstance(handshake_timeout, bool) or not isinstance(handshake_timeout, (int, float)) or handshake_timeout <= 0:
+        raise ValueError(f"tcp_handshake_timeout must be positive, got {handshake_timeout!r}")
+
 
 def configure_f3(config_file: str) -> tuple[Path, dict]:
     """Load a native F3 comm_config YAML before any cells are created."""
@@ -288,9 +308,14 @@ def f3_config_summary() -> str:
     config = CommConfigurator()
     chunk_size = config.get_streaming_chunk_size(DEFAULT_F3_CHUNK_SIZE)
     window_size = config.get_streaming_window_size(DEFAULT_F3_WINDOW_SIZE)
+    async_send = config.get_tcp_async_send(False)
+    bulk_lanes = config.get_tcp_bulk_lanes(0)
+    queue_size = config.get_tcp_send_queue_bytes(DEFAULT_TCP_SEND_QUEUE_SIZE)
     return (
         f"streaming_chunk_size={chunk_size:,} ({chunk_size / MB:,.1f} MiB), "
-        f"streaming_window_size={window_size:,} ({window_size / MB:,.1f} MiB)"
+        f"streaming_window_size={window_size:,} ({window_size / MB:,.1f} MiB), "
+        f"tcp_async_send={async_send}, tcp_bulk_lanes={bulk_lanes}, "
+        f"tcp_send_queue_bytes={queue_size:,} ({queue_size / MB:,.1f} MiB)"
     )
 
 
@@ -589,9 +614,8 @@ def run_tcp_sender(
 
 
 def rss_bytes() -> int:
-    """Current RSS of this process, in bytes (Linux)."""
-    with open("/proc/self/statm") as f:
-        return int(f.read().split()[1]) * os.sysconf("SC_PAGESIZE")
+    """Current resident set size of this process."""
+    return psutil.Process().memory_info().rss
 
 
 class MemSampler:

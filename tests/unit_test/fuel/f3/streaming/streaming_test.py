@@ -153,6 +153,9 @@ class TestStreamCell:
 
         client_name = f"segmented-client-{uuid.uuid4().hex[:8]}"
         sender_core = CoreCell(client_name, f"tcp://localhost:{port}", secure=False, credentials={})
+        # Force remote resolution before start. A stale process-local test Cell
+        # named "server" would otherwise suppress creation of the TCP connector.
+        sender_core.ALL_CELLS = {}
         try:
             client_cell = StreamCell(sender_core)
             sender_core.start()
@@ -161,9 +164,6 @@ class TestStreamCell:
                 time.sleep(0.05)
             assert sender_core.agents.get("server") is not None
 
-            # A process-local stale test Cell named "server" must not turn this
-            # into direct dispatch. The peer lives in the spawned process.
-            sender_core.ALL_CELLS = {}
             remote_send = MagicMock(wraps=sender_core.communicator.send)
             monkeypatch.setattr(sender_core.communicator, "send", remote_send)
             send_future = client_cell.send_blob(TEST_CHANNEL, TEST_TOPIC, "server", message, reliable=True)

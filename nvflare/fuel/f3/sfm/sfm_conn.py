@@ -20,6 +20,7 @@ from typing import Optional
 import msgpack
 
 from nvflare.fuel.f3.connection import BytesAlike, Connection
+from nvflare.fuel.f3.drivers.driver_params import DriverParams
 from nvflare.fuel.f3.endpoint import Endpoint
 from nvflare.fuel.f3.sfm.constants import HandshakeKeys, Types
 from nvflare.fuel.f3.sfm.prefix import PREFIX_LEN, Prefix
@@ -88,6 +89,12 @@ class SfmConnection:
         self.lock = threading.Lock()
         self.send_state_lock = threading.Lock()
         self.send_started_at = 0.0
+        get_conn_properties = getattr(conn, "get_conn_properties", None)
+        conn_props = get_conn_properties() if callable(get_conn_properties) else {}
+        conn_props = conn_props or {}
+        self.lane = conn_props.get(DriverParams.CONNECTION_LANE.value, 0)
+        self.pool_size = conn_props.get(DriverParams.CONNECTION_POOL_SIZE.value, 1)
+        self.pool_id = conn_props.get(DriverParams.CONNECTION_POOL_ID.value)
 
     def get_name(self) -> str:
         return self.conn.name
@@ -105,10 +112,18 @@ class SfmConnection:
     def send_handshake(self, frame_type: int):
         """Send HELLO/READY frame"""
 
-        data = {HandshakeKeys.ENDPOINT_NAME: self.local_endpoint.name, HandshakeKeys.TIMESTAMP: time.time()}
-
+        data = {}
         if self.local_endpoint.properties:
             data.update(self.local_endpoint.properties)
+
+        # Handshake metadata is transport-owned and cannot be overridden by
+        # application endpoint properties.
+        data[HandshakeKeys.ENDPOINT_NAME] = self.local_endpoint.name
+        data[HandshakeKeys.TIMESTAMP] = time.time()
+        data[HandshakeKeys.CONNECTION_LANE] = self.lane
+        data[HandshakeKeys.CONNECTION_POOL_SIZE] = self.pool_size
+        if self.pool_id:
+            data[HandshakeKeys.CONNECTION_POOL_ID] = self.pool_id
 
         self.send_dict(frame_type, 1, data)
 

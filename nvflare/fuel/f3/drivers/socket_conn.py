@@ -15,7 +15,9 @@ import errno
 import logging
 import select
 import socket
+import threading
 import time
+from collections import deque
 from socketserver import BaseRequestHandler
 from typing import Any, Union
 
@@ -31,6 +33,8 @@ from nvflare.security.logging import secure_format_exception
 
 log = logging.getLogger(__name__)
 
+DEFAULT_TCP_SEND_QUEUE_BYTES = 64 * 1024 * 1024
+
 
 class SocketConnection(Connection):
     def __init__(self, sock: Any, connector: ConnectorInfo, secure: bool = False):
@@ -38,11 +42,37 @@ class SocketConnection(Connection):
         self.sock = sock
         self.secure = secure
         self.closing = False
+        self.closed = False
         config = CommConfigurator()
         if config.get_tcp_no_delay(True):
             self._set_tcp_no_delay()
         self.conn_props = self._get_socket_properties()
         self.send_timeout = config.get_streaming_send_timeout(30.0)
+        self.async_send = config.get_tcp_async_send(False)
+        if not isinstance(self.async_send, bool):
+            raise CommError(CommError.BAD_CONFIG, f"tcp_async_send must be a bool, got {self.async_send!r}")
+        self.send_queue_limit = config.get_tcp_send_queue_bytes(DEFAULT_TCP_SEND_QUEUE_BYTES)
+        if (
+            isinstance(self.send_queue_limit, bool)
+            or not isinstance(self.send_queue_limit, int)
+            or self.send_queue_limit <= 0
+        ):
+            raise CommError(
+                CommError.BAD_CONFIG,
+                f"tcp_send_queue_bytes must be positive but got {self.send_queue_limit}",
+            )
+        self.send_queue = deque()
+        self.queued_send_bytes = 0
+        self.send_condition = threading.Condition()
+        self.writer_error = None
+        self.writer_thread = None
+        if self.async_send:
+            self.writer_thread = threading.Thread(
+                target=self._writer_loop,
+                name=f"tcp_writer_{self.name}",
+                daemon=True,
+            )
+            self.writer_thread.start()
 
     def _set_tcp_no_delay(self):
         """Disable Nagle's algorithm.
@@ -65,7 +95,14 @@ class SocketConnection(Connection):
         return self.conn_props
 
     def close(self):
-        self.closing = True
+        with self.send_condition:
+            if self.closed:
+                return
+            self.closed = True
+            self.closing = True
+            self.send_queue.clear()
+            self.queued_send_bytes = 0
+            self.send_condition.notify_all()
 
         if self.sock:
             try:
@@ -75,7 +112,18 @@ class SocketConnection(Connection):
 
             self.sock.close()
 
+        writer = self.writer_thread
+        if writer and writer is not threading.current_thread():
+            writer.join(timeout=1.0)
+
     def send_frame(self, frame: BytesAlike):
+        if self.async_send:
+            self._queue_frame(frame)
+            return
+
+        self._send_frame_sync(frame)
+
+    def _send_frame_sync(self, frame: BytesAlike):
         try:
             self._send_with_timeout(frame, self.send_timeout)
         except CommError as error:
@@ -99,6 +147,87 @@ class SocketConnection(Connection):
                         f"Connection {self.name} is closed while sending: {secure_format_exception(ex)}",
                     )
                 raise CommError(CommError.ERROR, f"Error sending frame on conn {self}: {secure_format_exception(ex)}")
+
+    def _queue_frame(self, frame: BytesAlike):
+        immutable_frame = frame if isinstance(frame, bytes) else bytes(frame)
+        frame_size = len(immutable_frame)
+        if frame_size > self.send_queue_limit:
+            raise CommError(
+                CommError.BAD_CONFIG,
+                f"Frame size {frame_size} exceeds tcp_send_queue_bytes {self.send_queue_limit}",
+            )
+
+        deadline = time.monotonic() + self.send_timeout
+        with self.send_condition:
+            while self.queued_send_bytes + frame_size > self.send_queue_limit:
+                self._check_writer_state()
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise CommError(
+                        CommError.TIMEOUT,
+                        f"send queue timeout after {self.send_timeout} seconds on {self.name}",
+                    )
+                self.send_condition.wait(timeout=remaining)
+
+            self._check_writer_state()
+            self.send_queue.append(immutable_frame)
+            self.queued_send_bytes += frame_size
+            self.send_condition.notify_all()
+
+    def _check_writer_state(self):
+        if self.writer_error:
+            raise self.writer_error
+        if self.closing:
+            raise CommError(CommError.CLOSED, f"Connection {self.name} is closed")
+
+    def _writer_loop(self):
+        while True:
+            with self.send_condition:
+                while not self.send_queue and not self.closing:
+                    self.send_condition.wait()
+                if self.closing:
+                    return
+                frame = self.send_queue[0]
+
+            try:
+                self._send_with_timeout(frame, self.send_timeout)
+            except Exception as ex:
+                if isinstance(ex, CommError):
+                    error = ex
+                elif self._is_timeout_exception(ex):
+                    error = CommError(
+                        CommError.TIMEOUT,
+                        f"send_frame timeout on conn {self}: {secure_format_exception(ex)}",
+                    )
+                elif self._is_closed_socket_exception(ex):
+                    error = CommError(
+                        CommError.CLOSED,
+                        f"Connection {self.name} is closed while sending: {secure_format_exception(ex)}",
+                    )
+                else:
+                    error = CommError(
+                        CommError.ERROR,
+                        f"Error sending frame on conn {self}: {secure_format_exception(ex)}",
+                    )
+
+                with self.send_condition:
+                    self.writer_error = error
+                    self.closing = True
+                    self.send_queue.clear()
+                    self.queued_send_bytes = 0
+                    self.send_condition.notify_all()
+                try:
+                    self.sock.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+                return
+
+            with self.send_condition:
+                if self.closing:
+                    return
+                sent_frame = self.send_queue.popleft()
+                self.queued_send_bytes -= len(sent_frame)
+                self.send_condition.notify_all()
 
     @staticmethod
     def _is_timeout_exception(ex: Exception) -> bool:
@@ -232,12 +361,33 @@ class SocketConnection(Connection):
 
 class ConnectionHandler(BaseRequestHandler):
     def handle(self):
-
-        # noinspection PyUnresolvedReferences
-        connection = SocketConnection(self.request, self.server.connector, self.server.ssl_context)
         # noinspection PyUnresolvedReferences
         driver = self.server.driver
 
-        driver.add_connection(connection)
-        connection.read_loop()
-        driver.close_connection(connection)
+        request = self.request
+        ssl_context = self.server.ssl_context
+        try:
+            if ssl_context:
+                request.settimeout(self.server.handshake_timeout)
+                request = ssl_context.wrap_socket(request, server_side=True)
+                request.settimeout(None)
+        except Exception as ex:
+            log.warning(f"Rejected TCP TLS connection: {secure_format_exception(ex)}")
+            try:
+                request.close()
+            except OSError:
+                pass
+            return
+
+        # noinspection PyUnresolvedReferences
+        connection = SocketConnection(request, self.server.connector, bool(ssl_context))
+
+        added = False
+        try:
+            driver.add_connection(connection)
+            added = True
+            connection.read_loop()
+        finally:
+            connection.close()
+            if added:
+                driver.close_connection(connection)

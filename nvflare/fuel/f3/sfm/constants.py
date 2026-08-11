@@ -26,6 +26,9 @@ class Types:
 class HandshakeKeys:
     ENDPOINT_NAME = "endpoint_name"
     TIMESTAMP = "timestamp"
+    CONNECTION_LANE = "connection_lane"
+    CONNECTION_POOL_SIZE = "connection_pool_size"
+    CONNECTION_POOL_ID = "connection_pool_id"
 
 
 class Flags:

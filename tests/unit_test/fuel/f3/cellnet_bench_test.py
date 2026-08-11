@@ -126,6 +126,9 @@ def test_configure_f3_loads_chunk_and_window_sizes(tmp_path):
                 "streaming_chunk_size: 4M",
                 "streaming_window_size: 256M",
                 "streaming_ack_interval: 64M",
+                "tcp_async_send: true",
+                "tcp_bulk_lanes: 2",
+                "tcp_send_queue_bytes: 32M",
                 "grpc:",
                 "  max_workers: 32",
                 "  options:",
@@ -144,6 +147,9 @@ def test_configure_f3_loads_chunk_and_window_sizes(tmp_path):
         assert config["grpc"]["options"][0][1] == 2 * 1024**3
         assert configurator.get_streaming_chunk_size(1) == 4194304
         assert configurator.get_streaming_window_size(1) == 268435456
+        assert configurator.get_tcp_async_send(False) is True
+        assert configurator.get_tcp_bulk_lanes(0) == 2
+        assert configurator.get_tcp_send_queue_bytes(1) == 32 * 1024**2
         assert "streaming_chunk_size=4,194,304" in cellnet_bench.f3_config_summary()
     finally:
         cellnet_bench.ConfigService.reset()
@@ -165,6 +171,14 @@ def test_configure_f3_loads_chunk_and_window_sizes(tmp_path):
             "streaming_window_size: 16777216\nstreaming_ack_interval: 33554432\n",
             "streaming_ack_interval .* must not exceed streaming_window_size",
         ),
+        ("tcp_async_send: yes-please\n", "tcp_async_send must be a boolean"),
+        ("tcp_async_send: false\ntcp_bulk_lanes: 2\n", "requires tcp_async_send"),
+        ("tcp_async_send: true\ntcp_bulk_lanes: 5\n", "tcp_bulk_lanes must be between"),
+        (
+            "streaming_chunk_size: 2M\ntcp_async_send: true\ntcp_send_queue_bytes: 2M\n",
+            "tcp_send_queue_bytes .* must exceed streaming_chunk_size",
+        ),
+        ("tcp_handshake_timeout: 0\n", "tcp_handshake_timeout must be positive"),
     ],
 )
 def test_configure_f3_rejects_invalid_streaming_settings(tmp_path, config_text, error):
@@ -252,6 +266,20 @@ def test_grpc_tls_profile_selects_synchronous_grpc():
     assert config["use_aio_grpc"] is False
     assert config["grpc"]["max_workers"] == 100
     assert config["streaming_chunk_size"] == cellnet_bench.MB
+    assert config["streaming_window_size"] == 64 * cellnet_bench.MB
+
+
+def test_native_tls_profile_enables_two_bulk_lanes_on_one_stcp_listener():
+    profile = cellnet_bench.Path(cellnet_bench.__file__).with_name("native_tls") / "comm_config.yml"
+    with profile.open(encoding="utf-8") as stream:
+        config = cellnet_bench.normalize_f3_config(cellnet_bench.yaml.safe_load(stream))
+
+    cellnet_bench.validate_f3_config(config)
+    assert config["adhoc_conn_scheme"] == "stcp"
+    assert config["internal_conn_scheme"] == "stcp"
+    assert config["tcp_async_send"] is True
+    assert config["tcp_bulk_lanes"] == 2
+    assert config["tcp_send_queue_bytes"] == 64 * cellnet_bench.MB
     assert config["streaming_window_size"] == 64 * cellnet_bench.MB
 
 

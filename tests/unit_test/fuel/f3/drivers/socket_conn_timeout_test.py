@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import threading
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -54,12 +55,23 @@ class FakeSocket:
 
 
 class TestSocketConnectionSendTimeout:
-    def _make_conn(self, monkeypatch, timeout_sec, send_returns=None):
+    def _make_conn(self, monkeypatch, timeout_sec, send_returns=None, async_send=False, queue_bytes=64 * 1024 * 1024):
         monkeypatch.setattr(CommConfigurator, "get_streaming_send_timeout", lambda self, default: float(timeout_sec))
+        monkeypatch.setattr(CommConfigurator, "get_tcp_async_send", lambda self, default: async_send)
+        monkeypatch.setattr(CommConfigurator, "get_tcp_send_queue_bytes", lambda self, default: queue_bytes)
         connector = SimpleNamespace(mode=Mode.ACTIVE, driver=SimpleNamespace(get_name=lambda: "tcp"))
         sock = FakeSocket(send_returns=send_returns)
         conn = SocketConnection(sock=sock, connector=connector, secure=False)
         return conn, sock
+
+    @staticmethod
+    def _wait_for(predicate, timeout=1.0):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if predicate():
+                return True
+            time.sleep(0.005)
+        return predicate()
 
     def test_send_timeout_config_is_applied(self, monkeypatch):
         conn, _ = self._make_conn(monkeypatch, timeout_sec=1.75)
@@ -268,3 +280,67 @@ class TestSocketConnectionSendTimeout:
         assert not t2.is_alive()
         # First timeout closes the connection; subsequent send may be suppressed while closing.
         assert len(errors) == 1
+
+    def test_async_send_preserves_order_and_releases_callers_before_socket_write(self, monkeypatch):
+        conn, _ = self._make_conn(monkeypatch, timeout_sec=1.0, async_send=True, queue_bytes=16)
+        writer_entered = threading.Event()
+        release_writer = threading.Event()
+        written = []
+
+        def _blocked_write(frame, _timeout):
+            writer_entered.set()
+            assert release_writer.wait(timeout=1.0)
+            written.append(bytes(frame))
+
+        monkeypatch.setattr(conn, "_send_with_timeout", _blocked_write)
+
+        conn.send_frame(b"first")
+        assert writer_entered.wait(timeout=1.0)
+        conn.send_frame(b"second")
+        assert written == []
+
+        release_writer.set()
+        assert self._wait_for(lambda: conn.queued_send_bytes == 0)
+        assert written == [b"first", b"second"]
+        conn.close()
+        assert not conn.writer_thread.is_alive()
+
+    def test_async_send_queue_is_bounded_by_bytes(self, monkeypatch):
+        conn, _ = self._make_conn(monkeypatch, timeout_sec=0.02, async_send=True, queue_bytes=3)
+        writer_entered = threading.Event()
+        release_writer = threading.Event()
+
+        def _blocked_write(_frame, _timeout):
+            writer_entered.set()
+            release_writer.wait(timeout=1.0)
+
+        monkeypatch.setattr(conn, "_send_with_timeout", _blocked_write)
+
+        conn.send_frame(b"abc")
+        assert writer_entered.wait(timeout=1.0)
+        with pytest.raises(CommError) as ex:
+            conn.send_frame(b"d")
+        assert ex.value.code == CommError.TIMEOUT
+
+        release_writer.set()
+        conn.close()
+
+    def test_async_writer_failure_is_reported_to_next_sender(self, monkeypatch):
+        conn, _ = self._make_conn(monkeypatch, timeout_sec=1.0, async_send=True, queue_bytes=16)
+
+        def _failed_write(_frame, _timeout):
+            raise BrokenPipeError("closed")
+
+        monkeypatch.setattr(conn, "_send_with_timeout", _failed_write)
+        conn.send_frame(b"first")
+        assert self._wait_for(lambda: conn.writer_error is not None)
+
+        with pytest.raises(CommError) as ex:
+            conn.send_frame(b"second")
+        assert ex.value.code == CommError.CLOSED
+        conn.close()
+
+    @pytest.mark.parametrize("queue_bytes", [0, -1, True, "16"])
+    def test_async_send_queue_size_is_validated(self, monkeypatch, queue_bytes):
+        with pytest.raises(CommError, match="tcp_send_queue_bytes must be positive"):
+            self._make_conn(monkeypatch, timeout_sec=1.0, async_send=True, queue_bytes=queue_bytes)

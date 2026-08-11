@@ -19,7 +19,7 @@ import pytest
 
 from nvflare.fuel.f3.cellnet.defs import MessageHeaderKey
 from nvflare.fuel.f3.endpoint import Endpoint, EndpointState
-from nvflare.fuel.f3.sfm.constants import Types
+from nvflare.fuel.f3.sfm.constants import HandshakeKeys, Types
 from nvflare.fuel.f3.sfm.prefix import PREFIX_LEN, Prefix
 from nvflare.fuel.f3.sfm.sfm_conn import SfmConnection
 from nvflare.fuel.f3.streaming.stream_const import STREAM_CHANNEL, STREAM_DATA_TOPIC
@@ -116,6 +116,33 @@ def test_send_data_rejects_invalid_buffer_list_member():
     assert conn.frame is None
 
 
+def test_handshake_carries_native_connection_lane_and_pool_size():
+    conn = _CaptureConnection()
+    sfm_conn = SfmConnection(
+        conn=conn,
+        local_endpoint=Endpoint(
+            "local",
+            {
+                HandshakeKeys.ENDPOINT_NAME: "spoofed",
+                HandshakeKeys.CONNECTION_LANE: 99,
+                HandshakeKeys.CONNECTION_POOL_SIZE: 100,
+            },
+        ),
+    )
+    sfm_conn.lane = 2
+    sfm_conn.pool_size = 3
+    sfm_conn.pool_id = "pool-generation"
+
+    sfm_conn.send_handshake(Types.HELLO)
+
+    prefix = Prefix.from_bytes(conn.frame)
+    data = msgpack.unpackb(conn.frame[PREFIX_LEN : prefix.length])
+    assert data[HandshakeKeys.ENDPOINT_NAME] == "local"
+    assert data[HandshakeKeys.CONNECTION_LANE] == 2
+    assert data[HandshakeKeys.CONNECTION_POOL_SIZE] == 3
+    assert data[HandshakeKeys.CONNECTION_POOL_ID] == "pool-generation"
+
+
 class _CaptureReceiver:
     def __init__(self):
         self.message = None
@@ -139,7 +166,7 @@ def test_remote_send_preserves_buffer_list_until_sfm():
     manager.sfm_endpoints["remote"] = SimpleNamespace(
         endpoint=SimpleNamespace(state=EndpointState.READY),
         next_stream_id=lambda: 11,
-        get_connection=lambda stream_id: sfm_conn,
+        get_connection=lambda stream_id, bulk=False: sfm_conn,
     )
     try:
         manager.send_message(Endpoint("remote"), 7, {"key": "value"}, payload)
@@ -149,6 +176,36 @@ def test_remote_send_preserves_buffer_list_until_sfm():
 
     assert captured == {"app_id": 7, "stream_id": 11, "headers": {"key": "value"}, "payload": payload}
     assert captured["payload"] is payload
+
+
+@pytest.mark.parametrize(
+    "headers,expected_bulk",
+    [
+        ({"key": "value"}, False),
+        ({MessageHeaderKey.CHANNEL: STREAM_CHANNEL, MessageHeaderKey.TOPIC: STREAM_DATA_TOPIC}, True),
+    ],
+)
+def test_remote_send_routes_only_stream_data_to_bulk_lanes(headers, expected_bulk):
+    from nvflare.fuel.f3.sfm.conn_manager import ConnManager
+
+    selections = []
+    sfm_conn = SimpleNamespace(
+        conn=SimpleNamespace(connector=SimpleNamespace(driver=SimpleNamespace(get_name=lambda: "capture"))),
+        send_data=lambda *_args, **_kwargs: None,
+    )
+    manager = ConnManager(Endpoint("local"))
+    manager.sfm_endpoints["remote"] = SimpleNamespace(
+        endpoint=SimpleNamespace(state=EndpointState.READY),
+        next_stream_id=lambda: 11,
+        get_connection=lambda stream_id, bulk=False: selections.append((stream_id, bulk)) or sfm_conn,
+    )
+    try:
+        manager.send_message(Endpoint("remote"), 7, headers, b"payload")
+    finally:
+        manager.conn_mgr_executor.shutdown(wait=True)
+        manager.frame_mgr_executor.shutdown(wait=True)
+
+    assert selections == [(11, expected_bulk)]
 
 
 def test_loopback_send_keeps_flattened_payload_compatibility():

@@ -42,6 +42,9 @@ class DriverParams(str, Enum):
     LOCAL_ADDR = "local_addr"
     PEER_ADDR = "peer_addr"
     PEER_CN = "peer_cn"
+    CONNECTION_LANE = "connection_lane"
+    CONNECTION_POOL_SIZE = "connection_pool_size"
+    CONNECTION_POOL_ID = "connection_pool_id"
     IMPLEMENTED_CONN_SEC = "implemented_conn_sec"
 
 

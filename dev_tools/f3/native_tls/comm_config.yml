@@ -1,0 +1,13 @@
+streaming_chunk_size: 2M
+streaming_window_size: 64M
+streaming_ack_interval: 16M
+streaming_reliable: true
+streaming_retry_max_pending_bytes: 128M
+
+adhoc_conn_scheme: stcp
+internal_conn_scheme: stcp
+
+tcp_async_send: true
+tcp_bulk_lanes: 2
+tcp_send_queue_bytes: 64M
+tcp_handshake_timeout: 10
