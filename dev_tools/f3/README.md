@@ -1,12 +1,13 @@
 # F3 Benchmark Tools
 
-Two programs for measuring F3 streaming and tensor-transfer throughput between
-two machines, plus a sample tuning config.
+Three programs for measuring F3 streaming, tensor-transfer throughput, and
+gRPC connection scaling between two machines, plus sample tuning configs.
 
 | File | Purpose |
 |------|---------|
 | `tensor_download_bench.py` | End-to-end PyTorch tensor transfer through FOBS and the F3 Download Service |
 | `cellnet_bench.py` | Raw F3 cellnet streaming and baseline raw-TCP ceiling |
+| `grpc_lane_bench.py` | Isolated same-port gRPC RPC/channel scaling diagnostic |
 | `comm_config.yml` | Sample F3 tuning config for high-bandwidth networks |
 | `grpc_tls/comm_config.yml` | Synchronous gRPC profile for production-equivalent transport-TLS tests |
 
@@ -207,6 +208,87 @@ measured payload (about 30 seconds at 25 Gbit/s). Override with
 `--size-gb`. The default application buffer is 16 MiB; change it with
 `--buffer-mb` on **both** endpoints. Override the nominal link rate used for
 utilisation reporting with `--target-gbps`.
+
+---
+
+## `grpc_lane_bench.py`
+
+Determines whether one synchronous gRPC stream or one physical gRPC/TCP
+connection is the transport bottleneck. This is a diagnostic beneath F3: it
+uses the same `streamer.Streamer/Stream` bidirectional RPC and `Frame` protobuf
+as the gRPC driver, but it does not include Cell, SFM, Download Service, or
+tensor work.
+
+Every condition uses one receiver hostname, listening port, and TLS
+certificate. Total measured bytes, warm-up bytes, and aggregate application
+credit remain fixed as the lane count changes. Each lane keeps the configured
+ACK threshold, so dividing the bytes among lanes keeps aggregate ACK work
+approximately fixed. Each Python Channel is explicitly assigned a local gRPC
+subchannel pool, and the receiver returns the `context.peer()` socket for every
+RPC. A run fails if the requested number of physical connections was not
+actually created.
+
+This program owns the same `/streamer.Streamer/Stream` RPC name as F3, so run
+it as a dedicated receiver process on a dedicated test port. It cannot attach
+to or share a live F3 listener, and it must not be pointed at a production
+endpoint. TLS authenticates the receiver only; it does not authenticate
+benchmark senders, so bind it only on trusted leased hosts and stop it after
+the test.
+
+Use the production TLS profile and credentials exactly as for the other
+benchmarks:
+
+```bash
+# Receiver — keep this process running for all four conditions
+python dev_tools/f3/grpc_lane_bench.py recv \
+    --url grpc://0.0.0.0:8002 \
+    --f3-config dev_tools/f3/grpc_tls/comm_config.yml \
+    --connection-security tls \
+    --credentials-dir /path/to/server/startup
+
+# Sender — current topology: one RPC on one physical connection
+python dev_tools/f3/grpc_lane_bench.py send \
+    --url grpc://<receiver-host>:8002 \
+    --channels 1 --rpcs-per-channel 1 \
+    --direction server-to-client \
+    --size-gb 16 --warmup-gb 1 --chunk-mb 2 --repeat 3 \
+    --f3-config dev_tools/f3/grpc_tls/comm_config.yml \
+    --connection-security tls \
+    --credentials-dir /path/to/client/startup
+```
+
+Repeat the sender command with these topologies, preserving all other options:
+
+| Channels | RPCs/channel | Expected physical sockets | What it isolates |
+|----------|--------------|---------------------------|------------------|
+| 1 | 1 | 1 | Current synchronous driver topology |
+| 1 | 2 | 1 | Per-RPC/handler serialization on one HTTP/2 connection |
+| 2 | 1 | 2 | Two physical gRPC/TCP/TLS connections on the same port |
+| 4 | 1 | 4 | Four physical connections on the same port |
+
+`server-to-client` is the primary result because it matches model download;
+`client-to-server` is a control for asymmetry in the two halves of the
+bidirectional RPC. Run the full topology table in both directions. In
+`server-to-client` mode, `[send]` is the active gRPC client but receives the
+bulk bytes; `[recv]` is the listening server and sends them. Attribute CPU and
+RSS using both the process label and the reported direction.
+
+The default 64 MiB aggregate window is divided among logical RPCs. Every lane
+retains the default 16 MiB ACK threshold, which keeps total ACK count roughly
+constant because each lane transfers only its share of the bytes.
+`peak_outstanding_bytes` must not exceed `window_bytes`, so a multi-lane result
+cannot gain throughput merely by multiplying application buffering. If the
+fixed-credit matrix is flat, run a separately labelled scaled-credit control
+by scaling `--window-mb` to `64 × logical_rpcs` while retaining `--ack-mb 16`;
+that measures the performance and memory cost of multiplying flight size.
+
+Interpret the matrix before changing production F3. Scaling for `1 × 2`
+points to per-RPC serialization. Scaling only for `2 × 1` or `4 × 1` points to
+a per-physical-connection limit. If neither scales, adding connections to F3
+will not address the shared protobuf, gRPC-core, copy, or CPU bottleneck.
+Even a positive result is only a gate: this diagnostic bypasses Cell/SFM,
+F3's shared ordered ACK/retry state, and Download Service. A production-shaped
+F3 connection-pool experiment is still required before changing the driver.
 
 ---
 
