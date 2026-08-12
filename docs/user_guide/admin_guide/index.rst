@@ -16,4 +16,4 @@ Guide for project Admin and Org Admin
    configurations/configurations.rst
    monitoring
    diagnostic_commands
-
+   native_tensor_bulk

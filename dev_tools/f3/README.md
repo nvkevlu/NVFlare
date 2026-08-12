@@ -8,7 +8,9 @@ two machines, plus a sample tuning config.
 | `tensor_download_bench.py` | End-to-end PyTorch tensor transfer through FOBS and the F3 Download Service |
 | `cellnet_bench.py` | Raw F3 cellnet streaming and baseline raw-TCP ceiling |
 | `comm_config.yml` | Sample F3 tuning config for high-bandwidth networks |
-| `grpc_tls/comm_config.yml` | Synchronous gRPC profile for production-equivalent transport-TLS tests |
+| `grpc_tls/comm_config.yml` | Synchronous gRPC profile for transport-TLS tests |
+| `native_tls/comm_config.yml` | Opt-in one-port native mTLS tensor-bulk profile |
+| `native_bulk_e2e_smoke.py` | Small real-Cell negotiation and direct-placement smoke test |
 
 Start the receiver on the destination machine first; then start the sender.
 Use the same Python environment (`nvflare` must be importable) on both hosts.
@@ -78,6 +80,12 @@ same candidate binary; `direct-replies`, `batched-replies`, and `items/reply` in
 the result prove which policy was exercised. `--disable-direct` also disables
 batch negotiation automatically.
 
+To isolate the native bulk feature while retaining direct/batched tensor
+fallback, add `--disable-native-bulk`. The default advertises native bulk, but
+the producer selects it only when both peers use the enabled native-TLS profile,
+the transfer has one receiver, Cell end-to-end encryption is off, and all
+tensors can be placed directly in CPU memory.
+
 The memory-mode receiver needs enough RAM for the full model plus transient
 serialisation buffers. Put `--offload-dir` on fast local storage for a
 meaningful disk result.
@@ -144,6 +152,54 @@ measures production-equivalent gRPC transport TLS; Cell end-to-end message
 encryption remains disabled so its cost is not conflated with the transport.
 Clear mode remains available for controls, but is not the production-equivalent
 result.
+
+### One-port native mTLS tensor bulk
+
+`native_tls/comm_config.yml` replaces gRPC transport with F3's native TLS
+listener and enables negotiated direct tensor placement. The established F3
+connection remains the control plane. After negotiation, one to four short-lived
+bulk TLS connections (three by default) connect to the **same host and port**,
+authenticate with the same mTLS identities, and fill preallocated tensor
+storage. No second listener or inbound port is required, and all connections
+are client-initiated.
+
+Use the same profile on both endpoints. Both credential directories contain
+`rootCA.pem`, a role certificate, and its private key. The sender URL hostname
+must match a SAN in the receiver certificate; `tcp_verify_hostname` fails
+closed on mismatch. The certificate CN must also match the peer identity F3
+expects. The benchmark uses `sender` and `receiver` as those identities.
+
+```bash
+# Receiver
+python dev_tools/f3/tensor_download_bench.py recv \
+    --url stcp://0.0.0.0:8002 \
+    --offload-dir /fast/local/nvme \
+    --f3-config dev_tools/f3/native_tls/comm_config.yml \
+    --connection-security mtls \
+    --credentials-dir /path/to/receiver/startup
+
+# Sender
+python dev_tools/f3/tensor_download_bench.py send \
+    --url stcp://<receiver-SAN-hostname>:8002 \
+    --checkpoint /path/to/pytorch_model.bin \
+    --modes memory --repeat 5 \
+    --f3-config dev_tools/f3/native_tls/comm_config.yml \
+    --connection-security mtls \
+    --credentials-dir /path/to/sender/startup
+```
+
+Mixed or unsupported cases fall back automatically to the direct/batched F3
+path: old peers ignore the capability; native bulk disabled or unavailable,
+multiple receivers, disk mode, Cell `secure=True`, unsupported/noncontiguous
+tensors, or configured size/session limits do not use the fast path. A bulk
+session failure is terminal for that download rather than silently replaying a
+partially written tensor through another protocol.
+
+This profile is opt-in. It is appropriate for direct TCP pass-through and
+ordinary client-outbound/server-listener deployments. HTTP/2-aware gRPC L7
+proxies cannot carry it; keep gRPC configuration as the rollback path for those
+deployments. A production rollout should first validate provisioned SAN/CN
+identity, listener reachability, memory/session caps, and fallback behavior.
 
 ---
 

@@ -31,3 +31,7 @@ def configurator(monkeypatch):
 
 def test_streaming_max_blob_size_defaults_to_four_gib(configurator):
     assert configurator.get_streaming_max_blob_size() == 4 * 1024 * 1024 * 1024
+
+
+def test_tcp_hostname_verification_defaults_off(configurator):
+    assert configurator.get_tcp_verify_hostname(False) is False

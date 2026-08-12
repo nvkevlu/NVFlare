@@ -53,6 +53,7 @@ class VarName:
     SFM_SEND_STALL_CONSECUTIVE_CHECKS = "sfm_send_stall_consecutive_checks"
     TCP_NO_DELAY = "tcp_no_delay"
     TCP_HANDSHAKE_TIMEOUT = "tcp_handshake_timeout"
+    TCP_VERIFY_HOSTNAME = "tcp_verify_hostname"
     TCP_TENSOR_BULK_ENABLED = "tcp_tensor_bulk_enabled"
     TCP_TENSOR_BULK_LANES = "tcp_tensor_bulk_lanes"
     TCP_TENSOR_BULK_MAX_BYTES = "tcp_tensor_bulk_max_bytes"
@@ -173,6 +174,9 @@ class CommConfigurator:
 
     def get_tcp_handshake_timeout(self, default=10.0):
         return ConfigService.get_float_var(VarName.TCP_HANDSHAKE_TIMEOUT, self.config, default=default)
+
+    def get_tcp_verify_hostname(self, default=False):
+        return ConfigService.get_bool_var(VarName.TCP_VERIFY_HOSTNAME, self.config, default=default)
 
     def get_tcp_tensor_bulk_enabled(self, default=False):
         return ConfigService.get_bool_var(VarName.TCP_TENSOR_BULK_ENABLED, self.config, default=default)

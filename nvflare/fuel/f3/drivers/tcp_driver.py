@@ -73,6 +73,7 @@ class TcpDriver(BaseDriver):
         self.server = None
         config = CommConfigurator()
         self.handshake_timeout = config.get_tcp_handshake_timeout(DEFAULT_TCP_HANDSHAKE_TIMEOUT)
+        self.verify_hostname = config.get_tcp_verify_hostname(False)
         if (
             isinstance(self.handshake_timeout, bool)
             or not isinstance(self.handshake_timeout, (int, float))
@@ -90,6 +91,9 @@ class TcpDriver(BaseDriver):
             timeout=config.get_tcp_tensor_bulk_timeout(DEFAULT_NATIVE_BULK_TIMEOUT),
         )
 
+    def _configure_connector_security(self, connector: ConnectorInfo):
+        connector.params.setdefault(DriverParams.VERIFY_HOSTNAME.value, self.verify_hostname)
+
     @staticmethod
     def supported_transports() -> List[str]:
         return ["tcp", "stcp"]
@@ -99,11 +103,13 @@ class TcpDriver(BaseDriver):
         return {DriverCap.SEND_HEARTBEAT.value: True, DriverCap.SUPPORT_SSL.value: True}
 
     def listen(self, connector: ConnectorInfo):
+        self._configure_connector_security(connector)
         self.connector = connector
         self.server = TcpStreamServer(self, connector)
         self.server.serve_forever()
 
     def connect(self, connector: ConnectorInfo):
+        self._configure_connector_security(connector)
         self.connector = connector
         params = connector.params
         host = params.get(DriverParams.HOST.value)

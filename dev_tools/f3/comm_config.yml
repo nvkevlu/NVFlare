@@ -24,6 +24,13 @@ streaming_retry_max_pending_bytes: 128M
 #
 # max_message_size: 1G
 # tcp_no_delay: true
+# tcp_handshake_timeout: 10.0
+# tcp_verify_hostname: false
+# tcp_tensor_bulk_enabled: false
+# tcp_tensor_bulk_lanes: 3
+# tcp_tensor_bulk_max_bytes: 32G
+# tcp_tensor_bulk_max_sessions: 2
+# tcp_tensor_bulk_timeout: 300.0
 # allow_adhoc_conns: true
 # adhoc_conn_scheme: tcp
 # internal_conn_scheme: tcp

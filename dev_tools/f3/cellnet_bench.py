@@ -34,6 +34,12 @@ Optional F3 tuning (use the same YAML on both endpoints):
     python dev_tools/f3/cellnet_bench.py send --url tcp://<receiver-host>:8002 \
         --f3-config dev_tools/f3/comm_config.yml
 
+Secure F3 transport tests use grpc:// or stcp:// URLs, --connection-security
+tls or mtls, and role-specific --credentials-dir paths. STCP keeps F3 over
+native TCP/TLS while removing gRPC and enables certificate hostname
+verification. Credential material is never stored by this benchmark. Cell
+end-to-end message encryption remains disabled.
+
 Raw TCP receiver and sender (no F3):
 
     python dev_tools/f3/cellnet_bench.py recv --transport tcp --url tcp://0.0.0.0:8002
@@ -60,10 +66,13 @@ from pathlib import Path
 from typing import Optional
 from urllib.parse import urlparse
 
+import psutil
 import yaml
 
+from nvflare.apis.fl_constant import ConnectionSecurity
 from nvflare.fuel.f3.cellnet.core_cell import CoreCell
 from nvflare.fuel.f3.comm_config import CommConfigurator
+from nvflare.fuel.f3.drivers.driver_params import DriverParams
 from nvflare.fuel.f3.message import Message
 from nvflare.fuel.f3.stream_cell import StreamCell
 from nvflare.fuel.f3.streaming.stream_const import STREAM_CHUNK_SIZE, STREAM_WINDOW_SIZE
@@ -91,6 +100,21 @@ DEFAULT_TCP_WARMUP_SIZE = GB
 DEFAULT_TARGET_GBPS = 25.0
 DEFAULT_F3_CHUNK_SIZE = STREAM_CHUNK_SIZE
 DEFAULT_F3_WINDOW_SIZE = STREAM_WINDOW_SIZE
+CELL_SECURITY_CHOICES = (
+    ConnectionSecurity.CLEAR,
+    ConnectionSecurity.TLS,
+    ConnectionSecurity.MTLS,
+)
+GRPC_SCHEMES = {"grpc", "grpcs"}
+SECURE_GRPC_SCHEMES = {"agrpcs", "grpcs", "ngrpcs"}
+STCP_SCHEMES = {"stcp"}
+SECURE_CELL_SCHEMES = SECURE_GRPC_SCHEMES | STCP_SCHEMES
+TLS_CELL_SCHEMES = GRPC_SCHEMES | SECURE_GRPC_SCHEMES | STCP_SCHEMES
+ROOT_CA_FILE = "rootCA.pem"
+ROLE_CREDENTIAL_FILES = {
+    RX_FQCN: ("server.crt", "server.key"),
+    TX_FQCN: ("client.crt", "client.key"),
+}
 
 BYTE_SIZE_PATTERN = re.compile(r"\s*(\d+(?:\.\d+)?)\s*([KMGT]?)(?:I?B)?\s*", re.IGNORECASE)
 BYTE_SIZE_MULTIPLIERS = {
@@ -107,6 +131,7 @@ F3_BYTE_SIZE_KEYS = {
     "streaming_window_size",
     "streaming_ack_interval",
     "streaming_retry_max_pending_bytes",
+    "tcp_tensor_bulk_max_bytes",
 }
 GRPC_BYTE_SIZE_OPTIONS = {
     "grpc.max_send_message_length",
@@ -220,6 +245,43 @@ def validate_f3_config(config: dict):
                 f"streaming_ack_interval ({ack_interval:,}) must not exceed streaming_window_size ({window_size:,})"
             )
 
+    handshake_timeout = config.get("tcp_handshake_timeout", 10.0)
+    if isinstance(handshake_timeout, bool) or not isinstance(handshake_timeout, (int, float)) or handshake_timeout <= 0:
+        raise ValueError(f"tcp_handshake_timeout must be positive, got {handshake_timeout!r}")
+    verify_hostname = config.get("tcp_verify_hostname", False)
+    if not isinstance(verify_hostname, bool):
+        raise ValueError(f"tcp_verify_hostname must be a boolean, got {verify_hostname!r}")
+
+    tensor_bulk_enabled = config.get("tcp_tensor_bulk_enabled", False)
+    if not isinstance(tensor_bulk_enabled, bool):
+        raise ValueError(f"tcp_tensor_bulk_enabled must be a boolean, got {tensor_bulk_enabled!r}")
+    if tensor_bulk_enabled and not verify_hostname:
+        raise ValueError("tcp_tensor_bulk_enabled requires tcp_verify_hostname: true")
+    tensor_bulk_lanes = config.get("tcp_tensor_bulk_lanes", 3)
+    if isinstance(tensor_bulk_lanes, bool) or not isinstance(tensor_bulk_lanes, int) or not 1 <= tensor_bulk_lanes <= 4:
+        raise ValueError(f"tcp_tensor_bulk_lanes must be between 1 and 4, got {tensor_bulk_lanes!r}")
+    tensor_bulk_max_bytes = config.get("tcp_tensor_bulk_max_bytes", 32 * 1024 * 1024 * 1024)
+    if (
+        isinstance(tensor_bulk_max_bytes, bool)
+        or not isinstance(tensor_bulk_max_bytes, int)
+        or not 1 <= tensor_bulk_max_bytes <= 64 * 1024 * 1024 * 1024
+    ):
+        raise ValueError(f"tcp_tensor_bulk_max_bytes is invalid: {tensor_bulk_max_bytes!r}")
+    tensor_bulk_max_sessions = config.get("tcp_tensor_bulk_max_sessions", 2)
+    if (
+        isinstance(tensor_bulk_max_sessions, bool)
+        or not isinstance(tensor_bulk_max_sessions, int)
+        or not 1 <= tensor_bulk_max_sessions <= 16
+    ):
+        raise ValueError(f"tcp_tensor_bulk_max_sessions must be between 1 and 16, got {tensor_bulk_max_sessions!r}")
+    tensor_bulk_timeout = config.get("tcp_tensor_bulk_timeout", 300.0)
+    if (
+        isinstance(tensor_bulk_timeout, bool)
+        or not isinstance(tensor_bulk_timeout, (int, float))
+        or not 1.0 <= tensor_bulk_timeout <= 3600.0
+    ):
+        raise ValueError(f"tcp_tensor_bulk_timeout must be between 1 and 3600, got {tensor_bulk_timeout!r}")
+
 
 def configure_f3(config_file: str) -> tuple[Path, dict]:
     """Load a native F3 comm_config YAML before any cells are created."""
@@ -264,10 +326,96 @@ def f3_config_summary() -> str:
     config = CommConfigurator()
     chunk_size = config.get_streaming_chunk_size(DEFAULT_F3_CHUNK_SIZE)
     window_size = config.get_streaming_window_size(DEFAULT_F3_WINDOW_SIZE)
+    verify_hostname = config.get_tcp_verify_hostname(False)
+    tensor_bulk_enabled = config.get_tcp_tensor_bulk_enabled(False)
+    tensor_bulk_lanes = config.get_tcp_tensor_bulk_lanes(3)
     return (
         f"streaming_chunk_size={chunk_size:,} ({chunk_size / MB:,.1f} MiB), "
-        f"streaming_window_size={window_size:,} ({window_size / MB:,.1f} MiB)"
+        f"streaming_window_size={window_size:,} ({window_size / MB:,.1f} MiB), "
+        f"tcp_verify_hostname={verify_hostname}, "
+        f"tcp_tensor_bulk_enabled={tensor_bulk_enabled}, tcp_tensor_bulk_lanes={tensor_bulk_lanes}, "
+        f"tcp_handshake_timeout={config.get_tcp_handshake_timeout(10.0):.1f}s"
     )
+
+
+def add_cell_security_args(parser: argparse.ArgumentParser):
+    """Add explicit transport-security arguments shared by the F3 benchmarks."""
+    parser.add_argument(
+        "--connection-security",
+        choices=CELL_SECURITY_CHOICES,
+        default=ConnectionSecurity.CLEAR,
+        help="F3 connection security: clear, TLS, or mTLS (default clear)",
+    )
+    parser.add_argument(
+        "--credentials-dir",
+        type=Path,
+        help=(
+            "directory containing rootCA.pem on both endpoints, server.crt/server.key on the receiver, "
+            "and client.crt/client.key on the sender for mTLS"
+        ),
+    )
+
+
+def build_cell_credentials(role: str, connection_security: str, credentials_dir: Optional[Path]) -> tuple[bool, dict]:
+    """Resolve role-specific TLS paths without reading or copying credential files."""
+    if role not in ROLE_CREDENTIAL_FILES:
+        raise ValueError(f"unsupported cell role {role!r}")
+    if connection_security not in CELL_SECURITY_CHOICES:
+        raise ValueError(
+            f"invalid connection security {connection_security!r}; expected one of {CELL_SECURITY_CHOICES}"
+        )
+
+    if connection_security == ConnectionSecurity.CLEAR:
+        if credentials_dir is not None:
+            raise ValueError("--credentials-dir requires --connection-security tls")
+        return False, {}
+
+    if credentials_dir is None:
+        raise ValueError(f"--credentials-dir is required for --connection-security {connection_security}")
+    credential_root = credentials_dir.expanduser().resolve()
+    if not credential_root.is_dir():
+        raise ValueError(f"credentials directory does not exist: {credential_root}")
+
+    required_files = [ROOT_CA_FILE]
+    if role == RX_FQCN or connection_security == ConnectionSecurity.MTLS:
+        role_cert, role_key = ROLE_CREDENTIAL_FILES[role]
+        required_files.extend((role_cert, role_key))
+    resolved_files = {name: credential_root / name for name in required_files}
+    missing = [name for name, path in resolved_files.items() if not path.is_file()]
+    if missing:
+        raise ValueError(f"credentials directory {credential_root} is missing: {', '.join(missing)}")
+
+    credentials = {
+        DriverParams.CONNECTION_SECURITY.value: connection_security,
+        DriverParams.CA_CERT.value: str(resolved_files[ROOT_CA_FILE]),
+    }
+    if role == RX_FQCN or connection_security == ConnectionSecurity.MTLS:
+        cert_param = DriverParams.SERVER_CERT if role == RX_FQCN else DriverParams.CLIENT_CERT
+        key_param = DriverParams.SERVER_KEY if role == RX_FQCN else DriverParams.CLIENT_KEY
+        credentials[cert_param.value] = str(resolved_files[role_cert])
+        credentials[key_param.value] = str(resolved_files[role_key])
+    return True, credentials
+
+
+def resolve_cell_security(
+    role: str, url: str, connection_security: str, credentials_dir: Optional[Path]
+) -> tuple[bool, dict]:
+    """Validate the requested F3 transport security and resolve its credentials."""
+    scheme = urlparse(url).scheme.lower()
+    if connection_security == ConnectionSecurity.CLEAR:
+        if scheme in SECURE_CELL_SCHEMES:
+            raise ValueError(f"URL scheme {scheme!r} requires --connection-security tls or mtls")
+    elif scheme not in TLS_CELL_SCHEMES:
+        raise ValueError(
+            f"--connection-security {connection_security} requires a grpc://, grpcs://, or stcp:// URL, got {url!r}"
+        )
+    secure, credentials = build_cell_credentials(role, connection_security, credentials_dir)
+    if secure and scheme in STCP_SCHEMES:
+        # Native bulk requires hostname verification on both roles. The active
+        # connector performs the SAN check; the passive value records a matched
+        # security policy for direction-independent negotiation.
+        credentials[DriverParams.VERIFY_HOSTNAME.value] = True
+    return secure, credentials
 
 
 def parse_tcp_url(url: str) -> tuple[str, int]:
@@ -486,9 +634,8 @@ def run_tcp_sender(
 
 
 def rss_bytes() -> int:
-    """Current RSS of this process, in bytes (Linux)."""
-    with open("/proc/self/statm") as f:
-        return int(f.read().split()[1]) * os.sysconf("SC_PAGESIZE")
+    """Current resident set size of this process."""
+    return psutil.Process().memory_info().rss
 
 
 class MemSampler:
@@ -556,12 +703,19 @@ def stream_cb(future: StreamFuture, stream: Stream, resume: bool, **kwargs):
     )
 
 
-def run_receiver(url: str):
-    cell = CoreCell(RX_FQCN, url, secure=False, credentials={})
+def run_receiver(
+    url: str,
+    connection_security: str = ConnectionSecurity.CLEAR,
+    credentials_dir: Optional[Path] = None,
+):
+    secure, credentials = resolve_cell_security(RX_FQCN, url, connection_security, credentials_dir)
+    cell = CoreCell(RX_FQCN, url, secure=secure, credentials=credentials)
     stream_cell = StreamCell(cell)
     stream_cell.register_stream_cb(CHANNEL, TOPIC, stream_cb)
     cell.start()
-    print(f"[recv] listening on {url}, waiting for streams (Ctrl-C to stop)")
+    print(
+        f"[recv] listening on {url}, connection_security={connection_security}, " "waiting for streams (Ctrl-C to stop)"
+    )
     try:
         while True:
             time.sleep(3600)
@@ -571,9 +725,16 @@ def run_receiver(url: str):
         cell.stop()
 
 
-def run_sender(url: str, size: int, reliable: Optional[bool]):
+def run_sender(
+    url: str,
+    size: int,
+    reliable: Optional[bool],
+    connection_security: str = ConnectionSecurity.CLEAR,
+    credentials_dir: Optional[Path] = None,
+):
     connected = threading.Event()
-    cell = CoreCell(TX_FQCN, url, secure=False, credentials={})
+    secure, credentials = resolve_cell_security(TX_FQCN, url, connection_security, credentials_dir)
+    cell = CoreCell(TX_FQCN, url, secure=secure, credentials=credentials)
     cell.set_cell_connected_cb(lambda agent: connected.set())
     stream_cell = StreamCell(cell)
     mem = None
@@ -582,7 +743,7 @@ def run_sender(url: str, size: int, reliable: Optional[bool]):
 
     try:
         cell.start()
-        print(f"[send] connecting to {url} ...")
+        print(f"[send] connecting to {url}, connection_security={connection_security} ...")
         if not connected.wait(timeout=30):
             raise SystemExit(f"[send] ERROR: could not connect to receiver at {url} within 30 seconds")
 
@@ -663,6 +824,7 @@ def main():
         dest="f3_config",
         help="optional native F3 comm_config.yml/comm_config.yaml file (cellnet transport only)",
     )
+    add_cell_security_args(p_recv)
 
     p_send = sub.add_parser("send", help="run the sender")
     p_send.add_argument("--url", required=True, help="receiver URL, e.g. tcp://10.1.2.3:8002")
@@ -714,6 +876,7 @@ def main():
         dest="f3_config",
         help="optional native F3 comm_config.yml/comm_config.yaml file (cellnet transport only)",
     )
+    add_cell_security_args(p_send)
 
     args = parser.parse_args()
     logging.basicConfig(level=getattr(logging, args.log_level.upper(), logging.WARNING))
@@ -725,6 +888,18 @@ def main():
         except (OSError, ValueError, yaml.YAMLError) as ex:
             parser.error(str(ex))
         print(f"[f3-config] loaded {config_path}: {f3_config_summary()}")
+    if args.transport != "cellnet" and (
+        args.connection_security != ConnectionSecurity.CLEAR or args.credentials_dir is not None
+    ):
+        parser.error("--connection-security and --credentials-dir apply only to --transport cellnet")
+
+    try:
+        if args.transport == "cellnet":
+            # Fail before opening sockets so configuration mistakes are explicit.
+            role = RX_FQCN if args.role == "recv" else TX_FQCN
+            resolve_cell_security(role, args.url, args.connection_security, args.credentials_dir)
+    except ValueError as ex:
+        parser.error(str(ex))
 
     buffer_size = int(args.buffer_mb * MB)
     if buffer_size <= 0:
@@ -739,7 +914,7 @@ def main():
         if args.transport == "tcp":
             run_tcp_receiver(args.url, buffer_size, socket_buffer_size, args.target_gbps)
         else:
-            run_receiver(args.url)
+            run_receiver(args.url, args.connection_security, args.credentials_dir)
     else:
         default_size = DEFAULT_TCP_SIZE if args.transport == "tcp" else DEFAULT_CELLNET_SIZE
         size = int(args.size_gb * GB) if args.size_gb is not None else default_size
@@ -759,7 +934,13 @@ def main():
             )
         else:
             reliable = None if args.reliable is None else args.reliable == "true"
-            run_sender(args.url, size, reliable)
+            run_sender(
+                args.url,
+                size,
+                reliable,
+                args.connection_security,
+                args.credentials_dir,
+            )
 
 
 if __name__ == "__main__":
