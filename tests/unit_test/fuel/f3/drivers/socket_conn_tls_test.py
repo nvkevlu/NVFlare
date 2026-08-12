@@ -35,6 +35,7 @@ def test_connection_handler_wraps_only_accepted_socket(monkeypatch):
     socket_connection = MagicMock(return_value=connection)
     monkeypatch.setattr("nvflare.fuel.f3.drivers.socket_conn.SocketConnection", socket_connection)
     driver = MagicMock()
+    driver.native_bulk.enabled = False
     server = SimpleNamespace(
         ssl_context=context,
         handshake_timeout=3.0,
@@ -59,6 +60,7 @@ def test_connection_handler_closes_failed_tls_handshake():
     context = MagicMock()
     context.wrap_socket.side_effect = TimeoutError("slow client hello")
     driver = MagicMock()
+    driver.native_bulk.enabled = False
     server = SimpleNamespace(
         ssl_context=context,
         handshake_timeout=2.0,
