@@ -129,6 +129,7 @@ def test_configure_f3_loads_chunk_and_window_sizes(tmp_path):
                 "tcp_async_send: true",
                 "tcp_bulk_lanes: 2",
                 "tcp_send_queue_bytes: 32M",
+                "tcp_tensor_bulk_max_bytes: 1G",
                 "grpc:",
                 "  max_workers: 32",
                 "  options:",
@@ -150,6 +151,7 @@ def test_configure_f3_loads_chunk_and_window_sizes(tmp_path):
         assert configurator.get_tcp_async_send(False) is True
         assert configurator.get_tcp_bulk_lanes(0) == 2
         assert configurator.get_tcp_send_queue_bytes(1) == 32 * 1024**2
+        assert configurator.get_tcp_tensor_bulk_max_bytes(1) == 1024**3
         assert "streaming_chunk_size=4,194,304" in cellnet_bench.f3_config_summary()
     finally:
         cellnet_bench.ConfigService.reset()
@@ -179,6 +181,8 @@ def test_configure_f3_loads_chunk_and_window_sizes(tmp_path):
             "tcp_send_queue_bytes .* must exceed streaming_chunk_size",
         ),
         ("tcp_handshake_timeout: 0\n", "tcp_handshake_timeout must be positive"),
+        ("tcp_tensor_bulk_max_sessions: 0\n", "tcp_tensor_bulk_max_sessions must be between"),
+        ("tcp_tensor_bulk_timeout: 0\n", "tcp_tensor_bulk_timeout must be between"),
     ],
 )
 def test_configure_f3_rejects_invalid_streaming_settings(tmp_path, config_text, error):
@@ -297,22 +301,33 @@ def test_resolve_cell_security_rejects_inconsistent_configuration(role, url, sec
         cellnet_bench.resolve_cell_security(role, url, security, credentials_dir)
 
 
-def test_resolve_cell_security_enables_stcp_hostname_verification(tmp_path):
+@pytest.mark.parametrize("role", [cellnet_bench.TX_FQCN, cellnet_bench.RX_FQCN])
+def test_resolve_cell_security_enables_stcp_hostname_verification(tmp_path, role):
     credentials_dir = _make_credentials_dir(tmp_path, "rootCA.pem")
+    if role == cellnet_bench.RX_FQCN:
+        _make_credentials_dir(tmp_path, "server.crt", "server.key")
 
     secure, credentials = cellnet_bench.resolve_cell_security(
-        cellnet_bench.TX_FQCN,
+        role,
         "stcp://receiver.example.test:8002",
         ConnectionSecurity.TLS,
         credentials_dir,
     )
 
     assert secure is True
-    assert credentials == {
+    expected = {
         DriverParams.CONNECTION_SECURITY.value: ConnectionSecurity.TLS,
         DriverParams.CA_CERT.value: str(credentials_dir / "rootCA.pem"),
         DriverParams.VERIFY_HOSTNAME.value: True,
     }
+    if role == cellnet_bench.RX_FQCN:
+        expected.update(
+            {
+                DriverParams.SERVER_CERT.value: str(credentials_dir / "server.crt"),
+                DriverParams.SERVER_KEY.value: str(credentials_dir / "server.key"),
+            }
+        )
+    assert credentials == expected
 
 
 def test_cellnet_sender_passes_tls_credentials_and_cleans_up_on_failure(monkeypatch, tmp_path):

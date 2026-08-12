@@ -26,6 +26,12 @@ from nvflare.fuel.f3.comm_error import CommError
 from nvflare.fuel.f3.connection import BytesAlike, Connection
 from nvflare.fuel.f3.drivers.driver import ConnectorInfo
 from nvflare.fuel.f3.drivers.driver_params import DriverParams
+from nvflare.fuel.f3.drivers.native_bulk import (
+    NATIVE_BULK_MAGIC,
+    PrefixedSocket,
+    authenticated_peer_cn,
+    log_bulk_connection_error,
+)
 from nvflare.fuel.f3.drivers.net_utils import MAX_FRAME_SIZE
 from nvflare.fuel.f3.sfm.prefix import PREFIX_LEN, Prefix
 from nvflare.fuel.hci.security import get_certificate_common_name
@@ -379,6 +385,23 @@ class ConnectionHandler(BaseRequestHandler):
                 pass
             return
 
+        if driver.native_bulk.enabled and ssl_context:
+            try:
+                request.settimeout(min(driver.native_bulk.timeout, 15.0))
+                first_magic = _read_connection_prefix(request, len(NATIVE_BULK_MAGIC))
+                request.settimeout(None)
+                if first_magic == NATIVE_BULK_MAGIC:
+                    request.settimeout(driver.native_bulk.timeout)
+                    peer_cn = authenticated_peer_cn(request)
+                    driver.native_bulk.handle_connection(request, peer_cn, first_magic)
+                    request.close()
+                    return
+                request = PrefixedSocket(request, first_magic)
+            except Exception as ex:
+                log_bulk_connection_error(ex)
+                request.close()
+                return
+
         # noinspection PyUnresolvedReferences
         connection = SocketConnection(request, self.server.connector, bool(ssl_context))
 
@@ -391,3 +414,15 @@ class ConnectionHandler(BaseRequestHandler):
             connection.close()
             if added:
                 driver.close_connection(connection)
+
+
+def _read_connection_prefix(sock, length: int) -> bytes:
+    prefix = bytearray(length)
+    view = memoryview(prefix)
+    offset = 0
+    while offset < length:
+        count = sock.recv_into(view[offset:])
+        if count == 0:
+            raise CommError(CommError.CLOSED, "connection closed while classifying native bulk preface")
+        offset += count
+    return bytes(prefix)

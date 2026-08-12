@@ -118,6 +118,21 @@ class Communicator:
         """
         return self.conn_manager.find_endpoint(name)
 
+    def get_native_bulk_transport(self, name: str, mode: Mode):
+        """Return this endpoint's enabled native-bulk manager, connector, and authenticated peer CN."""
+        connections = self.conn_manager.get_connections(name) or ()
+        for sfm_connection in connections:
+            connection = sfm_connection.conn
+            connector = connection.connector
+            manager = getattr(connector.driver, "native_bulk", None)
+            if connector.mode != mode or not manager or not manager.enabled or not manager.can_use_connector(connector):
+                continue
+            conn_props = connection.get_conn_properties() or {}
+            peer_cn = conn_props.get(DriverParams.PEER_CN.value)
+            if peer_cn and peer_cn != "N/A":
+                return manager, connector, peer_cn
+        return None
+
     def remove_endpoint(self, name: str):
         """Remove endpoint and close all the connections associated with it
 

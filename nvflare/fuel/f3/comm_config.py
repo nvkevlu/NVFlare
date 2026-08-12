@@ -56,6 +56,11 @@ class VarName:
     TCP_BULK_LANES = "tcp_bulk_lanes"
     TCP_SEND_QUEUE_BYTES = "tcp_send_queue_bytes"
     TCP_HANDSHAKE_TIMEOUT = "tcp_handshake_timeout"
+    TCP_TENSOR_BULK_ENABLED = "tcp_tensor_bulk_enabled"
+    TCP_TENSOR_BULK_LANES = "tcp_tensor_bulk_lanes"
+    TCP_TENSOR_BULK_MAX_BYTES = "tcp_tensor_bulk_max_bytes"
+    TCP_TENSOR_BULK_MAX_SESSIONS = "tcp_tensor_bulk_max_sessions"
+    TCP_TENSOR_BULK_TIMEOUT = "tcp_tensor_bulk_timeout"
 
 
 class CommConfigurator:
@@ -180,6 +185,21 @@ class CommConfigurator:
 
     def get_tcp_handshake_timeout(self, default):
         return ConfigService.get_float_var(VarName.TCP_HANDSHAKE_TIMEOUT, self.config, default=default)
+
+    def get_tcp_tensor_bulk_enabled(self, default=False):
+        return ConfigService.get_bool_var(VarName.TCP_TENSOR_BULK_ENABLED, self.config, default=default)
+
+    def get_tcp_tensor_bulk_lanes(self, default):
+        return ConfigService.get_int_var(VarName.TCP_TENSOR_BULK_LANES, self.config, default=default)
+
+    def get_tcp_tensor_bulk_max_bytes(self, default):
+        return ConfigService.get_int_var(VarName.TCP_TENSOR_BULK_MAX_BYTES, self.config, default=default)
+
+    def get_tcp_tensor_bulk_max_sessions(self, default):
+        return ConfigService.get_int_var(VarName.TCP_TENSOR_BULK_MAX_SESSIONS, self.config, default=default)
+
+    def get_tcp_tensor_bulk_timeout(self, default):
+        return ConfigService.get_float_var(VarName.TCP_TENSOR_BULK_TIMEOUT, self.config, default=default)
 
     def get_int_var(self, name: str, default=None):
         return ConfigService.get_int_var(name, self.config, default=default)

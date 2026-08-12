@@ -26,6 +26,7 @@ from dev_tools.f3.tensor_download_bench import (
     DIRECT_TENSOR_MIN_BYTES,
     MODE_DISK,
     MODE_MEMORY,
+    NATIVE_BULK_NEGOTIATION_KEY,
     DirectPathTracker,
     build_transfer_payload,
     direct_path_manifest,
@@ -217,6 +218,30 @@ def test_disabled_direct_control_rejects_observed_direct_item(tmp_path):
         )
 
 
+def test_native_bulk_tracks_all_tensors_including_small_items(tmp_path):
+    small = torch.tensor([1.0])
+    large = torch.zeros(DIRECT_TENSOR_MIN_BYTES, dtype=torch.uint8)
+    payload = build_transfer_payload(tmp_path / "model.pt", {"small": small, "large": large})
+    direct_stats = {
+        "items": 2,
+        "tensor_bytes": tensor_nbytes(small) + tensor_nbytes(large),
+        "wire_bytes": tensor_nbytes(small) + tensor_nbytes(large),
+        "tensor_ids": {id(small), id(large)},
+        "reply_item_counts": (2,),
+        "native_bulk_sessions": 1,
+        "native_bulk_lanes": (3,),
+        "native_bulk_directions": ("push",),
+    }
+
+    result = validate_received_payload(payload, MODE_MEMORY, direct_stats)
+
+    assert result["native_bulk_sessions"] == 1
+    assert result["native_bulk_lanes"] == (3,)
+    assert result["native_bulk_directions"] == ("push",)
+    assert result["direct_items"] == 2
+    assert result["fallback_items"] == 0
+
+
 def test_direct_tracking_suppresses_capability_advertisement_for_control(monkeypatch):
     tracker = DirectPathTracker()
     original_consume_direct_chunk = tensor_download_bench.TensorConsumer.consume_direct_chunk
@@ -250,14 +275,17 @@ def test_direct_tracking_suppresses_capability_advertisement_for_control(monkeyp
 
 
 @pytest.mark.parametrize(
-    ("extra_args", "expected_direct", "expected_batch"),
+    ("extra_args", "expected_direct", "expected_batch", "expected_native"),
     [
-        ([], True, True),
-        (["--disable-direct-batch"], True, False),
-        (["--disable-direct"], False, False),
+        ([], True, True, True),
+        (["--disable-direct-batch"], True, False, True),
+        (["--disable-native-bulk"], True, True, False),
+        (["--disable-direct"], False, False, False),
     ],
 )
-def test_sender_cli_coordinates_direct_negotiation(monkeypatch, extra_args, expected_direct, expected_batch):
+def test_sender_cli_coordinates_direct_negotiation(
+    monkeypatch, extra_args, expected_direct, expected_batch, expected_native
+):
     captured = {}
     monkeypatch.setattr(
         tensor_download_bench,
@@ -272,6 +300,7 @@ def test_sender_cli_coordinates_direct_negotiation(monkeypatch, extra_args, expe
 
     assert captured[DIRECT_NEGOTIATION_KEY] is expected_direct
     assert captured[DIRECT_BATCH_NEGOTIATION_KEY] is expected_batch
+    assert captured[NATIVE_BULK_NEGOTIATION_KEY] is expected_native
 
 
 def test_direct_tensor_fingerprint_hashes_raw_storage():

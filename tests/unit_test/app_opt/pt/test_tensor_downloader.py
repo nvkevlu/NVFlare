@@ -23,6 +23,7 @@ import json
 import multiprocessing as mp
 import time
 import uuid
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -44,6 +45,22 @@ from nvflare.fuel.f3.streaming.download_service import DirectDownloadChunk, Prod
 from nvflare.fuel.f3.streaming.obj_downloader import ObjectDownloader
 from nvflare.fuel.utils import fobs
 from nvflare.fuel.utils.network_utils import get_open_ports
+
+
+def _native_bulk_cell(transport, expected_fqcn=None):
+    def require_match(fqcn, peer_cn, _description):
+        if expected_fqcn is not None:
+            assert fqcn == expected_fqcn
+        assert peer_cn
+
+    return SimpleNamespace(
+        get_native_bulk_transport=transport,
+        core_cell=SimpleNamespace(
+            communicator=SimpleNamespace(
+                conn_manager=SimpleNamespace(identity_resolver=SimpleNamespace(require_match=require_match))
+            )
+        ),
+    )
 
 
 def _materialize_item(item) -> bytes:
@@ -190,6 +207,233 @@ class TestTensorDownloadableBasic:
         assert downloadable.get_item_size(0) is None
         with pytest.raises(RuntimeError, match="released"):
             downloadable.produce_item(0)
+
+    def test_native_bulk_offer_is_idempotent_and_accounts_after_completion(self):
+        class Manager:
+            lanes = 2
+            max_bytes = 1024 * 1024
+
+            def __init__(self):
+                self.registered = []
+                self.cancelled = []
+
+            def register_send(self, peer_cn, lanes, segments):
+                self.registered.append((peer_cn, lanes, segments))
+                return "01" * 16
+
+            @staticmethod
+            def wait_completed(token, peer_cn):
+                return True, None
+
+            @staticmethod
+            def pop_completed(token, peer_cn):
+                return True
+
+            def cancel(self, token):
+                self.cancelled.append(token)
+
+        manager = Manager()
+        cell = _native_bulk_cell(
+            lambda requester, mode: (manager, SimpleNamespace(), "receiver-cert"), expected_fqcn="receiver"
+        )
+        tensors = {"a": torch.arange(4, dtype=torch.float32), "b": torch.arange(8, dtype=torch.int64)}
+        downloadable = TensorDownloadable(tensors, max_chunk_size=1)
+        downloadable.num_receivers = 1
+        state = TensorConsumer(None, {}).get_initial_state()
+
+        rc, offer, next_state, bytes_delta, items_delta = downloadable.produce_native_bulk(state, "receiver", cell)
+        assert rc == ProduceRC.OK
+        assert offer["direction"] == "pull"
+        assert offer["lanes"] == 2
+        assert bytes_delta == items_delta == 0
+        assert len(manager.registered) == 1
+
+        repeated = downloadable.produce_native_bulk(state, "receiver", cell)
+        assert repeated[0] == ProduceRC.OK
+        assert repeated[1] == offer
+        assert len(manager.registered) == 1
+
+        segments = manager.registered[0][2]
+        acquired = []
+        for segment in segments:
+            owner, view = segment.acquire()
+            acquired.append((owner, bytes(view)))
+        assert torch.equal(acquired[0][0], tensors["a"])
+        assert torch.equal(acquired[1][0], tensors["b"])
+
+        terminal = downloadable.produce_native_bulk(next_state, "receiver", cell)
+        assert terminal[:3] == (ProduceRC.EOF, None, {})
+        assert terminal[3:] == (offer["total_bytes"], offer["item_count"])
+        duplicate_terminal = downloadable.produce_native_bulk(next_state, "receiver", cell)
+        assert duplicate_terminal[3:] == (0, 0)
+
+    def test_native_bulk_active_source_offers_push_and_sends_after_receiver_registration(self):
+        class Manager:
+            lanes = 1
+            max_bytes = 1024
+
+            def __init__(self):
+                self.pushed = None
+
+            @staticmethod
+            def new_token():
+                return "03" * 16
+
+            def push(self, connector, token, lanes, segments):
+                self.pushed = (connector, token, lanes, segments)
+
+            @staticmethod
+            def cancel(token):
+                return None
+
+        manager = Manager()
+        connector = SimpleNamespace()
+
+        def transport(_requester, mode):
+            return None if mode == tensor_downloader.Mode.PASSIVE else (manager, connector, "receiver-cert")
+
+        cell = _native_bulk_cell(transport, expected_fqcn="receiver")
+        downloadable = TensorDownloadable({"a": torch.arange(4, dtype=torch.float32)}, max_chunk_size=1)
+        downloadable.num_receivers = 1
+        state = TensorConsumer(None, {}).get_initial_state()
+
+        rc, offer, next_state, _, _ = downloadable.produce_native_bulk(state, "receiver", cell)
+        assert rc == ProduceRC.OK
+        assert offer["direction"] == "push"
+        assert manager.pushed is None
+
+        terminal = downloadable.produce_native_bulk(next_state, "receiver", cell)
+        assert terminal[0] == ProduceRC.EOF
+        assert manager.pushed[:3] == (connector, "03" * 16, 1)
+
+    def test_native_bulk_push_failure_is_terminal_and_not_retried(self):
+        class Manager:
+            lanes = 1
+            max_bytes = 1024
+
+            def __init__(self):
+                self.pushes = 0
+                self.cancelled = []
+
+            @staticmethod
+            def new_token():
+                return "05" * 16
+
+            def push(self, connector, token, lanes, segments):
+                self.pushes += 1
+                raise OSError("broken native lane")
+
+            def cancel(self, token):
+                self.cancelled.append(token)
+
+        manager = Manager()
+
+        def transport(_requester, mode):
+            return None if mode == tensor_downloader.Mode.PASSIVE else (manager, SimpleNamespace(), "receiver-cert")
+
+        downloadable = TensorDownloadable({"a": torch.arange(4, dtype=torch.float32)}, max_chunk_size=1)
+        downloadable.num_receivers = 1
+        state = TensorConsumer(None, {}).get_initial_state()
+        rc, _, next_state, _, _ = downloadable.produce_native_bulk(
+            state, "receiver", _native_bulk_cell(transport, expected_fqcn="receiver")
+        )
+        assert rc == ProduceRC.OK
+
+        assert downloadable.produce_native_bulk(next_state, "receiver", SimpleNamespace())[0] == ProduceRC.ERROR
+        assert downloadable.produce_native_bulk(next_state, "receiver", SimpleNamespace())[0] == ProduceRC.ERROR
+        assert manager.pushes == 1
+        assert manager.cancelled == ["05" * 16]
+
+    def test_native_bulk_falls_back_for_secure_or_partial_download(self):
+        downloadable = TensorDownloadable({"a": torch.ones(4)}, max_chunk_size=1)
+        downloadable.num_receivers = 1
+        state = TensorConsumer(None, {}).get_initial_state()
+        cell = _native_bulk_cell(lambda requester, mode: (_ for _ in ()).throw(AssertionError()))
+
+        assert downloadable.produce_native_bulk(state, "receiver", cell, secure=True) is None
+        state["start"] = 1
+        assert downloadable.produce_native_bulk(state, "receiver", cell) is None
+
+
+def test_tensor_consumer_native_bulk_places_each_tensor_in_final_storage():
+    class Manager:
+        lanes = 2
+        max_bytes = 1024
+
+        @staticmethod
+        def pull(connector, token, lanes, segments):
+            assert connector == "connector"
+            assert token == "02" * 16
+            assert lanes == 2
+            payloads = [
+                memoryview(torch.tensor([1.0, 2.0], dtype=torch.float32).view(torch.uint8).numpy()),
+                memoryview(torch.tensor([3, 4, 5], dtype=torch.int64).view(torch.uint8).numpy()),
+            ]
+            for segment, payload in zip(segments, payloads):
+                segment.target[:] = payload.cast("B")
+
+    manager = Manager()
+    cell = _native_bulk_cell(lambda source, mode: (manager, "connector", "source-cert"), expected_fqcn="source")
+    offer = {
+        "version": tensor_downloader._TENSOR_NATIVE_BULK_V1,
+        "direction": "pull",
+        "token": "02" * 16,
+        "lanes": 2,
+        "total_bytes": 32,
+        "item_count": 2,
+        "tensors": [
+            {"key": "a", "dtype": "F32", "shape": [2], "offset": 0, "size": 8, "lane": 0},
+            {"key": "b", "dtype": "I64", "shape": [3], "offset": 8, "size": 24, "lane": 1},
+        ],
+    }
+    state = {"next": True}
+    consumer = TensorConsumer(None, {})
+
+    assert consumer.consume_native_bulk("ref", state, offer, cell, "source") is state
+    assert torch.equal(consumer.result["a"], torch.tensor([1.0, 2.0]))
+    assert torch.equal(consumer.result["b"], torch.tensor([3, 4, 5]))
+    consumer.result["a"][0] = 9.0
+    assert consumer.result["a"][0].item() == 9.0
+
+
+def test_tensor_consumer_native_bulk_push_materializes_only_after_completion():
+    class Manager:
+        lanes = 1
+        max_bytes = 1024
+
+        def __init__(self):
+            self.segments = None
+
+        def register_receive(self, peer_cn, lanes, segments, token_hex=None):
+            self.segments = segments
+            return token_hex
+
+        def wait_completed(self, token, peer_cn):
+            payload = memoryview(torch.tensor([7.0, 8.0], dtype=torch.float32).view(torch.uint8).numpy()).cast("B")
+            self.segments[0].target[:] = payload
+            return True, None
+
+        @staticmethod
+        def pop_completed(token, peer_cn):
+            return True
+
+    manager = Manager()
+    cell = _native_bulk_cell(lambda source, mode: (manager, "connector", "source-cert"), expected_fqcn="source")
+    offer = {
+        "version": tensor_downloader._TENSOR_NATIVE_BULK_V1,
+        "direction": "push",
+        "token": "04" * 16,
+        "lanes": 1,
+        "total_bytes": 8,
+        "item_count": 1,
+        "tensors": [{"key": "a", "dtype": "F32", "shape": [2], "offset": 0, "size": 8, "lane": 0}],
+    }
+    consumer = TensorConsumer(None, {})
+
+    consumer.consume_native_bulk("ref", {}, offer, cell, "source")
+    assert consumer.result is None
+    consumer.download_completed("ref")
+    assert torch.equal(consumer.result["a"], torch.tensor([7.0, 8.0]))
 
 
 @pytest.mark.parametrize(

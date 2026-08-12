@@ -135,6 +135,7 @@ F3_BYTE_SIZE_KEYS = {
     "streaming_ack_interval",
     "streaming_retry_max_pending_bytes",
     "tcp_send_queue_bytes",
+    "tcp_tensor_bulk_max_bytes",
 }
 GRPC_BYTE_SIZE_OPTIONS = {
     "grpc.max_send_message_length",
@@ -264,6 +265,34 @@ def validate_f3_config(config: dict):
     if isinstance(handshake_timeout, bool) or not isinstance(handshake_timeout, (int, float)) or handshake_timeout <= 0:
         raise ValueError(f"tcp_handshake_timeout must be positive, got {handshake_timeout!r}")
 
+    tensor_bulk_enabled = config.get("tcp_tensor_bulk_enabled", False)
+    if not isinstance(tensor_bulk_enabled, bool):
+        raise ValueError(f"tcp_tensor_bulk_enabled must be a boolean, got {tensor_bulk_enabled!r}")
+    tensor_bulk_lanes = config.get("tcp_tensor_bulk_lanes", 3)
+    if isinstance(tensor_bulk_lanes, bool) or not isinstance(tensor_bulk_lanes, int) or not 1 <= tensor_bulk_lanes <= 4:
+        raise ValueError(f"tcp_tensor_bulk_lanes must be between 1 and 4, got {tensor_bulk_lanes!r}")
+    tensor_bulk_max_bytes = config.get("tcp_tensor_bulk_max_bytes", 32 * 1024 * 1024 * 1024)
+    if (
+        isinstance(tensor_bulk_max_bytes, bool)
+        or not isinstance(tensor_bulk_max_bytes, int)
+        or not 1 <= tensor_bulk_max_bytes <= 64 * 1024 * 1024 * 1024
+    ):
+        raise ValueError(f"tcp_tensor_bulk_max_bytes is invalid: {tensor_bulk_max_bytes!r}")
+    tensor_bulk_max_sessions = config.get("tcp_tensor_bulk_max_sessions", 2)
+    if (
+        isinstance(tensor_bulk_max_sessions, bool)
+        or not isinstance(tensor_bulk_max_sessions, int)
+        or not 1 <= tensor_bulk_max_sessions <= 16
+    ):
+        raise ValueError(f"tcp_tensor_bulk_max_sessions must be between 1 and 16, got {tensor_bulk_max_sessions!r}")
+    tensor_bulk_timeout = config.get("tcp_tensor_bulk_timeout", 300.0)
+    if (
+        isinstance(tensor_bulk_timeout, bool)
+        or not isinstance(tensor_bulk_timeout, (int, float))
+        or not 1.0 <= tensor_bulk_timeout <= 3600.0
+    ):
+        raise ValueError(f"tcp_tensor_bulk_timeout must be between 1 and 3600, got {tensor_bulk_timeout!r}")
+
 
 def configure_f3(config_file: str) -> tuple[Path, dict]:
     """Load a native F3 comm_config YAML before any cells are created."""
@@ -311,10 +340,13 @@ def f3_config_summary() -> str:
     async_send = config.get_tcp_async_send(False)
     bulk_lanes = config.get_tcp_bulk_lanes(0)
     queue_size = config.get_tcp_send_queue_bytes(DEFAULT_TCP_SEND_QUEUE_SIZE)
+    tensor_bulk_enabled = config.get_tcp_tensor_bulk_enabled(False)
+    tensor_bulk_lanes = config.get_tcp_tensor_bulk_lanes(3)
     return (
         f"streaming_chunk_size={chunk_size:,} ({chunk_size / MB:,.1f} MiB), "
         f"streaming_window_size={window_size:,} ({window_size / MB:,.1f} MiB), "
         f"tcp_async_send={async_send}, tcp_bulk_lanes={bulk_lanes}, "
+        f"tcp_tensor_bulk_enabled={tensor_bulk_enabled}, tcp_tensor_bulk_lanes={tensor_bulk_lanes}, "
         f"tcp_send_queue_bytes={queue_size:,} ({queue_size / MB:,.1f} MiB)"
     )
 
@@ -391,9 +423,10 @@ def resolve_cell_security(
             f"--connection-security {connection_security} requires a grpc://, grpcs://, or stcp:// URL, got {url!r}"
         )
     secure, credentials = build_cell_credentials(role, connection_security, credentials_dir)
-    if secure and scheme in STCP_SCHEMES and role == TX_FQCN:
-        # Native TCP TLS otherwise checks only the issuing CA. The benchmark
-        # always verifies the receiver URL host against its certificate SAN.
+    if secure and scheme in STCP_SCHEMES:
+        # Native bulk requires hostname verification on both roles. The active
+        # connector performs the SAN check; the passive value records a matched
+        # security policy for direction-independent negotiation.
         credentials[DriverParams.VERIFY_HOSTNAME.value] = True
     return secure, credentials
 

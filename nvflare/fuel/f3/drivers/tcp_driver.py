@@ -25,6 +25,13 @@ from nvflare.fuel.f3.comm_error import CommError
 from nvflare.fuel.f3.drivers.base_driver import BaseDriver
 from nvflare.fuel.f3.drivers.driver import ConnectorInfo, Driver
 from nvflare.fuel.f3.drivers.driver_params import DriverCap, DriverParams
+from nvflare.fuel.f3.drivers.native_bulk import (
+    DEFAULT_NATIVE_BULK_LANES,
+    DEFAULT_NATIVE_BULK_MAX_BYTES,
+    DEFAULT_NATIVE_BULK_MAX_SESSIONS,
+    DEFAULT_NATIVE_BULK_TIMEOUT,
+    NativeBulkManager,
+)
 from nvflare.fuel.f3.drivers.net_utils import get_ssl_context, get_tcp_urls
 from nvflare.fuel.f3.drivers.socket_conn import ConnectionHandler, SocketConnection
 from nvflare.security.logging import secure_format_exception
@@ -94,6 +101,13 @@ class TcpDriver(BaseDriver):
                 CommError.BAD_CONFIG,
                 f"tcp_handshake_timeout must be positive, got {self.handshake_timeout}",
             )
+        self.native_bulk = NativeBulkManager(
+            enabled=config.get_tcp_tensor_bulk_enabled(False),
+            lanes=config.get_tcp_tensor_bulk_lanes(DEFAULT_NATIVE_BULK_LANES),
+            max_bytes=config.get_tcp_tensor_bulk_max_bytes(DEFAULT_NATIVE_BULK_MAX_BYTES),
+            max_sessions=config.get_tcp_tensor_bulk_max_sessions(DEFAULT_NATIVE_BULK_MAX_SESSIONS),
+            timeout=config.get_tcp_tensor_bulk_timeout(DEFAULT_NATIVE_BULK_TIMEOUT),
+        )
 
     @staticmethod
     def supported_transports() -> List[str]:
@@ -185,6 +199,7 @@ class TcpDriver(BaseDriver):
         return self.connection_pool_size
 
     def shutdown(self):
+        self.native_bulk.shutdown()
         self.close_all()
         if self.server:
             self.server.shutdown()
