@@ -26,6 +26,8 @@ from safetensors.torch import save as save_tensors
 
 from nvflare.app_common.utils.tensor_disk_offload_context import _TENSOR_DISK_OFFLOAD_ROOT_DIR
 from nvflare.fuel.f3.cellnet.cell import Cell
+from nvflare.fuel.f3.drivers.connector_info import Mode
+from nvflare.fuel.f3.drivers.native_bulk import NativeBulkReceiveSegment, NativeBulkSendSegment
 from nvflare.fuel.f3.streaming.cacheable import CacheableObject, ItemConsumer
 from nvflare.fuel.f3.streaming.download_service import DirectDownloadChunk, ProduceRC, download_object
 from nvflare.fuel.f3.streaming.obj_downloader import ObjectDownloader
@@ -41,6 +43,9 @@ _TENSOR_STREAM_STATE_KEY = "__nvflare_tensor_stream__"
 _TENSOR_STREAM_MEMORY_V1 = "direct_memory_v1"
 _TENSOR_BATCH_STATE_KEY = "__nvflare_tensor_batch__"
 _TENSOR_BATCH_BOUNDED_V1 = "bounded_direct_v1"
+_TENSOR_NATIVE_BULK_STATE_KEY = "__nvflare_tensor_native_bulk__"
+_TENSOR_NATIVE_BULK_V1 = "native_tls_v1"
+_TENSOR_NATIVE_BULK_TOKEN_KEY = "__nvflare_tensor_native_bulk_token__"
 _DIRECT_TENSOR_MAGIC = b"NVTDIR01"
 _DIRECT_TENSOR_HEADER = struct.Struct("<8sII")
 _DIRECT_TENSOR_ALIGNMENT = 64
@@ -50,6 +55,9 @@ _DIRECT_TENSOR_BATCH_HEADER = struct.Struct("<8sII")
 _DIRECT_TENSOR_BATCH_LENGTH = struct.Struct("<Q")
 _DIRECT_TENSOR_BATCH_MAX_ITEMS = 8
 _DIRECT_TENSOR_BATCH_MAX_BYTES = 256 * 1024 * 1024
+_DIRECT_TENSOR_NATIVE_MAX_ITEMS = 65536
+_DIRECT_TENSOR_NATIVE_MAX_KEY_BYTES = 8 * 1024 * 1024
+_DIRECT_TENSOR_NATIVE_MAX_DIMS = 262144
 
 _SAFETENSORS_DTYPE_NAMES = (
     ("float64", "F64"),
@@ -332,6 +340,8 @@ class TensorDownloadable(CacheableObject):
         self._released = False
         self._stream_tensors = None
         self._batch_tensors = None
+        self._native_bulk_lock = threading.Lock()
+        self._native_bulk_session = None
         super().__init__(tensors, max_chunk_size)
 
     def get_item_count(self) -> int:
@@ -365,6 +375,198 @@ class TensorDownloadable(CacheableObject):
             if batch_tensors:
                 new_state[_TENSOR_BATCH_STATE_KEY] = _TENSOR_BATCH_BOUNDED_V1
         return rc, data, new_state
+
+    def produce_native_bulk(self, state: dict, requester: str, cell: Cell, secure: bool = False):
+        if secure or self.num_receivers != 1 or sys.byteorder != "little" or not isinstance(state, dict):
+            return None
+        if state.get(_TENSOR_NATIVE_BULK_STATE_KEY) != _TENSOR_NATIVE_BULK_V1:
+            return None
+
+        token = state.get(_TENSOR_NATIVE_BULK_TOKEN_KEY)
+        if token is not None:
+            with self._native_bulk_lock:
+                session = self._native_bulk_session
+            if not session or token != session["token"] or requester != session["requester"]:
+                return ProduceRC.ERROR, None, {}, 0, 0
+            manager = session["manager"]
+            peer_cn = session["peer_cn"]
+            with session["complete_lock"]:
+                if session["error"]:
+                    return ProduceRC.ERROR, None, {}, 0, 0
+                try:
+                    if not session["completed"]:
+                        if session["direction"] == "pull":
+                            completed, error = manager.wait_completed(token, peer_cn)
+                            if error or not completed or not manager.pop_completed(token, peer_cn):
+                                raise RuntimeError(error or "native tensor bulk pull did not complete")
+                        else:
+                            manager.push(session["connector"], token, session["lanes"], session["segments"])
+                        session["completed"] = True
+                except Exception as ex:
+                    session["error"] = f"{type(ex).__name__}: {ex}"
+                    manager.cancel(token)
+                    return ProduceRC.ERROR, None, {}, 0, 0
+            with self._native_bulk_lock:
+                if session["accounted"]:
+                    bytes_delta = 0
+                    items_delta = 0
+                else:
+                    bytes_delta = session["total_bytes"]
+                    items_delta = session["item_count"]
+                    session["accounted"] = True
+            return ProduceRC.EOF, None, {}, bytes_delta, items_delta
+
+        with self._native_bulk_lock:
+            session = self._native_bulk_session
+        if session:
+            if requester != session["requester"]:
+                return ProduceRC.ERROR, None, {}, 0, 0
+            return ProduceRC.OK, session["offer"], dict(session["next_state"]), 0, 0
+
+        # Never switch protocols after any ordinary item has already been returned.
+        if state.get("start", 0) or state.get("count", 0):
+            return None
+        transport = cell.get_native_bulk_transport(requester, Mode.PASSIVE)
+        direction = "pull"
+        if not transport:
+            transport = cell.get_native_bulk_transport(requester, Mode.ACTIVE)
+            direction = "push"
+        if not transport:
+            return None
+        manager, connector, peer_cn = transport
+        # The peer certificate is already checked against the endpoint FQCN
+        # during the SFM handshake. Re-resolve it here before minting a bearer
+        # token so the bulk path cannot weaken that binding.
+        try:
+            cell.core_cell.communicator.conn_manager.identity_resolver.require_match(
+                requester, peer_cn, "native tensor bulk control connection"
+            )
+        except (AttributeError, ValueError):
+            return None
+
+        base_obj = self.base_obj
+        if base_obj is None:
+            return ProduceRC.ERROR, None, {}, 0, 0
+        if not 1 <= self.size <= _DIRECT_TENSOR_NATIVE_MAX_ITEMS:
+            return None
+        lanes = min(manager.lanes, self.size)
+        if lanes <= 0:
+            return None
+
+        lane_sizes = [0] * lanes
+        manifest = []
+        segments = []
+        offset = 0
+        total_key_bytes = 0
+        total_dims = 0
+        for key in self.keys:
+            tensor = base_obj.get(key)
+            try:
+                key_bytes = len(key.encode("utf-8")) if isinstance(key, str) else 0
+            except UnicodeEncodeError:
+                return None
+            if (
+                not isinstance(key, str)
+                or key == "__metadata__"
+                or key_bytes > _DIRECT_TENSOR_MAX_METADATA
+                or not isinstance(tensor, torch.Tensor)
+                or len(tensor.shape) > 64
+                or not _can_stream_tensor_directly(tensor)
+            ):
+                return None
+            total_key_bytes += key_bytes
+            total_dims += len(tensor.shape)
+            if total_key_bytes > _DIRECT_TENSOR_NATIVE_MAX_KEY_BYTES or total_dims > _DIRECT_TENSOR_NATIVE_MAX_DIMS:
+                return None
+            size = tensor.numel() * tensor.element_size()
+            if size <= 0:
+                return None
+            lane = min(range(lanes), key=lambda lane_index: lane_sizes[lane_index])
+            lane_sizes[lane] += size
+
+            expected_dtype = tensor.dtype
+            expected_shape = tuple(tensor.shape)
+
+            def provide_tensor(
+                tensor_key=key,
+                tensor_size=size,
+                tensor_dtype=expected_dtype,
+                tensor_shape=expected_shape,
+            ):
+                current = self.base_obj
+                if current is None:
+                    raise RuntimeError(f"tensor {tensor_key!r} requested after source release")
+                source = current[tensor_key]
+                if (
+                    not isinstance(source, torch.Tensor)
+                    or source.dtype != tensor_dtype
+                    or tuple(source.shape) != tensor_shape
+                    or source.numel() * source.element_size() != tensor_size
+                    or not _can_stream_tensor_directly(source)
+                ):
+                    raise RuntimeError(f"tensor {tensor_key!r} changed representation during native bulk transfer")
+                snapshot = source.detach().clone(memory_format=torch.contiguous_format)
+                return snapshot, memoryview(snapshot.reshape(-1).view(torch.uint8).numpy())
+
+            segments.append(NativeBulkSendSegment(lane, size=size, provider=provide_tensor))
+            manifest.append(
+                {
+                    "key": key,
+                    "dtype": _SAFETENSORS_DTYPES[tensor.dtype],
+                    "shape": list(tensor.shape),
+                    "offset": offset,
+                    "size": size,
+                    "lane": lane,
+                }
+            )
+            offset += size
+
+        if offset > manager.max_bytes:
+            return None
+        token = manager.register_send(peer_cn, lanes, segments) if direction == "pull" else manager.new_token()
+        next_state = {
+            "start": 0,
+            "count": self.size,
+            _TENSOR_NATIVE_BULK_STATE_KEY: _TENSOR_NATIVE_BULK_V1,
+            _TENSOR_NATIVE_BULK_TOKEN_KEY: token,
+        }
+        offer = {
+            "version": _TENSOR_NATIVE_BULK_V1,
+            "direction": direction,
+            "token": token,
+            "lanes": lanes,
+            "total_bytes": offset,
+            "item_count": self.size,
+            "tensors": manifest,
+        }
+        new_session = {
+            "manager": manager,
+            "connector": connector,
+            "direction": direction,
+            "lanes": lanes,
+            "segments": segments,
+            "token": token,
+            "peer_cn": peer_cn,
+            "requester": requester,
+            "total_bytes": offset,
+            "item_count": self.size,
+            "offer": offer,
+            "next_state": next_state,
+            "completed": False,
+            "error": None,
+            "accounted": False,
+            "complete_lock": threading.Lock(),
+        }
+        with self._native_bulk_lock:
+            existing = self._native_bulk_session
+            if existing is None:
+                self._native_bulk_session = new_session
+            else:
+                manager.cancel(token)
+                if requester != existing["requester"]:
+                    return ProduceRC.ERROR, None, {}, 0, 0
+                return ProduceRC.OK, existing["offer"], dict(existing["next_state"]), 0, 0
+        return ProduceRC.OK, offer, next_state, 0, 0
 
     def produce_item(self, index: int):
         key = self.keys[index]
@@ -469,16 +671,31 @@ class TensorDownloadable(CacheableObject):
             self._prefetch_futures.clear()
         for future in futures:
             future.cancel()
+        with self._native_bulk_lock:
+            session = self._native_bulk_session
+            self._native_bulk_session = None
+        if session:
+            session["manager"].cancel(session["token"])
         super().release()
 
 
 class TensorConsumer(ItemConsumer):
 
-    def __init__(self, tensors_received_cb, cb_kwargs, enable_direct_batch: bool = True):
+    def __init__(
+        self,
+        tensors_received_cb,
+        cb_kwargs,
+        enable_direct_batch: bool = True,
+        enable_native_bulk: bool = True,
+    ):
         ItemConsumer.__init__(self)
         self.tensors_received_cb = tensors_received_cb
         self.cb_kwargs = cb_kwargs
         self.enable_direct_batch = enable_direct_batch
+        self.enable_native_bulk = enable_native_bulk
+        self._native_bulk_receive_session = None
+        self._native_bulk_pending_items = None
+        self._native_bulk_consumed = False
         if tensors_received_cb is not None and not callable(tensors_received_cb):
             raise ValueError("tensors_received_cb must be callable")
 
@@ -488,7 +705,150 @@ class TensorConsumer(ItemConsumer):
         state = {_TENSOR_STREAM_STATE_KEY: _TENSOR_STREAM_MEMORY_V1}
         if self.enable_direct_batch:
             state[_TENSOR_BATCH_STATE_KEY] = _TENSOR_BATCH_BOUNDED_V1
+        if self.enable_native_bulk:
+            state[_TENSOR_NATIVE_BULK_STATE_KEY] = _TENSOR_NATIVE_BULK_V1
         return state
+
+    def consume_native_bulk(self, ref_id: str, state: dict, offer: dict, cell: Cell, from_fqcn: str) -> dict:
+        if not self.enable_native_bulk or sys.byteorder != "little":
+            raise ValueError("received native tensor bulk without negotiating support")
+        if self._native_bulk_consumed:
+            raise ValueError("received more than one native tensor bulk offer")
+        if not isinstance(offer, dict) or set(offer) != {
+            "version",
+            "direction",
+            "token",
+            "lanes",
+            "total_bytes",
+            "item_count",
+            "tensors",
+        }:
+            raise ValueError("invalid native tensor bulk offer")
+        if offer["version"] != _TENSOR_NATIVE_BULK_V1 or offer["direction"] not in ("pull", "push"):
+            raise ValueError("unsupported native tensor bulk offer")
+        token = offer["token"]
+        lanes = offer["lanes"]
+        total_bytes = offer["total_bytes"]
+        item_count = offer["item_count"]
+        tensors = offer["tensors"]
+        if (
+            not isinstance(token, str)
+            or len(token) != 32
+            or type(lanes) is not int
+            or not 1 <= lanes <= 4
+            or type(total_bytes) is not int
+            or total_bytes <= 0
+            or type(item_count) is not int
+            or not 1 <= item_count <= _DIRECT_TENSOR_NATIVE_MAX_ITEMS
+            or not isinstance(tensors, list)
+            or len(tensors) != item_count
+        ):
+            raise ValueError("invalid native tensor bulk bounds")
+
+        mode = Mode.ACTIVE if offer["direction"] == "pull" else Mode.PASSIVE
+        transport = cell.get_native_bulk_transport(from_fqcn, mode)
+        if not transport:
+            raise ValueError("native tensor bulk requires a direct active mTLS connection")
+        manager, connector, peer_cn = transport
+        try:
+            cell.core_cell.communicator.conn_manager.identity_resolver.require_match(
+                from_fqcn, peer_cn, "native tensor bulk control connection"
+            )
+        except (AttributeError, ValueError) as ex:
+            raise ValueError("native tensor bulk peer identity does not match its endpoint") from ex
+        if lanes > manager.lanes or total_bytes > manager.max_bytes:
+            raise ValueError("native tensor bulk offer exceeds local limits")
+
+        dtype_by_code = {code: dtype for dtype, code in _SAFETENSORS_DTYPES.items()}
+        keys = set()
+        cursor = 0
+        parsed = []
+        segments = []
+        lane_counts = [0] * lanes
+        total_key_bytes = 0
+        total_dims = 0
+        for metadata in tensors:
+            if not isinstance(metadata, dict) or set(metadata) != {"key", "dtype", "shape", "offset", "size", "lane"}:
+                raise ValueError("invalid native tensor metadata schema")
+            key = metadata["key"]
+            dtype = dtype_by_code.get(metadata["dtype"])
+            shape = metadata["shape"]
+            offset = metadata["offset"]
+            size = metadata["size"]
+            lane = metadata["lane"]
+            if not isinstance(key, str) or key == "__metadata__" or key in keys:
+                raise ValueError(f"invalid native tensor key {key!r}")
+            try:
+                key_bytes = len(key.encode("utf-8"))
+            except UnicodeEncodeError as ex:
+                raise ValueError("native tensor keys must be valid UTF-8") from ex
+            total_key_bytes += key_bytes
+            total_dims += len(shape) if isinstance(shape, list) else 0
+            if total_key_bytes > _DIRECT_TENSOR_NATIVE_MAX_KEY_BYTES or total_dims > _DIRECT_TENSOR_NATIVE_MAX_DIMS:
+                raise ValueError("native tensor manifest metadata exceeds local limits")
+            if dtype is None:
+                raise ValueError(f"unsupported native tensor dtype {metadata['dtype']!r}")
+            if not isinstance(shape, list) or len(shape) > 64 or any(type(dim) is not int or dim < 0 for dim in shape):
+                raise ValueError(f"invalid native tensor shape {shape!r}")
+            if type(offset) is not int or offset != cursor or type(size) is not int or size <= 0:
+                raise ValueError("native tensor offsets must form one canonical bounded range")
+            if type(lane) is not int or not 0 <= lane < lanes or size > total_bytes - offset:
+                raise ValueError("invalid native tensor lane or size")
+            element_size = torch.empty((), dtype=dtype).element_size()
+            max_numel = size // element_size
+            numel = 0 if 0 in shape else 1
+            if numel:
+                for dim in shape:
+                    if dim and numel > max_numel // dim:
+                        raise ValueError("native tensor shape exceeds its payload")
+                    numel *= dim
+            if numel * element_size != size:
+                raise ValueError("native tensor shape and dtype do not match its payload")
+            keys.add(key)
+            lane_counts[lane] += 1
+            tensor = torch.empty(tuple(shape), dtype=dtype)
+            target = memoryview(tensor.reshape(-1).view(torch.uint8).numpy()).cast("B")
+            if len(target) != size:
+                raise ValueError("native tensor allocation does not match its declared payload")
+            segments.append(NativeBulkReceiveSegment(lane, target))
+            parsed.append((key, tensor, size))
+            cursor += size
+        if cursor != total_bytes or any(count == 0 for count in lane_counts):
+            raise ValueError("native tensor manifest does not cover the declared storage and lanes")
+
+        items = [_StreamedTensorItem(key, tensor, size) for key, tensor, size in parsed]
+        if offer["direction"] == "pull":
+            manager.pull(connector, token, lanes, segments)
+            self.result = self.consume_items(items, self.result)
+        else:
+            manager.register_receive(peer_cn, lanes, segments, token_hex=token)
+            self._native_bulk_receive_session = (manager, token, peer_cn)
+            self._native_bulk_pending_items = items
+        self._native_bulk_consumed = True
+        return state
+
+    def download_completed(self, ref_id: str):
+        session = self._native_bulk_receive_session
+        self._native_bulk_receive_session = None
+        pending_items = self._native_bulk_pending_items
+        self._native_bulk_pending_items = None
+        if session:
+            manager, token, peer_cn = session
+            completed, error = manager.wait_completed(token, peer_cn)
+            if error or not completed or not manager.pop_completed(token, peer_cn):
+                manager.cancel(token)
+                raise RuntimeError(error or "native tensor bulk push did not complete")
+        if pending_items:
+            self.result = self.consume_items(pending_items, self.result)
+        super().download_completed(ref_id)
+
+    def download_failed(self, ref_id, reason: str):
+        session = self._native_bulk_receive_session
+        self._native_bulk_receive_session = None
+        self._native_bulk_pending_items = None
+        if session:
+            session[0].cancel(session[1])
+        super().download_failed(ref_id, reason)
 
     def consume_direct_chunk(self, data) -> List[_StreamedTensorItem]:
         if sys.byteorder != "little":
@@ -560,6 +920,7 @@ def download_tensors(
     abort_signal=None,
     tensors_received_cb=None,
     progress_cb=None,
+    enable_native_bulk: bool = True,
     **cb_kwargs,
 ) -> Tuple[str, Optional[dict[str, torch.Tensor]]]:
     """Download the referenced state dict from the source.
@@ -573,11 +934,19 @@ def download_tensors(
         optional: supress log messages of communication
         abort_signal: signal for aborting download.
         tensors_received_cb: the callback to be called when one set of tensors are received
+        enable_native_bulk: advertise support for negotiated native-TLS tensor transfer
 
     Returns: tuple of (error message if any, downloaded state dict).
 
     """
-    consumer = TensorConsumer(tensors_received_cb, cb_kwargs)
+    native_transport_available = bool(cell.get_native_bulk_transport(from_fqcn, Mode.ACTIVE)) or bool(
+        cell.get_native_bulk_transport(from_fqcn, Mode.PASSIVE)
+    )
+    consumer = TensorConsumer(
+        tensors_received_cb,
+        cb_kwargs,
+        enable_native_bulk=enable_native_bulk and native_transport_available,
+    )
     download_object(
         from_fqcn=from_fqcn,
         ref_id=ref_id,

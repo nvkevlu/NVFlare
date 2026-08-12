@@ -190,6 +190,10 @@ class Downloadable(ABC):
         """
         pass
 
+    def produce_native_bulk(self, state: dict, requester: str, cell: Cell, secure: bool = False):
+        """Optionally return a native-bulk offer instead of an ordinary produced chunk."""
+        return None
+
 
 class DirectDownloadChunk:
     """A bytes-like chunk sent as the reply payload instead of through FOBS."""
@@ -267,6 +271,7 @@ class _PropKey:
     CONFIRM_NONCE = "confirm_nonce"  # both ways: per-serve nonce binding a confirmation to ITS serve
     CONFIRM_CAPABLE = "confirm_capable"  # receiver -> producer, per request: will confirm if asked
     CONFIRM_EXPECTED = "confirm_expected"  # producer -> receiver, per reply: confirmations consumed
+    NATIVE_BULK = "native_bulk"
 
 
 # Per-process kill-switch for receiver-confirmed completion (read once at first use; set the
@@ -1187,7 +1192,7 @@ class DownloadService:
                 cell.register_request_cb(
                     channel=OBJ_DOWNLOADER_CHANNEL,
                     topic=OBJ_DOWNLOADER_TOPIC,
-                    cb=cls._handle_download,
+                    cb=functools.partial(cls._handle_download, cell=cell),
                 )
                 cls._initialized_cells[cell] = True
 
@@ -1539,7 +1544,7 @@ class DownloadService:
             return ref.tx.tid
 
     @classmethod
-    def _handle_download(cls, request: Message) -> Message:
+    def _handle_download(cls, request: Message, cell: Cell = None) -> Message:
         requester = request.get_header(MessageHeaderKey.ORIGIN)
         payload = request.payload
         assert isinstance(payload, dict)
@@ -1582,6 +1587,65 @@ class DownloadService:
             # receiver-confirmed completion is armed only when the receiver advertised the
             # capability on this request AND the local kill-switch is on
             expect_confirm = bool(payload.get(_PropKey.CONFIRM_CAPABLE)) and _receiver_confirm_enabled()
+
+            if cell is not None and isinstance(current_state, dict):
+                try:
+                    native_bulk = ref.obj.produce_native_bulk(
+                        current_state,
+                        requester,
+                        cell,
+                        secure=bool(request.get_header(MessageHeaderKey.SECURE, False)),
+                    )
+                except Exception as ex:
+                    ref.emit_progress(receiver_id=requester, state=TransferProgressState.FAILED, force=True)
+                    cls._logger.error(
+                        f"Object {type(ref.obj)} encountered exception preparing native bulk: "
+                        f"{secure_format_exception(ex)}"
+                    )
+                    return make_reply(ReturnCode.PROCESS_EXCEPTION)
+                if native_bulk is not None:
+                    status, offer, new_state, bytes_delta, items_delta = native_bulk
+                    if bytes_delta:
+                        tx.add_total_bytes(bytes_delta)
+                        ref.emit_progress(
+                            receiver_id=requester,
+                            state=TransferProgressState.ACTIVE,
+                            bytes_delta=bytes_delta,
+                            items_delta=items_delta,
+                        )
+                    if status != ProduceRC.OK:
+                        serve_nonce = ref.obj_served(
+                            requester,
+                            status=DownloadStatus.SUCCESS if status == ProduceRC.EOF else DownloadStatus.FAILED,
+                            expect_confirm=expect_confirm,
+                        )
+                        if expect_confirm and serve_nonce:
+                            ref.emit_progress(receiver_id=requester, state=TransferProgressState.ACTIVE, force=True)
+                            body = {
+                                _PropKey.STATUS: status,
+                                _PropKey.CONFIRM_EXPECTED: True,
+                                _PropKey.CONFIRM_NONCE: serve_nonce,
+                            }
+                        else:
+                            ref.emit_progress(
+                                receiver_id=requester,
+                                state=(
+                                    TransferProgressState.COMPLETED
+                                    if status == ProduceRC.EOF
+                                    else TransferProgressState.FAILED
+                                ),
+                                force=True,
+                            )
+                            body = {_PropKey.STATUS: status}
+                        return make_reply(ReturnCode.OK, body=body)
+                    return make_reply(
+                        ReturnCode.OK,
+                        body={
+                            _PropKey.STATUS: status,
+                            _PropKey.STATE: new_state,
+                            _PropKey.NATIVE_BULK: offer,
+                        },
+                    )
 
             # Keep produce() outside the global transaction lock so slow chunk generation
             # does not block unrelated downloads. Timeout/delete cleanup can release the
@@ -1794,6 +1858,10 @@ class Consumer(ABC):
         """Materialize a negotiated direct reply before ``consume`` is called."""
         raise TypeError(f"{type(self).__name__} does not support direct download chunks")
 
+    def consume_native_bulk(self, ref_id: str, state: dict, offer: dict, cell: Cell, from_fqcn: str) -> dict:
+        """Consume a negotiated native-bulk offer and return the next producer state."""
+        raise TypeError(f"{type(self).__name__} does not support native bulk downloads")
+
     @abstractmethod
     def consume(self, ref_id: str, state: dict, data: Any) -> dict:
         """Called to process the received data.
@@ -1905,6 +1973,8 @@ def download_object(
     consecutive_timeouts = 0
     total_bytes = 0
     total_items = None
+    pending_native_bulk_bytes = 0
+    pending_native_bulk_items = 0
     progress_sequence = 0
     last_progress_emit_time = 0.0
     download_start = time.time()
@@ -2086,7 +2156,44 @@ def download_object(
             status = payload.get(_PropKey.STATUS)
             data = payload.get(_PropKey.DATA)
             state = payload.get(_PropKey.STATE)
+            native_bulk = payload.get(_PropKey.NATIVE_BULK)
+            if native_bulk is not None:
+                try:
+                    if status != ProduceRC.OK:
+                        raise ValueError(f"invalid native bulk status {status!r}")
+                    if pending_native_bulk_bytes or pending_native_bulk_items:
+                        raise ValueError("producer returned more than one native bulk offer")
+                    state = consumer.consume_native_bulk(ref_id, state, native_bulk, cell, from_fqcn)
+                    if not isinstance(state, dict):
+                        raise TypeError(f"native bulk state must be dict but got {type(state)}")
+                except Exception as ex:
+                    consumer.download_failed(
+                        ref_id,
+                        f"exception receiving native bulk data: {secure_format_exception(ex)}",
+                    )
+                    _emit_progress("failed", force=True)
+                    return
+                bulk_bytes = native_bulk.get("total_bytes") if isinstance(native_bulk, dict) else None
+                bulk_items = native_bulk.get("item_count") if isinstance(native_bulk, dict) else None
+                if type(bulk_bytes) is not int or bulk_bytes <= 0:
+                    consumer.download_failed(ref_id, "native bulk offer has an invalid byte count")
+                    _emit_progress("failed", force=True)
+                    return
+                if type(bulk_items) is not int or bulk_items <= 0:
+                    consumer.download_failed(ref_id, "native bulk offer has an invalid item count")
+                    _emit_progress("failed", force=True)
+                    return
+                pending_native_bulk_bytes = bulk_bytes
+                pending_native_bulk_items = bulk_items
+                current_state = state
+                _emit_progress("active")
+                continue
         if status == ProduceRC.EOF:
+            if pending_native_bulk_bytes:
+                total_bytes += pending_native_bulk_bytes
+                total_items = (total_items or 0) + pending_native_bulk_items
+                pending_native_bulk_bytes = 0
+                pending_native_bulk_items = 0
             elapsed = time.time() - download_start
             size_mb = total_bytes / (1024 * 1024)
             logger.info(

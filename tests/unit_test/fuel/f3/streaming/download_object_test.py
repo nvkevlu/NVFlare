@@ -55,7 +55,7 @@ class MockConsumer(Consumer):
         self.failure_reason = reason
 
 
-def _make_reply(rc: str, status=None, data=None, state=None) -> Message:
+def _make_reply(rc: str, status=None, data=None, state=None, native_bulk=None) -> Message:
     """Build a Message that mimics what cell.send_request returns."""
     payload = {}
     if status is not None:
@@ -64,6 +64,8 @@ def _make_reply(rc: str, status=None, data=None, state=None) -> Message:
         payload["data"] = data
     if state is not None:
         payload["state"] = state
+    if native_bulk is not None:
+        payload["native_bulk"] = native_bulk
 
     msg = Message()
     msg.set_header(MessageHeaderKey.RETURN_CODE, rc)
@@ -149,6 +151,69 @@ class TestDownloadObject:
         assert consumer.failed
         assert "invalid direct download status" in consumer.failure_reason
         assert consumer.direct_calls == 0
+
+    def test_native_bulk_is_negotiated_and_accounted_only_at_eof(self, cell):
+        events = []
+
+        class NativeConsumer(MockConsumer):
+            supports_pipelining = False
+
+            def __init__(self):
+                super().__init__()
+                self.offers = []
+
+            def get_initial_state(self):
+                return {"native": "v1"}
+
+            def consume_native_bulk(self, ref_id, state, offer, used_cell, from_fqcn):
+                assert used_cell is cell
+                assert from_fqcn == "server.site-1"
+                self.offers.append(offer)
+                return state
+
+        consumer = NativeConsumer()
+        offer = {"total_bytes": 1024, "item_count": 2}
+        next_state = {"native": "v1", "token": "01" * 16}
+        cell.send_request.side_effect = [
+            _make_reply(ReturnCode.OK, status=ProduceRC.OK, state=next_state, native_bulk=offer),
+            _make_reply(ReturnCode.OK, status=ProduceRC.EOF),
+        ]
+
+        download_object(
+            "server.site-1",
+            "ref-001",
+            10.0,
+            cell,
+            consumer,
+            progress_cb=lambda **event: events.append(event),
+            progress_interval=0,
+        )
+
+        assert consumer.completed
+        assert consumer.offers == [offer]
+        assert cell.send_request.call_args_list[1].kwargs["request"].payload["state"] == next_state
+        assert events[-1]["state"] == "completed"
+        assert events[-1]["bytes_done"] == 1024
+        assert events[-1]["items_done"] == 2
+
+    @pytest.mark.parametrize("status", [None, ProduceRC.EOF, ProduceRC.ERROR])
+    def test_native_bulk_rejects_non_data_status(self, cell, status):
+        class NativeConsumer(MockConsumer):
+            def consume_native_bulk(self, *_args):
+                raise AssertionError("invalid status must be rejected before native consumption")
+
+        consumer = NativeConsumer()
+        cell.send_request.return_value = _make_reply(
+            ReturnCode.OK,
+            status=status,
+            state={"token": "01" * 16},
+            native_bulk={"total_bytes": 1, "item_count": 1},
+        )
+
+        download_object("server.site-1", "ref-001", 10.0, cell, consumer)
+
+        assert consumer.failed
+        assert "invalid native bulk status" in consumer.failure_reason
 
     def test_multi_chunk_download(self, cell, consumer):
         """Test download with multiple chunks before EOF."""

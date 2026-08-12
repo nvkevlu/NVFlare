@@ -148,6 +148,41 @@ class TestDownloadService:
         assert bytes(body) == b"prefixbody"
         assert any(call.kwargs.get("items_delta") == 3 for call in ref.emit_progress.call_args_list)
 
+    def test_native_bulk_offer_bypasses_ordinary_produce(self):
+        from nvflare.fuel.f3.streaming.download_service import _Transaction
+
+        class NativeDownloadable(MockDownloadable):
+            def __init__(self):
+                super().__init__([b"fallback"])
+                self.native_calls = []
+
+            def produce_native_bulk(self, state, requester, cell, secure=False):
+                self.native_calls.append((state, requester, cell, secure))
+                return ProduceRC.OK, {"token": "01" * 16}, {"token": "01" * 16}, 0, 0
+
+            def produce(self, state, requester):
+                raise AssertionError("ordinary production must not run after a native offer")
+
+        service = _make_isolated_download_service()
+        obj = NativeDownloadable()
+        tx = _Transaction(timeout=10.0, num_receivers=1)
+        ref = tx.add_object(obj)
+        ref.emit_progress = Mock()
+        with service._tx_lock:
+            service._tx_table[tx.tid] = tx
+            service._ref_table[ref.rid] = ref
+        cell = object()
+
+        reply = service._handle_download(_make_download_request(ref.rid, "receiver1", {"native": "v1"}), cell)
+
+        assert reply.get_header(MessageHeaderKey.RETURN_CODE) == ReturnCode.OK
+        assert reply.payload == {
+            "status": ProduceRC.OK,
+            "state": {"token": "01" * 16},
+            "native_bulk": {"token": "01" * 16},
+        }
+        assert obj.native_calls == [({"native": "v1"}, "receiver1", cell, False)]
+
     def test_direct_control_round_trip_keeps_writable_body_view(self):
         wire = bytearray(_encode_direct_control(ProduceRC.OK, {"start": 3, "count": 1}) + b"body")
 
