@@ -52,6 +52,7 @@ class VarName:
     SFM_CLOSE_STALLED_CONNECTION = "sfm_close_stalled_connection"
     SFM_SEND_STALL_CONSECUTIVE_CHECKS = "sfm_send_stall_consecutive_checks"
     TCP_NO_DELAY = "tcp_no_delay"
+    TCP_HANDSHAKE_TIMEOUT = "tcp_handshake_timeout"
 
 
 class CommConfigurator:
@@ -164,6 +165,9 @@ class CommConfigurator:
 
     def get_tcp_no_delay(self, default=True):
         return ConfigService.get_bool_var(VarName.TCP_NO_DELAY, self.config, default=default)
+
+    def get_tcp_handshake_timeout(self, default=10.0):
+        return ConfigService.get_float_var(VarName.TCP_HANDSHAKE_TIMEOUT, self.config, default=default)
 
     def get_int_var(self, name: str, default=None):
         return ConfigService.get_int_var(name, self.config, default=default)

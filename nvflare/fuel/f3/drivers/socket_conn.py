@@ -233,11 +233,32 @@ class SocketConnection(Connection):
 class ConnectionHandler(BaseRequestHandler):
     def handle(self):
 
+        request = self.request
+        ssl_context = self.server.ssl_context
+        try:
+            if ssl_context:
+                request.settimeout(self.server.handshake_timeout)
+                request = ssl_context.wrap_socket(request, server_side=True)
+                request.settimeout(None)
+        except Exception as ex:
+            log.warning(f"Rejected TCP TLS connection: {secure_format_exception(ex)}")
+            try:
+                request.close()
+            except OSError:
+                pass
+            return
+
         # noinspection PyUnresolvedReferences
-        connection = SocketConnection(self.request, self.server.connector, self.server.ssl_context)
+        connection = SocketConnection(request, self.server.connector, bool(ssl_context))
         # noinspection PyUnresolvedReferences
         driver = self.server.driver
 
-        driver.add_connection(connection)
-        connection.read_loop()
-        driver.close_connection(connection)
+        added = False
+        try:
+            driver.add_connection(connection)
+            added = True
+            connection.read_loop()
+        finally:
+            connection.close()
+            if added:
+                driver.close_connection(connection)

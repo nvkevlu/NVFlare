@@ -17,7 +17,9 @@ import socket
 from socketserver import TCPServer, ThreadingTCPServer
 from typing import Any, Dict, List
 
+from nvflare.fuel.f3.comm_config import CommConfigurator
 from nvflare.fuel.f3.comm_config_utils import requires_secure_connection
+from nvflare.fuel.f3.comm_error import CommError
 from nvflare.fuel.f3.drivers.base_driver import BaseDriver
 from nvflare.fuel.f3.drivers.driver import ConnectorInfo, Driver
 from nvflare.fuel.f3.drivers.driver_params import DriverCap, DriverParams
@@ -27,10 +29,13 @@ from nvflare.security.logging import secure_format_exception
 
 log = logging.getLogger(__name__)
 
+DEFAULT_TCP_HANDSHAKE_TIMEOUT = 10.0
+
 
 class TcpStreamServer(ThreadingTCPServer):
 
     TCPServer.allow_reuse_address = True
+    daemon_threads = True
 
     def __init__(self, driver: Driver, connector: ConnectorInfo):
         self.driver = driver
@@ -38,15 +43,13 @@ class TcpStreamServer(ThreadingTCPServer):
 
         params = connector.params
         self.ssl_context = get_ssl_context(params, ssl_server=True)
+        self.handshake_timeout = driver.handshake_timeout
 
         host = params.get(DriverParams.HOST.value)
         port = int(params.get(DriverParams.PORT.value))
         self.local_addr = f"{host}:{port}"
 
         TCPServer.__init__(self, (host, port), ConnectionHandler, False)
-
-        if self.ssl_context:
-            self.socket = self.ssl_context.wrap_socket(self.socket, server_side=True)
 
         try:
             self.server_bind()
@@ -61,6 +64,16 @@ class TcpDriver(BaseDriver):
     def __init__(self):
         super().__init__()
         self.server = None
+        self.handshake_timeout = CommConfigurator().get_tcp_handshake_timeout(DEFAULT_TCP_HANDSHAKE_TIMEOUT)
+        if (
+            isinstance(self.handshake_timeout, bool)
+            or not isinstance(self.handshake_timeout, (int, float))
+            or self.handshake_timeout <= 0
+        ):
+            raise CommError(
+                CommError.BAD_CONFIG,
+                f"tcp_handshake_timeout must be positive, got {self.handshake_timeout}",
+            )
 
     @staticmethod
     def supported_transports() -> List[str]:
@@ -85,7 +98,10 @@ class TcpDriver(BaseDriver):
 
         context = get_ssl_context(params, ssl_server=False)
         if context:
-            sock = context.wrap_socket(sock)
+            if context.check_hostname:
+                sock = context.wrap_socket(sock, server_hostname=host)
+            else:
+                sock = context.wrap_socket(sock)
 
         sock.connect((host, port))
 

@@ -88,7 +88,10 @@ class AioTcpDriver(BaseDriver):
 
     async def _tcp_connect(self, host, port):
         self.ssl_context = get_ssl_context(self.connector.params, ssl_server=False)
-        reader, writer = await asyncio.open_connection(host, port, ssl=self.ssl_context)
+        connect_kwargs = {"ssl": self.ssl_context}
+        if self.ssl_context and self.ssl_context.check_hostname:
+            connect_kwargs["server_hostname"] = host
+        reader, writer = await asyncio.open_connection(host, port, **connect_kwargs)
         await self._create_connection(reader, writer)
 
     async def _tcp_listen(self, host, port):
