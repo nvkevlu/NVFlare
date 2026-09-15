@@ -20,7 +20,8 @@ Included:
 - visible memory capacity;
 - CUDA-enumerated GPUs;
 - capacity of the filesystem that contains the existing job workspace;
-- exact sizes of NVFlare result files already known to the platform; and
+- one exact byte total for a complete NVFlare result set already known to the
+  platform; and
 - F3 application-payload counters.
 
 Excluded:
@@ -92,8 +93,8 @@ The intended flow is:
    CPU, memory, and GPU values.
 4. At a normal end, NVFlare may take one final resource observation.
 5. NVFlare records the period end time.
-6. At site completion, NVFlare records saved-result sizes and closes the F3
-   counters.
+6. At site completion, NVFlare records one saved-result byte total and closes
+   the F3 counters.
 7. The site sends one final report through an existing authenticated NVFlare
    path.
 8. The server validates the report, combines all received site reports, and
@@ -113,7 +114,7 @@ Candidate v1 has eight closed record types:
 | **attempt_start** | Start of one measurement period and its CPU, memory, and GPU observation. |
 | **attempt_final** | Optional final resource observation for that period. |
 | **attempt_end** | End time and reason for that period. |
-| **participant_final** | End of the site run, saved-result sizes, and F3 counters. |
+| **participant_final** | End of the site run, one saved-result byte total, and F3 counters. |
 | **participant_summary** | One complete site report built from the preceding facts. |
 | **resource_summary** | Job result with every expected participant classified. |
 | **manifest** | Hashes of the exact stored server files. |
@@ -200,14 +201,18 @@ Calculate storage time only when NVFlare can establish that the workspace was
 available for the stated interval. Otherwise mark the result partial or
 unavailable.
 
-### Saved-result sizes
+### Saved-result byte total
 
-Record exact sizes only when existing NVFlare state provides a complete,
-bounded list of result files. If no such list exists, retained content is
-unavailable with `not_bound`. Do not add an artifact registry, job setting, or
-scan of unrelated directories.
+Record one exact byte total only when existing NVFlare state identifies a
+complete, bounded result set. Calculate it from that set without exporting
+per-file data. If no such set exists, retained content is unavailable with
+`not_bound`. Do not add an artifact registry, job setting, or scan of unrelated
+directories.
 
-Keep saved-result bytes separate from filesystem capacity.
+Keep only status and a byte count. A reported value is the complete total; a
+partial value is the exact observed subtotal. Do not export result filenames
+or hash model content. Keep saved-result bytes separate from filesystem
+capacity.
 
 ### F3 network counters
 
@@ -276,7 +281,7 @@ startup value appears to have remained valid. If it is missing or numerically
 different, mark the affected total partial.
 
 Storage uses the site job-run interval only when workspace continuity is known.
-Saved-result sizes and F3 counters contribute once per site report.
+The saved-result byte total and F3 counters contribute once per site report.
 
 A measurement period that started but could not capture resources may retain
 its known start and end times. Its resource values are unavailable, and job
@@ -397,8 +402,8 @@ Text output shows:
 - CPU hours;
 - memory GiB-hours;
 - storage GiB-hours;
-- saved-result MiB; and
-- accepted remote F3 KiB.
+- saved-result GiB; and
+- accepted remote F3 GiB.
 
 The command says clearly that job totals may contain overlapping physical
 resources and are not physical capacity.
@@ -407,8 +412,8 @@ Examples:
 
 - [all sites](../../research/runtime_resource_proxy_prototype/schema/golden/v1/finalized_job/cli/resources-all.txt)
 - [one site with models](../../research/runtime_resource_proxy_prototype/schema/golden/v1/finalized_job/cli/resources-site-1-details.txt)
+- [site with partial measurement evidence](../../research/runtime_resource_proxy_prototype/schema/golden/v1/finalized_job/cli/resources-site-2-details.txt)
 - [JSON](../../research/runtime_resource_proxy_prototype/schema/golden/v1/finalized_job/cli/resources-all.json)
-- [partial multi-period report](../../research/runtime_resource_proxy_prototype/schema/golden/v1/finalized_job/cli/resources-partial-periods.txt)
 
 ## 10. Initial observation and job code
 
@@ -463,7 +468,7 @@ Tests must cover:
 - CUDA-enumerated full GPUs, zero visible GPUs, unavailable CUDA, and MIG;
 - hardware-model suppression and heterogeneous CPUs;
 - shared and unreadable workspace filesystems;
-- exact saved-result sizes;
+- exact saved-result byte totals;
 - all included and excluded F3 traffic classes;
 - fan-out, forwarding, local delivery, failed send, and cutoff;
 - normal completion, missing final observation, crash, and launch failure;
@@ -475,9 +480,10 @@ Tests must cover:
 - text and JSON CLI output; and
 - ordinary-user execution with no extra privileges or configuration.
 
-## 14. Open decisions
+## 14. Open-decision shortlist
 
-These must be decided with the resource-management design:
+[GAPS.md](../../research/runtime_resource_proxy_prototype/GAPS.md) is the
+authoritative list. The main implementation questions are:
 
 1. Which existing NVFlare component records site-run and measurement-period
    boundaries?
@@ -492,33 +498,58 @@ These must be decided with the resource-management design:
    capacity changes without it?
 8. Is Linux the first fully supported platform?
 
-See [GAPS.md](../../research/runtime_resource_proxy_prototype/GAPS.md) for the
-review table.
+Use the GAPS review table for the complete set, constraints, and Phase 2
+questions. This shortlist should not be maintained as a second complete list.
 
 ## 15. Golden example
 
-The main example contains one eight-minute measurement period:
+The main finalized-job example has four expected participants:
 
-- 1.5 visible CPU units;
-- 8 GiB visible memory;
-- one H100 GPU;
-- 1 TiB visible job-workspace filesystem capacity;
-- an 18 MiB saved result; and
-- 5.5 KiB of remote F3 payload accepted for send.
+- `site-1` has a complete 37-minute, 3-second report;
+- `site-2` has an accepted report with incomplete measurement evidence;
+- `site-3` has no valid report before the cutoff; and
+- the server has a complete 37-minute, 3-second report.
 
-Its derived values are:
+`site-1` reports 32 visible CPU units, 192 GiB of memory, four A100 80 GB
+GPUs, 1 TiB of visible workspace capacity, a known empty saved-result set, and
+147,700,336,640 bytes of accepted remote F3 payload. Its derived values are:
 
 ~~~text
-CPU:     1.5 × 480 = 720 CPU-unit-seconds
-Memory:  8 GiB × 480 = 4,123,168,604,160 byte-seconds
-GPU:     1 × 480 = 480 GPU-instance-seconds
-Storage: 1 TiB × 480 = 527,765,581,332,480 byte-seconds
+CPU:     32 × 2,223 = 71,136 CPU-unit-seconds
+Memory:  192 GiB × 2,223 = 458,290,190,352,384 byte-seconds
+GPU:     4 × 2,223 = 8,892 GPU-instance-seconds
+Storage: 1 TiB × 2,223 = 2,444,214,348,546,048 byte-seconds
 ~~~
 
-The [partial example](../../research/runtime_resource_proxy_prototype/schema/golden/v1/participant_summary_partial_periods.json)
-contains two recorded periods and a gap. It demonstrates incomplete evidence.
-It is an example only. It does not describe or require the future process
-architecture.
+The [`site-2` report](../../research/runtime_resource_proxy_prototype/schema/golden/v1/participant_summary_partial_periods.json)
+contains a five-minute 16-CPU, 128-GiB, two-GPU period that ends without a
+final observation, a five-minute unmeasured gap, and a later 27-minute,
+3-second 32-CPU, 192-GiB, four-GPU period. Its report is accepted, but CPU,
+memory, and GPU totals are partial. Its saved-result byte count is unavailable
+with `not_bound` because no complete result set is known. No compute time is
+claimed for the gap.
+
+This example says only that one measurement ended and another later began. It
+does not claim that a client disconnected, a process changed, or resources were
+released. Those meanings depend on the resource-management architecture.
+
+The [resource summary](../../research/runtime_resource_proxy_prototype/schema/golden/v1/resource_summary.json)
+shows all four expected participants, each accepted participant's derived
+totals, and the job totals. `site-3` is the missing participant; the server is
+accepted rather than being described as interrupted. The server reports the
+complete 29,540,266,113-byte saved-result total. Across accepted reports, the
+example contains 145,656 CPU-unit-seconds, 986,880,405,405,696 memory
+byte-seconds, 15,984 GPU-instance-seconds, and 590,801,346,560 accepted remote
+F3 payload bytes.
+
+The scale comes from a completed five-round, two-client Qwen2.5-14B Colossus
+qualification. That run used four A100s per client, lasted 37:03, exchanged a
+29,540,067,328-byte state in twenty directions, and observed a
+29,540,266,113-byte saved result. The golden example is not a replay: its CPU,
+memory, storage, and measurement-period partitions are illustrative. The
+historical run recorded logical tensor size but did not measure post-encoding
+F3 acceptance bytes. The example sets its F3 counters to the derived logical
+volume only to use a realistic scale.
 
 Large quantities are stored as decimal strings so JavaScript and other clients
 do not lose integer precision.

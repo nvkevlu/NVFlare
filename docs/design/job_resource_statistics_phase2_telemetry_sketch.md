@@ -12,9 +12,11 @@ JobStatsReporter. It does not collect or recalculate Phase 1 data.
 | Phase 1 | Observe runtime-visible resources, build site reports, validate them, calculate job totals, and store the final RESOURCE_STATS record. |
 | Phase 2 | Read that finalized record and optionally publish an approved subset. |
 
-Phase 2 reads only the exact server-side RESOURCE_STATS component. It does not
-read site fragments, current host values, job code, launcher data, or
-in-progress reports.
+Phase 2 reads the exact server-side RESOURCE_STATS component through the narrow
+Phase 1 read API. Phase 1 has already validated the participant archive,
+manifest, and query copy before making that record available. Phase 2 does not
+read the manifest or participant files independently, nor does it read current
+host values, job code, launcher data, or in-progress reports.
 
 If RESOURCE_STATS is missing, invalid, or not final, Phase 2 publishes nothing.
 A Phase 2 failure never changes the Phase 1 result or the job outcome.
@@ -29,7 +31,7 @@ Phase 1 values have a different meaning:
 
 - visible CPU, memory, and GPU capacity;
 - capacity multiplied by measured time;
-- saved-result sizes; and
+- one saved-result byte total; and
 - F3 payload counters.
 
 Phase 2 may use JobStatsReporter to publish Phase 1 facts, but it must
@@ -44,7 +46,7 @@ The adapter accepts a record only when all of these are true:
 - the record kind is nvflare.resource_stats.resource_summary;
 - the schema version is supported;
 - the server has finalized the expected participant list;
-- stored hashes match the manifest; and
+- the Phase 1 API returns it as a finalized, validated record; and
 - the job ID matches the requested job.
 
 The adapter does not repair a bad record. It logs one short diagnostic and
@@ -59,11 +61,11 @@ The first version should publish a small job-level summary:
 | Schema version | resource summary schema_version |
 | Job ID | resource summary job_id |
 | Finalization time | finalized_at |
-| Expected participants | number of entries in roster |
-| Accepted reports | roster entries with status accepted |
-| Missing reports | roster entries with status missing |
-| Invalid reports | roster entries with status invalid |
-| Disabled reports | roster entries with status disabled |
+| Expected participants | number of entries in `participants` |
+| Accepted reports | `participants` entries with status `accepted` |
+| Missing reports | `participants` entries with status `missing` |
+| Invalid reports | `participants` entries with status `invalid` |
+| Disabled reports | `participants` entries with status `disabled` |
 | CPU-unit-seconds | totals.cpu groups |
 | Memory byte-seconds | totals.memory |
 | Full-GPU instance-seconds | totals.gpu full_gpu groups |
@@ -112,7 +114,7 @@ A simple sequence is:
 2. Phase 1 validates received reports and calculates totals.
 3. Phase 1 writes the participant records, summary, and manifest.
 4. Phase 1 writes the exact RESOURCE_STATS query copy.
-5. Phase 2 reads that copy.
+5. Phase 2 reads that validated copy through the narrow Phase 1 API.
 6. JobStatsReporter publishes the approved fields.
 
 No extra wait is added to job completion. If publication is asynchronous, the
@@ -193,7 +195,7 @@ Phase 2 is best effort.
 | Phase 1 is not final | Publish nothing yet. |
 | RESOURCE_STATS is absent | Publish nothing; record one short diagnostic. |
 | Schema version is unsupported | Publish nothing; identify the version. |
-| Hash or validation fails | Publish nothing; report invalid input. |
+| Phase 1 validation fails | Publish nothing; report invalid input. |
 | JobStatsReporter is not already active | Phase 1 remains available through storage and CLI; this feature does not add an enablement setting. |
 | Reporter publication fails | Keep the Phase 1 result; retry only within the normal reporter policy. |
 
@@ -237,3 +239,6 @@ The team still needs to choose:
 
 None of these decisions changes the Phase 1 schema or permits a new privilege,
 configuration field, launch option, or deployment step.
+
+These Phase 2 items are also recorded in the authoritative
+[GAPS.md](../../research/runtime_resource_proxy_prototype/GAPS.md) list.

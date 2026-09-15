@@ -2,7 +2,7 @@
   "schema_version": "1.0",
   "kind": "nvflare.resource_stats.participant_summary",
   "job_id": "job-20260909-001",
-  "participant_key": "sha256-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "participant_key": "sha256-cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
   "start": {
     "observed_at": "2026-09-09T14:00:00Z",
     "storage": {
@@ -18,13 +18,13 @@
     },
     "retained_content": {
       "status": "reported",
-      "bytes": "0"
+      "bytes": "29540266113"
     },
     "f3": {
       "status": "reported",
       "remote_accepted": {
-        "payload_bytes": "147700336640",
-        "messages": "5"
+        "payload_bytes": "295400673280",
+        "messages": "10"
       },
       "local_delivered": {
         "payload_bytes": "0",
@@ -38,41 +38,34 @@
   },
   "attempts": [
     {
-      "attempt_id": "11111111111111111111111111111111",
-      "environment_key": "sha256-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "attempt_id": "77777777777777777777777777777777",
+      "environment_key": "sha256-7777777777777777777777777777777777777777777777777777777777777777",
       "opened_at": "2026-09-09T14:00:00Z",
       "start": {
         "capacity": {
           "cpu": {
             "status": "reported",
-            "visible_units": "32",
+            "visible_units": "8",
             "architecture": "x86_64",
             "evidence": {
-              "affinity_count": "64",
-              "cpuset_count": "64",
-              "quota_units": "32"
+              "affinity_count": "16",
+              "cpuset_count": "16",
+              "quota_units": "8"
             },
             "model": "AMD EPYC 9654"
           },
           "memory": {
             "status": "reported",
-            "visible_bytes": "206158430208",
+            "visible_bytes": "68719476736",
             "evidence": {
               "physical_bytes": "549755813888",
-              "cgroup_limit_bytes": "206158430208"
+              "cgroup_limit_bytes": "68719476736"
             }
           },
           "gpu": {
             "status": "reported",
-            "cuda_mask_present": true,
-            "groups": [
-              {
-                "kind": "full_gpu",
-                "count": "4",
-                "model": "NVIDIA A100 80GB",
-                "memory_bytes": "85899345920"
-              }
-            ]
+            "cuda_mask_present": false,
+            "groups": []
           }
         }
       },
@@ -80,34 +73,27 @@
         "capacity": {
           "cpu": {
             "status": "reported",
-            "visible_units": "32",
+            "visible_units": "8",
             "architecture": "x86_64",
             "evidence": {
-              "affinity_count": "64",
-              "cpuset_count": "64",
-              "quota_units": "32"
+              "affinity_count": "16",
+              "cpuset_count": "16",
+              "quota_units": "8"
             },
             "model": "AMD EPYC 9654"
           },
           "memory": {
             "status": "reported",
-            "visible_bytes": "206158430208",
+            "visible_bytes": "68719476736",
             "evidence": {
               "physical_bytes": "549755813888",
-              "cgroup_limit_bytes": "206158430208"
+              "cgroup_limit_bytes": "68719476736"
             }
           },
           "gpu": {
             "status": "reported",
-            "cuda_mask_present": true,
-            "groups": [
-              {
-                "kind": "full_gpu",
-                "count": "4",
-                "model": "NVIDIA A100 80GB",
-                "memory_bytes": "85899345920"
-              }
-            ]
+            "cuda_mask_present": false,
+            "groups": []
           }
         }
       },

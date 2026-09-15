@@ -8,21 +8,21 @@
   "capacity": {
     "cpu": {
       "status": "reported",
-      "visible_units": "1.5",
+      "visible_units": "32",
       "architecture": "x86_64",
       "evidence": {
-        "affinity_count": "4",
-        "cpuset_count": "4",
-        "quota_units": "1.5"
+        "affinity_count": "64",
+        "cpuset_count": "64",
+        "quota_units": "32"
       },
       "model": "AMD EPYC 9654"
     },
     "memory": {
       "status": "reported",
-      "visible_bytes": "8589934592",
+      "visible_bytes": "206158430208",
       "evidence": {
-        "physical_bytes": "68719476736",
-        "cgroup_limit_bytes": "8589934592"
+        "physical_bytes": "549755813888",
+        "cgroup_limit_bytes": "206158430208"
       }
     },
     "gpu": {
@@ -31,8 +31,8 @@
       "groups": [
         {
           "kind": "full_gpu",
-          "count": "1",
-          "model": "NVIDIA H100 80GB HBM3",
+          "count": "4",
+          "model": "NVIDIA A100 80GB",
           "memory_bytes": "85899345920"
         }
       ]

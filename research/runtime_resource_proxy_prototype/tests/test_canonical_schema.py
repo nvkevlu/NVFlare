@@ -75,14 +75,14 @@ class TestCanonicalV1Contract(unittest.TestCase):
     def _bundle(self, participants):
         participant_records = {}
         participant_files = {}
-        roster = []
+        expected_participants = []
         for index, participant in enumerate(participants, start=1):
             key = participant["participant_key"]
             data = _json_bytes(participant)
             participant_records[key] = participant
             participant_files[f"participants/{key}.json"] = data
             resource_window_seconds, totals = derive_participant_totals(participant)
-            roster.append(
+            expected_participants.append(
                 {
                     "participant_id": f"site-{index}",
                     "participant_key": key,
@@ -94,15 +94,15 @@ class TestCanonicalV1Contract(unittest.TestCase):
                     "totals": totals,
                 }
             )
-        roster.sort(key=lambda item: (item["role"], item["participant_id"], item["participant_key"]))
+        expected_participants.sort(key=lambda item: (item["role"], item["participant_id"], item["participant_key"]))
         summary = {
             "schema_version": SCHEMA_VERSION,
             "kind": KIND_RESOURCE_SUMMARY,
             "job_id": participants[0]["job_id"],
             "report_cutoff_at": "2026-09-09T14:21:00Z",
             "finalized_at": "2026-09-09T14:21:00.1Z",
-            "roster": roster,
-            "totals": derive_job_totals(roster),
+            "participants": expected_participants,
+            "totals": derive_job_totals(expected_participants),
         }
         summary_bytes = _json_bytes(summary)
         files = {**participant_files, "resource_summary.json": summary_bytes}
@@ -138,16 +138,16 @@ class TestCanonicalV1Contract(unittest.TestCase):
     def test_cpu_selector_uses_minimum_and_online_is_fallback_only(self):
         record = self._golden("attempt_start.json")
         cpu = record["capacity"]["cpu"]
-        self.assertEqual("1.5", cpu["visible_units"])
+        self.assertEqual("32", cpu["visible_units"])
         self.assertEqual(
-            {"affinity_count": "4", "cpuset_count": "4", "quota_units": "1.5"},
+            {"affinity_count": "64", "cpuset_count": "64", "quota_units": "32"},
             cpu["evidence"],
         )
         self.assertNotIn("quota_us", cpu["evidence"])
         self.assertNotIn("period_us", cpu["evidence"])
 
         wrong_minimum = copy.deepcopy(record)
-        wrong_minimum["capacity"]["cpu"]["visible_units"] = "4"
+        wrong_minimum["capacity"]["cpu"]["visible_units"] = "64"
         self._assert_invalid(wrong_minimum, "minimum applicable CPU evidence")
 
         mixed_fallback = copy.deepcopy(record)
@@ -228,7 +228,7 @@ class TestCanonicalV1Contract(unittest.TestCase):
     def test_models_are_optional_normalized_metadata(self):
         record = self._golden("attempt_start.json")
         self.assertEqual("AMD EPYC 9654", record["capacity"]["cpu"]["model"])
-        self.assertEqual("NVIDIA H100 80GB HBM3", record["capacity"]["gpu"]["groups"][0]["model"])
+        self.assertEqual("NVIDIA A100 80GB", record["capacity"]["gpu"]["groups"][0]["model"])
 
         heterogeneous = copy.deepcopy(record)
         heterogeneous["capacity"]["cpu"].pop("model")
@@ -250,26 +250,69 @@ class TestCanonicalV1Contract(unittest.TestCase):
     def test_one_stable_measurement_period_uses_the_reported_duration(self):
         participant = self._golden("participant_summary.json")
         window_seconds, totals = derive_participant_totals(participant)
-        self.assertEqual("480", window_seconds)
+        self.assertEqual("2223", window_seconds)
         self.assertEqual("2026-09-09T14:00:00Z", participant["start"]["observed_at"])
-        self.assertEqual("2026-09-09T14:08:00Z", participant["final"]["observed_at"])
+        self.assertEqual("2026-09-09T14:37:03Z", participant["final"]["observed_at"])
         self.assertEqual(1, len(participant["attempts"]))
-        self.assertEqual("2026-09-09T14:08:00Z", participant["attempts"][0]["end"]["closed_at"])
-        self.assertEqual("720", totals["cpu"]["groups"][0]["unit_seconds"])
-        self.assertEqual("4123168604160", totals["memory"]["byte_seconds"])
-        self.assertEqual("480", totals["gpu"]["groups"][0]["instance_seconds"])
-        self.assertEqual("527765581332480", totals["storage"]["byte_seconds"])
-        self.assertEqual("18874368", totals["retained_content"]["bytes"])
-        self.assertEqual("5632", totals["f3"]["remote_accepted"]["payload_bytes"])
+        self.assertEqual("2026-09-09T14:37:03Z", participant["attempts"][0]["end"]["closed_at"])
+        self.assertEqual("71136", totals["cpu"]["groups"][0]["unit_seconds"])
+        self.assertEqual("458290190352384", totals["memory"]["byte_seconds"])
+        self.assertEqual("8892", totals["gpu"]["groups"][0]["instance_seconds"])
+        self.assertEqual("2444214348546048", totals["storage"]["byte_seconds"])
+        self.assertEqual("0", totals["retained_content"]["bytes"])
+        self.assertEqual("147700336640", totals["f3"]["remote_accepted"]["payload_bytes"])
         self.assertTrue(all("retained_content" not in attempt["final"] for attempt in participant["attempts"]))
         self.assertTrue(all("f3" not in attempt["final"] for attempt in participant["attempts"]))
+
+    def test_retained_content_is_an_aggregate_without_file_details(self):
+        participant = self._golden("participant_summary.json")
+        self.assertEqual(
+            {"status": "reported", "bytes": "0"},
+            participant["final"]["retained_content"],
+        )
+
+        old_per_file_shape = copy.deepcopy(participant)
+        old_per_file_shape["final"]["retained_content"] = {
+            "status": "reported",
+            "entries": [
+                {
+                    "relative_path": "result/example.bin",
+                    "size_bytes": "0",
+                    "sha256": "d" * 64,
+                }
+            ],
+        }
+        self._assert_invalid_both(old_per_file_shape)
+
+        partial = copy.deepcopy(participant)
+        partial["final"]["retained_content"] = {
+            "status": "partial",
+            "issues": ["observation_incomplete"],
+            "bytes": "1024",
+        }
+        validate_record(partial)
+        self.assertEqual(
+            {"status": "partial", "bytes": "1024"},
+            derive_participant_totals(partial)[1]["retained_content"],
+        )
+
+        unavailable = copy.deepcopy(participant)
+        unavailable["final"]["retained_content"] = {
+            "status": "unavailable",
+            "issues": ["not_bound"],
+        }
+        validate_record(unavailable)
+        self.assertEqual(
+            {"status": "unavailable"},
+            derive_participant_totals(unavailable)[1]["retained_content"],
+        )
 
     def test_reconfigured_is_only_an_end_reason_and_does_not_require_a_successor(self):
         participant = self._golden("participant_summary.json")
         participant["attempts"][0]["end"]["reason"] = "reconfigured"
         validate_record(participant)
         window_seconds, _ = derive_participant_totals(participant)
-        self.assertEqual("480", window_seconds)
+        self.assertEqual("2223", window_seconds)
 
     def test_launch_failed_has_nvflare_bounds_and_no_capacity_snapshot(self):
         participant = self._golden("participant_summary.json")
@@ -339,7 +382,7 @@ class TestCanonicalV1Contract(unittest.TestCase):
         changed_cpu["evidence"]["quota_units"] = "1"
         _, changed_totals = derive_participant_totals(changed)
         self.assertEqual("partial", changed_totals["cpu"]["status"])
-        self.assertEqual("720", changed_totals["cpu"]["groups"][0]["unit_seconds"])
+        self.assertEqual("71136", changed_totals["cpu"]["groups"][0]["unit_seconds"])
         self.assertEqual("reported", changed_totals["memory"]["status"])
 
         failed_with_final = copy.deepcopy(participant)
@@ -349,28 +392,28 @@ class TestCanonicalV1Contract(unittest.TestCase):
 
         partial_periods = self._golden("participant_summary_partial_periods.json")
         measured_seconds, partial_totals = derive_participant_totals(partial_periods)
-        self.assertEqual("180", measured_seconds)
+        self.assertEqual("1923", measured_seconds)
         self.assertNotIn("final", partial_periods["attempts"][0])
         self.assertEqual("terminated", partial_periods["attempts"][0]["end"]["reason"])
         self.assertEqual("released", partial_periods["attempts"][1]["end"]["reason"])
         self.assertEqual("partial", partial_totals["cpu"]["status"])
-        self.assertEqual(["90", "240"], [group["unit_seconds"] for group in partial_totals["cpu"]["groups"]])
+        self.assertEqual(["56736"], [group["unit_seconds"] for group in partial_totals["cpu"]["groups"]])
         self.assertEqual("partial", partial_totals["memory"]["status"])
-        self.assertEqual("2576980377600", partial_totals["memory"]["byte_seconds"])
+        self.assertEqual("375826818269184", partial_totals["memory"]["byte_seconds"])
         self.assertEqual("partial", partial_totals["gpu"]["status"])
         self.assertEqual(
-            [("NVIDIA A100 80GB PCIe", "240"), ("NVIDIA H100 80GB HBM3", "60")],
+            [("NVIDIA A100 80GB", "7092")],
             [(group["model"], group["instance_seconds"]) for group in partial_totals["gpu"]["groups"]],
         )
         self.assertEqual("reported", partial_totals["storage"]["status"])
-        self.assertEqual("527765581332480", partial_totals["storage"]["byte_seconds"])
-        self.assertEqual("reported", partial_totals["retained_content"]["status"])
+        self.assertEqual("2444214348546048", partial_totals["storage"]["byte_seconds"])
+        self.assertEqual("unavailable", partial_totals["retained_content"]["status"])
         self.assertEqual("reported", partial_totals["f3"]["status"])
         attempt_end = self._golden("attempt_end_terminated.json")
         self.assertNotIn("capacity", attempt_end)
         self.assertNotIn("return_code", attempt_end)
         self.assertEqual("2026-09-09T14:00:00Z", attempt_end["opened_at"])
-        self.assertEqual("2026-09-09T14:01:00Z", attempt_end["closed_at"])
+        self.assertEqual("2026-09-09T14:05:00Z", attempt_end["closed_at"])
 
     def test_completed_participant_with_no_compute_windows_reports_zero_transient_time(self):
         participant = self._golden("participant_summary.json")
@@ -380,7 +423,15 @@ class TestCanonicalV1Contract(unittest.TestCase):
         self.assertEqual({"status": "reported", "groups": []}, totals["cpu"])
         self.assertEqual({"status": "reported", "byte_seconds": "0"}, totals["memory"])
         self.assertEqual({"status": "reported", "groups": []}, totals["gpu"])
-        self.assertEqual("527765581332480", totals["storage"]["byte_seconds"])
+        self.assertEqual("2444214348546048", totals["storage"]["byte_seconds"])
+
+    def test_server_participant_is_reported_without_inventing_a_gpu(self):
+        participant = self._golden("participant_summary_server.json")
+        window_seconds, totals = derive_participant_totals(participant)
+        self.assertEqual("2223", window_seconds)
+        self.assertEqual({"status": "reported", "groups": []}, totals["gpu"])
+        self.assertFalse(participant["attempts"][0]["start"]["capacity"]["gpu"]["cuda_mask_present"])
+        self.assertEqual("295400673280", totals["f3"]["remote_accepted"]["payload_bytes"])
 
     def test_uncertain_continuous_storage_keeps_numeric_proxy_as_partial(self):
         participant = self._golden("participant_summary.json")
@@ -392,7 +443,7 @@ class TestCanonicalV1Contract(unittest.TestCase):
             }
         _, totals = derive_participant_totals(participant)
         self.assertEqual(
-            {"status": "partial", "byte_seconds": "527765581332480"},
+            {"status": "partial", "byte_seconds": "2444214348546048"},
             totals["storage"],
         )
 
@@ -411,7 +462,7 @@ class TestCanonicalV1Contract(unittest.TestCase):
 
         window_seconds, totals = derive_participant_totals(participant)
         self.assertEqual("120", window_seconds)
-        self.assertEqual("180", totals["cpu"]["groups"][0]["unit_seconds"])
+        self.assertEqual("3840", totals["cpu"]["groups"][0]["unit_seconds"])
 
     def test_large_integer_formula_is_exact_and_bounded(self):
         participant = self._golden("participant_summary_large_value.json")
@@ -427,15 +478,34 @@ class TestCanonicalV1Contract(unittest.TestCase):
         overflow["f3"]["remote_accepted"]["payload_bytes"] = str(U128_MAX + 1)
         self._assert_invalid(overflow, "no greater")
 
-    def test_roster_recomputes_job_totals_and_role_occurs_only_there(self):
+    def test_expected_participants_recompute_job_totals_and_role_occurs_only_there(self):
         summary = self._golden("resource_summary.json")
-        self.assertEqual(summary["totals"], derive_job_totals(summary["roster"]))
-        self.assertEqual(["client", "server"], [entry["role"] for entry in summary["roster"]])
+        self.assertEqual(summary["totals"], derive_job_totals(summary["participants"]))
+        self.assertEqual(
+            ["client", "client", "client", "server"],
+            [entry["role"] for entry in summary["participants"]],
+        )
+        self.assertEqual(
+            ["accepted", "accepted", "missing", "accepted"],
+            [entry["status"] for entry in summary["participants"]],
+        )
         self.assertTrue(all(total["status"] == "partial" for total in summary["totals"].values()))
+        self.assertEqual(
+            [("AMD EPYC 9654", "88920"), ("Intel Xeon Platinum 8480+", "56736")],
+            [(group["model"], group["unit_seconds"]) for group in summary["totals"]["cpu"]["groups"]],
+        )
+        self.assertEqual("986880405405696", summary["totals"]["memory"]["byte_seconds"])
+        self.assertEqual("7332643045638144", summary["totals"]["storage"]["byte_seconds"])
+        self.assertEqual("29540266113", summary["totals"]["retained_content"]["bytes"])
+        self.assertEqual("590801346560", summary["totals"]["f3"]["remote_accepted"]["payload_bytes"])
 
         changed = copy.deepcopy(summary)
         changed["totals"]["memory"]["byte_seconds"] = "1"
         self._assert_invalid(changed, "deterministic sum")
+
+        old_name = copy.deepcopy(summary)
+        old_name["roster"] = old_name.pop("participants")
+        self._assert_invalid_both(old_name)
 
         participant = self._golden("participant_summary.json")
         self.assertNotIn("role", participant)
@@ -443,25 +513,18 @@ class TestCanonicalV1Contract(unittest.TestCase):
         with_role["role"] = "client"
         self._assert_invalid_both(with_role)
 
-        accepted_server = copy.deepcopy(summary["roster"][0])
+        accepted_server = copy.deepcopy(summary["participants"][0])
         accepted_server["participant_id"] = "server"
         accepted_server["role"] = "server"
         self.assertEqual(accepted_server["totals"], derive_job_totals([accepted_server]))
 
     def test_summary_bytes_are_idempotent_and_conflicts_fail_digest_checks(self):
         participant_path = GOLDEN_ROOT / "participant_summary.json"
-        summary_path = GOLDEN_ROOT / "resource_summary.json"
         participant_bytes = participant_path.read_bytes()
-        summary_bytes = summary_path.read_bytes()
         participant = json.loads(participant_bytes)
-        summary = json.loads(summary_bytes)
-        manifest = self._golden("manifest.json")
+        summary, participant_records, manifest, files = self._bundle([participant])
         key = participant["participant_key"]
-        files = {
-            f"participants/{key}.json": participant_bytes,
-            "resource_summary.json": summary_bytes,
-        }
-        validate_bundle(summary, {key: participant}, manifest, files)
+        validate_bundle(summary, participant_records, manifest, files)
         self.assertNotIn("summary_id", participant)
         self.assertNotIn("summary_revision", participant)
         digest = hashlib.sha256(participant_bytes).digest()
@@ -483,13 +546,13 @@ class TestCanonicalV1Contract(unittest.TestCase):
         second["attempts"] = [second["attempts"][0]]
         attempt = second["attempts"][0]
         attempt["attempt_id"] = "3" * 32
-        attempt["opened_at"] = "2026-09-09T14:08:00Z"
-        attempt["end"] = {"closed_at": "2026-09-09T14:09:00Z", "reason": "released"}
-        second["final"]["observed_at"] = "2026-09-09T14:09:00Z"
+        attempt["opened_at"] = "2026-09-09T14:37:03Z"
+        attempt["end"] = {"closed_at": "2026-09-09T14:38:03Z", "reason": "released"}
+        second["final"]["observed_at"] = "2026-09-09T14:38:03Z"
         validate_bundle(*self._bundle([first, second]))
 
         overlapping = copy.deepcopy(second)
-        overlapping["attempts"][0]["opened_at"] = "2026-09-09T14:07:59Z"
+        overlapping["attempts"][0]["opened_at"] = "2026-09-09T14:37:02Z"
         with self.assertRaisesRegex(ContractError, "overlapping reporters"):
             validate_bundle(*self._bundle([first, overlapping]))
 
@@ -503,7 +566,7 @@ class TestCanonicalV1Contract(unittest.TestCase):
             },
             set(final["f3"]) - {"status"},
         )
-        self.assertEqual("5632", final["f3"]["remote_accepted"]["payload_bytes"])
+        self.assertEqual("147700336640", final["f3"]["remote_accepted"]["payload_bytes"])
 
         impossible_counter = copy.deepcopy(final)
         impossible_counter["f3"]["remote_failed_before_acceptance"] = {

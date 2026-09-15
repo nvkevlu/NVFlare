@@ -1,7 +1,7 @@
 {
   "schema_version": "1.0",
   "kind": "nvflare.resource_stats.attempt_start",
-  "job_id": "job-20260909-001",
+  "job_id": "job-cuda-unavailable-example",
   "participant_id": "site-mask-only",
   "attempt_id": "33333333333333333333333333333333",
   "environment_key": "sha256-3333333333333333333333333333333333333333333333333333333333333333",
@@ -9,21 +9,21 @@
   "capacity": {
     "cpu": {
       "status": "reported",
-      "visible_units": "1.5",
+      "visible_units": "32",
       "architecture": "x86_64",
       "evidence": {
-        "affinity_count": "4",
-        "cpuset_count": "4",
-        "quota_units": "1.5"
+        "affinity_count": "64",
+        "cpuset_count": "64",
+        "quota_units": "32"
       },
       "model": "AMD EPYC 9654"
     },
     "memory": {
       "status": "reported",
-      "visible_bytes": "8589934592",
+      "visible_bytes": "206158430208",
       "evidence": {
-        "physical_bytes": "68719476736",
-        "cgroup_limit_bytes": "8589934592"
+        "physical_bytes": "549755813888",
+        "cgroup_limit_bytes": "206158430208"
       }
     },
     "gpu": {

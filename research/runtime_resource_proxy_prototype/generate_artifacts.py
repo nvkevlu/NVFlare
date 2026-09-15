@@ -21,6 +21,8 @@ unavailable.  It never fabricates a GPU, server process, or network counter.
 Its exploratory record shapes predate the canonical v1
 contract and deliberately remain historical probe evidence.  Use
 ``schema/build_review_artifacts.py`` for normative records and CLI output.
+The retained-content probe measures only the one file this script creates and
+does not claim to discover a complete NVFlare result set.
 """
 
 from __future__ import annotations
@@ -219,35 +221,27 @@ def _proxy_rollup(
     return result
 
 
-def _retained_content_metric(result_file: Path, observed_at: str) -> tuple[dict[str, Any], dict[str, Any]]:
+def _retained_content_metric(result_file: Path, observed_at: str) -> dict[str, Any]:
     if result_file.is_symlink() or not result_file.is_file():
         raise RuntimeError("prototype artifact registry must contain regular files only")
     with result_file.open("rb") as stream:
         result_stat = os.fstat(stream.fileno())
     if not stat.S_ISREG(result_stat.st_mode):
         raise RuntimeError("prototype artifact registry must contain regular files only")
-    relative_path = "result_artifacts/probe_payload.json"
-    registry_entry = {
-        "artifact_id": "prototype_probe_payload",
-        "kind": "result",
-        "relative_path": relative_path,
-        "byte_count": result_stat.st_size,
-        "status": "reported",
-    }
     metric = _metric(
         "retained_content_bytes",
         result_stat.st_size,
         "bytes",
-        "prototype_explicit_artifact_registry+fstat.st_size",
+        "prototype_owned_file+fstat.st_size",
         basis="retained_content_bytes",
-        scope="identified_nvflare_artifacts",
+        scope="prototype_owned_file_only",
         sharing="unknown",
-        status="reported",
-        coverage="complete",
+        status="partial",
+        coverage="partial",
         observed_at=observed_at,
-        caveat_codes=["PROTOTYPE_OWNED_ARTIFACT_REGISTRY", "EXACT_REGULAR_FILE_CONTENT_ONLY"],
+        caveat_codes=["PROTOTYPE_OWNED_FILE_ONLY", "NOT_COMPLETE_NVFLARE_RESULT_SET"],
     )
-    return metric, registry_entry
+    return metric
 
 
 def _unbound_network(observed_at: str) -> dict[str, Any]:
@@ -635,7 +629,7 @@ def generate(output_dir: Path, job_id: str, study: str, observation_seconds: flo
     ended_at = _utc_now()
     duration_seconds = max(0.0, time.monotonic() - started_monotonic)
     final_snapshot = _collect_capacity_snapshot(client_resource_dir.parent, ended_at)
-    retained_metric, registry_entry = _retained_content_metric(result_path, ended_at)
+    retained_metric = _retained_content_metric(result_path, ended_at)
     network = _unbound_network(ended_at)
     rollups = [
         _proxy_rollup(
@@ -690,9 +684,8 @@ def generate(output_dir: Path, job_id: str, study: str, observation_seconds: flo
             "capacity_changed": _capacity_changed(start_snapshot, final_snapshot),
         },
         "retained_content": {
-            "registry_status": "prototype_explicit_registry",
+            "coverage": "prototype_owned_file_only",
             "frozen_at": ended_at,
-            "entries": [registry_entry],
             "metrics": [retained_metric],
         },
         "network": network,

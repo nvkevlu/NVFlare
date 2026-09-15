@@ -22,8 +22,8 @@ For resource observations, `reported` requires the applicable numeric facts and 
 numeric result and require issues. Point-in-time capacity cannot be partial: a source either
 produced a valid selected value or it did not. Derived totals never store issues.
 
-An observed zero is explicit: the string `"0"`, an empty reported GPU group array, an empty
-reported retained-entry array, or a completed participant summary with no measurement periods.
+An observed zero is explicit: the string `"0"`, an empty reported GPU group array, retained
+content with `bytes: "0"`, or a completed participant summary with no measurement periods.
 Missing, failed, disabled, or unbound collection is never encoded as zero. In particular, a
 `launch_failed` capacity is unavailable rather than a reported zero, although its known
 opened-to-closed duration remains part of `resource_window_seconds`.
@@ -55,7 +55,7 @@ Counts and CLI notices come from these entries.
 | --- | --- |
 | not_bound | NVFlare has no existing bounded source for this fact. |
 | counter_gap | Some events may be absent; the stored counter is a lower bound. |
-| observation_incomplete | Only part of the relevant interval or registered set was observed. |
+| observation_incomplete | Only part of the relevant interval or intended bounded set was observed. |
 | attribution_incomplete | Facts that could not be safely attributed were excluded. |
 | unsupported | The observation is unsupported on this platform/runtime. |
 | permission_denied | Ordinary-user collection was denied. |
@@ -64,7 +64,7 @@ Counts and CLI notices come from these entries.
 
 `issues` is a unique, sorted array of one to four values. The containing typed object supplies the
 subject: for example, `not_bound` on F3 means no existing job counter is available, while the same
-code on retained content means NVFlare has no existing bounded list of result files.
+code on retained content means NVFlare has no existing bounded result set.
 
 | Context/status | Exact allowed issues |
 | --- | --- |
@@ -151,9 +151,9 @@ There is no summary revision. The server:
 This does not merge measurement periods. Distinct attempt IDs stay separate inside the one
 accepted site report, including sequential periods that reuse an environment key.
 
-## Derived notices, not stored codes
+## Interpretation rules, not stored codes
 
-A v1 renderer can derive that:
+Documentation may explain that:
 
 - runtime-visible values are not utilization, ownership, total physical capacity, or billing;
 - CPU/memory/GPU time is calculated for each recorded measurement period;
@@ -167,5 +167,6 @@ A v1 renderer can derive that:
   that finish after NVFlare closes the counters, and excludes the summary message; and
 - site observations are self-reported until the server receives and stores the final report.
 
-Persisting a second warning/caveat list would create possible contradiction without adding
-evidence.
+These facts do not require another stored warning list or mandatory CLI
+disclaimer. Persisting a second warning/caveat list would create possible
+contradiction without adding evidence.

@@ -11,7 +11,7 @@ The contract deliberately separates two time scopes:
 
 | Scope | Starts | Ends | What it measures |
 | --- | --- | --- | --- |
-| Site job run | NVFlare begins this site's part of the job | NVFlare finishes this site's part of the job | storage, saved-result files, and F3 |
+| Site job run | NVFlare begins this site's part of the job | NVFlare finishes this site's part of the job | storage, saved-result byte total, and F3 |
 | Measurement period (`attempt`) | NVFlare records a resource observation and start time | NVFlare records the end time | CPU, memory, and GPU capacity-time |
 
 An attempt is a measurement period. It does not imply a process, allocation, lease, or roadmap
@@ -28,7 +28,7 @@ contribute CPU, memory, or GPU time.
 | `participant_start` | schema_version, kind, job_id, participant_id, observed_at, storage | Start of one site's job run and its storage observation. |
 | `participant_final` | same participant identity, observed_at, storage, retained_content, f3 | End-of-site storage, saved-result, and F3 observation. |
 | `participant_summary` | schema_version, kind, job_id, participant_key, start, final, attempts | Final site report accepted by the server. |
-| `resource_summary` | schema_version, kind, job_id, report_cutoff_at, finalized_at, roster, totals | Final server result. |
+| `resource_summary` | schema_version, kind, job_id, report_cutoff_at, finalized_at, participants, totals | Final server result. |
 | `manifest` | schema_version, kind, job_id, entries | Exact path/digest inventory. |
 
 Each record has exact `schema_version: "1.0"` and its namespaced
@@ -165,11 +165,11 @@ These facts are never repeated in attempt finals.
 
 ### Retained content
 
-Reported/partial retained content has 0–4,096 sorted unique entries. Each entry requires a
-normalized ASCII POSIX-relative `relative_path` of 1–512 bytes, U128 string `size_bytes`, and a
-64-character lowercase hexadecimal `sha256`. Reported empty entries means exact zero. Partial
-keeps a verified subset and applicable issues; unavailable/error has no entries. Total bytes are
-derived from entry sizes.
+Reported/partial retained content has one U128 `bytes` value. `reported` is the exact sum for a
+complete, bounded result-file set already known to NVFlare; reported zero means that known set is
+empty. `partial` is the exact subtotal for the successfully observed part of an intended bounded
+set, with an applicable issue. When no bounded set exists, use `unavailable/not_bound` instead.
+Unavailable/error has no byte value. The record does not expose result filenames or content hashes.
 
 ### F3
 
@@ -219,7 +219,7 @@ The same totals shape appears on every accepted participant entry and once at jo
 | memory | status, byte_seconds | memory byte-seconds across measurement periods. |
 | storage | status, byte_seconds | participant-lifetime filesystem-capacity byte-seconds. |
 | gpu | status, groups | `instance_seconds`, grouped by kind and optional metadata. |
-| retained_content | status, bytes | one terminal registered-content byte count. |
+| retained_content | status, bytes | one terminal saved-result byte total. |
 | f3 | status, remote_accepted | one participant-lifetime primary counter pair. |
 
 Totals statuses are `reported`, `partial`, or `unavailable`. Reported/partial requires the numeric
@@ -229,8 +229,9 @@ groups are valid zero.
 
 ## Resource summary and expected participant list
 
-The expected participant list has 1–10,000 unique entries sorted by role, participant ID, then
-participant key.
+The `participants` array is the complete expected participant list. It has 1–10,000 unique entries
+sorted by role, participant ID, then participant key. It includes participants whose report is
+missing, invalid, or disabled; it is not a list of received reports.
 Expected members come from authenticated job deployment/selection state independently of
 resource-report arrivals. At cutoff, every expected member is classified exactly once as
 `accepted`, `missing`, `invalid`, or `disabled`; the final list does not change.
@@ -268,10 +269,9 @@ All U32/U64/U128 bounds are inclusive. Booleans are never integers.
 | Attempts per participant | 0–4,096 |
 | GPU/CPU groups per applicable array | 0–4,096 |
 | Expected participants | 1–10,000 |
-| Retained entries | 0–4,096 |
 | Issues per list | 1–4 when present |
 | Hardware-model label | 128 ASCII characters |
-| Relative path | 512 bytes in the safe ASCII grammar |
+| Manifest relative path | 512 bytes in the safe ASCII grammar |
 
 The 4,096-attempt bound accommodates jobs with many measurement periods while preventing an
 unbounded array. It is an implementation-capacity candidate, not a promise that
@@ -294,9 +294,9 @@ decisive.
 ## Privacy exclusions
 
 Allowed data is restricted to authenticated product identity, job-scoped HMAC keys, normalized
-hardware display metadata, normalized registered relative paths, numeric facts, statuses, and
-issues. Optional CPU/GPU model metadata may be omitted without changing numeric status. This
-feature adds no model-publication setting.
+hardware display metadata, fixed manifest relative paths, numeric facts, statuses, and issues.
+Optional CPU/GPU model metadata may be omitted without changing numeric status. This feature adds
+no model-publication setting.
 
 Forbidden data includes environment/argument dumps, raw CUDA masks, GPU UUID/PCI identity, CPU
 serials/flags/topology, host/IP/PID/container/pod/scheduler identity, absolute cgroup/workspace

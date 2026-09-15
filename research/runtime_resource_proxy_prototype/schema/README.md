@@ -25,8 +25,8 @@ Unknown fields are rejected. New meanings require a new schema version.
 | --- | --- |
 | Site report | participant_summary |
 | Measurement period | attempt |
-| Expected participant list | roster |
-| Saved-result files | retained_content |
+| Expected participant list | participants |
+| Saved-result byte total | retained_content |
 | Measurement-scope key | environment_key |
 
 An attempt is a measurement period. It does not imply a process launch,
@@ -42,7 +42,7 @@ The schema accepts exactly eight record kinds:
 | attempt_start | Start time and resources for one measurement period. |
 | attempt_final | Optional final resource observation for that period. |
 | attempt_end | End time and reason for that period. |
-| participant_final | End of the site run, saved-result sizes, and F3 counters. |
+| participant_final | End of the site run, one saved-result byte total, and F3 counters. |
 | participant_summary | One final site report. |
 | resource_summary | Final server result for the job. |
 | manifest | Hashes of the stored server files. |
@@ -51,6 +51,15 @@ The small start, final, and end records are logical collection fragments. The
 schema does not require them to be separate files. participant_summary is the
 final site-level record. resource_summary is the result read by the CLI and
 Phase 2.
+
+The files under `golden/v1/finalized_job` form one complete example. Its
+resource summary combines a stable client, a client with two measured periods
+separated by an unmeasured gap, an expected client whose report is missing,
+and an accepted server report. The stable client has a known empty result set;
+the second client uses `unavailable/not_bound` because it has no complete known
+set; and the server has the complete saved-result byte total. Other JSON files
+directly under `golden/v1` include standalone boundary cases and are not all
+part of that job.
 
 ## Architecture and deployment constraints
 
@@ -171,11 +180,13 @@ workspace. capacity_bytes is the total visible filesystem capacity.
 Storage time covers the site job-run interval only when workspace continuity is
 known. If continuity is uncertain, storage is partial or unavailable.
 
-Saved-result entries contain a relative path, exact size, and SHA-256 digest.
-Paths are relative to an existing NVFlare result root. The collector uses a
-complete, bounded file list already known to NVFlare. If no such list exists,
-the value is unavailable with `not_bound`. The feature adds no registry or job
-setting and does not scan unrelated directories.
+The saved-result observation contains only status and a byte count. It does not
+expose filenames or hash model content. The collector uses a complete, bounded
+file list already known to NVFlare. If no such list exists, the value is
+unavailable with `not_bound`. The feature adds no registry or job setting and
+does not scan unrelated directories. A partial byte value is only the exact
+subtotal for the successfully observed portion; it is not presented as the
+complete retained size.
 
 ## Measurement periods
 
@@ -231,7 +242,7 @@ A period with known times but no start observation contributes to measured time
 but not a numeric resource total. The resource total is partial or unavailable.
 
 Storage uses the participant start-to-final interval, not each attempt.
-Saved-result sizes and F3 counters contribute once per site report.
+The saved-result byte total and F3 counters contribute once per site report.
 
 ## F3 counters
 
@@ -260,8 +271,9 @@ operation. Later callbacks do not change canonical totals.
 
 ## Expected participant list
 
-The server already knows the clients and server expected for the job. It must
-not infer that list from received resource reports.
+The `participants` array contains every client and server expected for the job,
+not just the ones that reported. The server already knows this list and must not
+infer it from received resource reports.
 
 At the report cutoff, every expected participant is one of:
 
@@ -272,6 +284,12 @@ At the report cutoff, every expected participant is one of:
 
 Only accepted reports contribute numeric values. Missing or invalid reports
 make affected job totals partial.
+
+An accepted report can still contain partial measurements. In the canonical
+example, `site-2` has one period without a final resource observation, a gap,
+and a later complete period. The gap contributes no compute time. This records
+an interruption and later resumption of measurement; it does not identify a
+network disconnect, process architecture, or resource-release event.
 
 A retry with identical bytes is accepted as the same report. Different bytes
 for an already accepted participant are rejected.

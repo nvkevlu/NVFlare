@@ -1,17 +1,18 @@
 Resources visible to the job while it ran.
-Job job-20260909-001 | selected site: site-1 | job coverage: PARTIAL (3 accepted / 4 expected)
+Job job-20260909-001 | selected site: site-2 | job coverage: PARTIAL (3 accepted / 4 expected)
 
 SITE     ROLE    STATUS    QUALITY     MEASURED TIME  FULL GPU h  CPU h   MEM GiB h  STORAGE GiB h  SAVED RESULT GiB  F3 REMOTE ACCEPTED GiB
-site-1   client  accepted  REPORTED            37m3s      2.4700 19.7600    118.5600       632.3200           0.0000               137.5567
+site-2   client  accepted  PARTIAL             32m3s      1.9700 15.7600     97.2267       632.3200              N/A               137.5567
 
 Notices:
   MEASURED TIME is the sum of the measurement periods in each received report.
   JOB COVERAGE PARTIAL means not every expected report was accepted.
+  Site QUALITY PARTIAL means that site's measurement evidence is incomplete.
   Reports may describe overlapping physical resources. Job totals are not physical capacity.
   Site observations are self-reported. The server protects only the received report bytes.
 
-Hardware detail for site-1
+Hardware detail for site-2
 Model metadata is optional. Its absence does not change numeric results.
 
-CPU: AMD EPYC 9654 (x86_64); 19.7600 CPU h
-GPU (full GPU): NVIDIA A100 80GB, 80 GiB per instance; 2.4700 instance h
+CPU: Intel Xeon Platinum 8480+ (x86_64); 15.7600 CPU h
+GPU (full GPU): NVIDIA A100 80GB, 80 GiB per instance; 1.9700 instance h

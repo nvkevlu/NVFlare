@@ -155,6 +155,11 @@ class TestGeneratedArtifacts(unittest.TestCase):
             resource_summary_path = server_dir / "resource_summary.json"
             query_copy_path = output_dir / "job_store" / "jobs" / "test-job" / "RESOURCE_STATS"
             self.assertTrue((client_dir / "participant_summary.json").is_file())
+            participant_summary = json.loads((client_dir / "participant_summary.json").read_text())
+            retained = participant_summary["attempts"][0]["retained_content"]
+            self.assertEqual("prototype_owned_file_only", retained["coverage"])
+            self.assertNotIn("entries", retained)
+            self.assertNotIn("relative_path", json.dumps(retained))
             self.assertTrue(resource_summary_path.is_file())
             self.assertEqual(resource_summary_path.read_bytes(), query_copy_path.read_bytes())
             self.assertTrue(receipt["integrity"]["query_copy_matches_resource_summary"])

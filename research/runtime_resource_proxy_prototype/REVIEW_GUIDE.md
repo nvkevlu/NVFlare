@@ -2,12 +2,23 @@
 
 This is the best place to start a design review.
 
+## Suggested meeting path
+
+1. Read the idea and hard requirements below.
+2. Inspect the generated all-site CLI output.
+3. Walk through the four-participant example and its partial-data behavior.
+4. Review the collection rules and formulas only where questions arise.
+5. End with [GAPS.md](GAPS.md), the authoritative list of remaining decisions.
+
+The field and code catalogs are lookup material. The decision-history document
+is optional background and does not belong in the main meeting path.
+
 ## The idea in one paragraph
 
 Phase 1 records the CPU, memory, storage, and GPUs that an NVFlare job can see.
-It also records saved-result sizes and NVFlare message payload bytes. The result
-is useful for later cost estimation, but it is not utilization, reserved
-capacity, or a bill.
+It also records one saved-result byte total and NVFlare message payload bytes.
+The result is useful for later cost estimation, but it is not utilization,
+reserved capacity, or a bill.
 
 This design defines the data and the calculations. It does **not** choose how
 NVFlare will run tasks. CP may run tasks directly, NVFlare may use child
@@ -46,13 +57,12 @@ The full generated examples are:
 
 - [all-site text output](schema/golden/v1/finalized_job/cli/resources-all.txt)
 - [one-site text output](schema/golden/v1/finalized_job/cli/resources-site-1-details.txt)
+- [partial-measurement site output](schema/golden/v1/finalized_job/cli/resources-site-2-details.txt)
 - [JSON output](schema/golden/v1/finalized_job/cli/resources-all.json)
-- [partial multi-period output](schema/golden/v1/finalized_job/cli/resources-partial-periods.txt)
 
-The text output starts with this warning:
+The text output starts with this label:
 
-> Resources visible to the job while it ran. These are not utilization,
-> reserved capacity, or billing data.
+> Resources visible to the job while it ran.
 
 ## Three plain terms
 
@@ -60,10 +70,76 @@ The text output starts with this warning:
 | --- | --- | --- |
 | Site report | `participant_summary` | Everything one client or server reports for one job. |
 | Measurement period | `attempt` | A start and end time for which one resource observation applies. It is not necessarily a process launch or scheduler attempt. |
-| Expected participant list | `roster` | The clients and server that the job already expects. It is used to show missing reports. |
+| Expected participant list | `participants` | Every client and server the job expects, including entries whose report is missing or invalid. |
 
-The JSON names remain unchanged because they are already used by the prototype.
-Human-facing prose should use the plain terms.
+These are the names used by candidate schema v1. Human-facing prose should use
+the plain terms when that is clearer.
+
+## How the main example fits together
+
+The files under `schema/golden/v1/finalized_job` describe one coherent job:
+
+- `site-1` sent a complete report for one 37-minute, 3-second measurement
+  period;
+- `site-2` sent an accepted report, but part of its measurement evidence is
+  incomplete;
+- `site-3` was expected, but no valid report arrived before the cutoff; and
+- the server produced and locally contributed a complete report.
+
+For `site-2`, a five-minute period with 16 visible CPU units, 128 GiB of memory,
+and two A100 GPUs ended at 14:05 without a final resource observation. Another
+period began at 14:10 with 32 CPU units, 192 GiB, and four A100s, then ended at
+14:37:03. The five-minute gap is not counted as CPU, memory, or GPU time. The
+report itself is accepted, but those three totals are partial because the first
+period lacks its final check.
+
+`site-2` has no complete platform-known result set, so its saved-result total is
+unavailable. `site-1` reports a known empty result set as zero. The server
+reports a complete 29,540,266,113-byte saved-result total. This keeps a real
+zero distinct from unavailable data and puts the result where the example says
+it was saved.
+
+This example does not claim that a network disconnect ended the first period or
+that resources were released during the gap. It shows only facts the data model
+can support: one measured period ended and measurement later resumed. The
+future resource-management design will determine what events create those
+boundaries.
+
+The other JSON files directly under `schema/golden/v1` include focused boundary
+examples. They are individually valid, but they are not all events from the
+same job. The `finalized_job` directory is the end-to-end reconciled example.
+
+### Why these example values are this size
+
+The scale is based on a completed Colossus Qwen2.5-14B qualification: two
+clients used four A100 80 GB GPUs each for five rounds. The NVFlare phase lasted
+37:03. Each full model state contained 29,540,067,328 bytes, the twenty state
+directions totaled 590,801,346,560 logical bytes (550.23 GiB), and the observed
+saved result was 29,540,266,113 bytes (27.51 GiB).
+
+The retained evidence is a **five-round 14B full-model qualification from
+2026-07-31**. The generated
+[receipt](schema/golden/v1/finalized_job/generation_receipt.json) records the
+reference values and the distinction between evidence-based and illustrative
+fields.
+
+The golden example is not a replay of that run. Its CPU, memory, storage, and
+measurement-period partitions are illustrative. Its F3 values use the derived
+logical state volume as a realistic scale, but the historical run did not
+record bytes at the proposed post-encoding F3 acceptance boundary. The F3
+values are therefore example counters, not recovered benchmark measurements.
+
+There is no proposed `resource.json` record:
+
+| Name | What it is |
+| --- | --- |
+| `participant_summary.json` | One client or server's detailed input report. |
+| `resource_summary.json` | The server's reconciled participant list and job totals. |
+| `RESOURCE_STATS` | A byte-identical job-store copy of `resource_summary.json`. |
+| `resources-all.json` | Example JSON printed by the CLI; it wraps the resource summary. |
+
+Existing NVFlare files named `resources.json` are unrelated site or component
+configuration.
 
 ## What one site reports
 
@@ -71,7 +147,8 @@ A site report has three parts:
 
 1. Job-run start and finish facts.
 2. Zero or more measurement periods.
-3. Facts collected once at the end: saved-result sizes and F3 counters.
+3. Facts collected once at the end: one saved-result byte total and F3
+   counters.
 
 Each measurement period contains:
 
@@ -136,10 +213,12 @@ unavailable.
 
 ### Saved results
 
-At completion, NVFlare records exact sizes only when existing platform state
-provides a complete, bounded list of result files. If it has no such list, this
-value is unavailable. The feature adds no artifact registry or job setting and
-does not scan unrelated directories.
+At completion, NVFlare records one exact byte total only when existing platform
+state identifies a complete, bounded result set. It calculates the total from
+that known set, but exports no per-file data. If it has no such set, the value
+is unavailable. The feature adds no artifact registry or job setting and does
+not scan unrelated directories. It does not expose filenames or hash model
+content.
 
 ### Network
 
@@ -203,9 +282,12 @@ best-effort option that writes them in the existing job workspace. If an
 implementation uses that option, the files are self-reported rather than
 immutable: job code may change or remove them, and a crash may lose them.
 
-The server validates the final site report and stores the accepted bytes in the
-existing job store under the exact component name `RESOURCE_STATS`. The
-manifest hashes those server-side files.
+The server validates each final site report and archives the exact accepted
+report bytes with the reconciled summary and manifest in the existing server
+job workspace. The manifest hashes those archive files. Separately, the server
+saves a byte-identical copy of the reconciled `resource_summary.json` in the
+job store under the exact component name `RESOURCE_STATS` for queries and
+Phase 2.
 
 This prototype does not require a separate protected site directory. If
 stronger crash recovery is later needed, the team must choose a solution that
@@ -224,21 +306,9 @@ If the selected process model cannot provide a trustworthy initial observation
 without extra privileges or operator setup, the value must be marked
 unavailable. The implementation must not weaken the deployment constraints.
 
-## What is agreed and what is still open
+## Remaining decisions
 
-### Agreed
-
-- Field types, units, bounds, privacy rules, and status codes.
-- CPU and memory selection rules.
-- CUDA-runtime authority for GPU counts.
-- Resource-time formulas.
-- F3 counter meanings.
-- The exact `RESOURCE_STATS` server component.
-- CLI behavior and golden examples.
-- No extra privileges, configuration, or deployment setup.
-- The data contract does not choose the task process model.
-
-### Open
+[GAPS.md](GAPS.md) is the authoritative decision list. The main themes are:
 
 - Which existing NVFlare component records job-run and measurement-period
   boundaries.
@@ -250,7 +320,9 @@ unavailable. The implementation must not weaken the deployment constraints.
 - Whether `reconfigured` remains useful as an end reason. It no longer implies
   a successor period.
 
-These are listed in [GAPS.md](GAPS.md) as decisions, not requirements.
+The closed field, formula, privacy, deployment, and storage decisions are
+already reflected in the examples and catalogs. Review their rationale only if
+needed in [SIMPLIFICATION_REVIEW.md](SIMPLIFICATION_REVIEW.md).
 
 ## File map
 

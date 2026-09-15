@@ -76,7 +76,7 @@ ISSUE_CODES = frozenset(
 POINT_STATUSES = frozenset({"reported", "unavailable", "error"})
 MEASUREMENT_STATUSES = frozenset({"reported", "partial", "unavailable", "error"})
 TOTAL_STATUSES = frozenset({"reported", "partial", "unavailable"})
-ROSTER_STATUSES = frozenset({"accepted", "missing", "invalid", "disabled"})
+PARTICIPANT_STATUSES = frozenset({"accepted", "missing", "invalid", "disabled"})
 ROLES = frozenset({"client", "server"})
 ATTEMPT_END_REASONS = frozenset({"released", "failed", "terminated", "launch_failed", "reconfigured"})
 GPU_KINDS = frozenset({"full_gpu", "mig_compute_instance"})
@@ -121,7 +121,6 @@ MAX_ISSUES = 4
 MAX_ATTEMPTS = 4_096
 MAX_PARTICIPANTS = 10_000
 MAX_GPU_GROUPS = 4_096
-MAX_ARTIFACT_ENTRIES = 4_096
 MAX_RELATIVE_PATH_BYTES = 512
 MAX_JSON_DEPTH = 32
 MAX_RECORD_BYTES = {
@@ -510,23 +509,11 @@ def _validate_retained_content(value: Any, path: str) -> None:
         path,
         resource="retained_content",
         statuses=MEASUREMENT_STATUSES,
-        reported_required={"entries"},
+        reported_required={"bytes"},
     )
     if status not in {"reported", "partial"}:
         return
-    entries = retained["entries"]
-    if not isinstance(entries, list) or len(entries) > MAX_ARTIFACT_ENTRIES:
-        _fail(f"{path}.entries", f"must be an array with at most {MAX_ARTIFACT_ENTRIES} entries")
-    paths: list[str] = []
-    for index, entry_value in enumerate(entries):
-        item_path = f"{path}.entries[{index}]"
-        entry = _mapping(entry_value, item_path)
-        _exact_keys(entry, {"relative_path", "size_bytes", "sha256"}, set(), item_path)
-        paths.append(_relative_path(entry["relative_path"], f"{item_path}.relative_path"))
-        _integer(entry["size_bytes"], f"{item_path}.size_bytes")
-        _identifier(entry["sha256"], SHA256_PATTERN, f"{item_path}.sha256")
-    if paths != sorted(paths) or len(paths) != len(set(paths)):
-        _fail(f"{path}.entries", "entries must have unique relative paths in sorted order")
+    _integer(retained["bytes"], f"{path}.bytes")
 
 
 def _validate_counter(value: Any, path: str) -> None:
@@ -662,21 +649,23 @@ def _sum_decimals(values: Sequence[Decimal], path: str) -> Decimal:
     return result
 
 
-def _aggregate_status(roster: Sequence[Mapping[str, Any]], accepted: Sequence[Mapping[str, Any]], resource: str) -> str:
+def _aggregate_status(
+    participants: Sequence[Mapping[str, Any]], accepted: Sequence[Mapping[str, Any]], resource: str
+) -> str:
     states = [entry["totals"][resource]["status"] for entry in accepted]
     numeric_count = sum(state in {"reported", "partial"} for state in states)
-    all_accepted = len(accepted) == len(roster)
+    all_accepted = len(accepted) == len(participants)
     if numeric_count and all_accepted and all(state == "reported" for state in states):
         return "reported"
     return "partial" if numeric_count else "unavailable"
 
 
 def _expected_group_total(
-    roster: Sequence[Mapping[str, Any]],
+    participants: Sequence[Mapping[str, Any]],
     accepted: Sequence[Mapping[str, Any]],
     resource: str,
 ) -> dict[str, Any]:
-    status = _aggregate_status(roster, accepted, resource)
+    status = _aggregate_status(participants, accepted, resource)
     if status == "unavailable":
         return {"status": status}
 
@@ -706,12 +695,12 @@ def _expected_group_total(
 
 
 def _expected_scalar_total(
-    roster: Sequence[Mapping[str, Any]],
+    participants: Sequence[Mapping[str, Any]],
     accepted: Sequence[Mapping[str, Any]],
     resource: str,
     field: str,
 ) -> dict[str, Any]:
-    status = _aggregate_status(roster, accepted, resource)
+    status = _aggregate_status(participants, accepted, resource)
     if status == "unavailable":
         return {"status": status}
     values = [
@@ -727,9 +716,9 @@ def _expected_scalar_total(
 
 
 def _expected_retained_total(
-    roster: Sequence[Mapping[str, Any]], accepted: Sequence[Mapping[str, Any]]
+    participants: Sequence[Mapping[str, Any]], accepted: Sequence[Mapping[str, Any]]
 ) -> dict[str, Any]:
-    status = _aggregate_status(roster, accepted, "retained_content")
+    status = _aggregate_status(participants, accepted, "retained_content")
     if status == "unavailable":
         return {"status": status}
     value = sum(
@@ -743,8 +732,10 @@ def _expected_retained_total(
     return result
 
 
-def _expected_f3_total(roster: Sequence[Mapping[str, Any]], accepted: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
-    status = _aggregate_status(roster, accepted, "f3")
+def _expected_f3_total(
+    participants: Sequence[Mapping[str, Any]], accepted: Sequence[Mapping[str, Any]]
+) -> dict[str, Any]:
+    status = _aggregate_status(participants, accepted, "f3")
     if status == "unavailable":
         return {"status": status}
     numeric = [
@@ -763,15 +754,15 @@ def _expected_f3_total(roster: Sequence[Mapping[str, Any]], accepted: Sequence[M
     return result
 
 
-def _expected_job_totals(roster: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
-    accepted = [entry for entry in roster if entry["status"] == "accepted"]
+def _expected_job_totals(participants: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    accepted = [entry for entry in participants if entry["status"] == "accepted"]
     return {
-        "cpu": _expected_group_total(roster, accepted, "cpu"),
-        "memory": _expected_scalar_total(roster, accepted, "memory", "byte_seconds"),
-        "storage": _expected_scalar_total(roster, accepted, "storage", "byte_seconds"),
-        "gpu": _expected_group_total(roster, accepted, "gpu"),
-        "retained_content": _expected_retained_total(roster, accepted),
-        "f3": _expected_f3_total(roster, accepted),
+        "cpu": _expected_group_total(participants, accepted, "cpu"),
+        "memory": _expected_scalar_total(participants, accepted, "memory", "byte_seconds"),
+        "storage": _expected_scalar_total(participants, accepted, "storage", "byte_seconds"),
+        "gpu": _expected_group_total(participants, accepted, "gpu"),
+        "retained_content": _expected_retained_total(participants, accepted),
+        "f3": _expected_f3_total(participants, accepted),
     }
 
 
@@ -1009,7 +1000,7 @@ def derive_participant_totals(
     In the JSON, an attempt is a measurement period.  Its start and end must use
     one NVFlare clock, but the schema does not choose which component records
     them.  A final sample is optional stability evidence.  Persistent storage
-    spans the site's job run.  Saved-result sizes and F3 totals are counted once.
+    spans the site's job run.  The saved-result byte total and F3 totals are counted once.
     Each product is rounded half-even to nine fractional digits before summing.
     """
 
@@ -1130,7 +1121,7 @@ def derive_participant_totals(
     retained_value = 0
     if retained["status"] in {"reported", "partial"}:
         numeric["retained_content"] = True
-        retained_value = sum(int(entry["size_bytes"]) for entry in retained["entries"])
+        retained_value = int(retained["bytes"])
         if retained["status"] == "partial":
             degraded["retained_content"] = True
     else:
@@ -1210,9 +1201,9 @@ def derive_participant_totals(
     return resource_window_seconds, totals
 
 
-def _validate_roster_entry(value: Any, path: str, cutoff_ns: int) -> None:
+def _validate_participant_entry(value: Any, path: str, cutoff_ns: int) -> None:
     entry = _mapping(value, path)
-    status = _enum(entry.get("status"), ROSTER_STATUSES, f"{path}.status")
+    status = _enum(entry.get("status"), PARTICIPANT_STATUSES, f"{path}.status")
     base = {"participant_id", "participant_key", "role", "status"}
     if status == "accepted":
         _exact_keys(
@@ -1248,29 +1239,29 @@ def _validate_roster_entry(value: Any, path: str, cutoff_ns: int) -> None:
     _enum(entry["role"], ROLES, f"{path}.role")
 
 
-def derive_job_totals(roster: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
-    """Derive job totals from one complete, fixed expected-participant roster."""
+def derive_job_totals(participants: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    """Derive job totals from one complete, fixed expected-participant list."""
 
-    if not isinstance(roster, list) or not 1 <= len(roster) <= MAX_PARTICIPANTS:
-        _fail("roster", f"must contain 1..{MAX_PARTICIPANTS} entries")
+    if not isinstance(participants, list) or not 1 <= len(participants) <= MAX_PARTICIPANTS:
+        _fail("participants", f"must contain 1..{MAX_PARTICIPANTS} entries")
     maximum_timestamp = _timestamp_nanoseconds("9999-12-31T23:59:59.999999999Z")
     ordering: list[tuple[str, str, str]] = []
-    for index, entry in enumerate(roster):
-        _validate_roster_entry(entry, f"roster[{index}]", maximum_timestamp)
+    for index, entry in enumerate(participants):
+        _validate_participant_entry(entry, f"participants[{index}]", maximum_timestamp)
         ordering.append((entry["role"], entry["participant_id"], entry["participant_key"]))
     if ordering != sorted(ordering):
-        _fail("roster", "must be sorted by role, participant_id, then participant_key")
+        _fail("participants", "must be sorted by role, participant_id, then participant_key")
     if len({item[1] for item in ordering}) != len(ordering):
-        _fail("roster", "participant_id values must be unique")
+        _fail("participants", "participant_id values must be unique")
     if len({item[2] for item in ordering}) != len(ordering):
-        _fail("roster", "participant_key values must be unique")
-    return _expected_job_totals(roster)
+        _fail("participants", "participant_key values must be unique")
+    return _expected_job_totals(participants)
 
 
 def _validate_resource_summary(record: Mapping[str, Any], path: str) -> None:
     _exact_keys(
         record,
-        {"schema_version", "kind", "job_id", "report_cutoff_at", "finalized_at", "roster", "totals"},
+        {"schema_version", "kind", "job_id", "report_cutoff_at", "finalized_at", "participants", "totals"},
         set(),
         path,
     )
@@ -1282,23 +1273,23 @@ def _validate_resource_summary(record: Mapping[str, Any], path: str) -> None:
     cutoff_ns = _timestamp_nanoseconds(cutoff)
     if _timestamp_nanoseconds(finalized) < cutoff_ns:
         _fail(f"{path}.finalized_at", "must not precede report_cutoff_at")
-    roster = record["roster"]
-    if not isinstance(roster, list) or not 1 <= len(roster) <= MAX_PARTICIPANTS:
-        _fail(f"{path}.roster", f"must contain 1..{MAX_PARTICIPANTS} entries")
+    participants = record["participants"]
+    if not isinstance(participants, list) or not 1 <= len(participants) <= MAX_PARTICIPANTS:
+        _fail(f"{path}.participants", f"must contain 1..{MAX_PARTICIPANTS} entries")
     ordering: list[tuple[str, str, str]] = []
-    for index, entry in enumerate(roster):
-        _validate_roster_entry(entry, f"{path}.roster[{index}]", cutoff_ns)
+    for index, entry in enumerate(participants):
+        _validate_participant_entry(entry, f"{path}.participants[{index}]", cutoff_ns)
         ordering.append((entry["role"], entry["participant_id"], entry["participant_key"]))
     if ordering != sorted(ordering):
-        _fail(f"{path}.roster", "must be sorted by role, participant_id, then participant_key")
+        _fail(f"{path}.participants", "must be sorted by role, participant_id, then participant_key")
     if len({item[1] for item in ordering}) != len(ordering):
-        _fail(f"{path}.roster", "participant_id values must be unique")
+        _fail(f"{path}.participants", "participant_id values must be unique")
     if len({item[2] for item in ordering}) != len(ordering):
-        _fail(f"{path}.roster", "participant_key values must be unique")
+        _fail(f"{path}.participants", "participant_key values must be unique")
     _validate_totals(record["totals"], f"{path}.totals")
-    expected = derive_job_totals(roster)
+    expected = derive_job_totals(participants)
     if record["totals"] != expected:
-        _fail(f"{path}.totals", "must exactly equal the deterministic sum and coverage state of the roster")
+        _fail(f"{path}.totals", "must exactly equal the deterministic sum and coverage state of participants")
 
 
 _PARTICIPANT_MANIFEST_PATH = re.compile(r"^participants/sha256-[0-9a-f]{64}\.json$")
@@ -1431,12 +1422,14 @@ def validate_bundle(
         _fail("file_bytes", "must be a relative-path-to-bytes mapping")
 
     accepted = {
-        entry["participant_key"]: entry for entry in resource_summary["roster"] if entry["status"] == "accepted"
+        entry["participant_key"]: entry
+        for entry in resource_summary["participants"]
+        if entry["status"] == "accepted"
     }
     if set(participant_records) != set(accepted):
         _fail(
             "participant_records",
-            "keys must exactly equal the accepted participant keys in the fixed roster",
+            "keys must exactly equal the accepted participant keys in the expected participant list",
         )
 
     expected_paths = {"resource_summary.json"} | {
@@ -1490,21 +1483,21 @@ def validate_bundle(
             )
         relative_path = f"participants/{participant_key}.json"
         digest = hashlib.sha256(file_bytes[relative_path]).hexdigest()
-        roster_entry = accepted[participant_key]
-        if roster_entry["summary_sha256"] != digest:
+        participant_entry = accepted[participant_key]
+        if participant_entry["summary_sha256"] != digest:
             _fail(
-                f"resource_summary.roster[{participant_key!r}].summary_sha256",
+                f"resource_summary.participants[{participant_key!r}].summary_sha256",
                 "does not match the accepted participant bytes",
             )
         resource_window_seconds, totals = derive_participant_totals(record)
-        if roster_entry["resource_window_seconds"] != resource_window_seconds:
+        if participant_entry["resource_window_seconds"] != resource_window_seconds:
             _fail(
-                f"resource_summary.roster[{participant_key!r}].resource_window_seconds",
+                f"resource_summary.participants[{participant_key!r}].resource_window_seconds",
                 "does not equal the lifecycle-derived resource-window interval sum",
             )
-        if roster_entry["totals"] != totals:
+        if participant_entry["totals"] != totals:
             _fail(
-                f"resource_summary.roster[{participant_key!r}].totals",
+                f"resource_summary.participants[{participant_key!r}].totals",
                 "does not equal startup capacity multiplied by the derived intervals",
             )
         for attempt in record["attempts"]:

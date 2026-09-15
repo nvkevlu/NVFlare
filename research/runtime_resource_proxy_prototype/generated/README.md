@@ -16,7 +16,7 @@ The reproducible review set lives in the
 - [server resource summary](../schema/golden/v1/finalized_job/server_run/resource_stats/resource_summary.json)
 - [all-site CLI output](../schema/golden/v1/finalized_job/cli/resources-all.txt)
 - [one-site CLI with hardware details](../schema/golden/v1/finalized_job/cli/resources-site-1-details.txt)
-- [partial multi-period CLI output](../schema/golden/v1/finalized_job/cli/resources-partial-periods.txt)
+- [partial-measurement site CLI output](../schema/golden/v1/finalized_job/cli/resources-site-2-details.txt)
 - [JSON CLI output](../schema/golden/v1/finalized_job/cli/resources-all.json)
 
 The full typed record set is in [schema/golden/v1](../schema/golden/v1/).

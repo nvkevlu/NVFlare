@@ -4,14 +4,14 @@
   "job_id": "job-large-exactness",
   "report_cutoff_at": "2026-09-09T00:15:02Z",
   "finalized_at": "2026-09-09T00:15:02.1Z",
-  "roster": [
+  "participants": [
     {
       "participant_id": "site-large",
       "participant_key": "sha256-ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
       "role": "client",
       "status": "accepted",
       "received_at": "2026-09-09T00:15:01.2Z",
-      "summary_sha256": "864872d16fb99680bae80cc23d14fd279ab3d81b89cb7fdbd314b4a348ff6d13",
+      "summary_sha256": "6fae9d75a53bf4e8a22259265f91ccae415987c9fbd9a6a55a43f9ee5f14b92a",
       "resource_window_seconds": "901",
       "totals": {
         "cpu": {

@@ -1,11 +1,11 @@
 {
   "schema_version": "1.0",
   "kind": "nvflare.resource_stats.attempt_end",
-  "job_id": "job-partial-periods",
-  "participant_id": "site-1",
+  "job_id": "job-20260909-001",
+  "participant_id": "site-2",
   "attempt_id": "55555555555555555555555555555555",
   "environment_key": "sha256-5555555555555555555555555555555555555555555555555555555555555555",
   "opened_at": "2026-09-09T14:00:00Z",
-  "closed_at": "2026-09-09T14:01:00Z",
+  "closed_at": "2026-09-09T14:05:00Z",
   "reason": "terminated"
 }

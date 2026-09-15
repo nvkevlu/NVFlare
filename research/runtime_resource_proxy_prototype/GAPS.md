@@ -1,4 +1,4 @@
-# Open Phase 1 decisions
+# Open resource-statistics decisions
 
 These are decisions, not current requirements.
 
@@ -44,8 +44,10 @@ It was one possible implementation, not an approved requirement.
 | Can the selected component write a final report after a child fails? | Partial data is useful only when the platform still has it. | Use existing NVFlare state and message paths; otherwise mark the site missing or partial. |
 | How is workspace continuity established for storage time? | Filesystem capacity cannot be multiplied across a period when the workspace was absent. | Report storage time only for an interval the platform can support. |
 
-Site-side files are self-reported and not immutable. Server-side accepted files
-are protected by the existing job store after receipt.
+Site-side files are self-reported and not immutable. Server-side accepted
+participant files are protected by existing server job storage after receipt;
+only the reconciled summary is copied to the `RESOURCE_STATS` job-store
+component.
 
 ## Delivery and server finalization
 
@@ -61,9 +63,10 @@ are protected by the existing job store after receipt.
 | Question | Why it matters | Constraint |
 | --- | --- | --- |
 | Which CUDA API and versions are supported? | Numeric GPU counts depend on successful runtime enumeration. | The raw CUDA mask is never count authority. NVML can enrich only matched devices. |
+| Which operating systems are in the first supported implementation? | CPU, memory, and model probes are platform-specific. | Choose the initial support matrix from ordinary-user evidence; unsupported platforms report unavailable. |
 | Which CPU model normalizer is used on each OS? | Raw model strings may expose too much or split equivalent models. | Use a bounded normalized value; omit it for heterogeneous visible CPUs. |
 | Which filesystems can prove continuity? | Shared and ephemeral filesystems have different behavior. | Keep the visible-capacity qualification and never claim ownership. |
-| Which existing NVFlare state provides the saved-result file list? | Exact size requires a complete, bounded set. | Use an existing list. If none exists, report unavailable; do not add a registry, job setting, or arbitrary path scan. |
+| Which existing NVFlare state identifies the complete saved-result set? | Exact size requires a complete, bounded set. | Use existing platform state. If none exists, report unavailable; do not add a registry, job setting, or arbitrary path scan. Store only the total bytes, not filenames or content hashes. |
 
 ## F3 integration
 
@@ -86,13 +89,15 @@ The team must choose:
 - final resource_proxy field names;
 - job-only versus per-site publication;
 - whether hardware models may be published;
-- payload and retry limits; and
+- the JobStatsReporter event type and payload limit;
+- retry duration and duplicate-delivery behavior;
+- which already-active reporter or reporters publish the Phase 1 subset; and
 - how it coexists with current JobStatsReporter utilization output.
 
 Phase 2 reads only finalized RESOURCE_STATS data. It does not solve any Phase 1
 collection or process-model question.
 
-## Decisions already closed
+## Closed decisions (reference only)
 
 These are no longer open:
 
@@ -104,3 +109,6 @@ These are no longer open:
 - missing data is not zero;
 - the server component name is exactly RESOURCE_STATS; and
 - the resource-statistics schema does not choose the roadmap process model.
+
+The rationale is kept in [SIMPLIFICATION_REVIEW.md](SIMPLIFICATION_REVIEW.md)
+and does not need to be presented unless a closed point is reopened.

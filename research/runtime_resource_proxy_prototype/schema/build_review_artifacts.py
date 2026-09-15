@@ -50,8 +50,15 @@ SCHEMA_ROOT = Path(__file__).resolve().parent
 GOLDEN_ROOT = SCHEMA_ROOT / "golden" / "v1"
 DEFAULT_OUTPUT = GOLDEN_ROOT / "finalized_job"
 JOB_ID = "job-20260909-001"
-PARTICIPANT_KEY = "sha256-" + "a" * 64
-PARTICIPANT_PATH = f"participants/{PARTICIPANT_KEY}.json"
+SITE_1_KEY = "sha256-" + "a" * 64
+SITE_2_KEY = "sha256-" + "e" * 64
+SITE_3_KEY = "sha256-" + "d" * 64
+SERVER_KEY = "sha256-" + "c" * 64
+SCENARIO_START = "2026-09-09T14:00:00Z"
+SCENARIO_END = "2026-09-09T14:37:03Z"
+CLIENT_F3_BYTES = "147700336640"
+SERVER_F3_BYTES = "295400673280"
+SAVED_RESULT_BYTES = "29540266113"
 
 
 def _json_bytes(value: Any) -> bytes:
@@ -69,19 +76,19 @@ def _write(path: Path, data: bytes) -> None:
 
 def _compute_capacity(
     *,
-    cpu_units: str = "1.5",
+    cpu_units: str = "32",
     cpu_model: str | None = "AMD EPYC 9654",
-    selector_count: str = "4",
-    memory_bytes: str = "8589934592",
-    physical_memory_bytes: str = "68719476736",
+    selector_count: str = "64",
+    memory_bytes: str = "206158430208",
+    physical_memory_bytes: str = "549755813888",
     gpu_groups: list[dict[str, str]] | None = None,
 ) -> dict[str, Any]:
     if gpu_groups is None:
         gpu_groups = [
             {
                 "kind": "full_gpu",
-                "count": "1",
-                "model": "NVIDIA H100 80GB HBM3",
+                "count": "4",
+                "model": "NVIDIA A100 80GB",
                 "memory_bytes": "85899345920",
             }
         ]
@@ -119,18 +126,17 @@ def _counter(payload_bytes: str = "0", messages: str = "0") -> dict[str, str]:
     return {"payload_bytes": payload_bytes, "messages": messages}
 
 
-def _f3(*, nonzero: bool) -> dict[str, Any]:
-    if not nonzero:
-        return {
-            "status": "reported",
-            "remote_accepted": _counter(),
-            "local_delivered": _counter(),
-            "remote_failed_before_acceptance": _counter(),
-        }
+def _f3(
+    *,
+    remote_payload_bytes: str = "0",
+    remote_messages: str = "0",
+    local_payload_bytes: str = "0",
+    local_messages: str = "0",
+) -> dict[str, Any]:
     return {
         "status": "reported",
-        "remote_accepted": _counter("5632", "2"),
-        "local_delivered": _counter("256", "1"),
+        "remote_accepted": _counter(remote_payload_bytes, remote_messages),
+        "local_delivered": _counter(local_payload_bytes, local_messages),
         "remote_failed_before_acceptance": _counter(),
     }
 
@@ -168,17 +174,20 @@ def _participant_final_body(
     observed_at: str,
     storage_bytes: str = "1099511627776",
     *,
-    retained: bool,
-    nonzero_f3: bool,
+    retained_bytes: str | None,
+    remote_payload_bytes: str = "0",
+    remote_messages: str = "0",
 ) -> dict[str, Any]:
-    entries = []
-    if retained:
-        entries.append({"relative_path": "result/model.pt", "size_bytes": "18874368", "sha256": "d" * 64})
+    retained_content = (
+        {"status": "reported", "bytes": retained_bytes}
+        if retained_bytes is not None
+        else {"status": "unavailable", "issues": ["not_bound"]}
+    )
     return {
         "observed_at": observed_at,
         "storage": _storage(storage_bytes),
-        "retained_content": {"status": "reported", "entries": entries},
-        "f3": _f3(nonzero=nonzero_f3),
+        "retained_content": retained_content,
+        "f3": _f3(remote_payload_bytes=remote_payload_bytes, remote_messages=remote_messages),
     }
 
 
@@ -188,19 +197,20 @@ def _main_participant() -> dict[str, Any]:
         "schema_version": "1.0",
         "kind": KIND_PARTICIPANT_SUMMARY,
         "job_id": JOB_ID,
-        "participant_key": PARTICIPANT_KEY,
-        "start": _participant_start_body("2026-09-09T14:00:00Z"),
+        "participant_key": SITE_1_KEY,
+        "start": _participant_start_body(SCENARIO_START),
         "final": _participant_final_body(
-            "2026-09-09T14:08:00Z",
-            retained=True,
-            nonzero_f3=True,
+            SCENARIO_END,
+            retained_bytes="0",
+            remote_payload_bytes=CLIENT_F3_BYTES,
+            remote_messages="5",
         ),
         "attempts": [
             _attempt(
                 attempt_id="1" * 32,
                 environment_key="sha256-" + "b" * 64,
-                opened_at="2026-09-09T14:00:00Z",
-                closed_at="2026-09-09T14:08:00Z",
+                opened_at=SCENARIO_START,
+                closed_at=SCENARIO_END,
                 capacity=capacity,
                 include_final=True,
             ),
@@ -209,17 +219,30 @@ def _main_participant() -> dict[str, Any]:
 
 
 def _partial_periods_participant() -> dict[str, Any]:
-    first_capacity = _compute_capacity()
-    second_capacity = _compute_capacity(
-        cpu_units="2",
+    first_capacity = _compute_capacity(
+        cpu_units="16",
         cpu_model="Intel Xeon Platinum 8480+",
-        selector_count="8",
-        memory_bytes="17179869184",
+        selector_count="32",
+        memory_bytes="137438953472",
         gpu_groups=[
             {
                 "kind": "full_gpu",
                 "count": "2",
-                "model": "NVIDIA A100 80GB PCIe",
+                "model": "NVIDIA A100 80GB",
+                "memory_bytes": "85899345920",
+            }
+        ],
+    )
+    second_capacity = _compute_capacity(
+        cpu_units="32",
+        cpu_model="Intel Xeon Platinum 8480+",
+        selector_count="64",
+        memory_bytes="206158430208",
+        gpu_groups=[
+            {
+                "kind": "full_gpu",
+                "count": "4",
+                "model": "NVIDIA A100 80GB",
                 "memory_bytes": "85899345920",
             }
         ],
@@ -227,31 +250,66 @@ def _partial_periods_participant() -> dict[str, Any]:
     return {
         "schema_version": "1.0",
         "kind": KIND_PARTICIPANT_SUMMARY,
-        "job_id": "job-partial-periods",
-        "participant_key": "sha256-" + "e" * 64,
-        "start": _participant_start_body("2026-09-09T14:00:00Z"),
+        "job_id": JOB_ID,
+        "participant_key": SITE_2_KEY,
+        "start": _participant_start_body(SCENARIO_START),
         "final": _participant_final_body(
-            "2026-09-09T14:08:00Z",
-            retained=True,
-            nonzero_f3=True,
+            SCENARIO_END,
+            retained_bytes=None,
+            remote_payload_bytes=CLIENT_F3_BYTES,
+            remote_messages="5",
         ),
         "attempts": [
             _attempt(
                 attempt_id="5" * 32,
                 environment_key="sha256-" + "5" * 64,
-                opened_at="2026-09-09T14:00:00Z",
-                closed_at="2026-09-09T14:01:00Z",
+                opened_at=SCENARIO_START,
+                closed_at="2026-09-09T14:05:00Z",
                 capacity=first_capacity,
                 end_reason="terminated",
             ),
             _attempt(
                 attempt_id="6" * 32,
-                environment_key="sha256-" + "5" * 64,
-                opened_at="2026-09-09T14:06:00Z",
-                closed_at="2026-09-09T14:08:00Z",
+                environment_key="sha256-" + "6" * 64,
+                opened_at="2026-09-09T14:10:00Z",
+                closed_at=SCENARIO_END,
                 capacity=second_capacity,
                 include_final=True,
             ),
+        ],
+    }
+
+
+def _server_participant() -> dict[str, Any]:
+    capacity = _compute_capacity(
+        cpu_units="8",
+        selector_count="16",
+        memory_bytes="68719476736",
+        gpu_groups=[],
+    )
+    capacity["gpu"]["cuda_mask_present"] = False
+    final = _participant_final_body(
+        SCENARIO_END,
+        retained_bytes=SAVED_RESULT_BYTES,
+        remote_payload_bytes=SERVER_F3_BYTES,
+        remote_messages="10",
+    )
+    return {
+        "schema_version": "1.0",
+        "kind": KIND_PARTICIPANT_SUMMARY,
+        "job_id": JOB_ID,
+        "participant_key": SERVER_KEY,
+        "start": _participant_start_body(SCENARIO_START),
+        "final": final,
+        "attempts": [
+            _attempt(
+                attempt_id="7" * 32,
+                environment_key="sha256-" + "7" * 64,
+                opened_at=SCENARIO_START,
+                closed_at=SCENARIO_END,
+                capacity=capacity,
+                include_final=True,
+            )
         ],
     }
 
@@ -279,8 +337,7 @@ def _large_participant() -> dict[str, Any]:
         "final": _participant_final_body(
             "2026-09-09T00:15:01Z",
             storage_bytes,
-            retained=False,
-            nonzero_f3=False,
+            retained_bytes="0",
         ),
         "attempts": [
             _attempt(
@@ -343,53 +400,52 @@ def _participant_final(participant_id: str, participant: dict[str, Any]) -> dict
     }
 
 
-def _resource_summary(
+def _accepted_participant_entry(
     participant: dict[str, Any],
     participant_bytes: bytes,
     *,
     participant_id: str,
+    role: str,
     received: str,
-    cutoff: str,
-    finalized: str,
-    missing_server: bool,
 ) -> dict[str, Any]:
     resource_window_seconds, totals = derive_participant_totals(participant)
-    roster = [
-        {
-            "participant_id": participant_id,
-            "participant_key": participant["participant_key"],
-            "role": "client",
-            "status": "accepted",
-            "received_at": received,
-            "summary_sha256": _digest(participant_bytes),
-            "resource_window_seconds": resource_window_seconds,
-            "totals": totals,
-        }
-    ]
-    if missing_server:
-        roster.append(
-            {
-                "participant_id": "server",
-                "participant_key": "sha256-" + "c" * 64,
-                "role": "server",
-                "status": "missing",
-            }
-        )
-    roster.sort(key=lambda item: (item["role"], item["participant_id"], item["participant_key"]))
     return {
-        "schema_version": "1.0",
-        "kind": KIND_RESOURCE_SUMMARY,
-        "job_id": participant["job_id"],
-        "report_cutoff_at": cutoff,
-        "finalized_at": finalized,
-        "roster": roster,
-        "totals": derive_job_totals(roster),
+        "participant_id": participant_id,
+        "participant_key": participant["participant_key"],
+        "role": role,
+        "status": "accepted",
+        "received_at": received,
+        "summary_sha256": _digest(participant_bytes),
+        "resource_window_seconds": resource_window_seconds,
+        "totals": totals,
     }
 
 
-def _manifest(job_id: str, summary_bytes: bytes, participant_bytes: bytes, participant_key: str) -> dict[str, Any]:
+def _resource_summary(
+    job_id: str,
+    participants: list[dict[str, Any]],
+    *,
+    cutoff: str,
+    finalized: str,
+) -> dict[str, Any]:
+    participants.sort(key=lambda item: (item["role"], item["participant_id"], item["participant_key"]))
+    return {
+        "schema_version": "1.0",
+        "kind": KIND_RESOURCE_SUMMARY,
+        "job_id": job_id,
+        "report_cutoff_at": cutoff,
+        "finalized_at": finalized,
+        "participants": participants,
+        "totals": derive_job_totals(participants),
+    }
+
+
+def _manifest(job_id: str, summary_bytes: bytes, participant_files: dict[str, bytes]) -> dict[str, Any]:
     entries = [
-        {"relative_path": f"participants/{participant_key}.json", "sha256": _digest(participant_bytes)},
+        *(
+            {"relative_path": f"participants/{participant_key}.json", "sha256": _digest(participant_bytes)}
+            for participant_key, participant_bytes in participant_files.items()
+        ),
         {"relative_path": "resource_summary.json", "sha256": _digest(summary_bytes)},
     ]
     entries.sort(key=lambda item: item["relative_path"])
@@ -406,10 +462,13 @@ def _hours(value: Decimal | None, divisor: Decimal = Decimal(3600)) -> str:
 
 def _duration(value: str) -> str:
     seconds = Decimal(value)
-    minutes = int(seconds // Decimal(60))
-    remainder = seconds - Decimal(minutes * 60)
+    hours = int(seconds // Decimal(3600))
+    after_hours = seconds - Decimal(hours * 3600)
+    minutes = int(after_hours // Decimal(60))
+    remainder = after_hours - Decimal(minutes * 60)
     text = format(remainder, "f").rstrip("0").rstrip(".")
-    return f"{minutes}m{text or '0'}s"
+    prefix = f"{hours}h" if hours else ""
+    return f"{prefix}{minutes}m{text or '0'}s"
 
 
 def _gpu_time(totals: dict[str, Any], kind: str) -> Decimal | None:
@@ -444,12 +503,12 @@ def _measurement_quality(totals: dict[str, Any]) -> str:
 
 
 def _human_cli(summary: dict[str, Any], selected_site: str | None = None) -> str:
-    accepted = sum(member["status"] == "accepted" for member in summary["roster"])
-    coverage = "COMPLETE" if accepted == len(summary["roster"]) else "PARTIAL"
+    accepted = sum(member["status"] == "accepted" for member in summary["participants"])
+    coverage = "COMPLETE" if accepted == len(summary["participants"]) else "PARTIAL"
     members = (
-        summary["roster"]
+        summary["participants"]
         if selected_site is None
-        else [member for member in summary["roster"] if member["participant_id"] == selected_site]
+        else [member for member in summary["participants"] if member["participant_id"] == selected_site]
     )
     if not members:
         raise ValueError(f"unknown site '{selected_site}'")
@@ -457,12 +516,12 @@ def _human_cli(summary: dict[str, Any], selected_site: str | None = None) -> str
     header = "SITE     ROLE    STATUS    QUALITY     MEASURED TIME  FULL GPU h"
     if show_mig:
         header += "  MIG CI h"
-    header += "  CPU h   MEM GiB h  STORAGE GiB h  SAVED RESULT MiB  F3 REMOTE ACCEPTED KiB"
+    header += "  CPU h   MEM GiB h  STORAGE GiB h  SAVED RESULT GiB  F3 REMOTE ACCEPTED GiB"
     selection = "" if selected_site is None else f" | selected site: {selected_site}"
     lines = [
-        "Resources visible to the job while it ran. These are not utilization, reserved capacity, or billing data.",
+        "Resources visible to the job while it ran.",
         f"Job {summary['job_id']}{selection} | job coverage: {coverage} "
-        f"({accepted} accepted / {len(summary['roster'])} expected)",
+        f"({accepted} accepted / {len(summary['participants'])} expected)",
         "",
         header,
     ]
@@ -491,7 +550,7 @@ def _human_cli(summary: dict[str, Any], selected_site: str | None = None) -> str
             f"{_duration(member['resource_window_seconds']):>13} {_hours(_gpu_time(totals, 'full_gpu')):>11} {mig}"
             f"{_hours(cpu):>7} {_hours(_scalar(totals, 'memory', 'byte_seconds'), Decimal(2**30 * 3600)):>11} "
             f"{_hours(_scalar(totals, 'storage', 'byte_seconds'), Decimal(2**30 * 3600)):>14} "
-            f"{_hours(retained, Decimal(2**20)):>16} {_hours(f3, Decimal(1024)):>22}"
+            f"{_hours(retained, Decimal(2**30)):>16} {_hours(f3, Decimal(2**30)):>22}"
         )
     if selected_site is None:
         totals = summary["totals"]
@@ -518,8 +577,8 @@ def _human_cli(summary: dict[str, Any], selected_site: str | None = None) -> str
             f"CPU {_hours(total_cpu)} h | "
             f"MEM {_hours(_scalar(totals, 'memory', 'byte_seconds'), Decimal(2**30 * 3600))} GiB h | "
             f"STORAGE {_hours(_scalar(totals, 'storage', 'byte_seconds'), Decimal(2**30 * 3600))} GiB h | "
-            f"SAVED RESULT {_hours(total_retained, Decimal(2**20))} MiB | "
-            f"F3 REMOTE ACCEPTED {_hours(total_f3, Decimal(1024))} KiB"
+            f"SAVED RESULT {_hours(total_retained, Decimal(2**30))} GiB | "
+            f"F3 REMOTE ACCEPTED {_hours(total_f3, Decimal(2**30))} GiB"
         )
         lines.extend(
             [
@@ -529,6 +588,8 @@ def _human_cli(summary: dict[str, Any], selected_site: str | None = None) -> str
             ]
         )
     notices = ["  MEASURED TIME is the sum of the measurement periods in each received report."]
+    if selected_site is None:
+        notices.append("  Use --site SITE or --format json to see hardware model details.")
     if coverage == "PARTIAL":
         notices.append("  JOB COVERAGE PARTIAL means not every expected report was accepted.")
     if any(
@@ -549,7 +610,7 @@ def _human_cli(summary: dict[str, Any], selected_site: str | None = None) -> str
 
 
 def _hardware_details(summary: dict[str, Any], participant_id: str) -> str:
-    member = next(entry for entry in summary["roster"] if entry["participant_id"] == participant_id)
+    member = next(entry for entry in summary["participants"] if entry["participant_id"] == participant_id)
     lines = [
         f"Hardware detail for {participant_id}",
         "Model metadata is optional. Its absence does not change numeric results.",
@@ -571,27 +632,61 @@ def _hardware_details(summary: dict[str, Any], participant_id: str) -> str:
 
 
 def build(output_root: Path = DEFAULT_OUTPUT) -> dict[str, Any]:
-    participant = _main_participant()
-    participant_bytes = _json_bytes(participant)
+    site_1 = _main_participant()
+    site_2 = _partial_periods_participant()
+    server = _server_participant()
+    accepted_records = {
+        SITE_1_KEY: site_1,
+        SITE_2_KEY: site_2,
+        SERVER_KEY: server,
+    }
+    accepted_bytes = {key: _json_bytes(record) for key, record in accepted_records.items()}
+    participants = [
+        _accepted_participant_entry(
+            site_1,
+            accepted_bytes[SITE_1_KEY],
+            participant_id="site-1",
+            role="client",
+            received="2026-09-09T14:37:03.1Z",
+        ),
+        _accepted_participant_entry(
+            site_2,
+            accepted_bytes[SITE_2_KEY],
+            participant_id="site-2",
+            role="client",
+            received="2026-09-09T14:37:03.2Z",
+        ),
+        {
+            "participant_id": "site-3",
+            "participant_key": SITE_3_KEY,
+            "role": "client",
+            "status": "missing",
+        },
+        _accepted_participant_entry(
+            server,
+            accepted_bytes[SERVER_KEY],
+            participant_id="server",
+            role="server",
+            received="2026-09-09T14:37:03.3Z",
+        ),
+    ]
     summary = _resource_summary(
-        participant,
-        participant_bytes,
-        participant_id="site-1",
-        received="2026-09-09T14:08:00.1Z",
-        cutoff="2026-09-09T14:08:01Z",
-        finalized="2026-09-09T14:08:01.1Z",
-        missing_server=True,
+        JOB_ID,
+        participants,
+        cutoff="2026-09-09T14:37:04Z",
+        finalized="2026-09-09T14:37:04.1Z",
     )
     summary_bytes = _json_bytes(summary)
-    manifest = _manifest(JOB_ID, summary_bytes, participant_bytes, PARTICIPANT_KEY)
+    manifest = _manifest(JOB_ID, summary_bytes, accepted_bytes)
     manifest_bytes = _json_bytes(manifest)
 
-    main_start = _attempt_start("site-1", participant)
-    main_final = _attempt_final("site-1", participant)
-    main_participant_start = _participant_start("site-1", participant)
-    main_participant_final = _participant_final("site-1", participant)
+    main_start = _attempt_start("site-1", site_1)
+    main_final = _attempt_final("site-1", site_1)
+    main_participant_start = _participant_start("site-1", site_1)
+    main_participant_final = _participant_final("site-1", site_1)
     zero_gpu = deepcopy(main_start)
     zero_gpu.update(
+        job_id="job-zero-gpu-example",
         participant_id="site-zero",
         attempt_id="2" * 32,
         environment_key="sha256-" + "2" * 64,
@@ -600,6 +695,7 @@ def build(output_root: Path = DEFAULT_OUTPUT) -> dict[str, Any]:
     zero_gpu["capacity"]["gpu"]["groups"] = []
     cuda_unavailable = deepcopy(zero_gpu)
     cuda_unavailable.update(
+        job_id="job-cuda-unavailable-example",
         participant_id="site-mask-only",
         attempt_id="3" * 32,
         environment_key="sha256-" + "3" * 64,
@@ -613,36 +709,30 @@ def build(output_root: Path = DEFAULT_OUTPUT) -> dict[str, Any]:
     terminated_end = {
         "schema_version": "1.0",
         "kind": KIND_ATTEMPT_END,
-        "job_id": "job-partial-periods",
-        "participant_id": "site-1",
-        "attempt_id": "5" * 32,
-        "environment_key": "sha256-" + "5" * 64,
-        "opened_at": "2026-09-09T14:00:00Z",
-        "closed_at": "2026-09-09T14:01:00Z",
-        "reason": "terminated",
+        "job_id": site_2["job_id"],
+        "participant_id": "site-2",
+        "attempt_id": site_2["attempts"][0]["attempt_id"],
+        "environment_key": site_2["attempts"][0]["environment_key"],
+        "opened_at": site_2["attempts"][0]["opened_at"],
+        **deepcopy(site_2["attempts"][0]["end"]),
     }
-    partial_periods = _partial_periods_participant()
-    partial_periods_bytes = _json_bytes(partial_periods)
-    partial_periods_summary = _resource_summary(
-        partial_periods,
-        partial_periods_bytes,
-        participant_id="site-1",
-        received="2026-09-09T14:08:00.1Z",
-        cutoff="2026-09-09T14:08:01Z",
-        finalized="2026-09-09T14:08:01.1Z",
-        missing_server=False,
-    )
 
     large_participant = _large_participant()
     large_participant_bytes = _json_bytes(large_participant)
+    large_participants = [
+        _accepted_participant_entry(
+            large_participant,
+            large_participant_bytes,
+            participant_id="site-large",
+            role="client",
+            received="2026-09-09T00:15:01.2Z",
+        )
+    ]
     large_summary = _resource_summary(
-        large_participant,
-        large_participant_bytes,
-        participant_id="site-large",
-        received="2026-09-09T00:15:01.2Z",
+        large_participant["job_id"],
+        large_participants,
         cutoff="2026-09-09T00:15:02Z",
         finalized="2026-09-09T00:15:02.1Z",
-        missing_server=False,
     )
     records = {
         "attempt_start.json": main_start,
@@ -652,8 +742,9 @@ def build(output_root: Path = DEFAULT_OUTPUT) -> dict[str, Any]:
         "attempt_end_terminated.json": terminated_end,
         "participant_start.json": main_participant_start,
         "participant_final.json": main_participant_final,
-        "participant_summary.json": participant,
-        "participant_summary_partial_periods.json": partial_periods,
+        "participant_summary.json": site_1,
+        "participant_summary_partial_periods.json": site_2,
+        "participant_summary_server.json": server,
         "participant_summary_large_value.json": large_participant,
         "resource_summary.json": summary,
         "resource_summary_large_value.json": large_summary,
@@ -664,16 +755,20 @@ def build(output_root: Path = DEFAULT_OUTPUT) -> dict[str, Any]:
         load_and_validate(data)
     validate_bundle(
         summary,
-        {PARTICIPANT_KEY: participant},
+        accepted_records,
         manifest,
-        {"resource_summary.json": summary_bytes, PARTICIPANT_PATH: participant_bytes},
+        {
+            "resource_summary.json": summary_bytes,
+            **{f"participants/{key}.json": data for key, data in accepted_bytes.items()},
+        },
     )
     for name, data in encoded.items():
         _write(GOLDEN_ROOT / name, data)
 
     resource_root = output_root / "server_run" / "resource_stats"
     _write(resource_root / "resource_summary.json", summary_bytes)
-    _write(resource_root / PARTICIPANT_PATH, participant_bytes)
+    for participant_key, participant_bytes in accepted_bytes.items():
+        _write(resource_root / "participants" / f"{participant_key}.json", participant_bytes)
     _write(resource_root / "manifest.json", manifest_bytes)
     query_copy = output_root / "job_store" / "jobs" / JOB_ID / "RESOURCE_STATS"
     _write(query_copy, summary_bytes)
@@ -686,29 +781,67 @@ def build(output_root: Path = DEFAULT_OUTPUT) -> dict[str, Any]:
     }
     cli_json_bytes = _json_bytes(cli_json)
     cli_text_bytes = _human_cli(summary).encode("utf-8")
-    detail_bytes = (_human_cli(summary, "site-1") + "\n" + _hardware_details(summary, "site-1")).encode("utf-8")
+    site_1_detail_bytes = (_human_cli(summary, "site-1") + "\n" + _hardware_details(summary, "site-1")).encode(
+        "utf-8"
+    )
+    site_2_detail_bytes = (_human_cli(summary, "site-2") + "\n" + _hardware_details(summary, "site-2")).encode(
+        "utf-8"
+    )
     _write(output_root / "cli" / "resources-all.json", cli_json_bytes)
     _write(output_root / "cli" / "resources-all.txt", cli_text_bytes)
-    _write(output_root / "cli" / "resources-site-1-details.txt", detail_bytes)
-    _write(
-        output_root / "cli" / "resources-partial-periods.txt",
-        _human_cli(partial_periods_summary).encode("utf-8"),
-    )
+    _write(output_root / "cli" / "resources-site-1-details.txt", site_1_detail_bytes)
+    _write(output_root / "cli" / "resources-site-2-details.txt", site_2_detail_bytes)
 
     receipt = {
         "generator": Path(__file__).name,
         "schema_version": "1.0",
         "job_id": JOB_ID,
-        "participant_summary_sha256": _digest(participant_bytes),
+        "participant_summary_sha256": {
+            "site-1": _digest(accepted_bytes[SITE_1_KEY]),
+            "site-2": _digest(accepted_bytes[SITE_2_KEY]),
+            "server": _digest(accepted_bytes[SERVER_KEY]),
+        },
         "resource_summary_sha256": _digest(summary_bytes),
         "manifest_sha256": _digest(manifest_bytes),
         "query_copy_matches_resource_summary": query_copy.read_bytes() == summary_bytes,
+        "scenario_basis": {
+            "description": "Illustrative values scaled to a completed two-client Qwen2.5-14B qualification.",
+            "reference_label": (
+                "Five-round 14B full-model qualification, 2026-07-31"
+            ),
+            "scope_note": (
+                "The A100 model, four-GPU baseline, runtime scale, model-state size, and saved-result size are "
+                "evidence-based; CPU, memory, storage, and site-2 period/resource changes are illustrative."
+            ),
+            "reference_runtime_seconds": "2223",
+            "reference_model_state_bytes": "29540067328",
+            "reference_logical_state_directions": "20",
+            "reference_logical_state_bytes": "590801346560",
+            "reference_saved_result_bytes": SAVED_RESULT_BYTES,
+            "f3_note": (
+                "The historical run recorded model-state size; its logical volume was derived, and it did not "
+                "measure the proposed post-encoding F3 counter."
+            ),
+        },
         "derived_examples": {
-            "participant_lifetime_seconds": "480",
-            "resource_window_seconds": summary["roster"][0]["resource_window_seconds"],
-            "cpu_unit_seconds": summary["roster"][0]["totals"]["cpu"]["groups"][0]["unit_seconds"],
-            "gpu_instance_seconds": summary["roster"][0]["totals"]["gpu"]["groups"][0]["instance_seconds"],
-            "storage_byte_seconds": summary["roster"][0]["totals"]["storage"]["byte_seconds"],
+            "participant_lifetime_seconds": "2223",
+            "site_1_resource_window_seconds": summary["participants"][0]["resource_window_seconds"],
+            "site_2_resource_window_seconds": summary["participants"][1]["resource_window_seconds"],
+            "server_resource_window_seconds": summary["participants"][3]["resource_window_seconds"],
+            "accepted_resource_window_seconds": str(
+                sum(
+                    Decimal(entry["resource_window_seconds"])
+                    for entry in summary["participants"]
+                    if entry["status"] == "accepted"
+                )
+            ),
+            "job_cpu_unit_seconds": str(
+                _decimal_sum(summary["totals"]["cpu"]["groups"], "unit_seconds")
+            ),
+            "job_gpu_instance_seconds": str(
+                _decimal_sum(summary["totals"]["gpu"]["groups"], "instance_seconds")
+            ),
+            "job_storage_byte_seconds": summary["totals"]["storage"]["byte_seconds"],
             "large_storage_byte_seconds": large_summary["totals"]["storage"]["byte_seconds"],
         },
     }

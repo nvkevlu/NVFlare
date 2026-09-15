@@ -36,8 +36,8 @@ Human-facing documents now use:
 | --- | --- |
 | participant_summary | site report |
 | attempt | measurement period |
-| roster | expected participant list |
-| retained_content | saved-result files |
+| participants | expected participant list |
+| retained_content | saved-result byte total |
 | environment_key | measurement-scope key |
 
 The exact JSON names remain in schema tables and examples.
@@ -56,6 +56,10 @@ The current contract keeps:
 - one final site report;
 - one server summary; and
 - one manifest.
+
+Saved-result accounting keeps only status and total bytes. Per-file names and
+content hashes were removed because Phase 1 does not need them and NVFlare does
+not have one universal result-file inventory.
 
 Server warnings are derived from participant status and resource status rather
 than copied into another warning array.
@@ -155,14 +159,16 @@ Filesystem capacity and saved-result bytes are different values.
 
 - Filesystem capacity is a visible proxy for the existing job-workspace
   filesystem.
-- Saved-result bytes are exact sizes of files NVFlare already knows about.
+- The saved-result byte total is the exact sum for a complete result set
+  NVFlare already knows about.
 
 Storage time is available only when workspace continuity is supported by
 existing platform facts. No extra volume or mount is introduced.
 
 Site fragments are normal self-reported workspace files. They can be lost or
 changed before the server receives the final report. Server-side accepted files
-use the existing job store and manifest.
+use existing server job storage and the manifest. The reconciled summary also
+has a byte-identical `RESOURCE_STATS` job-store copy.
 
 ## F3 decisions
 
@@ -193,19 +199,9 @@ The CLI uses:
 - MEASURED TIME for the sum of reported periods; and
 - Totals from received reports for the aggregate.
 
-The CLI starts by saying that the values are not utilization, reserved
-capacity, or billing data.
+The CLI starts with the short label `Resources visible to the job while it ran.`
 
 ## Decisions still open
 
-The following were not simplified into requirements:
-
-- which component records the site run;
-- what starts and ends a measurement period;
-- how the first observation runs before job code can affect it;
-- how the measurement-scope key is derived;
-- how much crash recovery existing storage permits;
-- which existing authenticated message carries the final report; and
-- whether the reconfigured end reason is worth keeping.
-
-See [GAPS.md](GAPS.md).
+This history does not maintain another decision list. See
+[GAPS.md](GAPS.md) for the current authoritative questions.
