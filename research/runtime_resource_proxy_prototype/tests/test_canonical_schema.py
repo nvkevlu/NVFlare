@@ -35,6 +35,7 @@ from contract_v1 import (  # noqa: E402
     KIND_MANIFEST,
     KIND_PARTICIPANT_SUMMARY,
     KIND_RESOURCE_SUMMARY,
+    MAX_ATTEMPTS,
     RECORD_KINDS,
     SCHEMA_VERSION,
     U128_MAX,
@@ -42,6 +43,7 @@ from contract_v1 import (  # noqa: E402
     derive_job_totals,
     derive_participant_totals,
     load_and_validate,
+    normalize_quota_units,
     validate_bundle,
     validate_record,
 )
@@ -79,7 +81,7 @@ class TestCanonicalV1Contract(unittest.TestCase):
             data = _json_bytes(participant)
             participant_records[key] = participant
             participant_files[f"participants/{key}.json"] = data
-            observation_seconds, totals = derive_participant_totals(participant)
+            resource_window_seconds, totals = derive_participant_totals(participant)
             roster.append(
                 {
                     "participant_id": f"site-{index}",
@@ -88,7 +90,7 @@ class TestCanonicalV1Contract(unittest.TestCase):
                     "status": "accepted",
                     "received_at": "2026-09-09T14:20:00Z",
                     "summary_sha256": hashlib.sha256(data).hexdigest(),
-                    "observation_seconds": observation_seconds,
+                    "resource_window_seconds": resource_window_seconds,
                     "totals": totals,
                 }
             )
@@ -115,18 +117,23 @@ class TestCanonicalV1Contract(unittest.TestCase):
         }
         return summary, participant_records, manifest, files
 
-    @unittest.skipIf(Draft202012Validator is None, "jsonschema is not installed")
-    def test_all_six_record_kinds_pass_executable_and_draft_2020_12_schema(self):
-        Draft202012Validator.check_schema(self.schema)
+    def test_all_eight_record_kinds_pass_executable_contract(self):
         seen = set()
         for path in sorted(GOLDEN_ROOT.glob("*.json")):
             with self.subTest(name=path.name):
                 record = load_and_validate(path.read_bytes())
-                errors = sorted(self.json_validator.iter_errors(record), key=lambda error: list(error.path))
-                self.assertEqual([], errors)
                 seen.add(record["kind"])
         self.assertEqual(RECORD_KINDS, seen)
         self.assertEqual("1.0", SCHEMA_VERSION)
+
+    @unittest.skipIf(Draft202012Validator is None, "jsonschema is not installed")
+    def test_all_goldens_pass_draft_2020_12_schema(self):
+        Draft202012Validator.check_schema(self.schema)
+        for path in sorted(GOLDEN_ROOT.glob("*.json")):
+            with self.subTest(name=path.name):
+                record = json.loads(path.read_text(encoding="utf-8"))
+                errors = sorted(self.json_validator.iter_errors(record), key=lambda error: list(error.path))
+                self.assertEqual([], errors)
 
     def test_cpu_selector_uses_minimum_and_online_is_fallback_only(self):
         record = self._golden("attempt_start.json")
@@ -150,6 +157,15 @@ class TestCanonicalV1Contract(unittest.TestCase):
         fallback = self._golden("participant_summary_large_value.json")["attempts"][0]["start"]
         self.assertEqual({"online_count": "1"}, fallback["capacity"]["cpu"]["evidence"])
         validate_record(self._golden("participant_summary_large_value.json"))
+
+    def test_quota_units_use_exact_decimal_division_and_conservative_floor(self):
+        self.assertEqual("1.5", normalize_quota_units(150_000, 100_000))
+        self.assertEqual("0.333333333", normalize_quota_units(1, 3))
+        self.assertEqual("0.666666666", normalize_quota_units(2, 3))
+        with self.assertRaisesRegex(ValueError, "positive unsigned"):
+            normalize_quota_units(0, 100_000)
+        with self.assertRaisesRegex(ValueError, "below the v1"):
+            normalize_quota_units(1, 10_000_000_000)
 
     def test_cuda_mask_is_diagnostic_and_zero_requires_reported_enumeration(self):
         unavailable = self._golden("attempt_start_cuda_unavailable.json")
@@ -194,12 +210,12 @@ class TestCanonicalV1Contract(unittest.TestCase):
             ISSUE_CODES,
         )
 
-        partial_f3 = self._golden("attempt_final.json")
+        partial_f3 = self._golden("participant_final.json")
         partial_f3["f3"]["status"] = "partial"
         partial_f3["f3"]["issues"] = ["counter_gap"]
         validate_record(partial_f3)
 
-        reported_with_issue = self._golden("attempt_final.json")
+        reported_with_issue = self._golden("participant_final.json")
         reported_with_issue["f3"]["issues"] = ["counter_gap"]
         self._assert_invalid_both(reported_with_issue)
 
@@ -231,10 +247,128 @@ class TestCanonicalV1Contract(unittest.TestCase):
         raw_cpu["capacity"]["cpu"]["raw_cpuinfo"] = "processor: 0"
         self._assert_invalid_both(raw_cpu)
 
-    def test_final_capacity_is_retained_and_crash_derivation_is_honest(self):
+    def test_gpu_free_window_counts_cpu_memory_and_storage_spans_participant(self):
         participant = self._golden("participant_summary.json")
-        observation, totals = derive_participant_totals(participant)
-        self.assertEqual("342.5", observation)
+        window_seconds, totals = derive_participant_totals(participant)
+        self.assertEqual("480", window_seconds)
+        self.assertEqual("2026-09-09T14:00:00Z", participant["start"]["observed_at"])
+        self.assertEqual("2026-09-09T14:08:00Z", participant["final"]["observed_at"])
+        self.assertEqual("2026-09-09T14:01:00Z", participant["attempts"][0]["end"]["closed_at"])
+        self.assertEqual("2026-09-09T14:01:00Z", participant["attempts"][1]["opened_at"])
+        self.assertEqual([], participant["attempts"][1]["start"]["capacity"]["gpu"]["groups"])
+        self.assertEqual("720", totals["cpu"]["groups"][0]["unit_seconds"])
+        self.assertEqual("4123168604160", totals["memory"]["byte_seconds"])
+        self.assertEqual("180", totals["gpu"]["groups"][0]["instance_seconds"])
+        self.assertEqual("527765581332480", totals["storage"]["byte_seconds"])
+        self.assertEqual("18874368", totals["retained_content"]["bytes"])
+        self.assertEqual("5632", totals["f3"]["remote_accepted"]["payload_bytes"])
+        self.assertTrue(all("retained_content" not in attempt["final"] for attempt in participant["attempts"]))
+        self.assertTrue(all("f3" not in attempt["final"] for attempt in participant["attempts"]))
+
+    def test_gpu_only_release_opens_an_immediate_zero_gpu_window(self):
+        participant = self._golden("participant_summary.json")
+        environment_key = participant["attempts"][0]["environment_key"]
+        with_gpu = copy.deepcopy(participant["attempts"][0]["start"]["capacity"])
+        without_gpu = copy.deepcopy(with_gpu)
+        without_gpu["gpu"] = {"status": "reported", "cuda_mask_present": False, "groups": []}
+        participant["attempts"] = [
+            {
+                "attempt_id": "1" * 32,
+                "environment_key": environment_key,
+                "opened_at": "2026-09-09T14:00:00Z",
+                "start": {"capacity": copy.deepcopy(with_gpu)},
+                "final": {"capacity": copy.deepcopy(with_gpu)},
+                "end": {"closed_at": "2026-09-09T14:01:00Z", "reason": "reconfigured"},
+            },
+            {
+                "attempt_id": "2" * 32,
+                "environment_key": environment_key,
+                "opened_at": "2026-09-09T14:01:00Z",
+                "start": {"capacity": copy.deepcopy(without_gpu)},
+                "final": {"capacity": copy.deepcopy(without_gpu)},
+                "end": {"closed_at": "2026-09-09T14:06:00Z", "reason": "released"},
+            },
+        ]
+
+        window_seconds, totals = derive_participant_totals(participant)
+        self.assertEqual("360", window_seconds)
+        self.assertEqual("540", totals["cpu"]["groups"][0]["unit_seconds"])
+        self.assertEqual("3092376453120", totals["memory"]["byte_seconds"])
+        self.assertEqual("60", totals["gpu"]["groups"][0]["instance_seconds"])
+
+        gap_after_reconfiguration = copy.deepcopy(participant)
+        gap_after_reconfiguration["attempts"][1]["opened_at"] = "2026-09-09T14:01:00.1Z"
+        self._assert_invalid(gap_after_reconfiguration, "exact closure boundary")
+
+        release_and_immediate_reacquire = copy.deepcopy(participant)
+        release_and_immediate_reacquire["attempts"][0]["end"]["reason"] = "released"
+        validate_record(release_and_immediate_reacquire)
+
+        unchanged_reconfiguration = copy.deepcopy(participant)
+        unchanged_reconfiguration["attempts"][1]["start"] = copy.deepcopy(
+            unchanged_reconfiguration["attempts"][0]["start"]
+        )
+        self._assert_invalid(unchanged_reconfiguration, "requires a changed numeric capacity vector")
+
+    def test_launch_failed_has_supervisor_bounds_and_no_capacity_snapshot(self):
+        participant = self._golden("participant_summary.json")
+        participant["attempts"] = [
+            {
+                "attempt_id": "1" * 32,
+                "environment_key": participant["attempts"][0]["environment_key"],
+                "opened_at": "2026-09-09T14:00:00Z",
+                "end": {"closed_at": "2026-09-09T14:00:10Z", "reason": "launch_failed"},
+            }
+        ]
+        window_seconds, totals = derive_participant_totals(participant)
+        self.assertEqual("10", window_seconds)
+        self.assertEqual({"status": "unavailable"}, totals["cpu"])
+        self.assertEqual({"status": "unavailable"}, totals["memory"])
+        self.assertEqual({"status": "unavailable"}, totals["gpu"])
+
+        invented_start = copy.deepcopy(participant)
+        invented_start["attempts"][0]["start"] = {
+            "capacity": copy.deepcopy(self._golden("attempt_start.json")["capacity"])
+        }
+        self._assert_invalid_both(invented_start)
+
+        negative_duration = copy.deepcopy(participant)
+        negative_duration["attempts"][0]["end"]["closed_at"] = "2026-09-09T13:59:59Z"
+        self._assert_invalid(negative_duration, "must not precede opened_at")
+
+        standalone_end = self._golden("attempt_end_terminated.json")
+        standalone_end["reason"] = "launch_failed"
+        validate_record(standalone_end)
+        standalone_end.pop("opened_at")
+        self._assert_invalid_both(standalone_end)
+
+    def test_attempt_bound_is_exactly_4096(self):
+        participant = self._golden("participant_summary.json")
+        environment_key = participant["attempts"][0]["environment_key"]
+        participant["attempts"] = [
+            {
+                "attempt_id": f"{index:032x}",
+                "environment_key": environment_key,
+                "opened_at": "2026-09-09T14:00:00Z",
+                "end": {"closed_at": "2026-09-09T14:00:00Z", "reason": "launch_failed"},
+            }
+            for index in range(MAX_ATTEMPTS)
+        ]
+        validate_record(participant)
+
+        participant["attempts"].append(
+            {
+                "attempt_id": f"{MAX_ATTEMPTS:032x}",
+                "environment_key": environment_key,
+                "opened_at": "2026-09-09T14:00:00Z",
+                "end": {"closed_at": "2026-09-09T14:00:00Z", "reason": "launch_failed"},
+            }
+        )
+        self._assert_invalid_both(participant)
+
+    def test_final_capacity_and_preemption_resume_derivation_are_honest(self):
+        participant = self._golden("participant_summary.json")
+        _, totals = derive_participant_totals(participant)
         self.assertEqual("reported", totals["cpu"]["status"])
         self.assertIn("capacity", participant["attempts"][0]["final"])
 
@@ -244,37 +378,92 @@ class TestCanonicalV1Contract(unittest.TestCase):
         changed_cpu["evidence"]["quota_units"] = "1"
         _, changed_totals = derive_participant_totals(changed)
         self.assertEqual("partial", changed_totals["cpu"]["status"])
-        self.assertEqual("513.75", changed_totals["cpu"]["groups"][0]["unit_seconds"])
+        self.assertEqual("720", changed_totals["cpu"]["groups"][0]["unit_seconds"])
         self.assertEqual("reported", changed_totals["memory"]["status"])
 
-        crash = copy.deepcopy(participant)
-        crash_attempt = crash["attempts"][0]
-        crash_attempt.pop("final")
-        crash_attempt["exit"] = {
-            "observed_at": "2026-09-09T14:05:42.6Z",
-            "outcome": "terminated",
-            "return_code": -9,
-        }
-        crash_observation, crash_totals = derive_participant_totals(crash)
-        self.assertEqual("342.6", crash_observation)
-        self.assertEqual("partial", crash_totals["cpu"]["status"])
-        self.assertEqual("513.9", crash_totals["cpu"]["groups"][0]["unit_seconds"])
-        self.assertEqual({"status": "unavailable"}, crash_totals["retained_content"])
-        self.assertEqual({"status": "unavailable"}, crash_totals["f3"])
-        self.assertNotIn("capacity", self._golden("parent_exit_crash.json"))
+        failed_with_final = copy.deepcopy(participant)
+        failed_with_final["attempts"][0]["end"]["reason"] = "failed"
+        _, failed_with_final_totals = derive_participant_totals(failed_with_final)
+        self.assertEqual(totals, failed_with_final_totals)
+
+        resumed = self._golden("participant_summary_preempted_resume.json")
+        resumed_seconds, resumed_totals = derive_participant_totals(resumed)
+        self.assertEqual("180", resumed_seconds)
+        self.assertNotIn("final", resumed["attempts"][0])
+        self.assertEqual("terminated", resumed["attempts"][0]["end"]["reason"])
+        self.assertEqual("released", resumed["attempts"][1]["end"]["reason"])
+        self.assertEqual("partial", resumed_totals["cpu"]["status"])
+        self.assertEqual(["90", "240"], [group["unit_seconds"] for group in resumed_totals["cpu"]["groups"]])
+        self.assertEqual("partial", resumed_totals["memory"]["status"])
+        self.assertEqual("2576980377600", resumed_totals["memory"]["byte_seconds"])
+        self.assertEqual("partial", resumed_totals["gpu"]["status"])
+        self.assertEqual(
+            [("NVIDIA A100 80GB PCIe", "240"), ("NVIDIA H100 80GB HBM3", "60")],
+            [(group["model"], group["instance_seconds"]) for group in resumed_totals["gpu"]["groups"]],
+        )
+        self.assertEqual("reported", resumed_totals["storage"]["status"])
+        self.assertEqual("527765581332480", resumed_totals["storage"]["byte_seconds"])
+        self.assertEqual("reported", resumed_totals["retained_content"]["status"])
+        self.assertEqual("reported", resumed_totals["f3"]["status"])
+        attempt_end = self._golden("attempt_end_terminated.json")
+        self.assertNotIn("capacity", attempt_end)
+        self.assertNotIn("return_code", attempt_end)
+        self.assertEqual("2026-09-09T14:00:00Z", attempt_end["opened_at"])
+        self.assertEqual("2026-09-09T14:01:00Z", attempt_end["closed_at"])
+
+    def test_completed_participant_with_no_compute_windows_reports_zero_transient_time(self):
+        participant = self._golden("participant_summary.json")
+        participant["attempts"] = []
+        window_seconds, totals = derive_participant_totals(participant)
+        self.assertEqual("0", window_seconds)
+        self.assertEqual({"status": "reported", "groups": []}, totals["cpu"])
+        self.assertEqual({"status": "reported", "byte_seconds": "0"}, totals["memory"])
+        self.assertEqual({"status": "reported", "groups": []}, totals["gpu"])
+        self.assertEqual("527765581332480", totals["storage"]["byte_seconds"])
+
+    def test_uncertain_continuous_storage_keeps_numeric_proxy_as_partial(self):
+        participant = self._golden("participant_summary.json")
+        for lifecycle_fact in (participant["start"], participant["final"]):
+            lifecycle_fact["storage"] = {
+                "status": "partial",
+                "capacity_bytes": "1099511627776",
+                "issues": ["observation_incomplete"],
+            }
+        _, totals = derive_participant_totals(participant)
+        self.assertEqual(
+            {"status": "partial", "byte_seconds": "527765581332480"},
+            totals["storage"],
+        )
+
+    def test_overlapping_different_environments_sum_resource_window_seconds(self):
+        participant = self._golden("participant_summary.json")
+        first = copy.deepcopy(participant["attempts"][0])
+        second = copy.deepcopy(first)
+        first["attempt_id"] = "1" * 32
+        first["opened_at"] = "2026-09-09T14:00:00Z"
+        first["end"] = {"closed_at": "2026-09-09T14:01:00Z", "reason": "released"}
+        second["attempt_id"] = "2" * 32
+        second["environment_key"] = "sha256-" + "c" * 64
+        second["opened_at"] = "2026-09-09T14:00:00Z"
+        second["end"] = {"closed_at": "2026-09-09T14:01:00Z", "reason": "released"}
+        participant["attempts"] = [first, second]
+
+        window_seconds, totals = derive_participant_totals(participant)
+        self.assertEqual("120", window_seconds)
+        self.assertEqual("180", totals["cpu"]["groups"][0]["unit_seconds"])
 
     def test_large_integer_formula_is_exact_and_bounded(self):
         participant = self._golden("participant_summary_large_value.json")
-        observation, totals = derive_participant_totals(participant)
-        self.assertEqual("901", observation)
+        window_seconds, totals = derive_participant_totals(participant)
+        self.assertEqual("901", window_seconds)
         self.assertEqual("9010000000000901", totals["storage"]["byte_seconds"])
         self.assertEqual(totals, self._golden("resource_summary_large_value.json")["totals"])
 
-        maximum = self._golden("attempt_final_large_value.json")
-        maximum["f3"]["summary_excluded"] = {"payload_bytes": str(U128_MAX), "messages": "1"}
+        maximum = self._golden("participant_final.json")
+        maximum["f3"]["remote_accepted"] = {"payload_bytes": str(U128_MAX), "messages": "1"}
         validate_record(maximum)
         overflow = copy.deepcopy(maximum)
-        overflow["f3"]["summary_excluded"]["payload_bytes"] = str(U128_MAX + 1)
+        overflow["f3"]["remote_accepted"]["payload_bytes"] = str(U128_MAX + 1)
         self._assert_invalid(overflow, "no greater")
 
     def test_roster_recomputes_job_totals_and_role_occurs_only_there(self):
@@ -292,6 +481,11 @@ class TestCanonicalV1Contract(unittest.TestCase):
         with_role = copy.deepcopy(participant)
         with_role["role"] = "client"
         self._assert_invalid_both(with_role)
+
+        accepted_server = copy.deepcopy(summary["roster"][0])
+        accepted_server["participant_id"] = "server"
+        accepted_server["role"] = "server"
+        self.assertEqual(accepted_server["totals"], derive_job_totals([accepted_server]))
 
     def test_summary_bytes_are_idempotent_and_conflicts_fail_digest_checks(self):
         participant_path = GOLDEN_ROOT / "participant_summary.json"
@@ -325,33 +519,28 @@ class TestCanonicalV1Contract(unittest.TestCase):
         first = self._golden("participant_summary.json")
         second = copy.deepcopy(first)
         second["participant_key"] = "sha256-" + "e" * 64
+        second["attempts"] = [second["attempts"][0]]
         attempt = second["attempts"][0]
-        attempt["attempt_id"] = "2" * 32
-        attempt["start"]["observed_at"] = "2026-09-09T14:05:42.6Z"
-        attempt["final"]["observed_at"] = "2026-09-09T14:10:00Z"
-        attempt["exit"] = {
-            "observed_at": "2026-09-09T14:10:00.1Z",
-            "outcome": "finished_ok",
-            "return_code": 0,
-        }
+        attempt["attempt_id"] = "3" * 32
+        attempt["opened_at"] = "2026-09-09T14:08:00Z"
+        attempt["end"] = {"closed_at": "2026-09-09T14:09:00Z", "reason": "released"}
+        second["final"]["observed_at"] = "2026-09-09T14:09:00Z"
         validate_bundle(*self._bundle([first, second]))
 
         overlapping = copy.deepcopy(second)
-        overlapping["attempts"][0]["start"]["observed_at"] = "2026-09-09T14:05:42.5Z"
+        overlapping["attempts"][0]["opened_at"] = "2026-09-09T14:07:59Z"
         with self.assertRaisesRegex(ContractError, "overlapping trusted reporters"):
             validate_bundle(*self._bundle([first, overlapping]))
 
-    def test_f3_bucket_semantics_and_cutoff_are_closed(self):
-        final = self._golden("attempt_final.json")
+    def test_f3_bucket_semantics_and_freeze_shape_are_closed(self):
+        final = self._golden("participant_final.json")
         self.assertEqual(
             {
                 "remote_accepted",
                 "local_delivered",
                 "remote_failed_before_acceptance",
-                "late_after_cutoff",
-                "summary_excluded",
             },
-            set(final["f3"]) - {"status", "cutoff_sequence"},
+            set(final["f3"]) - {"status"},
         )
         self.assertEqual("5632", final["f3"]["remote_accepted"]["payload_bytes"])
 
@@ -362,13 +551,21 @@ class TestCanonicalV1Contract(unittest.TestCase):
         }
         self._assert_invalid(impossible_counter, "payload_bytes must be zero")
 
-        impossible_cutoff = copy.deepcopy(final)
-        impossible_cutoff["f3"]["cutoff_sequence"] = "0"
-        self._assert_invalid(impossible_cutoff, "must be zero when cutoff_sequence is zero")
+        exposed_ordinal = copy.deepcopy(final)
+        exposed_ordinal["f3"]["cutoff_sequence"] = "5"
+        self._assert_invalid_both(exposed_ordinal)
+
+        circular = copy.deepcopy(final)
+        circular["f3"]["late_after_cutoff"] = {"payload_bytes": "0", "messages": "0"}
+        self._assert_invalid_both(circular)
+
+        summary_traffic = copy.deepcopy(final)
+        summary_traffic["f3"]["summary_excluded"] = {"payload_bytes": "0", "messages": "0"}
+        self._assert_invalid_both(summary_traffic)
 
     def test_unknown_fields_and_nulls_are_rejected(self):
-        unknown = self._golden("attempt_start.json")
-        unknown["capacity"]["storage"]["available_bytes"] = "1"
+        unknown = self._golden("participant_start.json")
+        unknown["storage"]["available_bytes"] = "1"
         self._assert_invalid_both(unknown)
 
         null_value = self._golden("attempt_start.json")

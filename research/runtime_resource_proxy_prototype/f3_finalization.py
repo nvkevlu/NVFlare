@@ -24,7 +24,8 @@ transport.  It fixes the contract a production hook must preserve:
 * summary publication is suppressed by an opaque in-process capability, never
   by a payload, topic, channel, or user-controlled label; and
 * the first ``freeze()`` records a fixed event-sequence cutoff.  Events that
-  complete after that cutoff remain visible only as diagnostics.
+  complete after that cutoff remain visible only as post-publication diagnostics,
+  never as circular fields inside the immutable participant summary.
 
 The opaque capability is an integration boundary, not a sandbox against code
 that can introspect arbitrary Python objects in the same process.  A product
@@ -133,12 +134,14 @@ class _SummaryPublicationSender:
 
 
 class F3FinalizationCounter:
-    """Thread-safe model of one attempt's F3 finalization boundary.
+    """Thread-safe model of one logical participant's F3 finalization boundary.
 
     ``send_remote`` considers a transport accepted only when ``transport_send``
     returns normally.  This mirrors the current F3 ``communicator.send``
     boundary, whose failure signal is an exception.  It is intentionally not a
-    receiver-delivery acknowledgement.
+    receiver-delivery acknowledgement.  The counter belongs to the durable
+    participant lifecycle owner so it can span zero or more transient compute
+    attempts and the GPU-free gaps between them.
     """
 
     def __init__(self) -> None:

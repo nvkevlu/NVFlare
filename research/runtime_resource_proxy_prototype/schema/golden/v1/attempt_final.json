@@ -5,18 +5,17 @@
   "participant_id": "site-1",
   "attempt_id": "11111111111111111111111111111111",
   "environment_key": "sha256-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-  "observed_at": "2026-09-09T14:05:42.5Z",
   "capacity": {
     "cpu": {
       "status": "reported",
       "visible_units": "1.5",
-      "model": "AMD EPYC 9654",
       "architecture": "x86_64",
       "evidence": {
         "affinity_count": "4",
         "cpuset_count": "4",
         "quota_units": "1.5"
-      }
+      },
+      "model": "AMD EPYC 9654"
     },
     "memory": {
       "status": "reported",
@@ -25,10 +24,6 @@
         "physical_bytes": "68719476736",
         "cgroup_limit_bytes": "8589934592"
       }
-    },
-    "storage": {
-      "status": "reported",
-      "capacity_bytes": "1099511627776"
     },
     "gpu": {
       "status": "reported",
@@ -41,40 +36,6 @@
           "memory_bytes": "85899345920"
         }
       ]
-    }
-  },
-  "retained_content": {
-    "status": "reported",
-    "entries": [
-      {
-        "relative_path": "result/model.pt",
-        "size_bytes": "18874368",
-        "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
-      }
-    ]
-  },
-  "f3": {
-    "status": "reported",
-    "cutoff_sequence": "5",
-    "remote_accepted": {
-      "payload_bytes": "5632",
-      "messages": "2"
-    },
-    "local_delivered": {
-      "payload_bytes": "256",
-      "messages": "1"
-    },
-    "remote_failed_before_acceptance": {
-      "payload_bytes": "0",
-      "messages": "0"
-    },
-    "late_after_cutoff": {
-      "payload_bytes": "512",
-      "messages": "1"
-    },
-    "summary_excluded": {
-      "payload_bytes": "1024",
-      "messages": "1"
     }
   }
 }

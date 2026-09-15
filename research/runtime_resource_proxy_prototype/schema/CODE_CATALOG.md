@@ -1,75 +1,80 @@
 # Canonical v1 status and issue catalog
 
 This is the human projection of the closed vocabularies in
-resource_stats_v1.schema.json. contract_v1.py enforces contextual combinations and cross-record
-consequences. Unknown statuses, issues, roles, exit outcomes, group kinds, and record kinds are
-rejected.
+`resource_stats_v1.schema.json`. `contract_v1.py` enforces contextual combinations and
+cross-record consequences. Unknown statuses, issues, roles, end reasons, group kinds, and record
+kinds are rejected.
 
-The accepted contract has no persisted source, coverage, caveat, warning, or qualification
-codes. Typed field location and schema_version already determine source semantics, units, and
-display text. A renderer may expose derived notices, but those notices are not canonical facts.
+The contract has no persisted source, coverage, caveat, warning, or qualification codes. Typed
+field location and schema version already determine source semantics, units, and display text. A
+renderer may show derived notices, but those notices are not canonical facts.
 
 ## Resource statuses
 
 | Context | Allowed statuses | Meaning |
 | --- | --- | --- |
-| Point-in-time CPU/memory/storage/GPU | reported, unavailable, error | Complete numeric observation; no usable observation; or collection/integrity failure. |
-| Retained content and F3 | reported, partial, unavailable, error | Complete facts; usable incomplete facts; no usable observation; or failure. |
+| Point-in-time CPU/memory/GPU | reported, unavailable, error | Complete numeric observation; no usable observation; or collection/integrity failure. |
+| Participant-lifetime storage | reported, partial, unavailable, error | Numeric capacity with complete/uncertain continuous availability, no usable value, or failure. |
+| Participant-terminal retained content and F3 | reported, partial, unavailable, error | Complete facts; usable incomplete facts; no usable observation; or failure. |
 | Participant/job totals | reported, partial, unavailable | Complete contributions; numeric contributions with a gap/uncertainty; or no usable contribution. |
 
-reported requires the applicable numeric facts and forbids issues. partial requires numeric facts
-plus one or more applicable issues. unavailable and error contain no numeric result and require
-one or more applicable issues. Point-in-time capacity cannot be partial: a source either produced
-a valid selected value or it did not.
+`reported` requires the applicable numeric facts and forbids issues. `partial` requires numeric
+facts plus applicable issues. `unavailable` and `error` contain no numeric result and require
+issues. Point-in-time capacity cannot be partial: a source either produced a valid selected value
+or it did not.
 
-An observed zero is explicit—the string \"0\", an empty reported GPU group array, or an empty
-reported retained-entry array. Missing, failed, disabled, or unbound collection is never encoded
-as zero.
+An observed zero is explicit: the string `"0"`, an empty reported GPU group array, an empty
+reported retained-entry array, or a completed participant summary with no transient attempts.
+Missing, failed, disabled, or unbound collection is never encoded as zero. In particular, a
+`launch_failed` capacity is unavailable rather than a reported zero, although its supervisor-owned
+opened-to-closed duration remains part of `resource_window_seconds`.
 
-Aggregate status has no stored issue list. It is derived deterministically from participant facts:
+Aggregate status has no stored issue list. It is derived deterministically:
 
-- reported: every expected enabled contribution used by that total is complete;
-- partial: at least one numeric contribution exists and a contributing attempt is partial or a
-  roster member is missing, invalid, or disabled; and
-- unavailable: no numeric contribution exists for that total.
+- `reported`: every expected enabled contribution used by that total is complete;
+- `partial`: at least one numeric contribution exists and a lifecycle fact is incomplete/changed
+  or a roster member is missing, invalid, or disabled; and
+- `unavailable`: no numeric contribution exists for that total.
 
-## Collection and roster state
+Workload failure or termination alone does not make resource time partial. Matching start/final
+capacity plus a trusted end completely describes the capacity window regardless of task outcome.
+
+## Roster state
 
 | Domain | Exact values | Rule |
 | --- | --- | --- |
-| collection_state | enabled, disabled | Stored once on attempt start; disabled forbids capacity and a child final. |
-| roster role | client, server | Stored once per frozen roster entry; never inferred from its participant ID. |
-| roster status | accepted, missing, invalid, disabled | The one frozen roster partitions expected participants. |
+| roster role | client, server | Stored once per fixed expected-participant roster entry; never inferred from participant ID. |
+| roster status | accepted, missing, invalid, disabled | Partitions the expected participants at server finalization. |
 
-An accepted roster member has a valid authenticated participant file received no later than the
-cutoff. Missing means none arrived. Invalid adds trusted receipt time and issues because a
-candidate arrived but failed authentication, shape, semantic, or digest validation. Disabled
-means collection policy was disabled for that participant. Counts, coverage, and warnings derive
-from these entries and are not parallel stored fields.
+Expected members come from authenticated job deployment/selection state, independently of report
+arrivals. At cutoff, every expected member is classified exactly once and the roster is immutable:
+`accepted` means a valid authenticated participant summary arrived by cutoff; `missing` means none
+did; `invalid` adds trusted receipt time and issues because a candidate arrived but failed
+validation; and `disabled` means policy disabled collection for that member. Counts, coverage, and
+warnings derive from these entries.
 
 ## Issue allowlist
 
 | Issue | Meaning in its typed context |
 | --- | --- |
-| not_bound | The platform counter or registry required by that object was not connected. |
-| counter_gap | Some events may be absent; the stored numeric counter is a lower bound. |
+| not_bound | The required platform counter or registry was not connected. |
+| counter_gap | Some events may be absent; the stored counter is a lower bound. |
 | observation_incomplete | Only part of the relevant interval or registered set was observed. |
-| attribution_incomplete | Some facts could not be safely attributed to this job/attempt and were excluded. |
-| unsupported | The required observation is unsupported on this platform/runtime. |
+| attribution_incomplete | Facts that could not be safely attributed were excluded. |
+| unsupported | The observation is unsupported on this platform/runtime. |
 | permission_denied | Ordinary-user collection was denied. |
-| dependency_missing | An optional runtime/library required for this observation was absent. |
-| malformed_source | A source returned data that failed parsing, range, or consistency checks. |
+| dependency_missing | An optional runtime/library required for the observation was absent. |
+| malformed_source | A source failed parsing, range, or consistency validation. |
 
-issues is a unique, canonically sorted array of one to four values. The same compact word is safe
-because the containing object supplies the missing noun—for example, not_bound on F3 is an
-unbound CellNet counter, while not_bound on retained content is an unbound artifact registry.
-
-### Contextual issue matrix
+`issues` is a unique, sorted array of one to four values. The containing typed object supplies the
+subject: for example, `not_bound` on F3 means an unbound transport counter, while the same code on
+retained content means an unbound artifact registry.
 
 | Context/status | Exact allowed issues |
 | --- | --- |
 | Capacity unavailable | observation_incomplete, attribution_incomplete, unsupported, dependency_missing |
 | Capacity error | permission_denied, malformed_source |
+| Storage partial | observation_incomplete, attribution_incomplete |
 | Retained partial | observation_incomplete, attribution_incomplete |
 | Retained unavailable | not_bound, observation_incomplete, attribution_incomplete, unsupported, dependency_missing |
 | Retained error | permission_denied, malformed_source |
@@ -78,26 +83,28 @@ unbound CellNet counter, while not_bound on retained content is an unbound artif
 | F3 error | permission_denied, malformed_source |
 | Invalid roster entry | malformed_source, permission_denied |
 
-Reported objects never carry issues. Capacity change, missing final, and early termination are
-already observable by comparing lifecycle records, so resource-time partiality derives from those
-facts rather than another persisted reason code. Disabled collection and roster gaps similarly
-remain states rather than duplicated issues.
+Reported objects never carry issues. Missing/changed attempt final capacity, launch failure,
+disabled collection, and roster gaps are already visible lifecycle/roster facts, so their derived
+effects are not duplicated as issue codes.
 
-## Process-exit outcome
+## Attempt-end reason
 
-outcome is stored directly beside observed_at (and return_code when applicable), both in the
-standalone parent-exit record and the nested participant attempt. There is no extra exit wrapper.
+`reason` is stored beside `closed_at` in embedded `end`. Standalone `attempt_end` also repeats the
+supervisor-owned `opened_at`, making its duration self-contained:
 
-| Outcome | Return-code rule | Meaning |
-| --- | --- | --- |
-| finished_ok | required and exactly 0 | Child completed successfully. |
-| finished_error | required and nonzero | Child exited with a failure code. |
-| terminated | required and nonzero | Parent observed termination rather than normal completion. |
-| launch_failed | omitted | No child return code exists; launch itself failed. |
+| Reason | Meaning and shape |
+| --- | --- |
+| released | Ordinary closure/release of a transient resource lease; requires an attempt start. |
+| failed | Closure following a failure after a trusted start capacity snapshot; requires start. |
+| terminated | Closure due to cancellation, preemption, or administration; requires an attempt start. |
+| launch_failed | The resource lease opened but no accepted capacity snapshot exists; forbids start/final. |
+| reconfigured | Trusted lifecycle authority observed an in-place stable capacity-vector transition; requires a same-environment successor at the exact boundary, and equal vectors are rejected when both snapshots are comparable. |
 
-The return code is a signed 32-bit JSON integer. Parent exit is required even when collection was
-disabled or the child final is missing. Final presence is established by the accepted bundle, not
-by a separate child_final_state label.
+There is no process return code. `opened_at` and `closed_at` come from the same durable-supervisor
+clock; `closed_at` means confirmed lease closure, not a worker snapshot or OS-process exit. The same
+process may have sequential attempts as resources are released, reacquired, or reconfigured.
+A full release and reacquisition can use `released` even if timestamp resolution makes the two
+windows touch.
 
 ## GPU group kind
 
@@ -106,57 +113,69 @@ by a separate child_final_state label.
 | full_gpu | One or more runtime-visible full CUDA devices. |
 | mig_compute_instance | One or more runtime-visible MIG compute instances. |
 
-Only positive-count groups are stored. Absence of a kind in a successfully reported GPU inventory
-means observed zero; an unavailable/error inventory carries no groups. mig_profile is legal only
-for mig_compute_instance. Full-GPU and MIG-instance time remain separate through aggregation.
+Only positive-count groups are stored. Absence of a kind in a successfully reported inventory
+means observed zero; unavailable/error inventories contain no groups. `mig_profile` is legal only
+for `mig_compute_instance`. Full-GPU and MIG-instance time stay separate through aggregation.
 
 ## F3 factual buckets
 
 | Field | Included fact |
 | --- | --- |
-| remote_accepted | Remote application payload accepted by transport before the cutoff; the primary F3 total. |
+| remote_accepted | Remote application payload accepted by transport before the atomic freeze; the primary total. |
 | local_delivered | Direct/local application delivery, kept separately. |
 | remote_failed_before_acceptance | Remote traffic that failed before transport acceptance. |
-| late_after_cutoff | Events after the fixed cutoff, excluded from the primary total. |
-| summary_excluded | Summary-publication traffic excluded via a platform-owned non-spoofable path. |
 
-Reported/partial F3 contains all five pairs and cutoff_sequence; unavailable/error contains no
-counter facts. Each pair has payload_bytes and messages. Zero messages requires zero bytes;
-zero-byte messages with a positive message count are allowed. If the cutoff is zero, each
-pre-cutoff bucket is zero. A positive pre-cutoff message count requires a positive cutoff.
+F3 is a participant-lifetime terminal fact, not an attempt fact. Reported/partial F3 contains all
+three counter pairs; unavailable/error contains no counters. Zero messages requires zero bytes.
+The lifecycle supervisor atomically freezes the three counters before participant-final
+serialization. Callback completions after the freeze never enter canonical counters, and no
+ordinal is exposed. Summary publication bypasses accounting through a platform-owned
+non-spoofable path; neither circular diagnostic is stored in the immutable terminal fact.
 
-The traffic-class allowlist and sender/exclusion mechanism are fixed by v1 integration. They are
-not user-controlled labels and are not serialized as codes. Remote-failed bytes are recorded only
-when the post-serialization size is known; failures before that point make observation coverage
-partial rather than inventing a size.
+The normative included traffic classes are `task_request`, `task_response`, `task_result`,
+`job_application`, and `job_stream_data`. The integration excludes `job_stream_control`,
+`bulk_envelope`, `workspace_transfer`, `platform_control`, `log_export`, unknown classes, and
+summary publication. These are platform-defined classifications, not caller-supplied labels.
+
+`payload_bytes` is `len(message.payload)` after `encode_payload` and optional end-to-end
+`encrypt_payload`, sampled immediately before direct delivery or `Communicator.send`. It excludes
+headers, SFM/driver/TLS/network framing, transport compression, and retransmissions. One message
+is counted per destination, so fan-out counts each destination and a forwarding participant
+counts its sender hop again. These are participant-hop counters, not unique-logical-data counters.
+Direct delivery increments `local_delivered`; a remote message increments `remote_accepted` only
+after `Communicator.send` returns successfully, or `remote_failed_before_acceptance` if it fails
+before acceptance.
 
 ## Participant acceptance and replay
 
-There is no summary_revision state. Participant acceptance has these exact outcomes:
+There is no summary revision. The server:
 
-1. validate/authenticate before the fixed cutoff;
-2. accept the first valid participant digest;
-3. accept an identical digest retry as an idempotent no-op;
-4. reject a different digest as a conflicting replacement; and
-5. do not reserve the participant slot for an invalid candidate.
+1. validates and authenticates before the fixed cutoff;
+2. accepts the first valid participant digest;
+3. treats an identical digest retry as idempotent;
+4. rejects a different digest as a conflicting replacement; and
+5. does not reserve the slot for an invalid candidate.
 
-This does not collapse execution attempts. Multiple attempts retain unique attempt IDs and remain
-separate entries inside the one accepted participant summary.
+This does not collapse resource windows. Distinct attempt IDs stay separate inside the one
+accepted participant summary, including sequential windows that reuse an environment key.
 
 ## Derived notices, not stored codes
 
-A schema-v1 renderer can deterministically explain that:
+A v1 renderer can derive that:
 
-- runtime-visible values are not allocations, reservations, ownership, total physical capacity,
-  or billing;
-- CPU, memory, filesystem, and GPU visibility may be shared;
-- a raw CUDA mask was diagnostic only when cuda_mask_present is true;
+- runtime-visible values are not utilization, ownership, total physical capacity, or billing;
+- transient CPU/memory/GPU time is integrated per stable vector, so GPU may be zero while CPU and
+  memory continue in a successor window;
+- persistent storage spans the participant lifecycle, not every transient attempt;
+- CPU, memory, storage, and GPU visibility may be shared;
+- a raw CUDA mask was diagnostic only when `cuda_mask_present` is true;
 - full GPUs and MIG instances are not combined;
 - participant-visible totals may overlap, including intentionally across jobs;
-- missing/invalid/disabled roster members make a numeric aggregate partial;
-- F3 includes remote-accepted application payload only and excludes local, failed, late, and
-  summary-publication buckets from its primary total; and
-- start/final facts are child self-reports preserved by parent-owned storage.
+- roster gaps make an otherwise numeric aggregate partial;
+- F3 includes remote-accepted application payload only in its primary total, ignores callback
+  completions after its atomic freeze, and excludes summary publication behaviorally; and
+- attempt capacity snapshots are worker self-reports preserved by supervisor-owned durable
+  storage, while attempt bounds and participant lifecycle facts are supervisor-observed.
 
-Because each notice follows from stored typed facts, persisting a second caveat/warning list would
-create possible contradiction without adding evidence.
+Persisting a second warning/caveat list would create possible contradiction without adding
+evidence.

@@ -18,17 +18,19 @@ This module is deliberately independent of NVFlare production code.  It makes
 four proposed Phase 1 safeguards concrete enough to test before an integration
 chooses its final internal APIs:
 
-* launchers start Python with a sanitized environment and carry a parent-issued
-  attempt ID only through a fixed allowlist;
+* launchers start an absolute platform-owned bootstrap in Python isolated mode,
+  from a platform-owned working directory and with a fixed environment allowlist,
+  and carry supervisor-issued attempt identity and handoff locator only through a
+  fixed argument allowlist;
 * one reporter owns a ``(job_id, execution_environment_id)`` observation
   boundary, without trying to infer exclusive physical-resource ownership;
-* child observations are copied into parent-owned write-once storage, while
+* worker observations are copied into supervisor-owned write-once storage, while
   their content origin remains explicitly self-reported; and
 * the final query copy uses the one exact ``RESOURCE_STATS`` component rather
   than a generic prefix convention.
 
 The module is a behavioral prototype, not a production implementation.  In
-particular, ``persist_child_fragment`` models the parent side after an
+particular, ``persist_worker_fragment`` models the supervisor side after an
 authenticated handoff; it does not claim that the handoff protocol exists.
 """
 
@@ -47,21 +49,24 @@ from typing import Any, Mapping, Sequence
 
 
 ATTEMPT_ID_ARGUMENT = "--resource-stats-attempt-id"
+HANDOFF_LOCATOR_ARGUMENT = "--resource-stats-handoff"
 RESOURCE_STATS_COMPONENT = "RESOURCE_STATS"
 
 # The value is intentionally fixed in each launcher path.  A caller cannot add
 # an alternate resource-stats argument or choose a different flag spelling.
 LAUNCHER_ATTEMPT_ARG_ALLOWLIST: dict[str, tuple[str, ...]] = {
-    "process": (ATTEMPT_ID_ARGUMENT,),
-    "docker": (ATTEMPT_ID_ARGUMENT,),
-    "k8s": (ATTEMPT_ID_ARGUMENT,),
-    "slurm": (ATTEMPT_ID_ARGUMENT,),
+    "process": (ATTEMPT_ID_ARGUMENT, HANDOFF_LOCATOR_ARGUMENT),
+    "docker": (ATTEMPT_ID_ARGUMENT, HANDOFF_LOCATOR_ARGUMENT),
+    "k8s": (ATTEMPT_ID_ARGUMENT, HANDOFF_LOCATOR_ARGUMENT),
+    "slurm": (ATTEMPT_ID_ARGUMENT, HANDOFF_LOCATOR_ARGUMENT),
 }
 
 _ATTEMPT_ID_PATTERN = re.compile(r"^[0-9a-f]{32}$")
 _SAFE_PATH_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
-_CHILD_FRAGMENT_NAMES = frozenset({"start.json", "final.json"})
-_ALL_FRAGMENT_NAMES = _CHILD_FRAGMENT_NAMES | {"parent_exit.json"}
+_WORKER_FRAGMENT_NAMES = frozenset({"start.json", "final.json"})
+_ALL_FRAGMENT_NAMES = _WORKER_FRAGMENT_NAMES | {"end.json"}
+_ATTEMPT_END_REASONS = frozenset({"released", "reconfigured", "failed", "terminated", "launch_failed"})
+_PRE_PYTHON_ENV_ALLOWLIST = frozenset({"CUDA_VISIBLE_DEVICES", "NVIDIA_VISIBLE_DEVICES"})
 
 
 class ReporterLeaseConflict(RuntimeError):
@@ -69,13 +74,19 @@ class ReporterLeaseConflict(RuntimeError):
 
 
 class WriteOnceRecordConflict(RuntimeError):
-    """Raised when an accepted parent-owned record conflicts with existing bytes."""
+    """Raised when an accepted supervisor-owned record conflicts with existing bytes."""
 
 
 def _require_attempt_id(attempt_id: str) -> str:
     if not isinstance(attempt_id, str) or not _ATTEMPT_ID_PATTERN.fullmatch(attempt_id):
         raise ValueError("attempt_id must be exactly 32 lowercase hexadecimal characters")
     return attempt_id
+
+
+def _require_handoff_locator(handoff_locator: str) -> str:
+    if not isinstance(handoff_locator, str) or not _ATTEMPT_ID_PATTERN.fullmatch(handoff_locator):
+        raise ValueError("handoff_locator must be exactly 32 lowercase hexadecimal characters")
+    return handoff_locator
 
 
 def _require_path_id(value: str, label: str) -> str:
@@ -99,6 +110,9 @@ class SanitizedLaunchPlan:
 
     launcher: str
     attempt_id: str
+    handoff_locator: str
+    platform_owned_cwd: str
+    trusted_bootstrap_path: str
     argv: tuple[str, ...]
     pre_python_environment: dict[str, str]
     post_snapshot_custom_import_paths: tuple[str, ...]
@@ -108,19 +122,22 @@ class SanitizedLaunchPlan:
 def build_sanitized_launch_plan(
     launcher: str,
     python_executable: str,
-    module: str,
+    trusted_bootstrap_path: str,
     platform_args: Sequence[str],
     environment: Mapping[str, str],
     attempt_id: str,
+    handoff_locator: str,
     custom_import_paths: Sequence[str] = (),
+    *,
+    platform_owned_cwd: str,
 ) -> SanitizedLaunchPlan:
     """Build the proposed launcher-independent pre-Python contract.
 
-    ``-S`` prevents Python's automatic site initialization before the
-    platform-owned bootstrap.  Removing ``PYTHONPATH`` prevents a job custom
-    ``sitecustomize`` module from being imported before that bootstrap.  The
-    real product still needs to select how platform packages remain importable
-    under this mode; this prototype captures only the security boundary.
+    ``-I -S`` prevents the caller's working directory, Python environment
+    variables, user site, and automatic site initialization from influencing
+    startup.  The bootstrap is an absolute file under a platform-owned working
+    directory; it is not imported by module name.  The real product still needs
+    to package and permission this artifact in every launcher image.
     """
 
     allowed_args = LAUNCHER_ATTEMPT_ARG_ALLOWLIST.get(launcher)
@@ -128,15 +145,33 @@ def build_sanitized_launch_plan(
         raise ValueError(f"unsupported launcher '{launcher}'")
     if ATTEMPT_ID_ARGUMENT not in allowed_args:
         raise ValueError(f"launcher '{launcher}' is not allowed to propagate the resource-stats attempt ID")
-    if not isinstance(python_executable, str) or not python_executable:
-        raise ValueError("python_executable must be a non-empty string")
-    if not isinstance(module, str) or not module:
-        raise ValueError("module must be a non-empty string")
+    if HANDOFF_LOCATOR_ARGUMENT not in allowed_args:
+        raise ValueError(f"launcher '{launcher}' is not allowed to propagate the resource-stats handoff locator")
+    if not isinstance(python_executable, str) or not Path(python_executable).is_absolute():
+        raise ValueError("python_executable must be an absolute path")
+    if not isinstance(platform_owned_cwd, str) or not Path(platform_owned_cwd).is_absolute():
+        raise ValueError("platform_owned_cwd must be an absolute path")
+    if not isinstance(trusted_bootstrap_path, str) or not Path(trusted_bootstrap_path).is_absolute():
+        raise ValueError("trusted_bootstrap_path must be an absolute path")
+    normalized_cwd = Path(platform_owned_cwd).resolve()
+    normalized_bootstrap = Path(trusted_bootstrap_path).resolve()
+    try:
+        normalized_bootstrap.relative_to(normalized_cwd)
+    except ValueError as exc:
+        raise ValueError("trusted_bootstrap_path must be inside platform_owned_cwd") from exc
 
     attempt_id = _require_attempt_id(attempt_id)
+    handoff_locator = _require_handoff_locator(handoff_locator)
     platform_args = tuple(str(arg) for arg in platform_args)
-    if any(_contains_attempt_argument(arg) for arg in platform_args):
-        raise ValueError("resource-stats attempt ID is injected only by the fixed launcher allowlist")
+    if any(
+        _contains_attempt_argument(arg)
+        or arg == HANDOFF_LOCATOR_ARGUMENT
+        or arg.startswith(f"{HANDOFF_LOCATOR_ARGUMENT}=")
+        for arg in platform_args
+    ):
+        raise ValueError(
+            "resource-stats identity and handoff arguments are injected only by the fixed launcher allowlist"
+        )
 
     custom_import_paths = tuple(str(path) for path in custom_import_paths)
     if any(not path for path in custom_import_paths):
@@ -147,18 +182,35 @@ def build_sanitized_launch_plan(
 
     # The original mapping is not modified.  That makes the plan safe to reuse
     # for each launcher and proves the caller cannot retain a stale custom path.
-    pre_python_environment = {str(name): str(value) for name, value in environment.items() if str(name) != "PYTHONPATH"}
-    argv = (python_executable, "-S", "-u", "-m", module, *platform_args, ATTEMPT_ID_ARGUMENT, attempt_id)
+    pre_python_environment = {
+        str(name): str(value) for name, value in environment.items() if str(name) in _PRE_PYTHON_ENV_ALLOWLIST
+    }
+    argv = (
+        python_executable,
+        "-I",
+        "-S",
+        "-u",
+        str(normalized_bootstrap),
+        *platform_args,
+        ATTEMPT_ID_ARGUMENT,
+        attempt_id,
+        HANDOFF_LOCATOR_ARGUMENT,
+        handoff_locator,
+    )
     return SanitizedLaunchPlan(
         launcher=launcher,
         attempt_id=attempt_id,
+        handoff_locator=handoff_locator,
+        platform_owned_cwd=str(normalized_cwd),
+        trusted_bootstrap_path=str(normalized_bootstrap),
         argv=argv,
         pre_python_environment=pre_python_environment,
         post_snapshot_custom_import_paths=custom_import_paths,
         bootstrap_steps=(
-            "start_python_without_site_initialization",
+            "chdir_to_platform_owned_directory",
+            "start_isolated_python_without_site_initialization",
             "capture_platform_owned_start_snapshot",
-            "persist_start_fragment_to_parent_owned_store",
+            "persist_start_fragment_to_supervisor_owned_store",
             "enable_custom_import_paths",
         ),
     )
@@ -267,92 +319,99 @@ def _write_once(path: Path, data: bytes) -> FragmentReceipt:
             pass
 
 
-class ParentOwnedAttemptStore:
-    """Parent-side durable, write-once attempt records outside the job workspace."""
+class SupervisorOwnedAttemptStore:
+    """Supervisor-side durable, write-once attempt records outside the worker workspace."""
 
-    def __init__(self, parent_owned_root: Path, job_writable_root: Path):
-        self.parent_owned_root = Path(parent_owned_root).resolve()
+    def __init__(self, supervisor_owned_root: Path, job_writable_root: Path):
+        self.supervisor_owned_root = Path(supervisor_owned_root).resolve()
         self.job_writable_root = Path(job_writable_root).resolve()
-        if _path_is_within(self.parent_owned_root, self.job_writable_root) or _path_is_within(
-            self.job_writable_root, self.parent_owned_root
+        if _path_is_within(self.supervisor_owned_root, self.job_writable_root) or _path_is_within(
+            self.job_writable_root, self.supervisor_owned_root
         ):
-            raise ValueError("parent-owned fragment storage must not overlap job-writable storage")
-        self.parent_owned_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+            raise ValueError("supervisor-owned fragment storage must not overlap job-writable storage")
+        self.supervisor_owned_root.mkdir(parents=True, exist_ok=True, mode=0o700)
 
     def fragment_path(self, job_id: str, attempt_id: str, fragment_name: str) -> Path:
         job_id = _require_path_id(job_id, "job_id")
         attempt_id = _require_attempt_id(attempt_id)
         if fragment_name not in _ALL_FRAGMENT_NAMES:
             raise ValueError(f"unsupported fragment name '{fragment_name}'")
-        return self.parent_owned_root / "resource_stats" / "attempts" / job_id / attempt_id / fragment_name
+        return self.supervisor_owned_root / "resource_stats" / "attempts" / job_id / attempt_id / fragment_name
 
-    def persist_child_fragment(
-        self, job_id: str, attempt_id: str, fragment_name: str, child_record: Mapping[str, Any]
+    def persist_worker_fragment(
+        self, job_id: str, attempt_id: str, fragment_name: str, worker_record: Mapping[str, Any]
     ) -> FragmentReceipt:
-        """Persist a child-produced start/final fragment after parent receipt.
+        """Persist a worker-produced start/final fragment after supervisor receipt.
 
-        Parent-owned storage prevents a job from changing the accepted bytes
-        later, but the values remain a child self-report.  The trust labels make
-        that distinction explicit rather than calling child files immutable.
+        Supervisor-owned storage prevents a worker from changing accepted bytes
+        later, but the values remain a worker self-report.  The trust labels make
+        that distinction explicit rather than calling worker files immutable.
         """
 
-        if fragment_name not in _CHILD_FRAGMENT_NAMES:
-            raise ValueError("only start.json and final.json may be child-produced fragments")
+        if fragment_name not in _WORKER_FRAGMENT_NAMES:
+            raise ValueError("only start.json and final.json may be worker-produced fragments")
         job_id = _require_path_id(job_id, "job_id")
         attempt_id = _require_attempt_id(attempt_id)
-        if child_record.get("job_id") != job_id or child_record.get("attempt_id") != attempt_id:
-            raise ValueError("child fragment identity must match the parent-issued job and attempt identity")
-        record = copy.deepcopy(dict(child_record))
+        if worker_record.get("job_id") != job_id or worker_record.get("attempt_id") != attempt_id:
+            raise ValueError("worker fragment identity must match the supervisor-issued job and attempt identity")
+        record = copy.deepcopy(dict(worker_record))
         record["trust"] = {
-            "storage_owner": "platform_parent",
+            "storage_owner": "site_supervisor",
             "storage_scope": "outside_job_writable_workspace",
-            "content_origin": "child_self_reported",
-            "integrity": "write_once_after_parent_receipt",
+            "content_origin": "worker_self_reported",
+            "integrity": "write_once_after_supervisor_receipt",
             "authenticated_handoff_required": True,
         }
         return _write_once(self.fragment_path(job_id, attempt_id, fragment_name), _json_bytes(record))
 
-    def record_crash_parent_exit(
+    def record_attempt_end_without_final(
         self,
         job_id: str,
         attempt_id: str,
-        observed_at: str,
-        return_code: int,
+        opened_at: str,
+        closed_at: str,
+        reason: str,
     ) -> FragmentReceipt:
-        """Write lifecycle facts after a child crash without inventing a final sample."""
+        """Close a resource window whose worker final is absent, without inventing one."""
 
         job_id = _require_path_id(job_id, "job_id")
         attempt_id = _require_attempt_id(attempt_id)
-        if not isinstance(observed_at, str) or not observed_at:
-            raise ValueError("observed_at must be a non-empty timestamp string")
-        if isinstance(return_code, bool) or not isinstance(return_code, int):
-            raise ValueError("return_code must be an integer")
+        if not isinstance(opened_at, str) or not opened_at:
+            raise ValueError("opened_at must be a non-empty timestamp string")
+        if not isinstance(closed_at, str) or not closed_at:
+            raise ValueError("closed_at must be a non-empty timestamp string")
+        if reason not in _ATTEMPT_END_REASONS:
+            raise ValueError("reason must be released, reconfigured, failed, terminated, or launch_failed")
         record = {
             "schema_version": "prototype-0.3",
-            "kind": "nvflare.resource_stats.attempt_parent_exit",
+            "kind": "nvflare.resource_stats.attempt_end",
             "job_id": job_id,
             "attempt_id": attempt_id,
-            "recorded_at": observed_at,
-            "process_exit": {"return_code": return_code, "classification": "child_crashed"},
-            "child_final": {"state": "absent"},
-            "observation_end": {"basis": "parent_observed_exit", "ended_at": observed_at},
+            "opened_at": opened_at,
+            "closed_at": closed_at,
+            "reason": reason,
+            "worker_final": {"state": "absent"},
+            "resource_window": {
+                "clock_owner": "site_supervisor",
+                "basis": "supervisor_confirmed_acquire_release",
+            },
             "resource_observations": {"state": "not_invented", "coverage": "partial"},
             "trust": {
-                "storage_owner": "platform_parent",
+                "storage_owner": "site_supervisor",
                 "storage_scope": "outside_job_writable_workspace",
-                "content_origin": "parent_observed_lifecycle",
-                "integrity": "write_once_parent_owned",
+                "content_origin": "supervisor_observed_lifecycle",
+                "integrity": "write_once_supervisor_owned",
             },
         }
-        return _write_once(self.fragment_path(job_id, attempt_id, "parent_exit.json"), _json_bytes(record))
+        return _write_once(self.fragment_path(job_id, attempt_id, "end.json"), _json_bytes(record))
 
 
 class FixedResourceStatsStore:
     """Prototype of a narrow final-summary API with one exact component name."""
 
-    def __init__(self, parent_owned_root: Path):
-        self.parent_owned_root = Path(parent_owned_root).resolve()
-        self.parent_owned_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    def __init__(self, job_store_root: Path):
+        self.job_store_root = Path(job_store_root).resolve()
+        self.job_store_root.mkdir(parents=True, exist_ok=True, mode=0o700)
 
     @staticmethod
     def is_allowed_component(component_name: str) -> bool:
@@ -364,14 +423,14 @@ class FixedResourceStatsStore:
         job_id = _require_path_id(job_id, "job_id")
         if not isinstance(resource_summary, bytes):
             raise TypeError("resource_summary must be bytes")
-        path = self.parent_owned_root / "jobs" / job_id / RESOURCE_STATS_COMPONENT
+        path = self.job_store_root / "jobs" / job_id / RESOURCE_STATS_COMPONENT
         return _write_once(path, resource_summary)
 
     def get_resource_stats(self, job_id: str) -> bytes | None:
         """Return the one exact final-summary component, or ``None`` if absent."""
 
         job_id = _require_path_id(job_id, "job_id")
-        path = self.parent_owned_root / "jobs" / job_id / RESOURCE_STATS_COMPONENT
+        path = self.job_store_root / "jobs" / job_id / RESOURCE_STATS_COMPONENT
         if not path.exists():
             return None
         if path.is_symlink() or not path.is_file():

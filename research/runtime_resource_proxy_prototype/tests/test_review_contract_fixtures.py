@@ -39,9 +39,13 @@ class TestReviewContractFixtures(unittest.TestCase):
             bootstrap = json.loads((root / "trusted_bootstrap_plans.json").read_text())
             self.assertEqual({"process", "docker", "k8s", "slurm"}, {p["launcher"] for p in bootstrap["plans"]})
             for plan in bootstrap["plans"]:
-                self.assertEqual("-S", plan["argv"][1])
+                self.assertEqual(["-I", "-S", "-u"], plan["argv"][1:4])
+                self.assertEqual("/opt/nvflare/platform", plan["platform_owned_cwd"])
+                self.assertEqual("/opt/nvflare/platform/resource_bootstrap.py", plan["trusted_bootstrap_path"])
+                self.assertEqual("4" * 32, plan["handoff_locator"])
                 self.assertNotIn("PYTHONPATH", plan["pre_python_environment"])
-                self.assertEqual("capture_platform_owned_start_snapshot", plan["bootstrap_steps"][1])
+                self.assertNotIn("PYTHONHOME", plan["pre_python_environment"])
+                self.assertEqual("capture_platform_owned_start_snapshot", plan["bootstrap_steps"][2])
 
             gpu = json.loads((root / "gpu_cuda_runtime_validated.json").read_text())
             self.assertEqual(
@@ -54,22 +58,27 @@ class TestReviewContractFixtures(unittest.TestCase):
             network = json.loads((root / "f3_finalization.json").read_text())
             self.assertEqual(5632, network["primary_metrics"][0]["value"])
             self.assertEqual(2, network["primary_metrics"][1]["value"])
-            self.assertEqual(256, network["counter"]["outcomes"]["local_delivery"]["payload_bytes"])
-            self.assertEqual(1024, network["counter"]["diagnostics"]["excluded_summary_publication"]["payload_bytes"])
-            self.assertEqual(512, network["counter"]["diagnostics"]["late_after_cutoff"]["payload_bytes"])
+            self.assertEqual(256, network["canonical_f3"]["local_delivered"]["payload_bytes"])
+            diagnostics = network["post_cutoff_diagnostics_not_embedded_in_summary"]
+            self.assertEqual(1024, diagnostics["excluded_summary_publication"]["payload_bytes"])
+            self.assertEqual(512, diagnostics["late_after_cutoff"]["payload_bytes"])
+            self.assertNotIn("late_after_cutoff", network["canonical_f3"])
+            self.assertNotIn("summary_excluded", network["canonical_f3"])
 
             lease = json.loads((root / "reporter_lease.json").read_text())
             self.assertTrue(lease["same_job_same_environment_second_rank_suppressed"])
             self.assertTrue(lease["different_job_same_environment"]["cross_job_overlap"] == "allowed")
             self.assertFalse(lease["owner"]["participant_total_is_capacity"])
 
-            fragments = json.loads((root / "parent_owned_fragments.json").read_text())
-            self.assertEqual("parent_owned_fragments", fragments["parent_owned_root"])
-            crash_record = next(record for record in fragments["records"] if "parent_exit" in record["relative_path"])
-            crash_path = root / crash_record["relative_path"]
-            crash = json.loads(crash_path.read_text())
-            self.assertEqual("parent_observed_exit", crash["observation_end"]["basis"])
-            self.assertEqual("not_invented", crash["resource_observations"]["state"])
+            fragments = json.loads((root / "supervisor_owned_fragments.json").read_text())
+            self.assertEqual("supervisor_owned_fragments", fragments["supervisor_owned_root"])
+            end_record = next(record for record in fragments["records"] if "end.json" in record["relative_path"])
+            end_path = root / end_record["relative_path"]
+            attempt_end = json.loads(end_path.read_text())
+            self.assertEqual("site_supervisor", attempt_end["resource_window"]["clock_owner"])
+            self.assertEqual("supervisor_confirmed_acquire_release", attempt_end["resource_window"]["basis"])
+            self.assertEqual("terminated", attempt_end["reason"])
+            self.assertEqual("not_invented", attempt_end["resource_observations"]["state"])
 
             component = json.loads((root / "fixed_resource_stats_component.json").read_text())
             self.assertEqual("RESOURCE_STATS", component["component"])

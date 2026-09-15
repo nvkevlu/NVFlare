@@ -54,8 +54,12 @@ class TestCanonicalReviewArtifacts(unittest.TestCase):
             self.assertEqual(receipt, json.loads(generated_files[Path("generation_receipt.json")]))
             self.assertEqual("build_review_artifacts.py", receipt["generator"])
             self.assertTrue(receipt["query_copy_matches_resource_summary"])
-            self.assertEqual("342.5", receipt["derived_examples"]["observation_seconds"])
-            self.assertEqual("513.75", receipt["derived_examples"]["cpu_unit_seconds"])
+            self.assertEqual("480", receipt["derived_examples"]["participant_lifetime_seconds"])
+            self.assertEqual("480", receipt["derived_examples"]["resource_window_seconds"])
+            self.assertEqual("300", receipt["derived_examples"]["gpu_free_cpu_memory_window_seconds"])
+            self.assertEqual("720", receipt["derived_examples"]["cpu_unit_seconds"])
+            self.assertEqual("180", receipt["derived_examples"]["gpu_instance_seconds"])
+            self.assertEqual("527765581332480", receipt["derived_examples"]["storage_byte_seconds"])
             self.assertEqual("9010000000000901", receipt["derived_examples"]["large_storage_byte_seconds"])
 
     def test_archive_manifest_digests_and_query_copy_are_exact(self):
@@ -90,11 +94,26 @@ class TestCanonicalReviewArtifacts(unittest.TestCase):
         self.assertIn("coverage: PARTIAL (1 accepted / 2 expected)", human)
         self.assertIn("site-1   client  accepted", human)
         self.assertIn("server   server  missing", human)
-        self.assertIn("5.5000 KiB", human)
+        self.assertIn("ENV WINDOW", human)
+        self.assertIn("8m0s", human)
+        self.assertIn("0.0500", human)
+        self.assertIn("136.5333", human)
+        self.assertIn("A GPU-free window still counts CPU and memory", human)
+        self.assertIn("REPORTED", human)
+        self.assertIn("Storage time spans the participant lifecycle", human)
+        self.assertIn("F3 REMOTE KiB", human)
+        self.assertIn("5.5000", human)
+        self.assertIn("Accepted-report totals | quality: PARTIAL", human)
         self.assertNotIn("MIG", human)
         self.assertNotIn("MIG", detail)
         self.assertIn("AMD EPYC 9654 (x86_64)", detail)
         self.assertIn("NVIDIA H100 80GB HBM3", detail)
+        selected = (COMMITTED_ROOT / "cli" / "resources-site-1-details.txt").read_text()
+        self.assertIn("Runtime-visible capacity-time proxies", selected)
+        self.assertIn("selected site: site-1", selected)
+        self.assertIn("site-1   client  accepted  REPORTED", selected)
+        self.assertIn("Hardware detail for site-1", selected)
+        self.assertIn("NVIDIA H100 80GB HBM3", selected)
         self.assertEqual(summary, envelope["data"]["summary"])
         self.assertEqual({"job_id": summary["job_id"], "site": "all"}, envelope["data"]["selection"])
         self.assertTrue(
@@ -105,6 +124,10 @@ class TestCanonicalReviewArtifacts(unittest.TestCase):
                 for group in entry["totals"]["gpu"].get("groups", [])
             )
         )
+
+        preempted = (COMMITTED_ROOT / "cli" / "resources-preempted-resume.txt").read_text()
+        self.assertIn("accepted  PARTIAL", preempted)
+        self.assertIn("PARTIAL means measurement evidence or expected-report coverage is incomplete", preempted)
 
     def test_cli_shows_mig_only_for_a_positive_applicable_group(self):
         summary = json.loads((SCHEMA_ROOT / "golden" / "v1" / "resource_summary.json").read_text())
@@ -130,15 +153,13 @@ class TestCanonicalReviewArtifacts(unittest.TestCase):
         human = artifacts._human_cli(summary)
         accepted = summary["roster"][0]
         self.assertEqual("5632", accepted["totals"]["f3"]["remote_accepted"]["payload_bytes"])
-        self.assertIn("5.5000 KiB", human)
+        self.assertIn("5.5000", human)
 
-        final = json.loads((SCHEMA_ROOT / "golden" / "v1" / "attempt_final.json").read_text())
+        final = json.loads((SCHEMA_ROOT / "golden" / "v1" / "participant_final.json").read_text())
         self.assertEqual("256", final["f3"]["local_delivered"]["payload_bytes"])
-        self.assertEqual("512", final["f3"]["late_after_cutoff"]["payload_bytes"])
-        self.assertEqual("1024", final["f3"]["summary_excluded"]["payload_bytes"])
+        self.assertNotIn("late_after_cutoff", final["f3"])
+        self.assertNotIn("summary_excluded", final["f3"])
         self.assertNotIn("local_delivered", accepted["totals"]["f3"])
-        self.assertNotIn("late_after_cutoff", accepted["totals"]["f3"])
-        self.assertNotIn("summary_excluded", accepted["totals"]["f3"])
 
 
 if __name__ == "__main__":

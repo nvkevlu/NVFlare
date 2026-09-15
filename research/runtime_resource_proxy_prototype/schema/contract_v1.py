@@ -32,7 +32,7 @@ import json
 import re
 from collections import defaultdict
 from datetime import datetime
-from decimal import ROUND_HALF_EVEN, Decimal, InvalidOperation, localcontext
+from decimal import ROUND_FLOOR, ROUND_HALF_EVEN, Decimal, InvalidOperation, localcontext
 from pathlib import PurePosixPath
 from typing import Any, Mapping, Sequence
 
@@ -41,7 +41,9 @@ SCHEMA_VERSION = "1.0"
 
 KIND_ATTEMPT_START = "nvflare.resource_stats.attempt_start"
 KIND_ATTEMPT_FINAL = "nvflare.resource_stats.attempt_final"
-KIND_ATTEMPT_PARENT_EXIT = "nvflare.resource_stats.attempt_parent_exit"
+KIND_ATTEMPT_END = "nvflare.resource_stats.attempt_end"
+KIND_PARTICIPANT_START = "nvflare.resource_stats.participant_start"
+KIND_PARTICIPANT_FINAL = "nvflare.resource_stats.participant_final"
 KIND_PARTICIPANT_SUMMARY = "nvflare.resource_stats.participant_summary"
 KIND_RESOURCE_SUMMARY = "nvflare.resource_stats.resource_summary"
 KIND_MANIFEST = "nvflare.resource_stats.manifest"
@@ -49,7 +51,9 @@ RECORD_KINDS = frozenset(
     {
         KIND_ATTEMPT_START,
         KIND_ATTEMPT_FINAL,
-        KIND_ATTEMPT_PARENT_EXIT,
+        KIND_ATTEMPT_END,
+        KIND_PARTICIPANT_START,
+        KIND_PARTICIPANT_FINAL,
         KIND_PARTICIPANT_SUMMARY,
         KIND_RESOURCE_SUMMARY,
         KIND_MANIFEST,
@@ -72,10 +76,9 @@ ISSUE_CODES = frozenset(
 POINT_STATUSES = frozenset({"reported", "unavailable", "error"})
 MEASUREMENT_STATUSES = frozenset({"reported", "partial", "unavailable", "error"})
 TOTAL_STATUSES = frozenset({"reported", "partial", "unavailable"})
-COLLECTION_STATES = frozenset({"enabled", "disabled"})
 ROSTER_STATUSES = frozenset({"accepted", "missing", "invalid", "disabled"})
 ROLES = frozenset({"client", "server"})
-EXIT_OUTCOMES = frozenset({"finished_ok", "finished_error", "terminated", "launch_failed"})
+ATTEMPT_END_REASONS = frozenset({"released", "failed", "terminated", "launch_failed", "reconfigured"})
 GPU_KINDS = frozenset({"full_gpu", "mig_compute_instance"})
 
 # The containing resource supplies the subject of an issue.  A status further
@@ -115,16 +118,18 @@ RESOURCE_ISSUES = {
 }
 
 MAX_ISSUES = 4
-MAX_ATTEMPTS = 128
+MAX_ATTEMPTS = 4_096
 MAX_PARTICIPANTS = 10_000
 MAX_GPU_GROUPS = 4_096
 MAX_ARTIFACT_ENTRIES = 4_096
 MAX_RELATIVE_PATH_BYTES = 512
 MAX_JSON_DEPTH = 32
 MAX_RECORD_BYTES = {
-    KIND_ATTEMPT_START: 256 * 1024,
+    KIND_ATTEMPT_START: 1024 * 1024,
     KIND_ATTEMPT_FINAL: 1024 * 1024,
-    KIND_ATTEMPT_PARENT_EXIT: 64 * 1024,
+    KIND_ATTEMPT_END: 64 * 1024,
+    KIND_PARTICIPANT_START: 64 * 1024,
+    KIND_PARTICIPANT_FINAL: 1024 * 1024,
     KIND_PARTICIPANT_SUMMARY: 64 * 1024 * 1024,
     KIND_RESOURCE_SUMMARY: 64 * 1024 * 1024,
     KIND_MANIFEST: 4 * 1024 * 1024,
@@ -416,10 +421,10 @@ def _validate_storage(value: Any, path: str) -> None:
         storage,
         path,
         resource="storage",
-        statuses=POINT_STATUSES,
+        statuses=MEASUREMENT_STATUSES,
         reported_required={"capacity_bytes"},
     )
-    if status != "reported":
+    if status not in {"reported", "partial"}:
         return
     _integer(storage["capacity_bytes"], f"{path}.capacity_bytes", maximum=U64_MAX, positive=True)
 
@@ -490,12 +495,11 @@ def _validate_gpu(value: Any, path: str) -> None:
         _issues(gpu["issues"], status, "gpu", f"{path}.issues")
 
 
-def _validate_capacity(value: Any, path: str) -> None:
+def _validate_compute_capacity(value: Any, path: str) -> None:
     capacity = _mapping(value, path)
-    _exact_keys(capacity, {"cpu", "memory", "storage", "gpu"}, set(), path)
+    _exact_keys(capacity, {"cpu", "memory", "gpu"}, set(), path)
     _validate_cpu(capacity["cpu"], f"{path}.cpu")
     _validate_memory(capacity["memory"], f"{path}.memory")
-    _validate_storage(capacity["storage"], f"{path}.storage")
     _validate_gpu(capacity["gpu"], f"{path}.gpu")
 
 
@@ -538,8 +542,6 @@ _F3_BUCKETS = (
     "remote_accepted",
     "local_delivered",
     "remote_failed_before_acceptance",
-    "late_after_cutoff",
-    "summary_excluded",
 )
 
 
@@ -550,17 +552,12 @@ def _validate_f3(value: Any, path: str) -> None:
         path,
         resource="f3",
         statuses=MEASUREMENT_STATUSES,
-        reported_required={"cutoff_sequence", *_F3_BUCKETS},
+        reported_required=set(_F3_BUCKETS),
     )
     if status not in {"reported", "partial"}:
         return
-    cutoff = _integer(f3["cutoff_sequence"], f"{path}.cutoff_sequence")
     for bucket in _F3_BUCKETS:
         _validate_counter(f3[bucket], f"{path}.{bucket}")
-    if cutoff == 0:
-        for bucket in ("remote_accepted", "local_delivered", "remote_failed_before_acceptance"):
-            if f3[bucket]["messages"] != "0":
-                _fail(f"{path}.{bucket}.messages", "must be zero when cutoff_sequence is zero")
 
 
 def _validate_cpu_time_group(value: Any, path: str) -> None:
@@ -631,6 +628,29 @@ def _canonical_decimal(value: Decimal) -> str:
         return str(value.quantize(Decimal(1)))
     rendered = format(value, "f").rstrip("0").rstrip(".")
     return rendered or "0"
+
+
+def normalize_quota_units(quota_us: int, period_us: int) -> str:
+    """Normalize a finite CPU quota conservatively for the canonical wire format.
+
+    The raw positive microsecond values stay probe-internal.  Division is exact
+    Decimal arithmetic followed by floor-to-nine-fractional-digits so a
+    repeating ratio cannot overstate the effective CPU limit.
+    """
+
+    for name, value in (("quota_us", quota_us), ("period_us", period_us)):
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0 or value > U64_MAX:
+            raise ValueError(f"{name} must be a positive unsigned 64-bit integer")
+    with localcontext() as context:
+        context.prec = 100
+        normalized = (Decimal(quota_us) / Decimal(period_us)).quantize(
+            Decimal("0.000000001"), rounding=ROUND_FLOOR
+        )
+    if normalized <= 0:
+        raise ValueError("CPU quota ratio is below the v1 nine-decimal precision")
+    if normalized > MAX_CPU_UNITS:
+        raise ValueError("normalized CPU quota exceeds the v1 visible-unit bound")
+    return _canonical_decimal(normalized)
 
 
 def _sum_decimals(values: Sequence[Decimal], path: str) -> Decimal:
@@ -765,10 +785,10 @@ _COMMON_ATTEMPT_FIELDS = {
 }
 
 RESOURCE_TIME_FORMULAS = {
-    "cpu.unit_seconds": "startup.cpu.visible_units * observation_seconds",
-    "memory.byte_seconds": "startup.memory.visible_bytes * observation_seconds",
-    "storage.byte_seconds": "startup.storage.capacity_bytes * observation_seconds",
-    "gpu.instance_seconds": "startup.gpu.groups[].count * observation_seconds",
+    "cpu.unit_seconds": "attempt_start.cpu.visible_units * (closed_at - opened_at)",
+    "memory.byte_seconds": "attempt_start.memory.visible_bytes * (closed_at - opened_at)",
+    "storage.byte_seconds": "participant_start.storage.capacity_bytes * participant_lifetime_seconds",
+    "gpu.instance_seconds": "attempt_start.gpu.groups[].count * (closed_at - opened_at)",
 }
 
 
@@ -781,160 +801,194 @@ def _validate_attempt_identity(record: Mapping[str, Any], path: str) -> None:
     _identifier(record.get("environment_key"), HASH_KEY_PATTERN, f"{path}.environment_key")
 
 
-def _validate_start_body(value: Any, path: str) -> None:
+def _validate_attempt_start_body(value: Any, path: str) -> None:
     body = _mapping(value, path)
-    state = _enum(body.get("collection_state"), COLLECTION_STATES, f"{path}.collection_state")
-    if state == "enabled":
-        _exact_keys(body, {"observed_at", "collection_state", "capacity"}, set(), path)
-        _validate_capacity(body["capacity"], f"{path}.capacity")
-    else:
-        _exact_keys(body, {"observed_at", "collection_state"}, set(), path)
-    _timestamp(body["observed_at"], f"{path}.observed_at")
+    _exact_keys(body, {"capacity"}, set(), path)
+    _validate_compute_capacity(body["capacity"], f"{path}.capacity")
 
 
-def _validate_final_body(value: Any, path: str) -> None:
+def _validate_attempt_final_body(value: Any, path: str) -> None:
     body = _mapping(value, path)
-    _exact_keys(
-        body,
-        {"observed_at", "capacity", "retained_content", "f3"},
-        set(),
-        path,
-    )
+    _exact_keys(body, {"capacity"}, set(), path)
+    _validate_compute_capacity(body["capacity"], f"{path}.capacity")
+
+
+def _validate_participant_start_body(value: Any, path: str) -> None:
+    body = _mapping(value, path)
+    _exact_keys(body, {"observed_at", "storage"}, set(), path)
     _timestamp(body["observed_at"], f"{path}.observed_at")
-    _validate_capacity(body["capacity"], f"{path}.capacity")
+    _validate_storage(body["storage"], f"{path}.storage")
+
+
+def _validate_participant_final_body(value: Any, path: str) -> None:
+    body = _mapping(value, path)
+    _exact_keys(body, {"observed_at", "storage", "retained_content", "f3"}, set(), path)
+    _timestamp(body["observed_at"], f"{path}.observed_at")
+    _validate_storage(body["storage"], f"{path}.storage")
     _validate_retained_content(body["retained_content"], f"{path}.retained_content")
     _validate_f3(body["f3"], f"{path}.f3")
 
 
-def _validate_exit_fact(value: Any, path: str) -> None:
-    fact = _mapping(value, path)
-    outcome = _enum(fact.get("outcome"), EXIT_OUTCOMES, f"{path}.outcome")
-    if outcome == "launch_failed":
-        _exact_keys(fact, {"outcome"}, set(), path)
-        return
-    _exact_keys(fact, {"outcome", "return_code"}, set(), path)
-    return_code = fact["return_code"]
-    if not isinstance(return_code, int) or isinstance(return_code, bool) or not -(2**31) <= return_code <= 2**31 - 1:
-        _fail(f"{path}.return_code", "must be a signed 32-bit integer")
-    if outcome == "finished_ok" and return_code != 0:
-        _fail(f"{path}.return_code", "must be zero for finished_ok")
-    if outcome in {"finished_error", "terminated"} and return_code == 0:
-        _fail(f"{path}.return_code", f"must be nonzero for {outcome}")
-
-
-def _validate_exit_body(value: Any, path: str) -> None:
+def _validate_attempt_end_body(value: Any, path: str) -> None:
     body = _mapping(value, path)
-    _exact_keys(body, {"observed_at", "outcome"}, {"return_code"}, path)
-    _timestamp(body["observed_at"], f"{path}.observed_at")
-    fact = {name: body[name] for name in ("outcome", "return_code") if name in body}
-    _validate_exit_fact(fact, path)
+    _exact_keys(body, {"closed_at", "reason"}, set(), path)
+    _timestamp(body["closed_at"], f"{path}.closed_at")
+    _enum(body["reason"], ATTEMPT_END_REASONS, f"{path}.reason")
 
 
 def _validate_attempt_start(record: Mapping[str, Any], path: str) -> None:
-    _exact_keys(record, _COMMON_ATTEMPT_FIELDS | {"observed_at", "collection_state"}, {"capacity"}, path)
+    _exact_keys(record, _COMMON_ATTEMPT_FIELDS | {"opened_at", "capacity"}, set(), path)
     _validate_attempt_identity(record, path)
-    body = {name: record[name] for name in ("observed_at", "collection_state")}
-    if "capacity" in record:
-        body["capacity"] = record["capacity"]
-    _validate_start_body(body, path)
+    _timestamp(record["opened_at"], f"{path}.opened_at")
+    _validate_attempt_start_body({"capacity": record["capacity"]}, path)
 
 
 def _validate_attempt_final(record: Mapping[str, Any], path: str) -> None:
     _exact_keys(
         record,
-        _COMMON_ATTEMPT_FIELDS | {"observed_at", "capacity", "retained_content", "f3"},
+        _COMMON_ATTEMPT_FIELDS | {"capacity"},
         set(),
         path,
     )
     _validate_attempt_identity(record, path)
-    _validate_final_body(
-        {name: record[name] for name in ("observed_at", "capacity", "retained_content", "f3")},
-        path,
-    )
+    _validate_attempt_final_body({"capacity": record["capacity"]}, path)
 
 
-def _validate_parent_exit(record: Mapping[str, Any], path: str) -> None:
-    _exact_keys(
-        record,
-        _COMMON_ATTEMPT_FIELDS | {"observed_at", "outcome"},
-        {"return_code"},
-        path,
-    )
+def _validate_attempt_end(record: Mapping[str, Any], path: str) -> None:
+    _exact_keys(record, _COMMON_ATTEMPT_FIELDS | {"opened_at", "closed_at", "reason"}, set(), path)
     _validate_attempt_identity(record, path)
-    _validate_exit_body(
-        {name: record[name] for name in ("observed_at", "outcome", "return_code") if name in record},
-        path,
+    opened_at = _timestamp(record["opened_at"], f"{path}.opened_at")
+    closed_at = _timestamp(record["closed_at"], f"{path}.closed_at")
+    if _timestamp_nanoseconds(closed_at) < _timestamp_nanoseconds(opened_at):
+        _fail(f"{path}.closed_at", "must not precede opened_at")
+    _validate_attempt_end_body({name: record[name] for name in ("closed_at", "reason")}, path)
+
+
+def _validate_participant_identity(record: Mapping[str, Any], path: str) -> None:
+    if record.get("schema_version") != SCHEMA_VERSION:
+        _fail(f"{path}.schema_version", f"must equal {SCHEMA_VERSION}")
+    _identifier(record.get("job_id"), JOB_ID_PATTERN, f"{path}.job_id")
+    _identifier(record.get("participant_id"), PARTICIPANT_ID_PATTERN, f"{path}.participant_id")
+
+
+def _validate_participant_start(record: Mapping[str, Any], path: str) -> None:
+    required = {"schema_version", "kind", "job_id", "participant_id", "observed_at", "storage"}
+    _exact_keys(record, required, set(), path)
+    _validate_participant_identity(record, path)
+    _validate_participant_start_body({name: record[name] for name in ("observed_at", "storage")}, path)
+
+
+def _validate_participant_final(record: Mapping[str, Any], path: str) -> None:
+    required = {
+        "schema_version",
+        "kind",
+        "job_id",
+        "participant_id",
+        "observed_at",
+        "storage",
+        "retained_content",
+        "f3",
+    }
+    _exact_keys(record, required, set(), path)
+    _validate_participant_identity(record, path)
+    _validate_participant_final_body(
+        {name: record[name] for name in ("observed_at", "storage", "retained_content", "f3")}, path
     )
 
 
-def _validate_attempt_summary(value: Any, path: str) -> tuple[str, int | None, int]:
+def _validate_attempt_summary(value: Any, path: str) -> tuple[str, int, int]:
     attempt = _mapping(value, path)
     _exact_keys(
         attempt,
-        {"attempt_id", "environment_key", "exit"},
+        {"attempt_id", "environment_key", "opened_at", "end"},
         {"start", "final"},
         path,
     )
     attempt_id = _identifier(attempt["attempt_id"], ATTEMPT_ID_PATTERN, f"{path}.attempt_id")
     environment_key = _identifier(attempt["environment_key"], HASH_KEY_PATTERN, f"{path}.environment_key")
+    opened_at = _timestamp(attempt["opened_at"], f"{path}.opened_at")
     if "start" in attempt:
-        _validate_start_body(attempt["start"], f"{path}.start")
-        if attempt["start"]["collection_state"] == "disabled":
-            _fail(
-                f"{path}.start.collection_state",
-                "disabled collection belongs in the frozen roster, not an accepted participant record",
-            )
+        _validate_attempt_start_body(attempt["start"], f"{path}.start")
     if "final" in attempt:
-        _validate_final_body(attempt["final"], f"{path}.final")
-    _validate_exit_body(attempt["exit"], f"{path}.exit")
+        _validate_attempt_final_body(attempt["final"], f"{path}.final")
+    _validate_attempt_end_body(attempt["end"], f"{path}.end")
 
-    exit_ns = _timestamp_nanoseconds(attempt["exit"]["observed_at"])
-    start_ns: int | None = None
-    if "start" in attempt:
-        start_ns = _timestamp_nanoseconds(attempt["start"]["observed_at"])
-        if start_ns > exit_ns:
-            _fail(f"{path}.exit.observed_at", "must not precede the startup observation")
-    if "final" in attempt:
-        if start_ns is None:
-            _fail(f"{path}.final", "requires a paired enabled startup observation")
-        final_ns = _timestamp_nanoseconds(attempt["final"]["observed_at"])
-        if start_ns is not None and final_ns < start_ns:
-            _fail(f"{path}.final.observed_at", "must not precede the startup observation")
-        if final_ns > exit_ns:
-            _fail(f"{path}.exit.observed_at", "must not precede the final observation")
-    if attempt["exit"]["outcome"] == "launch_failed" and ("start" in attempt or "final" in attempt):
-        _fail(path, "a launch_failed attempt cannot contain child startup or final observations")
-    return environment_key, start_ns, exit_ns
+    opened_ns = _timestamp_nanoseconds(opened_at)
+    closed_ns = _timestamp_nanoseconds(attempt["end"]["closed_at"])
+    if closed_ns < opened_ns:
+        _fail(f"{path}.end.closed_at", "must not precede opened_at")
+    if attempt["end"]["reason"] == "launch_failed":
+        if "start" in attempt or "final" in attempt:
+            _fail(path, "a launch_failed attempt cannot contain worker startup or final observations")
+    elif "start" not in attempt:
+        _fail(f"{path}.start", "is required unless end.reason is launch_failed")
+    return environment_key, opened_ns, closed_ns
 
 
 def _validate_participant_summary(record: Mapping[str, Any], path: str) -> None:
-    _exact_keys(record, {"schema_version", "kind", "job_id", "participant_key", "attempts"}, set(), path)
+    required = {"schema_version", "kind", "job_id", "participant_key", "start", "final", "attempts"}
+    _exact_keys(record, required, set(), path)
     if record["schema_version"] != SCHEMA_VERSION:
         _fail(f"{path}.schema_version", f"must equal {SCHEMA_VERSION}")
     _identifier(record["job_id"], JOB_ID_PATTERN, f"{path}.job_id")
     _identifier(record["participant_key"], HASH_KEY_PATTERN, f"{path}.participant_key")
+    _validate_participant_start_body(record["start"], f"{path}.start")
+    _validate_participant_final_body(record["final"], f"{path}.final")
+    participant_start_ns = _timestamp_nanoseconds(record["start"]["observed_at"])
+    participant_final_ns = _timestamp_nanoseconds(record["final"]["observed_at"])
+    if participant_final_ns < participant_start_ns:
+        _fail(f"{path}.final.observed_at", "must not precede participant startup")
     attempts = record["attempts"]
-    if not isinstance(attempts, list) or not 1 <= len(attempts) <= MAX_ATTEMPTS:
-        _fail(f"{path}.attempts", f"must contain 1..{MAX_ATTEMPTS} attempts")
+    if not isinstance(attempts, list) or len(attempts) > MAX_ATTEMPTS:
+        _fail(f"{path}.attempts", f"must contain 0..{MAX_ATTEMPTS} attempts")
 
     attempt_ids: list[str] = []
-    intervals: dict[str, list[tuple[int, int, str]]] = defaultdict(list)
+    intervals: dict[str, list[tuple[int, int, str, Mapping[str, Any]]]] = defaultdict(list)
     for index, attempt in enumerate(attempts):
         item_path = f"{path}.attempts[{index}]"
-        environment_key, start_ns, exit_ns = _validate_attempt_summary(attempt, item_path)
+        environment_key, opened_ns, closed_ns = _validate_attempt_summary(attempt, item_path)
         attempt_ids.append(attempt["attempt_id"])
-        if start_ns is not None:
-            intervals[environment_key].append((start_ns, exit_ns, item_path))
+        if opened_ns < participant_start_ns:
+            _fail(f"{item_path}.opened_at", "must not precede participant startup")
+        if closed_ns > participant_final_ns:
+            _fail(f"{item_path}.end.closed_at", "must not follow participant finalization")
+        intervals[environment_key].append((opened_ns, closed_ns, item_path, attempt))
     if attempt_ids != sorted(attempt_ids) or len(attempt_ids) != len(set(attempt_ids)):
         _fail(f"{path}.attempts", "must be sorted by unique attempt_id")
 
     for environment_intervals in intervals.values():
         environment_intervals.sort()
-        previous_end: int | None = None
-        for start_ns, end_ns, item_path in environment_intervals:
-            if previous_end is not None and start_ns < previous_end:
+        previous: tuple[int, int, str, Mapping[str, Any]] | None = None
+        for opened_ns, closed_ns, item_path, attempt in environment_intervals:
+            if previous is not None and opened_ns < previous[1]:
                 _fail(item_path, "overlaps another attempt in the same execution environment")
-            previous_end = end_ns
+            if previous is not None:
+                previous_closed_ns = previous[1]
+                previous_path = previous[2]
+                previous_attempt = previous[3]
+                if previous_attempt["end"]["reason"] == "reconfigured" and opened_ns != previous_closed_ns:
+                    _fail(
+                        f"{previous_path}.end.reason",
+                        "reconfigured requires a same-environment successor at the exact closure boundary",
+                    )
+                previous_vector = _compute_capacity_signature(previous_attempt)
+                current_vector = _compute_capacity_signature(attempt)
+                if (
+                    previous_attempt["end"]["reason"] == "reconfigured"
+                    and previous_vector is not None
+                    and current_vector is not None
+                    and previous_vector == current_vector
+                ):
+                    _fail(
+                        f"{previous_path}.end.reason",
+                        "reconfigured requires a changed numeric capacity vector when both snapshots are comparable",
+                    )
+            previous = (opened_ns, closed_ns, item_path, attempt)
+        if previous is not None and previous[3]["end"]["reason"] == "reconfigured":
+            _fail(
+                f"{previous[2]}.end.reason",
+                "reconfigured requires a same-environment successor at the exact closure boundary",
+            )
 
 
 def _duration_seconds(start: str, end: str) -> Decimal:
@@ -953,7 +1007,7 @@ def _resource_product(capacity: Decimal, seconds: Decimal, path: str) -> Decimal
 
 
 def _capacity_signature(resource: str, value: Mapping[str, Any]) -> Any:
-    if value["status"] != "reported":
+    if value["status"] not in {"reported", "partial"}:
         return None
     if resource == "cpu":
         return value["visible_units"]
@@ -967,6 +1021,16 @@ def _capacity_signature(resource: str, value: Mapping[str, Any]) -> Any:
     return tuple(sorted(counts.items()))
 
 
+def _compute_capacity_signature(attempt: Mapping[str, Any]) -> tuple[Any, ...] | None:
+    start = attempt.get("start")
+    if start is None:
+        return None
+    capacity = start["capacity"]
+    if any(capacity[resource]["status"] != "reported" for resource in ("cpu", "memory", "gpu")):
+        return None
+    return tuple(_capacity_signature(resource, capacity[resource]) for resource in ("cpu", "memory", "gpu"))
+
+
 def _derived_status(numeric_seen: bool, degraded: bool) -> str:
     if not numeric_seen:
         return "unavailable"
@@ -976,45 +1040,48 @@ def _derived_status(numeric_seen: bool, degraded: bool) -> str:
 def derive_participant_totals(
     participant_record: Mapping[str, Any],
 ) -> tuple[str, dict[str, Any]]:
-    """Derive compact participant totals from accepted attempt lifecycle facts.
+    """Derive resource-window seconds and totals from participant lifecycle facts.
 
-    Resource time uses startup capacity multiplied by the exact half-open
-    observation interval.  A final observation closes the interval when one was
-    durably handed to the parent; otherwise the parent-observed exit closes it
-    and makes the result partial.  Each product is rounded half-even to nine
-    fractional digits before attempt values are summed.
+    Transient compute time always ends at the supervisor-confirmed attempt end;
+    an attempt final is only stability evidence.  Persistent storage spans the
+    participant start-to-final interval.  Retained content and F3 are consumed
+    exactly once from participant final.  Each product is rounded half-even to
+    nine fractional digits before values are summed.
     """
 
     validate_record(participant_record)
     if participant_record["kind"] != KIND_PARTICIPANT_SUMMARY:
         _fail("$.kind", f"must equal {KIND_PARTICIPANT_SUMMARY}")
 
-    resource_names = ("cpu", "memory", "storage", "gpu")
+    transient_resources = ("cpu", "memory", "gpu")
     numeric = {name: False for name in _TOTAL_FIELDS}
     degraded = {name: False for name in _TOTAL_FIELDS}
-    observation_values: list[Decimal] = []
+    resource_window_values: list[Decimal] = []
     cpu_values: dict[tuple[str, str], list[Decimal]] = defaultdict(list)
     cpu_templates: dict[tuple[str, str], dict[str, str]] = {}
     gpu_values: dict[tuple[str, str, str, str], list[Decimal]] = defaultdict(list)
     gpu_templates: dict[tuple[str, str, str, str], dict[str, str]] = {}
     memory_values: list[Decimal] = []
     storage_values: list[Decimal] = []
-    retained_values: list[int] = []
-    f3_payload_values: list[int] = []
-    f3_message_values: list[int] = []
+
+    # A completed participant lifecycle with no attempts authoritatively says
+    # that no transient resource window occurred.  This is a reported zero,
+    # unlike an end-only launch_failed attempt whose capacity is unobserved.
+    if not participant_record["attempts"]:
+        for resource in transient_resources:
+            numeric[resource] = True
 
     for index, attempt in enumerate(participant_record["attempts"]):
         attempt_path = f"$.attempts[{index}]"
         start = attempt.get("start")
         final = attempt.get("final")
-        if start is None or start["collection_state"] != "enabled":
-            for resource in resource_names:
+        seconds = _duration_seconds(attempt["opened_at"], attempt["end"]["closed_at"])
+        resource_window_values.append(seconds)
+        if start is None:
+            for resource in transient_resources:
                 degraded[resource] = True
         else:
-            end_at = final["observed_at"] if final is not None else attempt["exit"]["observed_at"]
-            seconds = _duration_seconds(start["observed_at"], end_at)
-            observation_values.append(seconds)
-            for resource in resource_names:
+            for resource in transient_resources:
                 startup_resource = start["capacity"][resource]
                 if startup_resource["status"] != "reported":
                     degraded[resource] = True
@@ -1051,14 +1118,6 @@ def derive_participant_totals(
                             f"{attempt_path}.start.capacity.memory",
                         )
                     )
-                elif resource == "storage":
-                    storage_values.append(
-                        _resource_product(
-                            Decimal(startup_resource["capacity_bytes"]),
-                            seconds,
-                            f"{attempt_path}.start.capacity.storage",
-                        )
-                    )
                 else:
                     for group in startup_resource["groups"]:
                         key = _gpu_group_key(group)
@@ -1075,31 +1134,55 @@ def derive_participant_totals(
                             )
                         )
 
-        if final is None:
+    resource_window_seconds = _canonical_decimal(
+        _sum_decimals(resource_window_values, "$.resource_window_seconds")
+    )
+
+    participant_start = participant_record["start"]
+    participant_final = participant_record["final"]
+    storage_start = participant_start["storage"]
+    storage_final = participant_final["storage"]
+    if storage_start["status"] in {"reported", "partial"}:
+        numeric["storage"] = True
+        participant_seconds = _duration_seconds(participant_start["observed_at"], participant_final["observed_at"])
+        storage_values.append(
+            _resource_product(
+                Decimal(storage_start["capacity_bytes"]),
+                participant_seconds,
+                "$.start.storage",
+            )
+        )
+        if (
+            storage_final["status"] not in {"reported", "partial"}
+            or _capacity_signature("storage", storage_start) != _capacity_signature("storage", storage_final)
+            or storage_start["status"] == "partial"
+            or storage_final["status"] == "partial"
+        ):
+            degraded["storage"] = True
+    else:
+        degraded["storage"] = True
+
+    retained = participant_final["retained_content"]
+    retained_value = 0
+    if retained["status"] in {"reported", "partial"}:
+        numeric["retained_content"] = True
+        retained_value = sum(int(entry["size_bytes"]) for entry in retained["entries"])
+        if retained["status"] == "partial":
             degraded["retained_content"] = True
+    else:
+        degraded["retained_content"] = True
+
+    f3 = participant_final["f3"]
+    f3_payload = 0
+    f3_messages = 0
+    if f3["status"] in {"reported", "partial"}:
+        numeric["f3"] = True
+        f3_payload = int(f3["remote_accepted"]["payload_bytes"])
+        f3_messages = int(f3["remote_accepted"]["messages"])
+        if f3["status"] == "partial":
             degraded["f3"] = True
-            continue
-
-        retained = final["retained_content"]
-        if retained["status"] in {"reported", "partial"}:
-            numeric["retained_content"] = True
-            retained_values.append(sum(int(entry["size_bytes"]) for entry in retained["entries"]))
-            if retained["status"] == "partial":
-                degraded["retained_content"] = True
-        else:
-            degraded["retained_content"] = True
-
-        f3 = final["f3"]
-        if f3["status"] in {"reported", "partial"}:
-            numeric["f3"] = True
-            f3_payload_values.append(int(f3["remote_accepted"]["payload_bytes"]))
-            f3_message_values.append(int(f3["remote_accepted"]["messages"]))
-            if f3["status"] == "partial":
-                degraded["f3"] = True
-        else:
-            degraded["f3"] = True
-
-    observation_seconds = _canonical_decimal(_sum_decimals(observation_values, "$.observation_seconds"))
+    else:
+        degraded["f3"] = True
 
     cpu_status = _derived_status(numeric["cpu"], degraded["cpu"])
     if cpu_status == "unavailable":
@@ -1136,17 +1219,14 @@ def derive_participant_totals(
     if retained_status == "unavailable":
         retained_total: dict[str, Any] = {"status": retained_status}
     else:
-        retained_sum = sum(retained_values)
-        if retained_sum > U128_MAX:
+        if retained_value > U128_MAX:
             _fail("$.totals.retained_content.bytes", "derived total exceeds unsigned 128-bit bound")
-        retained_total = {"status": retained_status, "bytes": str(retained_sum)}
+        retained_total = {"status": retained_status, "bytes": str(retained_value)}
 
     f3_status = _derived_status(numeric["f3"], degraded["f3"])
     if f3_status == "unavailable":
         f3_total: dict[str, Any] = {"status": f3_status}
     else:
-        f3_payload = sum(f3_payload_values)
-        f3_messages = sum(f3_message_values)
         if f3_payload > U128_MAX or f3_messages > U128_MAX:
             _fail("$.totals.f3.remote_accepted", "derived total exceeds unsigned 128-bit bound")
         f3_total = {
@@ -1163,7 +1243,7 @@ def derive_participant_totals(
         "f3": f3_total,
     }
     _validate_totals(totals, "$.totals")
-    return observation_seconds, totals
+    return resource_window_seconds, totals
 
 
 def _validate_roster_entry(value: Any, path: str, cutoff_ns: int) -> None:
@@ -1173,13 +1253,13 @@ def _validate_roster_entry(value: Any, path: str, cutoff_ns: int) -> None:
     if status == "accepted":
         _exact_keys(
             entry,
-            base | {"received_at", "summary_sha256", "observation_seconds", "totals"},
+            base | {"received_at", "summary_sha256", "resource_window_seconds", "totals"},
             set(),
             path,
         )
         received_at = _timestamp(entry["received_at"], f"{path}.received_at")
         _identifier(entry["summary_sha256"], SHA256_PATTERN, f"{path}.summary_sha256")
-        _decimal(entry["observation_seconds"], f"{path}.observation_seconds")
+        _decimal(entry["resource_window_seconds"], f"{path}.resource_window_seconds")
         _validate_totals(entry["totals"], f"{path}.totals")
         if _timestamp_nanoseconds(received_at) > cutoff_ns:
             _fail(f"{path}.received_at", "must not be later than report_cutoff_at")
@@ -1205,7 +1285,7 @@ def _validate_roster_entry(value: Any, path: str, cutoff_ns: int) -> None:
 
 
 def derive_job_totals(roster: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
-    """Derive job totals from one complete, frozen roster."""
+    """Derive job totals from one complete, fixed expected-participant roster."""
 
     if not isinstance(roster, list) or not 1 <= len(roster) <= MAX_PARTICIPANTS:
         _fail("roster", f"must contain 1..{MAX_PARTICIPANTS} entries")
@@ -1308,7 +1388,9 @@ def validate_record(record: Mapping[str, Any], *, serialized_size: int | None = 
     validators = {
         KIND_ATTEMPT_START: _validate_attempt_start,
         KIND_ATTEMPT_FINAL: _validate_attempt_final,
-        KIND_ATTEMPT_PARENT_EXIT: _validate_parent_exit,
+        KIND_ATTEMPT_END: _validate_attempt_end,
+        KIND_PARTICIPANT_START: _validate_participant_start,
+        KIND_PARTICIPANT_FINAL: _validate_participant_final,
         KIND_PARTICIPANT_SUMMARY: _validate_participant_summary,
         KIND_RESOURCE_SUMMARY: _validate_resource_summary,
         KIND_MANIFEST: _validate_manifest,
@@ -1390,7 +1472,7 @@ def validate_bundle(
     if set(participant_records) != set(accepted):
         _fail(
             "participant_records",
-            "keys must exactly equal the accepted participant keys in the frozen roster",
+            "keys must exactly equal the accepted participant keys in the fixed roster",
         )
 
     expected_paths = {"resource_summary.json"} | {
@@ -1450,11 +1532,11 @@ def validate_bundle(
                 f"resource_summary.roster[{participant_key!r}].summary_sha256",
                 "does not match the accepted participant bytes",
             )
-        observation_seconds, totals = derive_participant_totals(record)
-        if roster_entry["observation_seconds"] != observation_seconds:
+        resource_window_seconds, totals = derive_participant_totals(record)
+        if roster_entry["resource_window_seconds"] != resource_window_seconds:
             _fail(
-                f"resource_summary.roster[{participant_key!r}].observation_seconds",
-                "does not equal the lifecycle-derived observation interval sum",
+                f"resource_summary.roster[{participant_key!r}].resource_window_seconds",
+                "does not equal the lifecycle-derived resource-window interval sum",
             )
         if roster_entry["totals"] != totals:
             _fail(
@@ -1462,12 +1544,10 @@ def validate_bundle(
                 "does not equal startup capacity multiplied by the derived intervals",
             )
         for attempt in record["attempts"]:
-            if "start" not in attempt:
-                continue
             environment_intervals[attempt["environment_key"]].append(
                 (
-                    _timestamp_nanoseconds(attempt["start"]["observed_at"]),
-                    _timestamp_nanoseconds(attempt["exit"]["observed_at"]),
+                    _timestamp_nanoseconds(attempt["opened_at"]),
+                    _timestamp_nanoseconds(attempt["end"]["closed_at"]),
                     participant_key,
                     attempt["attempt_id"],
                 )

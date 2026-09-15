@@ -6,7 +6,9 @@
   "oneOf": [
     {"$ref": "#/$defs/attempt_start"},
     {"$ref": "#/$defs/attempt_final"},
-    {"$ref": "#/$defs/attempt_parent_exit"},
+    {"$ref": "#/$defs/attempt_end"},
+    {"$ref": "#/$defs/participant_start_record"},
+    {"$ref": "#/$defs/participant_final_record"},
     {"$ref": "#/$defs/participant_summary"},
     {"$ref": "#/$defs/resource_summary"},
     {"$ref": "#/$defs/manifest"}
@@ -25,12 +27,16 @@
   "x-nvflare-cross-record-invariants": [
     "reported GPU capacity is emitted only after successful CUDA-runtime enumeration; cuda_mask_present is diagnostic and never count authority",
     "full GPUs and MIG compute instances remain separate groups; a missing MIG group in a reported inventory means observed zero",
-    "CPU visible_units is the minimum of present affinity_count, cpuset_count, and quota_units, or online_count only when none is available",
+    "CPU quota_units is exact quota_us/period_us Decimal division conservatively floored to nine fractional digits; CPU visible_units is the minimum of present affinity_count, cpuset_count, and quota_units, or online_count only when none is available",
     "model and architecture are optional normalized metadata; their absence never changes numeric status",
-    "resource time is startup capacity multiplied by the exact start-to-final interval, or start-to-parent-exit when final is missing, rounded half-even to nine fractional digits per attempt",
-    "missing final data and numeric capacity change make the affected derived participant total partial",
+    "transient CPU, memory, and GPU time is attempt-start capacity multiplied by the supervisor-owned half-open opened_at-to-closed_at interval, rounded half-even to nine fractional digits per attempt",
+    "attempt start and final contain capacity only; missing final data or numeric capacity change makes the affected transient participant total partial without changing the supervisor-owned interval",
+    "reconfigured is asserted by trusted lifecycle authority and requires a same-environment successor at the same timestamp; when both numeric vectors are comparable they must differ, while a full release and reacquisition may use released even when timestamps are equal",
+    "persistent storage time is participant-start capacity multiplied by the participant start-to-final interval; it is never multiplied once per transient attempt",
+    "retained content and F3 are terminal participant facts and contribute exactly once, never once per resumed transient attempt",
     "one trusted reporter is accepted per execution environment at a time; half-open intervals may reuse an environment_key only when they do not overlap",
-    "remote_accepted is counted only after send acceptance; local delivery, pre-acceptance failure, late traffic, and non-spoofably excluded summary traffic remain separate",
+    "the three F3 counters are atomically frozen before participant-final serialization; callback completions after freeze never enter canonical counters, and summary publication uses a platform-owned non-spoofable exclusion path",
+    "the immutable expected-participant roster comes from authenticated deployment/selection state independently of resource-report arrivals, and classifies every expected member at cutoff",
     "job totals are deterministic sums of accepted roster totals; roster and attempt facts explain partial and unavailable totals",
     "manifest and accepted-roster digests cover the exact archived bytes"
   ],
@@ -135,7 +141,10 @@
           "properties": {
             "affinity_count": {"$ref": "#/$defs/positive_unsigned"},
             "cpuset_count": {"$ref": "#/$defs/positive_unsigned"},
-            "quota_units": {"$ref": "#/$defs/positive_decimal"}
+            "quota_units": {
+              "$ref": "#/$defs/positive_decimal",
+              "description": "Exact quota_us/period_us Decimal ratio, conservatively floored to nine fractional digits."
+            }
           }
         },
         {
@@ -200,9 +209,23 @@
         "capacity_bytes": {"$ref": "#/$defs/positive_unsigned"}
       }
     },
+    "storage_partial": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "capacity_bytes", "issues"],
+      "properties": {
+        "status": {"const": "partial"},
+        "capacity_bytes": {"$ref": "#/$defs/positive_unsigned"},
+        "issues": {
+          "type": "array", "minItems": 1, "maxItems": 4, "uniqueItems": true,
+          "items": {"enum": ["attribution_incomplete", "observation_incomplete"]}
+        }
+      }
+    },
     "storage": {
       "oneOf": [
         {"$ref": "#/$defs/storage_reported"},
+        {"$ref": "#/$defs/storage_partial"},
         {"$ref": "#/$defs/capacity_unavailable"},
         {"$ref": "#/$defs/capacity_error"}
       ]
@@ -215,7 +238,10 @@
         "kind": {"const": "full_gpu"},
         "count": {"$ref": "#/$defs/positive_unsigned"},
         "model": {"$ref": "#/$defs/model"},
-        "memory_bytes": {"$ref": "#/$defs/positive_unsigned"}
+        "memory_bytes": {
+          "$ref": "#/$defs/positive_unsigned",
+          "description": "Runtime-reported bytes per visible full-GPU entity; every entity consolidated into this group shares the value."
+        }
       }
     },
     "mig_gpu_group": {
@@ -226,7 +252,10 @@
         "kind": {"const": "mig_compute_instance"},
         "count": {"$ref": "#/$defs/positive_unsigned"},
         "model": {"$ref": "#/$defs/model"},
-        "memory_bytes": {"$ref": "#/$defs/positive_unsigned"},
+        "memory_bytes": {
+          "$ref": "#/$defs/positive_unsigned",
+          "description": "Runtime-reported bytes per visible MIG compute-instance entity; every entity consolidated into this group shares the value."
+        },
         "mig_profile": {"$ref": "#/$defs/mig_profile"}
       }
     },
@@ -266,14 +295,13 @@
       ]
     },
     "gpu": {"oneOf": [{"$ref": "#/$defs/gpu_reported"}, {"$ref": "#/$defs/gpu_nonreported"}]},
-    "capacity": {
+    "compute_capacity": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["cpu", "memory", "storage", "gpu"],
+      "required": ["cpu", "memory", "gpu"],
       "properties": {
         "cpu": {"$ref": "#/$defs/cpu"},
         "memory": {"$ref": "#/$defs/memory"},
-        "storage": {"$ref": "#/$defs/storage"},
         "gpu": {"$ref": "#/$defs/gpu"}
       }
     },
@@ -332,29 +360,23 @@
     },
     "f3_reported": {
       "type": "object", "additionalProperties": false,
-      "required": ["status", "cutoff_sequence", "remote_accepted", "local_delivered", "remote_failed_before_acceptance", "late_after_cutoff", "summary_excluded"],
+      "required": ["status", "remote_accepted", "local_delivered", "remote_failed_before_acceptance"],
       "properties": {
         "status": {"const": "reported"},
-        "cutoff_sequence": {"$ref": "#/$defs/unsigned"},
         "remote_accepted": {"$ref": "#/$defs/counter"},
         "local_delivered": {"$ref": "#/$defs/counter"},
-        "remote_failed_before_acceptance": {"$ref": "#/$defs/counter"},
-        "late_after_cutoff": {"$ref": "#/$defs/counter"},
-        "summary_excluded": {"$ref": "#/$defs/counter"}
+        "remote_failed_before_acceptance": {"$ref": "#/$defs/counter"}
       }
     },
     "f3_partial": {
       "type": "object", "additionalProperties": false,
-      "required": ["status", "issues", "cutoff_sequence", "remote_accepted", "local_delivered", "remote_failed_before_acceptance", "late_after_cutoff", "summary_excluded"],
+      "required": ["status", "issues", "remote_accepted", "local_delivered", "remote_failed_before_acceptance"],
       "properties": {
         "status": {"const": "partial"},
         "issues": {"type": "array", "minItems": 1, "maxItems": 4, "uniqueItems": true, "items": {"$ref": "#/$defs/partial_issue"}},
-        "cutoff_sequence": {"$ref": "#/$defs/unsigned"},
         "remote_accepted": {"$ref": "#/$defs/counter"},
         "local_delivered": {"$ref": "#/$defs/counter"},
-        "remote_failed_before_acceptance": {"$ref": "#/$defs/counter"},
-        "late_after_cutoff": {"$ref": "#/$defs/counter"},
-        "summary_excluded": {"$ref": "#/$defs/counter"}
+        "remote_failed_before_acceptance": {"$ref": "#/$defs/counter"}
       }
     },
     "f3": {
@@ -363,63 +385,45 @@
         {"$ref": "#/$defs/source_unavailable"}, {"$ref": "#/$defs/source_error"}
       ]
     },
-    "start_body": {
-      "oneOf": [
-        {
-          "type": "object", "additionalProperties": false,
-          "required": ["observed_at", "collection_state", "capacity"],
-          "properties": {
-            "observed_at": {"$ref": "#/$defs/timestamp"},
-            "collection_state": {"const": "enabled"},
-            "capacity": {"$ref": "#/$defs/capacity"}
-          }
-        },
-        {
-          "type": "object", "additionalProperties": false,
-          "required": ["observed_at", "collection_state"],
-          "properties": {
-            "observed_at": {"$ref": "#/$defs/timestamp"},
-            "collection_state": {"const": "disabled"}
-          }
-        }
-      ]
-    },
-    "final_body": {
+    "attempt_start_body": {
       "type": "object", "additionalProperties": false,
-      "required": ["observed_at", "capacity", "retained_content", "f3"],
+      "required": ["capacity"],
+      "properties": {
+        "capacity": {"$ref": "#/$defs/compute_capacity"}
+      }
+    },
+    "attempt_final_body": {
+      "type": "object", "additionalProperties": false,
+      "required": ["capacity"],
+      "properties": {
+        "capacity": {"$ref": "#/$defs/compute_capacity"}
+      }
+    },
+    "participant_start_body": {
+      "type": "object", "additionalProperties": false,
+      "required": ["observed_at", "storage"],
       "properties": {
         "observed_at": {"$ref": "#/$defs/timestamp"},
-        "capacity": {"$ref": "#/$defs/capacity"},
+        "storage": {"$ref": "#/$defs/storage"}
+      }
+    },
+    "participant_final_body": {
+      "type": "object", "additionalProperties": false,
+      "required": ["observed_at", "storage", "retained_content", "f3"],
+      "properties": {
+        "observed_at": {"$ref": "#/$defs/timestamp"},
+        "storage": {"$ref": "#/$defs/storage"},
         "retained_content": {"$ref": "#/$defs/retained_content"},
         "f3": {"$ref": "#/$defs/f3"}
       }
     },
-    "participant_start": {
+    "attempt_end_body": {
       "type": "object", "additionalProperties": false,
-      "required": ["observed_at", "collection_state", "capacity"],
+      "required": ["closed_at", "reason"],
       "properties": {
-        "observed_at": {"$ref": "#/$defs/timestamp"},
-        "collection_state": {"const": "enabled"},
-        "capacity": {"$ref": "#/$defs/capacity"}
+        "closed_at": {"$ref": "#/$defs/timestamp"},
+        "reason": {"enum": ["released", "failed", "terminated", "launch_failed", "reconfigured"]}
       }
-    },
-    "exit_body": {
-      "oneOf": [
-        {
-          "type": "object", "additionalProperties": false,
-          "required": ["observed_at", "outcome"],
-          "properties": {"observed_at": {"$ref": "#/$defs/timestamp"}, "outcome": {"const": "launch_failed"}}
-        },
-        {
-          "type": "object", "additionalProperties": false,
-          "required": ["observed_at", "outcome", "return_code"],
-          "properties": {
-            "observed_at": {"$ref": "#/$defs/timestamp"},
-            "outcome": {"enum": ["finished_ok", "finished_error", "terminated"]},
-            "return_code": {"type": "integer", "minimum": -2147483648, "maximum": 2147483647}
-          }
-        }
-      ]
     },
     "cpu_time_group": {
       "type": "object", "additionalProperties": false,
@@ -437,7 +441,10 @@
         "kind": {"const": "full_gpu"},
         "instance_seconds": {"$ref": "#/$defs/decimal"},
         "model": {"$ref": "#/$defs/model"},
-        "memory_bytes": {"$ref": "#/$defs/positive_unsigned"}
+        "memory_bytes": {
+          "$ref": "#/$defs/positive_unsigned",
+          "description": "Per-entity runtime-reported memory metadata copied from the matching capacity group."
+        }
       }
     },
     "mig_gpu_time_group": {
@@ -447,7 +454,10 @@
         "kind": {"const": "mig_compute_instance"},
         "instance_seconds": {"$ref": "#/$defs/decimal"},
         "model": {"$ref": "#/$defs/model"},
-        "memory_bytes": {"$ref": "#/$defs/positive_unsigned"},
+        "memory_bytes": {
+          "$ref": "#/$defs/positive_unsigned",
+          "description": "Per-entity runtime-reported memory metadata copied from the matching capacity group."
+        },
         "mig_profile": {"$ref": "#/$defs/mig_profile"}
       }
     },
@@ -521,21 +531,27 @@
     },
     "participant_attempt": {
       "type": "object", "additionalProperties": false,
-      "required": ["attempt_id", "environment_key", "exit"],
+      "required": ["attempt_id", "environment_key", "opened_at", "end"],
       "properties": {
         "attempt_id": {"$ref": "#/$defs/attempt_id"},
         "environment_key": {"$ref": "#/$defs/hash_key"},
-        "start": {"$ref": "#/$defs/participant_start"},
-        "final": {"$ref": "#/$defs/final_body"},
-        "exit": {"$ref": "#/$defs/exit_body"}
+        "opened_at": {"$ref": "#/$defs/timestamp"},
+        "start": {"$ref": "#/$defs/attempt_start_body"},
+        "final": {"$ref": "#/$defs/attempt_final_body"},
+        "end": {"$ref": "#/$defs/attempt_end_body"}
       },
       "allOf": [
-        {"if": {"required": ["final"]}, "then": {"required": ["start"]}}
+        {"if": {"required": ["final"]}, "then": {"required": ["start"]}},
+        {
+          "if": {"properties": {"end": {"properties": {"reason": {"const": "launch_failed"}}}}},
+          "then": {"not": {"anyOf": [{"required": ["start"]}, {"required": ["final"]}]}},
+          "else": {"required": ["start"]}
+        }
       ]
     },
     "accepted_roster_entry": {
       "type": "object", "additionalProperties": false,
-      "required": ["participant_id", "participant_key", "role", "status", "received_at", "summary_sha256", "observation_seconds", "totals"],
+      "required": ["participant_id", "participant_key", "role", "status", "received_at", "summary_sha256", "resource_window_seconds", "totals"],
       "properties": {
         "participant_id": {"$ref": "#/$defs/participant_id"},
         "participant_key": {"$ref": "#/$defs/hash_key"},
@@ -543,7 +559,7 @@
         "status": {"const": "accepted"},
         "received_at": {"$ref": "#/$defs/timestamp"},
         "summary_sha256": {"$ref": "#/$defs/sha256"},
-        "observation_seconds": {"$ref": "#/$defs/decimal"},
+        "resource_window_seconds": {"$ref": "#/$defs/decimal"},
         "totals": {"$ref": "#/$defs/totals"}
       }
     },
@@ -580,52 +596,63 @@
     },
     "attempt_start": {
       "type": "object", "additionalProperties": false,
-      "required": ["schema_version", "kind", "job_id", "participant_id", "attempt_id", "environment_key", "observed_at", "collection_state"],
+      "required": ["schema_version", "kind", "job_id", "participant_id", "attempt_id", "environment_key", "opened_at", "capacity"],
       "properties": {
         "schema_version": {"$ref": "#/$defs/schema_version"}, "kind": {"const": "nvflare.resource_stats.attempt_start"},
         "job_id": {"$ref": "#/$defs/job_id"}, "participant_id": {"$ref": "#/$defs/participant_id"},
         "attempt_id": {"$ref": "#/$defs/attempt_id"}, "environment_key": {"$ref": "#/$defs/hash_key"},
-        "observed_at": {"$ref": "#/$defs/timestamp"}, "collection_state": {"enum": ["enabled", "disabled"]},
-        "capacity": {"$ref": "#/$defs/capacity"}
-      },
-      "allOf": [
-        {"if": {"properties": {"collection_state": {"const": "enabled"}}}, "then": {"required": ["capacity"]}},
-        {"if": {"properties": {"collection_state": {"const": "disabled"}}}, "then": {"not": {"required": ["capacity"]}}}
-      ]
+        "opened_at": {"$ref": "#/$defs/timestamp"}, "capacity": {"$ref": "#/$defs/compute_capacity"}
+      }
     },
     "attempt_final": {
       "type": "object", "additionalProperties": false,
-      "required": ["schema_version", "kind", "job_id", "participant_id", "attempt_id", "environment_key", "observed_at", "capacity", "retained_content", "f3"],
+      "required": ["schema_version", "kind", "job_id", "participant_id", "attempt_id", "environment_key", "capacity"],
       "properties": {
         "schema_version": {"$ref": "#/$defs/schema_version"}, "kind": {"const": "nvflare.resource_stats.attempt_final"},
         "job_id": {"$ref": "#/$defs/job_id"}, "participant_id": {"$ref": "#/$defs/participant_id"},
         "attempt_id": {"$ref": "#/$defs/attempt_id"}, "environment_key": {"$ref": "#/$defs/hash_key"},
-        "observed_at": {"$ref": "#/$defs/timestamp"}, "capacity": {"$ref": "#/$defs/capacity"},
+        "capacity": {"$ref": "#/$defs/compute_capacity"}
+      }
+    },
+    "attempt_end": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schema_version", "kind", "job_id", "participant_id", "attempt_id", "environment_key", "opened_at", "closed_at", "reason"],
+      "properties": {
+        "schema_version": {"$ref": "#/$defs/schema_version"}, "kind": {"const": "nvflare.resource_stats.attempt_end"},
+        "job_id": {"$ref": "#/$defs/job_id"}, "participant_id": {"$ref": "#/$defs/participant_id"},
+        "attempt_id": {"$ref": "#/$defs/attempt_id"}, "environment_key": {"$ref": "#/$defs/hash_key"},
+        "opened_at": {"$ref": "#/$defs/timestamp"}, "closed_at": {"$ref": "#/$defs/timestamp"},
+        "reason": {"enum": ["released", "failed", "terminated", "launch_failed", "reconfigured"]}
+      }
+    },
+    "participant_start_record": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schema_version", "kind", "job_id", "participant_id", "observed_at", "storage"],
+      "properties": {
+        "schema_version": {"$ref": "#/$defs/schema_version"}, "kind": {"const": "nvflare.resource_stats.participant_start"},
+        "job_id": {"$ref": "#/$defs/job_id"}, "participant_id": {"$ref": "#/$defs/participant_id"},
+        "observed_at": {"$ref": "#/$defs/timestamp"}, "storage": {"$ref": "#/$defs/storage"}
+      }
+    },
+    "participant_final_record": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schema_version", "kind", "job_id", "participant_id", "observed_at", "storage", "retained_content", "f3"],
+      "properties": {
+        "schema_version": {"$ref": "#/$defs/schema_version"}, "kind": {"const": "nvflare.resource_stats.participant_final"},
+        "job_id": {"$ref": "#/$defs/job_id"}, "participant_id": {"$ref": "#/$defs/participant_id"},
+        "observed_at": {"$ref": "#/$defs/timestamp"}, "storage": {"$ref": "#/$defs/storage"},
         "retained_content": {"$ref": "#/$defs/retained_content"}, "f3": {"$ref": "#/$defs/f3"}
       }
     },
-    "attempt_parent_exit": {
-      "type": "object", "additionalProperties": false,
-      "required": ["schema_version", "kind", "job_id", "participant_id", "attempt_id", "environment_key", "observed_at", "outcome"],
-      "properties": {
-        "schema_version": {"$ref": "#/$defs/schema_version"}, "kind": {"const": "nvflare.resource_stats.attempt_parent_exit"},
-        "job_id": {"$ref": "#/$defs/job_id"}, "participant_id": {"$ref": "#/$defs/participant_id"},
-        "attempt_id": {"$ref": "#/$defs/attempt_id"}, "environment_key": {"$ref": "#/$defs/hash_key"},
-        "observed_at": {"$ref": "#/$defs/timestamp"},
-        "outcome": {"enum": ["finished_ok", "finished_error", "terminated", "launch_failed"]},
-        "return_code": {"type": "integer", "minimum": -2147483648, "maximum": 2147483647}
-      },
-      "allOf": [
-        {"if": {"properties": {"outcome": {"const": "launch_failed"}}}, "then": {"not": {"required": ["return_code"]}}, "else": {"required": ["return_code"]}}
-      ]
-    },
     "participant_summary": {
       "type": "object", "additionalProperties": false,
-      "required": ["schema_version", "kind", "job_id", "participant_key", "attempts"],
+      "required": ["schema_version", "kind", "job_id", "participant_key", "start", "final", "attempts"],
       "properties": {
         "schema_version": {"$ref": "#/$defs/schema_version"}, "kind": {"const": "nvflare.resource_stats.participant_summary"},
         "job_id": {"$ref": "#/$defs/job_id"}, "participant_key": {"$ref": "#/$defs/hash_key"},
-        "attempts": {"type": "array", "minItems": 1, "maxItems": 128, "items": {"$ref": "#/$defs/participant_attempt"}}
+        "start": {"$ref": "#/$defs/participant_start_body"},
+        "final": {"$ref": "#/$defs/participant_final_body"},
+        "attempts": {"type": "array", "maxItems": 4096, "items": {"$ref": "#/$defs/participant_attempt"}}
       }
     },
     "resource_summary": {

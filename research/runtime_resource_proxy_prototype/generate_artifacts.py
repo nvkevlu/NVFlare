@@ -12,11 +12,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Generate realistic, self-contained resource-summary artifacts.
+"""Generate realistic, self-contained pre-v1 probe artifacts.
 
 The generator intentionally records what it can actually observe on the local
 machine and marks unbound NVFlare-only signals (currently F3 traffic) as
 unavailable.  It never fabricates a GPU, server process, or network counter.
+
+Its exploratory record shapes predate the canonical roadmap-compatible v1
+contract and deliberately remain historical probe evidence.  Use
+``schema/build_review_artifacts.py`` for normative records and CLI output.
 """
 
 from __future__ import annotations

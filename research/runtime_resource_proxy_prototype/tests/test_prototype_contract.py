@@ -14,7 +14,6 @@
 
 import inspect
 import json
-import os
 import subprocess
 import sys
 import tempfile
@@ -28,11 +27,12 @@ sys.path.insert(0, str(ROOT))
 
 from prototype_contract import (  # noqa: E402
     ATTEMPT_ID_ARGUMENT,
+    HANDOFF_LOCATOR_ARGUMENT,
     LAUNCHER_ATTEMPT_ARG_ALLOWLIST,
     RESOURCE_STATS_COMPONENT,
     FixedResourceStatsStore,
     WriteOnceRecordConflict,
-    ParentOwnedAttemptStore,
+    SupervisorOwnedAttemptStore,
     ReporterLeaseConflict,
     ReporterLeaseRegistry,
     build_sanitized_launch_plan,
@@ -40,6 +40,7 @@ from prototype_contract import (  # noqa: E402
 
 
 ATTEMPT_ID = "a" * 32
+HANDOFF_LOCATOR = "b" * 32
 
 
 class TestSanitizedLaunchPlan(unittest.TestCase):
@@ -49,49 +50,132 @@ class TestSanitizedLaunchPlan(unittest.TestCase):
                 plan = build_sanitized_launch_plan(
                     launcher=launcher,
                     python_executable="/opt/nvflare/python",
-                    module="nvflare.private.fed.app.resource_bootstrap",
+                    trusted_bootstrap_path="/opt/nvflare/platform/resource_bootstrap.py",
                     platform_args=("--workspace", "/workspace"),
-                    environment={"PYTHONPATH": "/job/custom:/site/custom", "KEEP_ME": "yes"},
+                    environment={
+                        "PYTHONPATH": "/job/custom:/site/custom",
+                        "PYTHONHOME": "/job/python",
+                        "KEEP_ME": "no",
+                        "CUDA_VISIBLE_DEVICES": "0",
+                    },
                     attempt_id=ATTEMPT_ID,
+                    handoff_locator=HANDOFF_LOCATOR,
                     custom_import_paths=("/job/custom", "/site/custom"),
+                    platform_owned_cwd="/opt/nvflare/platform",
                 )
-                self.assertEqual(("-S", "-u", "-m"), plan.argv[1:4])
+                self.assertEqual(("-I", "-S", "-u"), plan.argv[1:4])
+                self.assertEqual("/opt/nvflare/platform/resource_bootstrap.py", plan.argv[4])
                 self.assertNotIn("PYTHONPATH", plan.pre_python_environment)
-                self.assertEqual("yes", plan.pre_python_environment["KEEP_ME"])
+                self.assertNotIn("PYTHONHOME", plan.pre_python_environment)
+                self.assertNotIn("KEEP_ME", plan.pre_python_environment)
+                self.assertEqual({"CUDA_VISIBLE_DEVICES": "0"}, plan.pre_python_environment)
                 self.assertEqual(("/job/custom", "/site/custom"), plan.post_snapshot_custom_import_paths)
                 self.assertNotIn("/job/custom", plan.argv)
                 self.assertEqual(1, plan.argv.count(ATTEMPT_ID_ARGUMENT))
-                self.assertEqual(ATTEMPT_ID, plan.argv[-1])
-                self.assertEqual("capture_platform_owned_start_snapshot", plan.bootstrap_steps[1])
+                self.assertEqual(ATTEMPT_ID, plan.argv[plan.argv.index(ATTEMPT_ID_ARGUMENT) + 1])
+                self.assertEqual(1, plan.argv.count(HANDOFF_LOCATOR_ARGUMENT))
+                self.assertEqual(HANDOFF_LOCATOR, plan.argv[-1])
+                self.assertEqual("capture_platform_owned_start_snapshot", plan.bootstrap_steps[2])
                 self.assertEqual("enable_custom_import_paths", plan.bootstrap_steps[-1])
 
     def test_attempt_argument_cannot_be_supplied_by_callers_or_unknown_launchers(self):
-        args = ("--workspace", "/workspace", ATTEMPT_ID_ARGUMENT, "b" * 32)
-        with self.assertRaisesRegex(ValueError, "fixed launcher allowlist"):
-            build_sanitized_launch_plan(
-                "process", "/python", "platform.bootstrap", args, {}, ATTEMPT_ID, ("/job/custom",)
-            )
+        for forbidden_arg, forbidden_value in (
+            (ATTEMPT_ID_ARGUMENT, ATTEMPT_ID),
+            (HANDOFF_LOCATOR_ARGUMENT, HANDOFF_LOCATOR),
+        ):
+            with self.subTest(forbidden_arg=forbidden_arg):
+                args = ("--workspace", "/workspace", forbidden_arg, forbidden_value)
+                with self.assertRaisesRegex(ValueError, "fixed launcher allowlist"):
+                    build_sanitized_launch_plan(
+                        "process",
+                        "/python",
+                        "/platform/bootstrap.py",
+                        args,
+                        {},
+                        ATTEMPT_ID,
+                        HANDOFF_LOCATOR,
+                        ("/job/custom",),
+                        platform_owned_cwd="/platform",
+                    )
         with self.assertRaisesRegex(ValueError, "unsupported launcher"):
-            build_sanitized_launch_plan("unknown", "/python", "platform.bootstrap", (), {}, ATTEMPT_ID)
+            build_sanitized_launch_plan(
+                "unknown",
+                "/python",
+                "/platform/bootstrap.py",
+                (),
+                {},
+                ATTEMPT_ID,
+                HANDOFF_LOCATOR,
+                platform_owned_cwd="/platform",
+            )
         with self.assertRaisesRegex(ValueError, "32 lowercase hexadecimal"):
-            build_sanitized_launch_plan("process", "/python", "platform.bootstrap", (), {}, "ABC")
+            build_sanitized_launch_plan(
+                "process",
+                "/python",
+                "/platform/bootstrap.py",
+                (),
+                {},
+                "ABC",
+                HANDOFF_LOCATOR,
+                platform_owned_cwd="/platform",
+            )
+        with self.assertRaisesRegex(ValueError, "handoff_locator"):
+            build_sanitized_launch_plan(
+                "process",
+                "/python",
+                "/platform/bootstrap.py",
+                (),
+                {},
+                ATTEMPT_ID,
+                "BAD",
+                platform_owned_cwd="/platform",
+            )
+        with self.assertRaisesRegex(ValueError, "inside platform_owned_cwd"):
+            build_sanitized_launch_plan(
+                "process",
+                "/python",
+                "/job/bootstrap.py",
+                (),
+                {},
+                ATTEMPT_ID,
+                HANDOFF_LOCATOR,
+                platform_owned_cwd="/platform",
+            )
 
-    def test_sanitized_python_start_defers_job_sitecustomize_until_after_snapshot(self):
-        """Exercise the pre-Python ordering promise with a real child interpreter.
+    def test_isolated_absolute_bootstrap_defeats_cwd_shadowing_and_defers_custom_imports(self):
+        """Exercise the pre-custom-code boundary with a real child interpreter.
 
         This is intentionally a bootstrap fixture, not a real NVFlare launcher:
-        it proves that the proposed ``-S`` plus stripped ``PYTHONPATH`` boundary
-        prevents a job-owned ``sitecustomize`` from executing before the
-        platform snapshot marker exists.
+        it proves that an absolute platform-owned script plus ``-I -S``, a
+        platform-owned cwd, and the environment allowlist defeat both module
+        shadowing and job-owned ``sitecustomize`` before the snapshot marker.
         """
 
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
+            platform = root / "platform"
+            platform.mkdir()
+            job_cwd = root / "job"
+            malicious_package = job_cwd / "nvflare" / "private" / "fed" / "app"
+            malicious_package.mkdir(parents=True)
+            package_dirs = [
+                job_cwd / "nvflare",
+                job_cwd / "nvflare" / "private",
+                job_cwd / "nvflare" / "private" / "fed",
+                malicious_package,
+            ]
+            for package in package_dirs:
+                (package / "__init__.py").write_text("", encoding="utf-8")
             custom = root / "job_custom"
             custom.mkdir()
             snapshot_marker = root / "snapshot-complete"
             site_marker = root / "job-sitecustomize-ran"
             job_marker = root / "job-module-ran"
+            malicious_marker = root / "job-bootstrap-ran"
+            (malicious_package / "resource_bootstrap.py").write_text(
+                "from pathlib import Path\n" f"Path({str(malicious_marker)!r}).write_text('bad', encoding='utf-8')\n",
+                encoding="utf-8",
+            )
             (custom / "sitecustomize.py").write_text(
                 "from pathlib import Path\n" f"Path({str(site_marker)!r}).write_text('enabled', encoding='utf-8')\n",
                 encoding="utf-8",
@@ -100,16 +184,8 @@ class TestSanitizedLaunchPlan(unittest.TestCase):
                 "from pathlib import Path\n" f"Path({str(job_marker)!r}).write_text('enabled', encoding='utf-8')\n",
                 encoding="utf-8",
             )
-            plan = build_sanitized_launch_plan(
-                "process",
-                sys.executable,
-                "nvflare.private.fed.app.resource_bootstrap",
-                ("--workspace", "/workspace"),
-                {"PYTHONPATH": str(custom)},
-                ATTEMPT_ID,
-                (str(custom),),
-            )
-            bootstrap = textwrap.dedent(
+            bootstrap_path = platform / "resource_bootstrap.py"
+            bootstrap_path.write_text(textwrap.dedent(
                 f"""
                 import importlib
                 import sys
@@ -117,21 +193,31 @@ class TestSanitizedLaunchPlan(unittest.TestCase):
 
                 snapshot = Path({str(snapshot_marker)!r})
                 site_marker = Path({str(site_marker)!r})
+                malicious_marker = Path({str(malicious_marker)!r})
                 assert not site_marker.exists(), 'job sitecustomize ran before snapshot'
+                assert not malicious_marker.exists(), 'job bootstrap shadowed platform bootstrap'
                 snapshot.write_text('captured', encoding='utf-8')
                 sys.path.insert(0, {str(custom)!r})
                 importlib.import_module('sitecustomize')
                 importlib.import_module('job_module')
                 assert snapshot.exists()
                 """
+            ), encoding="utf-8")
+            plan = build_sanitized_launch_plan(
+                "process",
+                sys.executable,
+                str(bootstrap_path),
+                ("--workspace", "/workspace"),
+                {"PYTHONPATH": str(custom), "PYTHONHOME": str(job_cwd), "KEEP_ME": "no"},
+                ATTEMPT_ID,
+                HANDOFF_LOCATOR,
+                (str(custom),),
+                platform_owned_cwd=str(platform),
             )
-            child_environment = dict(os.environ)
-            child_environment.pop("PYTHONPATH", None)
-            child_environment.update(plan.pre_python_environment)
             completed = subprocess.run(
-                [sys.executable, "-S", "-u", "-c", bootstrap],
-                cwd=root,
-                env=child_environment,
+                plan.argv,
+                cwd=plan.platform_owned_cwd,
+                env=plan.pre_python_environment,
                 check=False,
                 capture_output=True,
                 text=True,
@@ -140,6 +226,7 @@ class TestSanitizedLaunchPlan(unittest.TestCase):
             self.assertTrue(snapshot_marker.is_file())
             self.assertTrue(site_marker.is_file())
             self.assertTrue(job_marker.is_file())
+            self.assertFalse(malicious_marker.exists())
 
 
 class TestReporterLeaseRegistry(unittest.TestCase):
@@ -157,49 +244,55 @@ class TestReporterLeaseRegistry(unittest.TestCase):
         self.assertFalse(other_job.as_record()["participant_total_is_capacity"])
 
 
-class TestParentOwnedAttemptStore(unittest.TestCase):
-    def test_child_records_are_write_once_parent_owned_and_crash_exit_invents_no_final_sample(self):
+class TestSupervisorOwnedAttemptStore(unittest.TestCase):
+    def test_worker_records_are_write_once_and_terminated_window_invents_no_final_sample(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             job_writable_root = root / "job_writable"
-            parent_owned_root = root / "parent_owned"
-            store = ParentOwnedAttemptStore(parent_owned_root, job_writable_root)
-            child_record = {
+            supervisor_owned_root = root / "supervisor_owned"
+            store = SupervisorOwnedAttemptStore(supervisor_owned_root, job_writable_root)
+            worker_record = {
                 "schema_version": "prototype-0.3",
                 "kind": "nvflare.resource_stats.attempt_start",
                 "job_id": "job-a",
                 "attempt_id": ATTEMPT_ID,
-                "snapshot": {"metric_count": 4},
+                "snapshot": {"resource_types": ["cpu", "memory", "gpu"]},
             }
 
-            first = store.persist_child_fragment("job-a", ATTEMPT_ID, "start.json", child_record)
-            replay = store.persist_child_fragment("job-a", ATTEMPT_ID, "start.json", child_record)
+            first = store.persist_worker_fragment("job-a", ATTEMPT_ID, "start.json", worker_record)
+            replay = store.persist_worker_fragment("job-a", ATTEMPT_ID, "start.json", worker_record)
             self.assertTrue(first.created)
             self.assertFalse(replay.created)
             with self.assertRaises(ValueError):
                 first.path.relative_to(job_writable_root)
 
-            stored_child = json.loads(first.path.read_text(encoding="utf-8"))
-            self.assertEqual("platform_parent", stored_child["trust"]["storage_owner"])
-            self.assertEqual("child_self_reported", stored_child["trust"]["content_origin"])
-            self.assertTrue(stored_child["trust"]["authenticated_handoff_required"])
+            stored_worker = json.loads(first.path.read_text(encoding="utf-8"))
+            self.assertEqual("site_supervisor", stored_worker["trust"]["storage_owner"])
+            self.assertEqual("worker_self_reported", stored_worker["trust"]["content_origin"])
+            self.assertTrue(stored_worker["trust"]["authenticated_handoff_required"])
 
-            conflicting_record = {**child_record, "snapshot": {"metric_count": 5}}
+            conflicting_record = {**worker_record, "snapshot": {"resource_types": ["cpu", "memory"]}}
             with self.assertRaises(WriteOnceRecordConflict):
-                store.persist_child_fragment("job-a", ATTEMPT_ID, "start.json", conflicting_record)
+                store.persist_worker_fragment("job-a", ATTEMPT_ID, "start.json", conflicting_record)
 
-            exit_receipt = store.record_crash_parent_exit("job-a", ATTEMPT_ID, "2026-09-04T12:00:00Z", 137)
-            exit_record = json.loads(exit_receipt.path.read_text(encoding="utf-8"))
-            self.assertEqual("parent_observed_lifecycle", exit_record["trust"]["content_origin"])
-            self.assertEqual("absent", exit_record["child_final"]["state"])
-            self.assertEqual("parent_observed_exit", exit_record["observation_end"]["basis"])
-            self.assertEqual("not_invented", exit_record["resource_observations"]["state"])
+            end_receipt = store.record_attempt_end_without_final(
+                "job-a", ATTEMPT_ID, "2026-09-04T11:59:00Z", "2026-09-04T12:00:00Z", "terminated"
+            )
+            end_record = json.loads(end_receipt.path.read_text(encoding="utf-8"))
+            self.assertEqual("supervisor_observed_lifecycle", end_record["trust"]["content_origin"])
+            self.assertEqual("absent", end_record["worker_final"]["state"])
+            self.assertEqual("2026-09-04T11:59:00Z", end_record["opened_at"])
+            self.assertEqual("2026-09-04T12:00:00Z", end_record["closed_at"])
+            self.assertEqual("site_supervisor", end_record["resource_window"]["clock_owner"])
+            self.assertEqual("supervisor_confirmed_acquire_release", end_record["resource_window"]["basis"])
+            self.assertEqual("terminated", end_record["reason"])
+            self.assertEqual("not_invented", end_record["resource_observations"]["state"])
 
     def test_parent_storage_must_not_overlap_job_writable_storage(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             with self.assertRaisesRegex(ValueError, "must not overlap"):
-                ParentOwnedAttemptStore(root / "job_writable" / "resource_stats", root / "job_writable")
+                SupervisorOwnedAttemptStore(root / "job_writable" / "resource_stats", root / "job_writable")
 
 
 class TestFixedResourceStatsStore(unittest.TestCase):

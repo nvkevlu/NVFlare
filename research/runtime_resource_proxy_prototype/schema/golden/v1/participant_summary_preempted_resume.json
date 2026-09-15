@@ -1,0 +1,170 @@
+{
+  "schema_version": "1.0",
+  "kind": "nvflare.resource_stats.participant_summary",
+  "job_id": "job-preempted-resume",
+  "participant_key": "sha256-eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+  "start": {
+    "observed_at": "2026-09-09T14:00:00Z",
+    "storage": {
+      "status": "reported",
+      "capacity_bytes": "1099511627776"
+    }
+  },
+  "final": {
+    "observed_at": "2026-09-09T14:08:00Z",
+    "storage": {
+      "status": "reported",
+      "capacity_bytes": "1099511627776"
+    },
+    "retained_content": {
+      "status": "reported",
+      "entries": [
+        {
+          "relative_path": "result/model.pt",
+          "size_bytes": "18874368",
+          "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        }
+      ]
+    },
+    "f3": {
+      "status": "reported",
+      "remote_accepted": {
+        "payload_bytes": "5632",
+        "messages": "2"
+      },
+      "local_delivered": {
+        "payload_bytes": "256",
+        "messages": "1"
+      },
+      "remote_failed_before_acceptance": {
+        "payload_bytes": "0",
+        "messages": "0"
+      }
+    }
+  },
+  "attempts": [
+    {
+      "attempt_id": "55555555555555555555555555555555",
+      "environment_key": "sha256-5555555555555555555555555555555555555555555555555555555555555555",
+      "opened_at": "2026-09-09T14:00:00Z",
+      "start": {
+        "capacity": {
+          "cpu": {
+            "status": "reported",
+            "visible_units": "1.5",
+            "architecture": "x86_64",
+            "evidence": {
+              "affinity_count": "4",
+              "cpuset_count": "4",
+              "quota_units": "1.5"
+            },
+            "model": "AMD EPYC 9654"
+          },
+          "memory": {
+            "status": "reported",
+            "visible_bytes": "8589934592",
+            "evidence": {
+              "physical_bytes": "68719476736",
+              "cgroup_limit_bytes": "8589934592"
+            }
+          },
+          "gpu": {
+            "status": "reported",
+            "cuda_mask_present": true,
+            "groups": [
+              {
+                "kind": "full_gpu",
+                "count": "1",
+                "model": "NVIDIA H100 80GB HBM3",
+                "memory_bytes": "85899345920"
+              }
+            ]
+          }
+        }
+      },
+      "end": {
+        "closed_at": "2026-09-09T14:01:00Z",
+        "reason": "terminated"
+      }
+    },
+    {
+      "attempt_id": "66666666666666666666666666666666",
+      "environment_key": "sha256-5555555555555555555555555555555555555555555555555555555555555555",
+      "opened_at": "2026-09-09T14:06:00Z",
+      "start": {
+        "capacity": {
+          "cpu": {
+            "status": "reported",
+            "visible_units": "2",
+            "architecture": "x86_64",
+            "evidence": {
+              "affinity_count": "8",
+              "cpuset_count": "8",
+              "quota_units": "2"
+            },
+            "model": "Intel Xeon Platinum 8480+"
+          },
+          "memory": {
+            "status": "reported",
+            "visible_bytes": "17179869184",
+            "evidence": {
+              "physical_bytes": "68719476736",
+              "cgroup_limit_bytes": "17179869184"
+            }
+          },
+          "gpu": {
+            "status": "reported",
+            "cuda_mask_present": true,
+            "groups": [
+              {
+                "kind": "full_gpu",
+                "count": "2",
+                "model": "NVIDIA A100 80GB PCIe",
+                "memory_bytes": "85899345920"
+              }
+            ]
+          }
+        }
+      },
+      "final": {
+        "capacity": {
+          "cpu": {
+            "status": "reported",
+            "visible_units": "2",
+            "architecture": "x86_64",
+            "evidence": {
+              "affinity_count": "8",
+              "cpuset_count": "8",
+              "quota_units": "2"
+            },
+            "model": "Intel Xeon Platinum 8480+"
+          },
+          "memory": {
+            "status": "reported",
+            "visible_bytes": "17179869184",
+            "evidence": {
+              "physical_bytes": "68719476736",
+              "cgroup_limit_bytes": "17179869184"
+            }
+          },
+          "gpu": {
+            "status": "reported",
+            "cuda_mask_present": true,
+            "groups": [
+              {
+                "kind": "full_gpu",
+                "count": "2",
+                "model": "NVIDIA A100 80GB PCIe",
+                "memory_bytes": "85899345920"
+              }
+            ]
+          }
+        }
+      },
+      "end": {
+        "closed_at": "2026-09-09T14:08:00Z",
+        "reason": "released"
+      }
+    }
+  ]
+}

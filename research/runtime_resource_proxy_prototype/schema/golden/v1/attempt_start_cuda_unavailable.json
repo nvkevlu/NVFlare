@@ -5,19 +5,18 @@
   "participant_id": "site-mask-only",
   "attempt_id": "33333333333333333333333333333333",
   "environment_key": "sha256-3333333333333333333333333333333333333333333333333333333333333333",
-  "observed_at": "2026-09-09T15:01:00Z",
-  "collection_state": "enabled",
+  "opened_at": "2026-09-09T15:01:00Z",
   "capacity": {
     "cpu": {
       "status": "reported",
       "visible_units": "1.5",
-      "model": "AMD EPYC 9654",
       "architecture": "x86_64",
       "evidence": {
         "affinity_count": "4",
         "cpuset_count": "4",
         "quota_units": "1.5"
-      }
+      },
+      "model": "AMD EPYC 9654"
     },
     "memory": {
       "status": "reported",
@@ -26,10 +25,6 @@
         "physical_bytes": "68719476736",
         "cgroup_limit_bytes": "8589934592"
       }
-    },
-    "storage": {
-      "status": "reported",
-      "capacity_bytes": "1099511627776"
     },
     "gpu": {
       "status": "unavailable",

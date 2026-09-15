@@ -1,0 +1,36 @@
+{
+  "schema_version": "1.0",
+  "kind": "nvflare.resource_stats.participant_final",
+  "job_id": "job-20260909-001",
+  "participant_id": "site-1",
+  "observed_at": "2026-09-09T14:08:00Z",
+  "storage": {
+    "status": "reported",
+    "capacity_bytes": "1099511627776"
+  },
+  "retained_content": {
+    "status": "reported",
+    "entries": [
+      {
+        "relative_path": "result/model.pt",
+        "size_bytes": "18874368",
+        "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+      }
+    ]
+  },
+  "f3": {
+    "status": "reported",
+    "remote_accepted": {
+      "payload_bytes": "5632",
+      "messages": "2"
+    },
+    "local_delivered": {
+      "payload_bytes": "256",
+      "messages": "1"
+    },
+    "remote_failed_before_acceptance": {
+      "payload_bytes": "0",
+      "messages": "0"
+    }
+  }
+}

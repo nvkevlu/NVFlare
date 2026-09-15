@@ -11,17 +11,17 @@
       "schema_version": "1.0",
       "kind": "nvflare.resource_stats.resource_summary",
       "job_id": "job-20260909-001",
-      "report_cutoff_at": "2026-09-09T14:06:00Z",
-      "finalized_at": "2026-09-09T14:06:00.1Z",
+      "report_cutoff_at": "2026-09-09T14:08:01Z",
+      "finalized_at": "2026-09-09T14:08:01.1Z",
       "roster": [
         {
           "participant_id": "site-1",
           "participant_key": "sha256-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
           "role": "client",
           "status": "accepted",
-          "received_at": "2026-09-09T14:05:43Z",
-          "summary_sha256": "7cade0ee3ace5f2f59b4b005ca426338ecceaf7bfbe1f828d3e223eef58481b2",
-          "observation_seconds": "342.5",
+          "received_at": "2026-09-09T14:08:00.1Z",
+          "summary_sha256": "1e3ceb4962f4b1b0726236d310bd8f94a1a0a9bfe51faa1c65a99c58f232cc01",
+          "resource_window_seconds": "480",
           "totals": {
             "cpu": {
               "status": "reported",
@@ -29,17 +29,17 @@
                 {
                   "model": "AMD EPYC 9654",
                   "architecture": "x86_64",
-                  "unit_seconds": "513.75"
+                  "unit_seconds": "720"
                 }
               ]
             },
             "memory": {
               "status": "reported",
-              "byte_seconds": "2942052597760"
+              "byte_seconds": "4123168604160"
             },
             "storage": {
               "status": "reported",
-              "byte_seconds": "376582732513280"
+              "byte_seconds": "527765581332480"
             },
             "gpu": {
               "status": "reported",
@@ -48,7 +48,7 @@
                   "kind": "full_gpu",
                   "model": "NVIDIA H100 80GB HBM3",
                   "memory_bytes": "85899345920",
-                  "instance_seconds": "342.5"
+                  "instance_seconds": "180"
                 }
               ]
             },
@@ -79,17 +79,17 @@
             {
               "model": "AMD EPYC 9654",
               "architecture": "x86_64",
-              "unit_seconds": "513.75"
+              "unit_seconds": "720"
             }
           ]
         },
         "memory": {
           "status": "partial",
-          "byte_seconds": "2942052597760"
+          "byte_seconds": "4123168604160"
         },
         "storage": {
           "status": "partial",
-          "byte_seconds": "376582732513280"
+          "byte_seconds": "527765581332480"
         },
         "gpu": {
           "status": "partial",
@@ -98,7 +98,7 @@
               "kind": "full_gpu",
               "model": "NVIDIA H100 80GB HBM3",
               "memory_bytes": "85899345920",
-              "instance_seconds": "342.5"
+              "instance_seconds": "180"
             }
           ]
         },

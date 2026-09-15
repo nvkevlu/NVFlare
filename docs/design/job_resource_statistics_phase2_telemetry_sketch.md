@@ -1,7 +1,7 @@
 # NVFlare Phase 2 — Publishing Finalized Resource Statistics
 
-**Status:** Integration sketch. Phase 1 owns the approved candidate-v1 contract and remains the
-implementation priority. Phase 2 may publish selected finalized Phase 1 values through
+**Status:** Integration sketch. The Phase 1 candidate-v1 contract is ready for design review and
+remains the implementation priority. Phase 2 may publish selected finalized Phase 1 values through
 **JobStatsReporter**; it does not define another collector or data model.
 
 For the full path from observation to CLI/export, start with the
@@ -14,7 +14,7 @@ defines the exact records.
 
 | Layer | Owns | Does not own |
 | --- | --- | --- |
-| Phase 1 | Trusted bootstrap, typed lifecycle records, parent-owned durable storage, participant acceptance, derivation, server finalization, archive/manifest, RESOURCE_STATS, and CLI semantics. | Utilization, allocation, billing, or external telemetry delivery. |
+| Phase 1 | Logical-participant and stable-vector attempt records, trusted bootstrap/reconfigure hook, supervisor-owned durable storage, participant acceptance, derivation, server finalization, archive/manifest, RESOURCE_STATS, and CLI semantics. | Utilization, billing, or external telemetry delivery. |
 | Phase 2 | A bounded adapter that reads the validated, finalized Phase 1 result and publishes selected facts through JobStatsReporter. | Collection authority, formulas, participant acceptance, retry replacement, F3 classification, or durable evidence. |
 | Existing JobStatsReporter diagnostics | Current job/round/task reports and compatibility behavior. | Canonical Phase 1 evidence. |
 
@@ -33,6 +33,9 @@ Phase 2 starts only after the server has:
 6. saved those exact bytes behind the narrow **RESOURCE_STATS** component API.
 
 Publication failure is non-fatal and never changes the finalized job or its stored statistics.
+Phase 2 receives no event for individual vector open/reconfiguration, allocation release,
+checkpoint, or resume.
+Those events are normalized by Phase 1 before publication.
 
 ## 2. Canonical Phase 1 input
 
@@ -43,32 +46,53 @@ or resource-manager allocation results.
 The resource summary contains:
 
 - flat **job_id**, **report_cutoff_at**, and **finalized_at**;
-- a frozen roster, with role stored once per roster entry;
-- for accepted entries, **received_at**, **summary_sha256**, **observation_seconds**, and compact
+- a fixed expected-participant roster sourced from authenticated job-selection/deployment state
+  independently of report arrivals, made immutable and classified at the report cutoff, with role
+  stored once per roster entry;
+- for accepted entries, **received_at**, **summary_sha256**, **resource_window_seconds**, and compact
   flat totals; and
 - flat job totals for CPU, memory, storage, GPU, retained content, and F3.
 
 There is no summary revision. At the Phase 1 acceptance boundary, the first valid authenticated
 participant summary received by the cutoff wins. An identical-digest retry is a no-op; a
 conflicting replacement is rejected; and an invalid candidate does not reserve the slot.
-Distinct executions remain immutable attempt entries in the participant file.
+Distinct stable `(resource lease, reporter environment, capacity vector)` windows remain immutable
+attempt entries in the participant file. One scheduler allocation may contain several concurrent
+reporter-environment attempts, and a partial resource change may split one environment into
+sequential attempts. Multiple attempts therefore do not imply failure.
 
-**observation_seconds** is a convenience value derived by Phase 1 from enabled attempt
-intervals. For each interval, Phase 1 uses startup capacity multiplied by:
-
-~~~text
-final observed_at - start observed_at
-~~~
-
-or, when no valid final was received:
+**resource_window_seconds** is a convenience value derived by Phase 1 from accepted attempt
+intervals. It is their sum and may exceed participant wall time when environments overlap. For
+CPU, memory, and GPU, each interval uses start capacity multiplied by:
 
 ~~~text
-parent-exit observed_at - start observed_at
+end.closed_at - opened_at
 ~~~
 
-The latter result is partial. A valid final retains its complete capacity snapshot plus retained
-content and F3 facts. A final is never invented after a crash. Phase 2 consumes these outcomes; it
-does not repeat the duration or resource-time calculation.
+Both boundaries come from one durable lifecycle-owner clock. **opened_at** is recorded at
+confirmed acquisition before bootstrap, so bootstrap time is included. Worker start/final
+snapshots carry no duration timestamp. An optional final is capacity-stability evidence only. A
+missing final makes the affected compute result partial, but a final is never invented after a
+crash or preemption.
+
+A GPU-only change closes the old vector as **reconfigured** and immediately opens a CPU/memory
+plus zero-GPU successor when those resources remain held. Only a full-release interval with no
+open environment attempt adds zero to every transient compute total. A launch failure after
+acquisition still contributes its known open/close duration to `resource_window_seconds`, but its
+missing capacity makes transient totals partial or unavailable.
+
+`reconfigured` is a one-way lifecycle assertion: it requires an immediate same-environment
+successor at the exact close boundary. When both capacity snapshots are comparable, they must
+differ; a successor whose snapshot is unavailable is still representable and makes affected
+totals partial or unavailable. A fully released lease may instead be reacquired at that same
+timestamp and may expose a different vector without being relabeled as reconfiguration.
+
+Storage-capacity time instead spans the logical participant's start and final storage
+observations, including release/resume gaps, only when the supervisor guarantees that the
+workspace remained continuously available; otherwise storage is partial or unavailable.
+Retained content and all-job F3 counters are finalized once
+at participant finalization. Phase 2 consumes these outcomes; it does not repeat either formula,
+pair fragments across resumptions, or infer allocation state.
 
 ## 3. What JobStatsReporter may publish
 
@@ -78,13 +102,13 @@ unambiguous Phase 1 source:
 
 | Published concept | Phase 1 field | Meaning |
 | --- | --- | --- |
-| CPU time | totals.cpu.groups[].unit_seconds | Startup-visible CPU units multiplied by observed time, grouped by optional model/architecture. |
-| Memory time | totals.memory.byte_seconds | Startup-visible memory bytes multiplied by observed time. |
-| Storage-capacity time | totals.storage.byte_seconds | Run-filesystem capacity bytes multiplied by observed time; not occupancy or retained size. |
-| GPU time | totals.gpu.groups[].instance_seconds | CUDA-validated visible instances multiplied by observed time, kept separate by kind and optional metadata. |
+| CPU time | totals.cpu.groups[].unit_seconds | Attempt-start CPU units multiplied by resource-window time, grouped by optional model/architecture. |
+| Memory time | totals.memory.byte_seconds | Attempt-start memory bytes multiplied by resource-window time. |
+| Storage-capacity time | totals.storage.byte_seconds | Participant-start run-filesystem capacity multiplied by logical-participant time; not occupancy or retained size. |
+| GPU time | totals.gpu.groups[].instance_seconds | CUDA-validated attempt-start instances multiplied by resource-window time, kept separate by kind and optional metadata. |
 | Retained content | totals.retained_content.bytes | Sum of frozen platform-registered retained file sizes. |
-| Primary F3 traffic | totals.f3.remote_accepted.{payload_bytes,messages} | Remote application payload accepted by transport before the fixed cutoff. |
-| Participant duration | roster[].observation_seconds | Checked sum of accepted enabled attempt intervals. |
+| Primary F3 traffic | totals.f3.remote_accepted.{payload_bytes,messages} | Remote application payload accepted by transport before the participant-final counter freeze. |
+| Resource-window duration | roster[].resource_window_seconds | Checked sum of stable environment-vector intervals; it may exceed logical participant wall time when environments overlap. |
 | Roster state | roster[].status | One of accepted, missing, invalid, or disabled. |
 
 Job totals should be the default publication. Per-participant series are optional and require an
@@ -96,8 +120,11 @@ Every compact total has status **reported**, **partial**, or **unavailable**.
 - Publish a numeric value only for reported or partial.
 - Never publish unavailable as numeric zero.
 - Carry the bounded status as a backend attribute or companion state signal.
-- Derive counts such as expected/accepted/missing from the frozen roster at publication time.
+- Derive counts such as expected/accepted/missing from the fixed roster at publication time.
 - Do not create stored warning, coverage, or contributor fields beside the total.
+
+Roster membership must never be reconstructed from the reports that happened to arrive; doing so
+would silently remove missing participants from coverage.
 
 Source-level issues stay in detailed Phase 1 records. Compact totals intentionally have no issue
 array. The exporter should not turn arbitrary source detail into high-cardinality labels.
@@ -123,22 +150,33 @@ data remains available without mixing it into a generic GPU count.
 
 ## 5. F3 authority remains in Phase 1
 
-Every accepted Phase 1 final with numeric F3 facts has the same five factual buckets:
+Every accepted Phase 1 participant final with numeric F3 facts has the same three factual buckets:
 
 | Bucket | Phase 1 meaning |
 | --- | --- |
-| remote_accepted | Remote payload accepted by transport before cutoff. |
+| remote_accepted | Remote payload accepted by transport before the participant-final counter freeze. |
 | local_delivered | Direct/local delivery, reported separately. |
 | remote_failed_before_acceptance | Remote send that failed before acceptance. |
-| late_after_cutoff | Post-cutoff traffic excluded from the frozen primary total. |
-| summary_excluded | Resource-summary publication traffic excluded through a platform-owned, non-spoofable path. |
 
 Each bucket contains canonical integer-string **payload_bytes** and **messages**. Phase 1 fixes
-the included traffic classes, sender-acceptance point, cutoff, and exclusion path. A job cannot
-select its own class or mark ordinary traffic as summary traffic.
+the included classes to `task_request`, `task_response`, `task_result`, `job_application`, and
+`job_stream_data`. It excludes `job_stream_control`, `bulk_envelope`, `workspace_transfer`,
+`platform_control`, `log_export`, unknown classes, and summary publication. A job cannot select
+its own class or mark ordinary traffic as summary traffic.
 
-The compact resource summary intentionally publishes only **remote_accepted**. If a later
-telemetry view needs the other four diagnostic buckets, it must read the already validated
+Phase 1 counts `len(message.payload)` after payload encoding and optional end-to-end encryption,
+immediately before the direct-delivery or remote-send boundary. It excludes headers, transport
+framing, TLS/network overhead, compression effects, and retransmissions. Counts are per
+destination and per sender hop, so fan-out and forwarding are hop traffic rather than unique
+logical data. A remote bucket increments only after send acceptance; direct delivery remains
+separate. Before participant-final serialization, the durable participant owner atomically freezes
+all three counters; callbacks completing after the freeze are ignored for canonical totals.
+Summary publication uses a platform-only exclusion path. Neither behavior is represented by a
+stored counter, and counting summary publication inside the summary itself would be circular.
+
+These counters span the logical participant, including traffic while no GPU attempt is open. The
+compact resource summary intentionally publishes only **remote_accepted**. If a later
+telemetry view needs the other two diagnostic buckets, it must read the already validated
 participant bundle under a separately reviewed bounded mapping. It must not estimate the values
 from JobStatsReporter task payload sizes, communication time, receiver counts, or process-wide
 statistics.
@@ -170,7 +208,7 @@ resource-summary bytes. This is transport deduplication, not a mutable summary r
 publishes the same values; Phase 2 never replaces the Phase 1 record.
 
 If validation or the narrow lookup fails, emit an exporter error through normal observability and
-publish no resource values. Do not fall back to child fragments, current host probes, or the
+publish no resource values. Do not fall back to resource-worker fragments, current host probes, or the
 existing reporter's sampled resource fields.
 
 ## 7. Privacy, cardinality, and units
@@ -182,14 +220,14 @@ The typed location defines each unit:
 - GPU uses instance-seconds;
 - retained content and F3 payload use bytes;
 - F3 message counts use messages; and
-- observation duration uses seconds.
+- resource-window duration uses seconds.
 
 The adapter may convert base units for a human report, but machine telemetry should preserve the
 canonical decimal value or use a backend representation that can do so without silent
 large-integer loss. Do not parse U128-range decimal strings through an IEEE-754 number first.
 
 Allowed dimensions should be closed and small: resource kind, total status, GPU kind, and
-optionally approved normalized hardware labels. Role comes only from the frozen roster if a
+optionally approved normalized hardware labels. Role comes only from the fixed roster if a
 participant view is enabled. Do not export raw participant IDs/keys, attempt IDs, environment
 keys, paths, hashes, host/container/pod identity, GPU UUID/PCI identity, or issue text as default
 labels.
@@ -230,6 +268,9 @@ publication task or into Phase 1 resource-time totals.
 Required tests:
 
 - exact byte/object handoff after Phase 1 finalization and refusal before finalization;
+- the main three-window result maps 480 CPU/memory window-seconds, 180 GPU-instance-seconds, and
+  480 participant-storage seconds; a separate preempt/resume result preserves a true full-release
+  gap and partial totals;
 - reported, partial, and unavailable mapping without invented zeros;
 - roster-derived accepted/missing/invalid/disabled counts;
 - full-GPU, MIG, no-MIG, suppressed model, and heterogeneous-CPU cases;
@@ -242,4 +283,4 @@ Required tests:
 The remaining choices are intentionally integration-specific: telemetry backend, final metric
 names, whether per-participant series are useful, hardware-model label policy, enablement
 default, retry/retention limits, authorization, and compatibility placement in
-JobStatsReporter. None of these choices may change the approved Phase 1 schema or formulas.
+JobStatsReporter. Any accepted integration must preserve the reviewed Phase 1 schema and formulas.

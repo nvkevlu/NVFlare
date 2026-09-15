@@ -17,7 +17,7 @@
 The normal generator deliberately captures only what the local process can
 actually observe.  These fixtures exercise proposed runtime boundaries that
 cannot be honestly installed in this standalone process yet: a CUDA runtime
-adapter, a trusted F3 sender hook, a parent/child handoff, and platform-owned
+adapter, a trusted F3 sender hook, a supervisor/worker handoff, and platform-owned
 launcher preparation.  Every file emitted here declares itself a synthetic
 contract fixture; none is a local resource observation or production evidence.
 """
@@ -33,7 +33,7 @@ from typing import Any
 from f3_finalization import F3FinalizationCounter, JobTrafficClass, JobTrafficEvent
 from prototype_contract import (
     FixedResourceStatsStore,
-    ParentOwnedAttemptStore,
+    SupervisorOwnedAttemptStore,
     ReporterLeaseConflict,
     ReporterLeaseRegistry,
     RESOURCE_STATS_COMPONENT,
@@ -43,7 +43,8 @@ from runtime_probe import probe_gpu_records
 
 
 _FIXTURE_ATTEMPT_ID = "1" * 32
-_CRASH_FIXTURE_ATTEMPT_ID = "2" * 32
+_FIXTURE_HANDOFF_LOCATOR = "4" * 32
+_TERMINATED_FIXTURE_ATTEMPT_ID = "2" * 32
 
 
 def _json_bytes(value: Any) -> bytes:
@@ -123,10 +124,22 @@ def _f3_fixture() -> dict[str, Any]:
     counter.send_remote(JobTrafficEvent(JobTrafficClass.TASK_RESULT, 4096), lambda: None)
     counter.deliver_direct(JobTrafficEvent(JobTrafficClass.JOB_APPLICATION, 256), lambda: None)
     counter.send_remote(JobTrafficEvent(JobTrafficClass.PLATFORM_CONTROL, 64), lambda: None)
+    frozen = counter.freeze()
     counter.summary_publisher().send_remote(JobTrafficEvent(JobTrafficClass.JOB_APPLICATION, 1024), lambda: None)
-    counter.freeze()
     counter.send_remote(JobTrafficEvent(JobTrafficClass.TASK_RESULT, 512), lambda: None)
-    snapshot = counter.snapshot()
+    post_cutoff = counter.snapshot()
+    def canonical_counter(bucket: dict[str, int]) -> dict[str, int]:
+        return {"payload_bytes": bucket["payload_bytes"], "messages": bucket["message_count"]}
+
+    canonical_f3 = {
+        "status": "reported",
+        "remote_accepted": canonical_counter(frozen["outcomes"]["remote_transport_accepted"]),
+        "local_delivered": canonical_counter(frozen["outcomes"]["local_delivery"]),
+        "remote_failed_before_acceptance": {
+            "payload_bytes": frozen["diagnostics"]["before_transport_acceptance_failed"]["attempted_payload_bytes"],
+            "messages": frozen["diagnostics"]["before_transport_acceptance_failed"]["attempted_message_count"],
+        },
+    }
     return {
         "schema_version": "prototype-0.3",
         "kind": "nvflare.resource_stats.f3_finalization_fixture",
@@ -134,20 +147,22 @@ def _f3_fixture() -> dict[str, Any]:
         "primary_metrics": [
             {
                 "name": "f3_payload_bytes_sent",
-                "value": snapshot["outcomes"]["remote_transport_accepted"]["payload_bytes"],
+                "value": canonical_f3["remote_accepted"]["payload_bytes"],
                 "unit": "bytes",
                 "scope": "outbound_sender_hop",
                 "status": "reported",
             },
             {
                 "name": "f3_message_count_sent",
-                "value": snapshot["outcomes"]["remote_transport_accepted"]["message_count"],
+                "value": canonical_f3["remote_accepted"]["messages"],
                 "unit": "messages",
                 "scope": "outbound_sender_hop",
                 "status": "reported",
             },
         ],
-        "counter": snapshot,
+        "canonical_f3": canonical_f3,
+        "included_traffic_classes": frozen["included_traffic_classes"],
+        "post_cutoff_diagnostics_not_embedded_in_summary": post_cutoff["diagnostics"],
     }
 
 
@@ -157,16 +172,25 @@ def _bootstrap_fixture() -> dict[str, Any]:
         plan = build_sanitized_launch_plan(
             launcher=launcher,
             python_executable="/opt/nvflare/python",
-            module="nvflare.private.fed.app.resource_bootstrap",
+            trusted_bootstrap_path="/opt/nvflare/platform/resource_bootstrap.py",
             platform_args=("--workspace", "/workspace"),
-            environment={"PYTHONPATH": "/job/custom:/site/custom", "NVFLARE_PLATFORM": "fixture"},
+            environment={
+                "PYTHONPATH": "/job/custom:/site/custom",
+                "PYTHONHOME": "/job/python",
+                "CUDA_VISIBLE_DEVICES": "fixture-mask-never-exported",
+            },
             attempt_id=_FIXTURE_ATTEMPT_ID,
+            handoff_locator=_FIXTURE_HANDOFF_LOCATOR,
             custom_import_paths=("/job/custom", "/site/custom"),
+            platform_owned_cwd="/opt/nvflare/platform",
         )
         plans.append(
             {
                 "launcher": plan.launcher,
                 "attempt_id": plan.attempt_id,
+                "handoff_locator": plan.handoff_locator,
+                "platform_owned_cwd": plan.platform_owned_cwd,
+                "trusted_bootstrap_path": plan.trusted_bootstrap_path,
                 "argv": list(plan.argv),
                 "pre_python_environment": plan.pre_python_environment,
                 "post_snapshot_custom_import_paths": list(plan.post_snapshot_custom_import_paths),
@@ -179,7 +203,9 @@ def _bootstrap_fixture() -> dict[str, Any]:
         "provenance": "synthetic_contract_fixture",
         "plans": plans,
         "production_gap": (
-            "Every real launcher must still invoke the platform bootstrap and preserve this exact argument."
+            "Every real launcher must provision the absolute bootstrap as a platform-owned file, use the "
+            "platform-owned working directory and minimal environment, and preserve the exact attempt and "
+            "handoff arguments."
         ),
     }
 
@@ -205,9 +231,9 @@ def _lease_fixture(job_id: str) -> dict[str, Any]:
 
 def _fragment_fixture(root: Path, job_id: str) -> dict[str, Any]:
     job_writable_root = root / "simulated_job_writable"
-    parent_owned_root = root / "parent_owned_fragments"
-    store = ParentOwnedAttemptStore(parent_owned_root, job_writable_root)
-    start = store.persist_child_fragment(
+    supervisor_owned_root = root / "supervisor_owned_fragments"
+    store = SupervisorOwnedAttemptStore(supervisor_owned_root, job_writable_root)
+    start = store.persist_worker_fragment(
         job_id,
         _FIXTURE_ATTEMPT_ID,
         "start.json",
@@ -216,10 +242,13 @@ def _fragment_fixture(root: Path, job_id: str) -> dict[str, Any]:
             "kind": "nvflare.resource_stats.attempt_start",
             "job_id": job_id,
             "attempt_id": _FIXTURE_ATTEMPT_ID,
-            "snapshot": {"provenance": "synthetic_contract_fixture", "metric_count": 4},
+            "snapshot": {
+                "provenance": "synthetic_contract_fixture",
+                "resource_types": ["cpu", "memory", "gpu"],
+            },
         },
     )
-    final = store.persist_child_fragment(
+    final = store.persist_worker_fragment(
         job_id,
         _FIXTURE_ATTEMPT_ID,
         "final.json",
@@ -231,29 +260,30 @@ def _fragment_fixture(root: Path, job_id: str) -> dict[str, Any]:
             "finalization": {"state": "finished_ok"},
         },
     )
-    crash = store.record_crash_parent_exit(
+    terminated = store.record_attempt_end_without_final(
         job_id,
-        _CRASH_FIXTURE_ATTEMPT_ID,
+        _TERMINATED_FIXTURE_ATTEMPT_ID,
+        "2026-09-04T11:59:00Z",
         "2026-09-04T12:00:00Z",
-        137,
+        "terminated",
     )
-    records = [_relative_record(receipt.path, root) for receipt in (start, final, crash)]
+    records = [_relative_record(receipt.path, root) for receipt in (start, final, terminated)]
     return {
         "schema_version": "prototype-0.3",
-        "kind": "nvflare.resource_stats.parent_owned_fragment_fixture",
+        "kind": "nvflare.resource_stats.supervisor_owned_fragment_fixture",
         "provenance": "synthetic_contract_fixture",
         "job_writable_root": "simulated_job_writable",
-        "parent_owned_root": "parent_owned_fragments",
+        "supervisor_owned_root": "supervisor_owned_fragments",
         "records": records,
         "kubernetes_note": (
-            "A production Kubernetes parent-owned root must be durable outside a child-only emptyDir; "
+            "A production Kubernetes supervisor-owned root must be durable outside a worker-only emptyDir; "
             "this local fixture cannot prove that deployment property."
         ),
     }
 
 
 def _fixed_component_fixture(root: Path, job_id: str, resource_summary_bytes: bytes) -> dict[str, Any]:
-    store = FixedResourceStatsStore(root / "parent_owned_job_store")
+    store = FixedResourceStatsStore(root / "server_job_store")
     receipt = store.save_resource_stats(job_id, resource_summary_bytes)
     return {
         "schema_version": "prototype-0.3",
@@ -283,7 +313,7 @@ def write_review_contract_fixtures(output_dir: Path, job_id: str, resource_summa
     }
     for name, contents in files.items():
         _write_json(root / name, contents)
-    _write_json(root / "parent_owned_fragments.json", _fragment_fixture(root, job_id))
+    _write_json(root / "supervisor_owned_fragments.json", _fragment_fixture(root, job_id))
     _write_json(
         root / "fixed_resource_stats_component.json",
         _fixed_component_fixture(root, job_id, resource_summary_bytes),

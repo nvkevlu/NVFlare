@@ -11,8 +11,8 @@
       "role": "client",
       "status": "accepted",
       "received_at": "2026-09-09T00:15:01.2Z",
-      "summary_sha256": "aaff615d6ac0117a46a4f0858df3343c63e84a2f827cb14d96a386216d6d5687",
-      "observation_seconds": "901",
+      "summary_sha256": "864872d16fb99680bae80cc23d14fd279ab3d81b89cb7fdbd314b4a348ff6d13",
+      "resource_window_seconds": "901",
       "totals": {
         "cpu": {
           "status": "reported",

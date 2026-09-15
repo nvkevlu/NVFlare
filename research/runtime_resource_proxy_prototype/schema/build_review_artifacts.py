@@ -31,10 +31,12 @@ from pathlib import Path
 from typing import Any
 
 from contract_v1 import (
+    KIND_ATTEMPT_END,
     KIND_ATTEMPT_FINAL,
-    KIND_ATTEMPT_PARENT_EXIT,
     KIND_ATTEMPT_START,
     KIND_MANIFEST,
+    KIND_PARTICIPANT_FINAL,
+    KIND_PARTICIPANT_START,
     KIND_PARTICIPANT_SUMMARY,
     KIND_RESOURCE_SUMMARY,
     derive_job_totals,
@@ -65,10 +67,13 @@ def _write(path: Path, data: bytes) -> None:
     path.write_bytes(data)
 
 
-def _capacity(
+def _compute_capacity(
     *,
     cpu_units: str = "1.5",
-    storage_bytes: str = "1099511627776",
+    cpu_model: str | None = "AMD EPYC 9654",
+    selector_count: str = "4",
+    memory_bytes: str = "8589934592",
+    physical_memory_bytes: str = "68719476736",
     gpu_groups: list[dict[str, str]] | None = None,
 ) -> dict[str, Any]:
     if gpu_groups is None:
@@ -83,20 +88,31 @@ def _capacity(
     cpu = {
         "status": "reported",
         "visible_units": cpu_units,
-        "model": "AMD EPYC 9654",
         "architecture": "x86_64",
-        "evidence": {"affinity_count": "4", "cpuset_count": "4", "quota_units": cpu_units},
+        "evidence": {
+            "affinity_count": selector_count,
+            "cpuset_count": selector_count,
+            "quota_units": cpu_units,
+        },
     }
+    if cpu_model is not None:
+        cpu["model"] = cpu_model
     return {
         "cpu": cpu,
         "memory": {
             "status": "reported",
-            "visible_bytes": "8589934592",
-            "evidence": {"physical_bytes": "68719476736", "cgroup_limit_bytes": "8589934592"},
+            "visible_bytes": memory_bytes,
+            "evidence": {
+                "physical_bytes": physical_memory_bytes,
+                "cgroup_limit_bytes": memory_bytes,
+            },
         },
-        "storage": {"status": "reported", "capacity_bytes": storage_bytes},
         "gpu": {"status": "reported", "cuda_mask_present": True, "groups": gpu_groups},
     }
+
+
+def _storage(capacity_bytes: str = "1099511627776") -> dict[str, str]:
+    return {"status": "reported", "capacity_bytes": capacity_bytes}
 
 
 def _counter(payload_bytes: str = "0", messages: str = "0") -> dict[str, str]:
@@ -107,21 +123,15 @@ def _f3(*, nonzero: bool) -> dict[str, Any]:
     if not nonzero:
         return {
             "status": "reported",
-            "cutoff_sequence": "0",
             "remote_accepted": _counter(),
             "local_delivered": _counter(),
             "remote_failed_before_acceptance": _counter(),
-            "late_after_cutoff": _counter(),
-            "summary_excluded": _counter(),
         }
     return {
         "status": "reported",
-        "cutoff_sequence": "5",
         "remote_accepted": _counter("5632", "2"),
         "local_delivered": _counter("256", "1"),
         "remote_failed_before_acceptance": _counter(),
-        "late_after_cutoff": _counter("512", "1"),
-        "summary_excluded": _counter("1024", "1"),
     }
 
 
@@ -129,10 +139,35 @@ def _attempt(
     *,
     attempt_id: str,
     environment_key: str,
-    start_at: str,
-    final_at: str,
-    exit_at: str,
-    capacity: dict[str, Any],
+    opened_at: str,
+    closed_at: str,
+    capacity: dict[str, Any] | None,
+    include_final: bool = False,
+    end_reason: str = "released",
+) -> dict[str, Any]:
+    result = {
+        "attempt_id": attempt_id,
+        "environment_key": environment_key,
+        "opened_at": opened_at,
+    }
+    if capacity is not None:
+        result["start"] = {"capacity": deepcopy(capacity)}
+    if include_final:
+        if capacity is None:
+            raise ValueError("a final snapshot requires a start capacity")
+        result["final"] = {"capacity": deepcopy(capacity)}
+    result["end"] = {"closed_at": closed_at, "reason": end_reason}
+    return result
+
+
+def _participant_start_body(observed_at: str, storage_bytes: str = "1099511627776") -> dict[str, Any]:
+    return {"observed_at": observed_at, "storage": _storage(storage_bytes)}
+
+
+def _participant_final_body(
+    observed_at: str,
+    storage_bytes: str = "1099511627776",
+    *,
     retained: bool,
     nonzero_f3: bool,
 ) -> dict[str, Any]:
@@ -140,42 +175,110 @@ def _attempt(
     if retained:
         entries.append({"relative_path": "result/model.pt", "size_bytes": "18874368", "sha256": "d" * 64})
     return {
-        "attempt_id": attempt_id,
-        "environment_key": environment_key,
-        "start": {"observed_at": start_at, "collection_state": "enabled", "capacity": deepcopy(capacity)},
-        "final": {
-            "observed_at": final_at,
-            "capacity": deepcopy(capacity),
-            "retained_content": {"status": "reported", "entries": entries},
-            "f3": _f3(nonzero=nonzero_f3),
-        },
-        "exit": {"observed_at": exit_at, "outcome": "finished_ok", "return_code": 0},
+        "observed_at": observed_at,
+        "storage": _storage(storage_bytes),
+        "retained_content": {"status": "reported", "entries": entries},
+        "f3": _f3(nonzero=nonzero_f3),
     }
 
 
 def _main_participant() -> dict[str, Any]:
+    capacity = _compute_capacity()
+    gpu_free_capacity = deepcopy(capacity)
+    gpu_free_capacity["gpu"]["groups"] = []
     return {
         "schema_version": "1.0",
         "kind": KIND_PARTICIPANT_SUMMARY,
         "job_id": JOB_ID,
         "participant_key": PARTICIPANT_KEY,
+        "start": _participant_start_body("2026-09-09T14:00:00Z"),
+        "final": _participant_final_body(
+            "2026-09-09T14:08:00Z",
+            retained=True,
+            nonzero_f3=True,
+        ),
         "attempts": [
             _attempt(
                 attempt_id="1" * 32,
                 environment_key="sha256-" + "b" * 64,
-                start_at="2026-09-09T14:00:00Z",
-                final_at="2026-09-09T14:05:42.5Z",
-                exit_at="2026-09-09T14:05:42.6Z",
-                capacity=_capacity(),
-                retained=True,
-                nonzero_f3=True,
-            )
+                opened_at="2026-09-09T14:00:00Z",
+                closed_at="2026-09-09T14:01:00Z",
+                capacity=capacity,
+                include_final=True,
+                end_reason="reconfigured",
+            ),
+            _attempt(
+                attempt_id="2" * 32,
+                environment_key="sha256-" + "b" * 64,
+                opened_at="2026-09-09T14:01:00Z",
+                closed_at="2026-09-09T14:06:00Z",
+                capacity=gpu_free_capacity,
+                include_final=True,
+                end_reason="reconfigured",
+            ),
+            _attempt(
+                attempt_id="3" * 32,
+                environment_key="sha256-" + "b" * 64,
+                opened_at="2026-09-09T14:06:00Z",
+                closed_at="2026-09-09T14:08:00Z",
+                capacity=capacity,
+                include_final=True,
+            ),
+        ],
+    }
+
+
+def _preempted_resume_participant() -> dict[str, Any]:
+    first_capacity = _compute_capacity()
+    resumed_capacity = _compute_capacity(
+        cpu_units="2",
+        cpu_model="Intel Xeon Platinum 8480+",
+        selector_count="8",
+        memory_bytes="17179869184",
+        gpu_groups=[
+            {
+                "kind": "full_gpu",
+                "count": "2",
+                "model": "NVIDIA A100 80GB PCIe",
+                "memory_bytes": "85899345920",
+            }
+        ],
+    )
+    return {
+        "schema_version": "1.0",
+        "kind": KIND_PARTICIPANT_SUMMARY,
+        "job_id": "job-preempted-resume",
+        "participant_key": "sha256-" + "e" * 64,
+        "start": _participant_start_body("2026-09-09T14:00:00Z"),
+        "final": _participant_final_body(
+            "2026-09-09T14:08:00Z",
+            retained=True,
+            nonzero_f3=True,
+        ),
+        "attempts": [
+            _attempt(
+                attempt_id="5" * 32,
+                environment_key="sha256-" + "5" * 64,
+                opened_at="2026-09-09T14:00:00Z",
+                closed_at="2026-09-09T14:01:00Z",
+                capacity=first_capacity,
+                end_reason="terminated",
+            ),
+            _attempt(
+                attempt_id="6" * 32,
+                environment_key="sha256-" + "5" * 64,
+                opened_at="2026-09-09T14:06:00Z",
+                closed_at="2026-09-09T14:08:00Z",
+                capacity=resumed_capacity,
+                include_final=True,
+            ),
         ],
     }
 
 
 def _large_participant() -> dict[str, Any]:
-    capacity = _capacity(cpu_units="1", storage_bytes="10000000000001", gpu_groups=[])
+    storage_bytes = "10000000000001"
+    capacity = _compute_capacity(cpu_units="1", gpu_groups=[])
     capacity["cpu"] = {
         "status": "reported",
         "visible_units": "1",
@@ -192,16 +295,21 @@ def _large_participant() -> dict[str, Any]:
         "kind": KIND_PARTICIPANT_SUMMARY,
         "job_id": "job-large-exactness",
         "participant_key": "sha256-" + "f" * 64,
+        "start": _participant_start_body("2026-09-09T00:00:00Z", storage_bytes),
+        "final": _participant_final_body(
+            "2026-09-09T00:15:01Z",
+            storage_bytes,
+            retained=False,
+            nonzero_f3=False,
+        ),
         "attempts": [
             _attempt(
                 attempt_id="9" * 32,
                 environment_key="sha256-" + "9" * 64,
-                start_at="2026-09-09T00:00:00Z",
-                final_at="2026-09-09T00:15:01Z",
-                exit_at="2026-09-09T00:15:01.1Z",
+                opened_at="2026-09-09T00:00:00Z",
+                closed_at="2026-09-09T00:15:01Z",
                 capacity=capacity,
-                retained=False,
-                nonzero_f3=False,
+                include_final=True,
             )
         ],
     }
@@ -217,6 +325,7 @@ def _attempt_start(participant_id: str, participant: dict[str, Any]) -> dict[str
         "participant_id": participant_id,
         "attempt_id": attempt["attempt_id"],
         "environment_key": attempt["environment_key"],
+        "opened_at": attempt["opened_at"],
         **deepcopy(start),
     }
 
@@ -234,6 +343,26 @@ def _attempt_final(participant_id: str, participant: dict[str, Any]) -> dict[str
     }
 
 
+def _participant_start(participant_id: str, participant: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "schema_version": "1.0",
+        "kind": KIND_PARTICIPANT_START,
+        "job_id": participant["job_id"],
+        "participant_id": participant_id,
+        **deepcopy(participant["start"]),
+    }
+
+
+def _participant_final(participant_id: str, participant: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "schema_version": "1.0",
+        "kind": KIND_PARTICIPANT_FINAL,
+        "job_id": participant["job_id"],
+        "participant_id": participant_id,
+        **deepcopy(participant["final"]),
+    }
+
+
 def _resource_summary(
     participant: dict[str, Any],
     participant_bytes: bytes,
@@ -244,7 +373,7 @@ def _resource_summary(
     finalized: str,
     missing_server: bool,
 ) -> dict[str, Any]:
-    observation_seconds, totals = derive_participant_totals(participant)
+    resource_window_seconds, totals = derive_participant_totals(participant)
     roster = [
         {
             "participant_id": participant_id,
@@ -253,7 +382,7 @@ def _resource_summary(
             "status": "accepted",
             "received_at": received,
             "summary_sha256": _digest(participant_bytes),
-            "observation_seconds": observation_seconds,
+            "resource_window_seconds": resource_window_seconds,
             "totals": totals,
         }
     ]
@@ -318,36 +447,55 @@ def _scalar(totals: dict[str, Any], resource: str, field: str) -> Decimal | None
     return None if item["status"] == "unavailable" else Decimal(item[field])
 
 
-def _show_mig(summary: dict[str, Any]) -> bool:
+def _show_mig(members: list[dict[str, Any]]) -> bool:
     return any(
         member["status"] == "accepted" and (_gpu_time(member["totals"], "mig_compute_instance") or Decimal(0)) > 0
-        for member in summary["roster"]
+        for member in members
     )
 
 
-def _human_cli(summary: dict[str, Any]) -> str:
+def _measurement_quality(totals: dict[str, Any]) -> str:
+    statuses = {item["status"] for item in totals.values()}
+    if statuses == {"reported"}:
+        return "REPORTED"
+    if statuses == {"unavailable"}:
+        return "UNAVAILABLE"
+    return "PARTIAL"
+
+
+def _human_cli(summary: dict[str, Any], selected_site: str | None = None) -> str:
     accepted = sum(member["status"] == "accepted" for member in summary["roster"])
     coverage = "COMPLETE" if accepted == len(summary["roster"]) else "PARTIAL"
-    show_mig = _show_mig(summary)
-    header = "SITE     ROLE    STATUS    OBSERVED   FULL GPU h"
+    members = (
+        summary["roster"]
+        if selected_site is None
+        else [member for member in summary["roster"] if member["participant_id"] == selected_site]
+    )
+    if not members:
+        raise ValueError(f"unknown site '{selected_site}'")
+    show_mig = _show_mig(members)
+    header = "SITE     ROLE    STATUS    QUALITY      ENV WINDOW  FULL GPU h"
     if show_mig:
         header += "  MIG CI h"
-    header += "  CPU h   MEM GiB h  STORAGE GiB h  RETAINED  F3 BYTES"
+    header += "  CPU h   MEM GiB h  STORAGE GiB h  RETAINED MiB  F3 REMOTE KiB"
+    selection = "" if selected_site is None else f" | selected site: {selected_site}"
     lines = [
-        "Runtime-visible capacity proxies; not allocations, reservations, guarantees, or billable usage.",
-        f"Job {summary['job_id']} | coverage: {coverage} ({accepted} accepted / {len(summary['roster'])} expected)",
+        "Runtime-visible capacity-time proxies; not utilization, requested quantities, guarantees, or billable usage.",
+        f"Job {summary['job_id']}{selection} | coverage: {coverage} "
+        f"({accepted} accepted / {len(summary['roster'])} expected)",
         "",
         header,
     ]
-    for member in summary["roster"]:
+    for member in members:
         if member["status"] != "accepted":
             mig = f"{'N/A':>8} " if show_mig else ""
             lines.append(
-                f"{member['participant_id']:<8} {member['role']:<7} {member['status']:<9} {'—':>10} "
-                f"{'N/A':>12} {mig}{'N/A':>7} {'N/A':>11} {'N/A':>14} {'N/A':>9} {'N/A':>9}"
+                f"{member['participant_id']:<8} {member['role']:<7} {member['status']:<9} {'—':<11} {'—':>11} "
+                f"{'N/A':>12} {mig}{'N/A':>7} {'N/A':>11} {'N/A':>14} {'N/A':>13} {'N/A':>14}"
             )
             continue
         totals = member["totals"]
+        quality = _measurement_quality(totals)
         cpu = (
             None if totals["cpu"]["status"] == "unavailable" else _decimal_sum(totals["cpu"]["groups"], "unit_seconds")
         )
@@ -359,19 +507,58 @@ def _human_cli(summary: dict[str, Any]) -> str:
         )
         mig = f"{_hours(_gpu_time(totals, 'mig_compute_instance')):>8} " if show_mig else ""
         lines.append(
-            f"{member['participant_id']:<8} {member['role']:<7} {member['status']:<9} "
-            f"{_duration(member['observation_seconds']):>10} {_hours(_gpu_time(totals, 'full_gpu')):>12} {mig}"
+            f"{member['participant_id']:<8} {member['role']:<7} {member['status']:<9} {quality:<11} "
+            f"{_duration(member['resource_window_seconds']):>11} {_hours(_gpu_time(totals, 'full_gpu')):>11} {mig}"
             f"{_hours(cpu):>7} {_hours(_scalar(totals, 'memory', 'byte_seconds'), Decimal(2**30 * 3600)):>11} "
             f"{_hours(_scalar(totals, 'storage', 'byte_seconds'), Decimal(2**30 * 3600)):>14} "
-            f"{_hours(retained, Decimal(2**20)):>5} MiB {_hours(f3, Decimal(1024)):>5} KiB"
+            f"{_hours(retained, Decimal(2**20)):>13} {_hours(f3, Decimal(1024)):>14}"
+        )
+    if selected_site is None:
+        totals = summary["totals"]
+        total_cpu = (
+            None if totals["cpu"]["status"] == "unavailable" else _decimal_sum(totals["cpu"]["groups"], "unit_seconds")
+        )
+        total_retained = _scalar(totals, "retained_content", "bytes")
+        total_f3 = (
+            None
+            if totals["f3"]["status"] == "unavailable"
+            else Decimal(totals["f3"]["remote_accepted"]["payload_bytes"])
+        )
+        total_window = sum(
+            (Decimal(member["resource_window_seconds"]) for member in members if member["status"] == "accepted"),
+            Decimal(0),
+        )
+        aggregate = (
+            f"  ENV WINDOW {_duration(format(total_window, 'f'))} | "
+            f"FULL GPU {_hours(_gpu_time(totals, 'full_gpu'))} h | "
+        )
+        if show_mig:
+            aggregate += f"MIG CI {_hours(_gpu_time(totals, 'mig_compute_instance'))} h | "
+        aggregate += (
+            f"CPU {_hours(total_cpu)} h | "
+            f"MEM {_hours(_scalar(totals, 'memory', 'byte_seconds'), Decimal(2**30 * 3600))} GiB h | "
+            f"STORAGE {_hours(_scalar(totals, 'storage', 'byte_seconds'), Decimal(2**30 * 3600))} GiB h | "
+            f"RETAINED {_hours(total_retained, Decimal(2**20))} MiB | "
+            f"F3 REMOTE {_hours(total_f3, Decimal(1024))} KiB"
+        )
+        lines.extend(
+            [
+                "",
+                f"Accepted-report totals | quality: {_measurement_quality(totals)}",
+                aggregate,
+            ]
         )
     lines.extend(
         [
             "",
             "Notices:",
             "  Participant-visible proxies may overlap; this is not physical capacity.",
+            "  ENV WINDOW is summed reporter-environment time and may exceed participant wall time.",
+            "  A GPU-free window still counts CPU and memory if those resources remain visible.",
+            "  PARTIAL means measurement evidence or expected-report coverage is incomplete; STATUS is acceptance.",
+            "  Storage time spans the participant lifecycle while its persistent workspace remains available.",
             "  Totals cover accepted reports only; roster gaps make them partial.",
-            "  Participant observations are self-reported; accepted bytes are preserved by the parent.",
+            "  Worker observations are self-reported; accepted bytes are preserved by the site supervisor.",
             "",
         ]
     )
@@ -407,9 +594,9 @@ def build(output_root: Path = DEFAULT_OUTPUT) -> dict[str, Any]:
         participant,
         participant_bytes,
         participant_id="site-1",
-        received="2026-09-09T14:05:43Z",
-        cutoff="2026-09-09T14:06:00Z",
-        finalized="2026-09-09T14:06:00.1Z",
+        received="2026-09-09T14:08:00.1Z",
+        cutoff="2026-09-09T14:08:01Z",
+        finalized="2026-09-09T14:08:01.1Z",
         missing_server=True,
     )
     summary_bytes = _json_bytes(summary)
@@ -418,12 +605,14 @@ def build(output_root: Path = DEFAULT_OUTPUT) -> dict[str, Any]:
 
     main_start = _attempt_start("site-1", participant)
     main_final = _attempt_final("site-1", participant)
+    main_participant_start = _participant_start("site-1", participant)
+    main_participant_final = _participant_final("site-1", participant)
     zero_gpu = deepcopy(main_start)
     zero_gpu.update(
         participant_id="site-zero",
         attempt_id="2" * 32,
         environment_key="sha256-" + "2" * 64,
-        observed_at="2026-09-09T15:00:00Z",
+        opened_at="2026-09-09T15:00:00Z",
     )
     zero_gpu["capacity"]["gpu"]["groups"] = []
     cuda_unavailable = deepcopy(zero_gpu)
@@ -431,34 +620,35 @@ def build(output_root: Path = DEFAULT_OUTPUT) -> dict[str, Any]:
         participant_id="site-mask-only",
         attempt_id="3" * 32,
         environment_key="sha256-" + "3" * 64,
-        observed_at="2026-09-09T15:01:00Z",
+        opened_at="2026-09-09T15:01:00Z",
     )
     cuda_unavailable["capacity"]["gpu"] = {
         "status": "unavailable",
         "cuda_mask_present": True,
         "issues": ["dependency_missing"],
     }
-    disabled = {
+    terminated_end = {
         "schema_version": "1.0",
-        "kind": KIND_ATTEMPT_START,
-        "job_id": JOB_ID,
-        "participant_id": "site-disabled",
-        "attempt_id": "4" * 32,
-        "environment_key": "sha256-" + "4" * 64,
-        "observed_at": "2026-09-09T15:02:00Z",
-        "collection_state": "disabled",
-    }
-    crash = {
-        "schema_version": "1.0",
-        "kind": KIND_ATTEMPT_PARENT_EXIT,
-        "job_id": JOB_ID,
+        "kind": KIND_ATTEMPT_END,
+        "job_id": "job-preempted-resume",
         "participant_id": "site-1",
         "attempt_id": "5" * 32,
         "environment_key": "sha256-" + "5" * 64,
-        "observed_at": "2026-09-09T14:10:00Z",
-        "outcome": "terminated",
-        "return_code": -9,
+        "opened_at": "2026-09-09T14:00:00Z",
+        "closed_at": "2026-09-09T14:01:00Z",
+        "reason": "terminated",
     }
+    preempted_resume = _preempted_resume_participant()
+    preempted_resume_bytes = _json_bytes(preempted_resume)
+    preempted_summary = _resource_summary(
+        preempted_resume,
+        preempted_resume_bytes,
+        participant_id="site-1",
+        received="2026-09-09T14:08:00.1Z",
+        cutoff="2026-09-09T14:08:01Z",
+        finalized="2026-09-09T14:08:01.1Z",
+        missing_server=False,
+    )
 
     large_participant = _large_participant()
     large_participant_bytes = _json_bytes(large_participant)
@@ -475,11 +665,12 @@ def build(output_root: Path = DEFAULT_OUTPUT) -> dict[str, Any]:
         "attempt_start.json": main_start,
         "attempt_start_zero_gpu.json": zero_gpu,
         "attempt_start_cuda_unavailable.json": cuda_unavailable,
-        "attempt_start_disabled.json": disabled,
         "attempt_final.json": main_final,
-        "attempt_final_large_value.json": _attempt_final("site-large", large_participant),
-        "parent_exit_crash.json": crash,
+        "attempt_end_terminated.json": terminated_end,
+        "participant_start.json": main_participant_start,
+        "participant_final.json": main_participant_final,
         "participant_summary.json": participant,
+        "participant_summary_preempted_resume.json": preempted_resume,
         "participant_summary_large_value.json": large_participant,
         "resource_summary.json": summary,
         "resource_summary_large_value.json": large_summary,
@@ -512,10 +703,14 @@ def build(output_root: Path = DEFAULT_OUTPUT) -> dict[str, Any]:
     }
     cli_json_bytes = _json_bytes(cli_json)
     cli_text_bytes = _human_cli(summary).encode("utf-8")
-    detail_bytes = _hardware_details(summary, "site-1").encode("utf-8")
+    detail_bytes = (_human_cli(summary, "site-1") + "\n" + _hardware_details(summary, "site-1")).encode("utf-8")
     _write(output_root / "cli" / "resources-all.json", cli_json_bytes)
     _write(output_root / "cli" / "resources-all.txt", cli_text_bytes)
     _write(output_root / "cli" / "resources-site-1-details.txt", detail_bytes)
+    _write(
+        output_root / "cli" / "resources-preempted-resume.txt",
+        _human_cli(preempted_summary).encode("utf-8"),
+    )
 
     receipt = {
         "generator": Path(__file__).name,
@@ -526,8 +721,12 @@ def build(output_root: Path = DEFAULT_OUTPUT) -> dict[str, Any]:
         "manifest_sha256": _digest(manifest_bytes),
         "query_copy_matches_resource_summary": query_copy.read_bytes() == summary_bytes,
         "derived_examples": {
-            "observation_seconds": summary["roster"][0]["observation_seconds"],
+            "participant_lifetime_seconds": "480",
+            "resource_window_seconds": summary["roster"][0]["resource_window_seconds"],
+            "gpu_free_cpu_memory_window_seconds": "300",
             "cpu_unit_seconds": summary["roster"][0]["totals"]["cpu"]["groups"][0]["unit_seconds"],
+            "gpu_instance_seconds": summary["roster"][0]["totals"]["gpu"]["groups"][0]["instance_seconds"],
+            "storage_byte_seconds": summary["roster"][0]["totals"]["storage"]["byte_seconds"],
             "large_storage_byte_seconds": large_summary["totals"]["storage"]["byte_seconds"],
         },
     }
