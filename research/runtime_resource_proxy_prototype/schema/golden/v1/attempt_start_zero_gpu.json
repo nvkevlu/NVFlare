@@ -1,0 +1,40 @@
+{
+  "schema_version": "1.0",
+  "kind": "nvflare.resource_stats.attempt_start",
+  "job_id": "job-20260909-001",
+  "participant_id": "site-zero",
+  "attempt_id": "22222222222222222222222222222222",
+  "environment_key": "sha256-2222222222222222222222222222222222222222222222222222222222222222",
+  "observed_at": "2026-09-09T15:00:00Z",
+  "collection_state": "enabled",
+  "capacity": {
+    "cpu": {
+      "status": "reported",
+      "visible_units": "1.5",
+      "model": "AMD EPYC 9654",
+      "architecture": "x86_64",
+      "evidence": {
+        "affinity_count": "4",
+        "cpuset_count": "4",
+        "quota_units": "1.5"
+      }
+    },
+    "memory": {
+      "status": "reported",
+      "visible_bytes": "8589934592",
+      "evidence": {
+        "physical_bytes": "68719476736",
+        "cgroup_limit_bytes": "8589934592"
+      }
+    },
+    "storage": {
+      "status": "reported",
+      "capacity_bytes": "1099511627776"
+    },
+    "gpu": {
+      "status": "reported",
+      "cuda_mask_present": true,
+      "groups": []
+    }
+  }
+}

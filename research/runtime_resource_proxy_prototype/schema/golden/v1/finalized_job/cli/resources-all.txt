@@ -1,0 +1,11 @@
+Runtime-visible capacity proxies; not allocations, reservations, guarantees, or billable usage.
+Job job-20260909-001 | coverage: PARTIAL (1 accepted / 2 expected)
+
+SITE     ROLE    STATUS    OBSERVED   FULL GPU h  CPU h   MEM GiB h  STORAGE GiB h  RETAINED  F3 BYTES
+site-1   client  accepted     5m42.5s       0.0951  0.1427      0.7611        97.4222 18.0000 MiB 5.5000 KiB
+server   server  missing            —          N/A     N/A         N/A            N/A       N/A       N/A
+
+Notices:
+  Participant-visible proxies may overlap; this is not physical capacity.
+  Totals cover accepted reports only; roster gaps make them partial.
+  Participant observations are self-reported; accepted bytes are preserved by the parent.

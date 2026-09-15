@@ -1,0 +1,86 @@
+{
+  "schema_version": "1.0",
+  "kind": "nvflare.resource_stats.resource_summary",
+  "job_id": "job-large-exactness",
+  "report_cutoff_at": "2026-09-09T00:15:02Z",
+  "finalized_at": "2026-09-09T00:15:02.1Z",
+  "roster": [
+    {
+      "participant_id": "site-large",
+      "participant_key": "sha256-ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "role": "client",
+      "status": "accepted",
+      "received_at": "2026-09-09T00:15:01.2Z",
+      "summary_sha256": "aaff615d6ac0117a46a4f0858df3343c63e84a2f827cb14d96a386216d6d5687",
+      "observation_seconds": "901",
+      "totals": {
+        "cpu": {
+          "status": "reported",
+          "groups": [
+            {
+              "architecture": "x86_64",
+              "unit_seconds": "901"
+            }
+          ]
+        },
+        "memory": {
+          "status": "reported",
+          "byte_seconds": "967441383424"
+        },
+        "storage": {
+          "status": "reported",
+          "byte_seconds": "9010000000000901"
+        },
+        "gpu": {
+          "status": "reported",
+          "groups": []
+        },
+        "retained_content": {
+          "status": "reported",
+          "bytes": "0"
+        },
+        "f3": {
+          "status": "reported",
+          "remote_accepted": {
+            "payload_bytes": "0",
+            "messages": "0"
+          }
+        }
+      }
+    }
+  ],
+  "totals": {
+    "cpu": {
+      "status": "reported",
+      "groups": [
+        {
+          "architecture": "x86_64",
+          "unit_seconds": "901"
+        }
+      ]
+    },
+    "memory": {
+      "status": "reported",
+      "byte_seconds": "967441383424"
+    },
+    "storage": {
+      "status": "reported",
+      "byte_seconds": "9010000000000901"
+    },
+    "gpu": {
+      "status": "reported",
+      "groups": []
+    },
+    "retained_content": {
+      "status": "reported",
+      "bytes": "0"
+    },
+    "f3": {
+      "status": "reported",
+      "remote_accepted": {
+        "payload_bytes": "0",
+        "messages": "0"
+      }
+    }
+  }
+}

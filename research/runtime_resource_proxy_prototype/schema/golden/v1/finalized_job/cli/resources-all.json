@@ -1,0 +1,119 @@
+{
+  "schema_version": "1",
+  "status": "ok",
+  "exit_code": 0,
+  "data": {
+    "selection": {
+      "job_id": "job-20260909-001",
+      "site": "all"
+    },
+    "summary": {
+      "schema_version": "1.0",
+      "kind": "nvflare.resource_stats.resource_summary",
+      "job_id": "job-20260909-001",
+      "report_cutoff_at": "2026-09-09T14:06:00Z",
+      "finalized_at": "2026-09-09T14:06:00.1Z",
+      "roster": [
+        {
+          "participant_id": "site-1",
+          "participant_key": "sha256-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "role": "client",
+          "status": "accepted",
+          "received_at": "2026-09-09T14:05:43Z",
+          "summary_sha256": "7cade0ee3ace5f2f59b4b005ca426338ecceaf7bfbe1f828d3e223eef58481b2",
+          "observation_seconds": "342.5",
+          "totals": {
+            "cpu": {
+              "status": "reported",
+              "groups": [
+                {
+                  "model": "AMD EPYC 9654",
+                  "architecture": "x86_64",
+                  "unit_seconds": "513.75"
+                }
+              ]
+            },
+            "memory": {
+              "status": "reported",
+              "byte_seconds": "2942052597760"
+            },
+            "storage": {
+              "status": "reported",
+              "byte_seconds": "376582732513280"
+            },
+            "gpu": {
+              "status": "reported",
+              "groups": [
+                {
+                  "kind": "full_gpu",
+                  "model": "NVIDIA H100 80GB HBM3",
+                  "memory_bytes": "85899345920",
+                  "instance_seconds": "342.5"
+                }
+              ]
+            },
+            "retained_content": {
+              "status": "reported",
+              "bytes": "18874368"
+            },
+            "f3": {
+              "status": "reported",
+              "remote_accepted": {
+                "payload_bytes": "5632",
+                "messages": "2"
+              }
+            }
+          }
+        },
+        {
+          "participant_id": "server",
+          "participant_key": "sha256-cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "role": "server",
+          "status": "missing"
+        }
+      ],
+      "totals": {
+        "cpu": {
+          "status": "partial",
+          "groups": [
+            {
+              "model": "AMD EPYC 9654",
+              "architecture": "x86_64",
+              "unit_seconds": "513.75"
+            }
+          ]
+        },
+        "memory": {
+          "status": "partial",
+          "byte_seconds": "2942052597760"
+        },
+        "storage": {
+          "status": "partial",
+          "byte_seconds": "376582732513280"
+        },
+        "gpu": {
+          "status": "partial",
+          "groups": [
+            {
+              "kind": "full_gpu",
+              "model": "NVIDIA H100 80GB HBM3",
+              "memory_bytes": "85899345920",
+              "instance_seconds": "342.5"
+            }
+          ]
+        },
+        "retained_content": {
+          "status": "partial",
+          "bytes": "18874368"
+        },
+        "f3": {
+          "status": "partial",
+          "remote_accepted": {
+            "payload_bytes": "5632",
+            "messages": "2"
+          }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,63 @@
+{
+  "schema_version": "1.0",
+  "kind": "nvflare.resource_stats.attempt_final",
+  "job_id": "job-large-exactness",
+  "participant_id": "site-large",
+  "attempt_id": "99999999999999999999999999999999",
+  "environment_key": "sha256-9999999999999999999999999999999999999999999999999999999999999999",
+  "observed_at": "2026-09-09T00:15:01Z",
+  "capacity": {
+    "cpu": {
+      "status": "reported",
+      "visible_units": "1",
+      "architecture": "x86_64",
+      "evidence": {
+        "online_count": "1"
+      }
+    },
+    "memory": {
+      "status": "reported",
+      "visible_bytes": "1073741824",
+      "evidence": {
+        "physical_bytes": "1073741824"
+      }
+    },
+    "storage": {
+      "status": "reported",
+      "capacity_bytes": "10000000000001"
+    },
+    "gpu": {
+      "status": "reported",
+      "cuda_mask_present": true,
+      "groups": []
+    }
+  },
+  "retained_content": {
+    "status": "reported",
+    "entries": []
+  },
+  "f3": {
+    "status": "reported",
+    "cutoff_sequence": "0",
+    "remote_accepted": {
+      "payload_bytes": "0",
+      "messages": "0"
+    },
+    "local_delivered": {
+      "payload_bytes": "0",
+      "messages": "0"
+    },
+    "remote_failed_before_acceptance": {
+      "payload_bytes": "0",
+      "messages": "0"
+    },
+    "late_after_cutoff": {
+      "payload_bytes": "0",
+      "messages": "0"
+    },
+    "summary_excluded": {
+      "payload_bytes": "0",
+      "messages": "0"
+    }
+  }
+}

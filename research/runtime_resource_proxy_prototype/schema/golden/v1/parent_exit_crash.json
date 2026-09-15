@@ -1,0 +1,11 @@
+{
+  "schema_version": "1.0",
+  "kind": "nvflare.resource_stats.attempt_parent_exit",
+  "job_id": "job-20260909-001",
+  "participant_id": "site-1",
+  "attempt_id": "55555555555555555555555555555555",
+  "environment_key": "sha256-5555555555555555555555555555555555555555555555555555555555555555",
+  "observed_at": "2026-09-09T14:10:00Z",
+  "outcome": "terminated",
+  "return_code": -9
+}

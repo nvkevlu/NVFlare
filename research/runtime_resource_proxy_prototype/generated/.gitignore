@@ -1,0 +1,4 @@
+# Real local captures contain volatile capacity, timing, and filesystem values.
+# Regenerate them for review; commit only deterministic fixtures if we later add any.
+actual_local/
+feedback_hardened_local*/

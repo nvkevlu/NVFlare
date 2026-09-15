@@ -1,0 +1,652 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nvflare.nvidia.com/schemas/resource_stats/v1/resource_stats.json",
+  "title": "NVFlare typed resource-statistics record v1",
+  "description": "Closed canonical records for trusted lifecycle capture, participant reconstruction, and finalized job resource statistics.",
+  "oneOf": [
+    {"$ref": "#/$defs/attempt_start"},
+    {"$ref": "#/$defs/attempt_final"},
+    {"$ref": "#/$defs/attempt_parent_exit"},
+    {"$ref": "#/$defs/participant_summary"},
+    {"$ref": "#/$defs/resource_summary"},
+    {"$ref": "#/$defs/manifest"}
+  ],
+  "x-nvflare-units": {
+    "visible_units": "CPU units",
+    "count": "runtime-enumerated device instances",
+    "capacity_bytes": "bytes",
+    "visible_bytes": "bytes",
+    "unit_seconds": "CPU-unit seconds",
+    "instance_seconds": "GPU- or MIG-instance seconds",
+    "byte_seconds": "byte-seconds",
+    "payload_bytes": "serialized application payload bytes",
+    "messages": "messages"
+  },
+  "x-nvflare-cross-record-invariants": [
+    "reported GPU capacity is emitted only after successful CUDA-runtime enumeration; cuda_mask_present is diagnostic and never count authority",
+    "full GPUs and MIG compute instances remain separate groups; a missing MIG group in a reported inventory means observed zero",
+    "CPU visible_units is the minimum of present affinity_count, cpuset_count, and quota_units, or online_count only when none is available",
+    "model and architecture are optional normalized metadata; their absence never changes numeric status",
+    "resource time is startup capacity multiplied by the exact start-to-final interval, or start-to-parent-exit when final is missing, rounded half-even to nine fractional digits per attempt",
+    "missing final data and numeric capacity change make the affected derived participant total partial",
+    "one trusted reporter is accepted per execution environment at a time; half-open intervals may reuse an environment_key only when they do not overlap",
+    "remote_accepted is counted only after send acceptance; local delivery, pre-acceptance failure, late traffic, and non-spoofably excluded summary traffic remain separate",
+    "job totals are deterministic sums of accepted roster totals; roster and attempt facts explain partial and unavailable totals",
+    "manifest and accepted-roster digests cover the exact archived bytes"
+  ],
+  "x-nvflare-privacy": [
+    "hardware models may be omitted by site policy",
+    "CPU model is emitted only when all affinity-visible CPUs normalize to one model",
+    "forbidden: raw cpuinfo, flags, topology, serials, UUIDs, PCI addresses, host identifiers, and raw CUDA mask values"
+  ],
+  "$defs": {
+    "schema_version": {"const": "1.0"},
+    "job_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+    },
+    "participant_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$"
+    },
+    "attempt_id": {"type": "string", "pattern": "^[0-9a-f]{32}$"},
+    "hash_key": {"type": "string", "pattern": "^sha256-[0-9a-f]{64}$"},
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "maxLength": 40,
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]{1,9})?Z$"
+    },
+    "unsigned": {"type": "string", "pattern": "^(?:0|[1-9][0-9]{0,38})$"},
+    "positive_unsigned": {"type": "string", "pattern": "^[1-9][0-9]{0,38}$"},
+    "decimal": {
+      "type": "string",
+      "pattern": "^(?:0|[1-9][0-9]{0,38})(?:\\.[0-9]{0,8}[1-9])?$"
+    },
+    "positive_decimal": {
+      "type": "string",
+      "pattern": "^(?:0\\.[0-9]{0,8}[1-9]|[1-9][0-9]{0,38}(?:\\.[0-9]{0,8}[1-9])?)$"
+    },
+    "model": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9 ._()+/@-]{0,127}$",
+      "allOf": [
+        {"not": {"pattern": "(?:GPU|MIG|MIG-GPU)-[0-9A-Fa-f-]{16,}"}},
+        {"not": {"pattern": "(?:[0-9A-Fa-f]{4}:)?[0-9A-Fa-f]{2}:[0-9A-Fa-f]{2}\\.[0-7]"}},
+        {"not": {"pattern": "[Ss][Ee][Rr][Ii][Aa][Ll]|[Uu][Uu][Ii][Dd]|[Cc][Uu][Dd][Aa]_[Vv][Ii][Ss][Ii][Bb][Ll][Ee]_[Dd][Ee][Vv][Ii][Cc][Ee][Ss]|[Pp][Cc][Ii]_[Bb][Uu][Ss]_[Ii][Dd]|[Hh][Oo][Ss][Tt][Nn][Aa][Mm][Ee]"}}
+      ]
+    },
+    "architecture": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 32,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,31}$"
+    },
+    "mig_profile": {
+      "type": "string",
+      "maxLength": 32,
+      "pattern": "^[1-9][0-9]*g\\.[1-9][0-9]*gb(?:\\+me)?$"
+    },
+    "capacity_unavailable_issue": {
+      "enum": ["attribution_incomplete", "dependency_missing", "observation_incomplete", "unsupported"]
+    },
+    "source_unavailable_issue": {
+      "enum": ["attribution_incomplete", "dependency_missing", "not_bound", "observation_incomplete", "unsupported"]
+    },
+    "source_error_issue": {"enum": ["malformed_source", "permission_denied"]},
+    "partial_issue": {"enum": ["attribution_incomplete", "counter_gap", "observation_incomplete"]},
+    "capacity_unavailable": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "issues"],
+      "properties": {
+        "status": {"const": "unavailable"},
+        "issues": {
+          "type": "array", "minItems": 1, "maxItems": 4, "uniqueItems": true,
+          "items": {"$ref": "#/$defs/capacity_unavailable_issue"}
+        }
+      }
+    },
+    "capacity_error": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "issues"],
+      "properties": {
+        "status": {"const": "error"},
+        "issues": {
+          "type": "array", "minItems": 1, "maxItems": 4, "uniqueItems": true,
+          "items": {"$ref": "#/$defs/source_error_issue"}
+        }
+      }
+    },
+    "cpu_evidence": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "minProperties": 1,
+          "properties": {
+            "affinity_count": {"$ref": "#/$defs/positive_unsigned"},
+            "cpuset_count": {"$ref": "#/$defs/positive_unsigned"},
+            "quota_units": {"$ref": "#/$defs/positive_decimal"}
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["online_count"],
+          "properties": {"online_count": {"$ref": "#/$defs/positive_unsigned"}}
+        }
+      ]
+    },
+    "cpu_reported": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "visible_units", "evidence"],
+      "properties": {
+        "status": {"const": "reported"},
+        "visible_units": {"$ref": "#/$defs/positive_decimal"},
+        "model": {"$ref": "#/$defs/model"},
+        "architecture": {"$ref": "#/$defs/architecture"},
+        "evidence": {"$ref": "#/$defs/cpu_evidence"}
+      }
+    },
+    "cpu": {
+      "oneOf": [
+        {"$ref": "#/$defs/cpu_reported"},
+        {"$ref": "#/$defs/capacity_unavailable"},
+        {"$ref": "#/$defs/capacity_error"}
+      ]
+    },
+    "memory_evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "properties": {
+        "physical_bytes": {"$ref": "#/$defs/positive_unsigned"},
+        "cgroup_limit_bytes": {"$ref": "#/$defs/positive_unsigned"}
+      }
+    },
+    "memory_reported": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "visible_bytes", "evidence"],
+      "properties": {
+        "status": {"const": "reported"},
+        "visible_bytes": {"$ref": "#/$defs/positive_unsigned"},
+        "evidence": {"$ref": "#/$defs/memory_evidence"}
+      }
+    },
+    "memory": {
+      "oneOf": [
+        {"$ref": "#/$defs/memory_reported"},
+        {"$ref": "#/$defs/capacity_unavailable"},
+        {"$ref": "#/$defs/capacity_error"}
+      ]
+    },
+    "storage_reported": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "capacity_bytes"],
+      "properties": {
+        "status": {"const": "reported"},
+        "capacity_bytes": {"$ref": "#/$defs/positive_unsigned"}
+      }
+    },
+    "storage": {
+      "oneOf": [
+        {"$ref": "#/$defs/storage_reported"},
+        {"$ref": "#/$defs/capacity_unavailable"},
+        {"$ref": "#/$defs/capacity_error"}
+      ]
+    },
+    "full_gpu_group": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "count"],
+      "properties": {
+        "kind": {"const": "full_gpu"},
+        "count": {"$ref": "#/$defs/positive_unsigned"},
+        "model": {"$ref": "#/$defs/model"},
+        "memory_bytes": {"$ref": "#/$defs/positive_unsigned"}
+      }
+    },
+    "mig_gpu_group": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "count"],
+      "properties": {
+        "kind": {"const": "mig_compute_instance"},
+        "count": {"$ref": "#/$defs/positive_unsigned"},
+        "model": {"$ref": "#/$defs/model"},
+        "memory_bytes": {"$ref": "#/$defs/positive_unsigned"},
+        "mig_profile": {"$ref": "#/$defs/mig_profile"}
+      }
+    },
+    "gpu_reported": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "cuda_mask_present", "groups"],
+      "properties": {
+        "status": {"const": "reported"},
+        "cuda_mask_present": {"type": "boolean"},
+        "groups": {
+          "type": "array", "maxItems": 4096,
+          "items": {"oneOf": [{"$ref": "#/$defs/full_gpu_group"}, {"$ref": "#/$defs/mig_gpu_group"}]}
+        }
+      }
+    },
+    "gpu_nonreported": {
+      "oneOf": [
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["status", "cuda_mask_present", "issues"],
+          "properties": {
+            "status": {"const": "unavailable"},
+            "cuda_mask_present": {"type": "boolean"},
+            "issues": {"type": "array", "minItems": 1, "maxItems": 4, "uniqueItems": true, "items": {"$ref": "#/$defs/capacity_unavailable_issue"}}
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["status", "cuda_mask_present", "issues"],
+          "properties": {
+            "status": {"const": "error"},
+            "cuda_mask_present": {"type": "boolean"},
+            "issues": {"type": "array", "minItems": 1, "maxItems": 4, "uniqueItems": true, "items": {"$ref": "#/$defs/source_error_issue"}}
+          }
+        }
+      ]
+    },
+    "gpu": {"oneOf": [{"$ref": "#/$defs/gpu_reported"}, {"$ref": "#/$defs/gpu_nonreported"}]},
+    "capacity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["cpu", "memory", "storage", "gpu"],
+      "properties": {
+        "cpu": {"$ref": "#/$defs/cpu"},
+        "memory": {"$ref": "#/$defs/memory"},
+        "storage": {"$ref": "#/$defs/storage"},
+        "gpu": {"$ref": "#/$defs/gpu"}
+      }
+    },
+    "artifact_entry": {
+      "type": "object", "additionalProperties": false,
+      "required": ["relative_path", "size_bytes", "sha256"],
+      "properties": {
+        "relative_path": {"type": "string", "minLength": 1, "maxLength": 512, "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[A-Za-z0-9._/-]+$"},
+        "size_bytes": {"$ref": "#/$defs/unsigned"},
+        "sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "retained_numeric": {
+      "type": "object", "additionalProperties": false,
+      "required": ["status", "entries"],
+      "properties": {
+        "status": {"const": "reported"},
+        "entries": {"type": "array", "maxItems": 4096, "items": {"$ref": "#/$defs/artifact_entry"}}
+      }
+    },
+    "retained_partial": {
+      "type": "object", "additionalProperties": false,
+      "required": ["status", "issues", "entries"],
+      "properties": {
+        "status": {"const": "partial"},
+        "issues": {"type": "array", "minItems": 1, "maxItems": 4, "uniqueItems": true, "items": {"enum": ["attribution_incomplete", "observation_incomplete"]}},
+        "entries": {"type": "array", "maxItems": 4096, "items": {"$ref": "#/$defs/artifact_entry"}}
+      }
+    },
+    "source_unavailable": {
+      "type": "object", "additionalProperties": false,
+      "required": ["status", "issues"],
+      "properties": {
+        "status": {"const": "unavailable"},
+        "issues": {"type": "array", "minItems": 1, "maxItems": 4, "uniqueItems": true, "items": {"$ref": "#/$defs/source_unavailable_issue"}}
+      }
+    },
+    "source_error": {
+      "type": "object", "additionalProperties": false,
+      "required": ["status", "issues"],
+      "properties": {
+        "status": {"const": "error"},
+        "issues": {"type": "array", "minItems": 1, "maxItems": 4, "uniqueItems": true, "items": {"$ref": "#/$defs/source_error_issue"}}
+      }
+    },
+    "retained_content": {
+      "oneOf": [
+        {"$ref": "#/$defs/retained_numeric"}, {"$ref": "#/$defs/retained_partial"},
+        {"$ref": "#/$defs/source_unavailable"}, {"$ref": "#/$defs/source_error"}
+      ]
+    },
+    "counter": {
+      "type": "object", "additionalProperties": false,
+      "required": ["payload_bytes", "messages"],
+      "properties": {"payload_bytes": {"$ref": "#/$defs/unsigned"}, "messages": {"$ref": "#/$defs/unsigned"}}
+    },
+    "f3_reported": {
+      "type": "object", "additionalProperties": false,
+      "required": ["status", "cutoff_sequence", "remote_accepted", "local_delivered", "remote_failed_before_acceptance", "late_after_cutoff", "summary_excluded"],
+      "properties": {
+        "status": {"const": "reported"},
+        "cutoff_sequence": {"$ref": "#/$defs/unsigned"},
+        "remote_accepted": {"$ref": "#/$defs/counter"},
+        "local_delivered": {"$ref": "#/$defs/counter"},
+        "remote_failed_before_acceptance": {"$ref": "#/$defs/counter"},
+        "late_after_cutoff": {"$ref": "#/$defs/counter"},
+        "summary_excluded": {"$ref": "#/$defs/counter"}
+      }
+    },
+    "f3_partial": {
+      "type": "object", "additionalProperties": false,
+      "required": ["status", "issues", "cutoff_sequence", "remote_accepted", "local_delivered", "remote_failed_before_acceptance", "late_after_cutoff", "summary_excluded"],
+      "properties": {
+        "status": {"const": "partial"},
+        "issues": {"type": "array", "minItems": 1, "maxItems": 4, "uniqueItems": true, "items": {"$ref": "#/$defs/partial_issue"}},
+        "cutoff_sequence": {"$ref": "#/$defs/unsigned"},
+        "remote_accepted": {"$ref": "#/$defs/counter"},
+        "local_delivered": {"$ref": "#/$defs/counter"},
+        "remote_failed_before_acceptance": {"$ref": "#/$defs/counter"},
+        "late_after_cutoff": {"$ref": "#/$defs/counter"},
+        "summary_excluded": {"$ref": "#/$defs/counter"}
+      }
+    },
+    "f3": {
+      "oneOf": [
+        {"$ref": "#/$defs/f3_reported"}, {"$ref": "#/$defs/f3_partial"},
+        {"$ref": "#/$defs/source_unavailable"}, {"$ref": "#/$defs/source_error"}
+      ]
+    },
+    "start_body": {
+      "oneOf": [
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["observed_at", "collection_state", "capacity"],
+          "properties": {
+            "observed_at": {"$ref": "#/$defs/timestamp"},
+            "collection_state": {"const": "enabled"},
+            "capacity": {"$ref": "#/$defs/capacity"}
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["observed_at", "collection_state"],
+          "properties": {
+            "observed_at": {"$ref": "#/$defs/timestamp"},
+            "collection_state": {"const": "disabled"}
+          }
+        }
+      ]
+    },
+    "final_body": {
+      "type": "object", "additionalProperties": false,
+      "required": ["observed_at", "capacity", "retained_content", "f3"],
+      "properties": {
+        "observed_at": {"$ref": "#/$defs/timestamp"},
+        "capacity": {"$ref": "#/$defs/capacity"},
+        "retained_content": {"$ref": "#/$defs/retained_content"},
+        "f3": {"$ref": "#/$defs/f3"}
+      }
+    },
+    "participant_start": {
+      "type": "object", "additionalProperties": false,
+      "required": ["observed_at", "collection_state", "capacity"],
+      "properties": {
+        "observed_at": {"$ref": "#/$defs/timestamp"},
+        "collection_state": {"const": "enabled"},
+        "capacity": {"$ref": "#/$defs/capacity"}
+      }
+    },
+    "exit_body": {
+      "oneOf": [
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["observed_at", "outcome"],
+          "properties": {"observed_at": {"$ref": "#/$defs/timestamp"}, "outcome": {"const": "launch_failed"}}
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["observed_at", "outcome", "return_code"],
+          "properties": {
+            "observed_at": {"$ref": "#/$defs/timestamp"},
+            "outcome": {"enum": ["finished_ok", "finished_error", "terminated"]},
+            "return_code": {"type": "integer", "minimum": -2147483648, "maximum": 2147483647}
+          }
+        }
+      ]
+    },
+    "cpu_time_group": {
+      "type": "object", "additionalProperties": false,
+      "required": ["unit_seconds"],
+      "properties": {
+        "unit_seconds": {"$ref": "#/$defs/decimal"},
+        "model": {"$ref": "#/$defs/model"},
+        "architecture": {"$ref": "#/$defs/architecture"}
+      }
+    },
+    "full_gpu_time_group": {
+      "type": "object", "additionalProperties": false,
+      "required": ["kind", "instance_seconds"],
+      "properties": {
+        "kind": {"const": "full_gpu"},
+        "instance_seconds": {"$ref": "#/$defs/decimal"},
+        "model": {"$ref": "#/$defs/model"},
+        "memory_bytes": {"$ref": "#/$defs/positive_unsigned"}
+      }
+    },
+    "mig_gpu_time_group": {
+      "type": "object", "additionalProperties": false,
+      "required": ["kind", "instance_seconds"],
+      "properties": {
+        "kind": {"const": "mig_compute_instance"},
+        "instance_seconds": {"$ref": "#/$defs/decimal"},
+        "model": {"$ref": "#/$defs/model"},
+        "memory_bytes": {"$ref": "#/$defs/positive_unsigned"},
+        "mig_profile": {"$ref": "#/$defs/mig_profile"}
+      }
+    },
+    "cpu_total": {
+      "oneOf": [
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["status", "groups"],
+          "properties": {
+            "status": {"enum": ["reported", "partial"]},
+            "groups": {"type": "array", "maxItems": 4096, "items": {"$ref": "#/$defs/cpu_time_group"}}
+          }
+        },
+        {"type": "object", "additionalProperties": false, "required": ["status"], "properties": {"status": {"const": "unavailable"}}}
+      ]
+    },
+    "gpu_total": {
+      "oneOf": [
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["status", "groups"],
+          "properties": {
+            "status": {"enum": ["reported", "partial"]},
+            "groups": {"type": "array", "maxItems": 4096, "items": {"oneOf": [{"$ref": "#/$defs/full_gpu_time_group"}, {"$ref": "#/$defs/mig_gpu_time_group"}]}}
+          }
+        },
+        {"type": "object", "additionalProperties": false, "required": ["status"], "properties": {"status": {"const": "unavailable"}}}
+      ]
+    },
+    "byte_seconds_total": {
+      "oneOf": [
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["status", "byte_seconds"],
+          "properties": {"status": {"enum": ["reported", "partial"]}, "byte_seconds": {"$ref": "#/$defs/decimal"}}
+        },
+        {"type": "object", "additionalProperties": false, "required": ["status"], "properties": {"status": {"const": "unavailable"}}}
+      ]
+    },
+    "retained_total": {
+      "oneOf": [
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["status", "bytes"],
+          "properties": {"status": {"enum": ["reported", "partial"]}, "bytes": {"$ref": "#/$defs/unsigned"}}
+        },
+        {"type": "object", "additionalProperties": false, "required": ["status"], "properties": {"status": {"const": "unavailable"}}}
+      ]
+    },
+    "f3_total": {
+      "oneOf": [
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["status", "remote_accepted"],
+          "properties": {"status": {"enum": ["reported", "partial"]}, "remote_accepted": {"$ref": "#/$defs/counter"}}
+        },
+        {"type": "object", "additionalProperties": false, "required": ["status"], "properties": {"status": {"const": "unavailable"}}}
+      ]
+    },
+    "totals": {
+      "type": "object", "additionalProperties": false,
+      "required": ["cpu", "memory", "storage", "gpu", "retained_content", "f3"],
+      "properties": {
+        "cpu": {"$ref": "#/$defs/cpu_total"},
+        "memory": {"$ref": "#/$defs/byte_seconds_total"},
+        "storage": {"$ref": "#/$defs/byte_seconds_total"},
+        "gpu": {"$ref": "#/$defs/gpu_total"},
+        "retained_content": {"$ref": "#/$defs/retained_total"},
+        "f3": {"$ref": "#/$defs/f3_total"}
+      }
+    },
+    "participant_attempt": {
+      "type": "object", "additionalProperties": false,
+      "required": ["attempt_id", "environment_key", "exit"],
+      "properties": {
+        "attempt_id": {"$ref": "#/$defs/attempt_id"},
+        "environment_key": {"$ref": "#/$defs/hash_key"},
+        "start": {"$ref": "#/$defs/participant_start"},
+        "final": {"$ref": "#/$defs/final_body"},
+        "exit": {"$ref": "#/$defs/exit_body"}
+      },
+      "allOf": [
+        {"if": {"required": ["final"]}, "then": {"required": ["start"]}}
+      ]
+    },
+    "accepted_roster_entry": {
+      "type": "object", "additionalProperties": false,
+      "required": ["participant_id", "participant_key", "role", "status", "received_at", "summary_sha256", "observation_seconds", "totals"],
+      "properties": {
+        "participant_id": {"$ref": "#/$defs/participant_id"},
+        "participant_key": {"$ref": "#/$defs/hash_key"},
+        "role": {"enum": ["client", "server"]},
+        "status": {"const": "accepted"},
+        "received_at": {"$ref": "#/$defs/timestamp"},
+        "summary_sha256": {"$ref": "#/$defs/sha256"},
+        "observation_seconds": {"$ref": "#/$defs/decimal"},
+        "totals": {"$ref": "#/$defs/totals"}
+      }
+    },
+    "invalid_roster_entry": {
+      "type": "object", "additionalProperties": false,
+      "required": ["participant_id", "participant_key", "role", "status", "received_at", "issues"],
+      "properties": {
+        "participant_id": {"$ref": "#/$defs/participant_id"},
+        "participant_key": {"$ref": "#/$defs/hash_key"},
+        "role": {"enum": ["client", "server"]},
+        "status": {"const": "invalid"},
+        "received_at": {"$ref": "#/$defs/timestamp"},
+        "issues": {"type": "array", "minItems": 1, "maxItems": 4, "uniqueItems": true, "items": {"enum": ["malformed_source", "permission_denied"]}}
+      }
+    },
+    "absent_roster_entry": {
+      "type": "object", "additionalProperties": false,
+      "required": ["participant_id", "participant_key", "role", "status"],
+      "properties": {
+        "participant_id": {"$ref": "#/$defs/participant_id"},
+        "participant_key": {"$ref": "#/$defs/hash_key"},
+        "role": {"enum": ["client", "server"]},
+        "status": {"enum": ["missing", "disabled"]}
+      }
+    },
+    "roster_entry": {"oneOf": [{"$ref": "#/$defs/accepted_roster_entry"}, {"$ref": "#/$defs/invalid_roster_entry"}, {"$ref": "#/$defs/absent_roster_entry"}]},
+    "manifest_entry": {
+      "type": "object", "additionalProperties": false,
+      "required": ["relative_path", "sha256"],
+      "properties": {
+        "relative_path": {"type": "string", "minLength": 1, "maxLength": 512, "pattern": "^(?:resource_summary\\.json|participants/sha256-[0-9a-f]{64}\\.json)$"},
+        "sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "attempt_start": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schema_version", "kind", "job_id", "participant_id", "attempt_id", "environment_key", "observed_at", "collection_state"],
+      "properties": {
+        "schema_version": {"$ref": "#/$defs/schema_version"}, "kind": {"const": "nvflare.resource_stats.attempt_start"},
+        "job_id": {"$ref": "#/$defs/job_id"}, "participant_id": {"$ref": "#/$defs/participant_id"},
+        "attempt_id": {"$ref": "#/$defs/attempt_id"}, "environment_key": {"$ref": "#/$defs/hash_key"},
+        "observed_at": {"$ref": "#/$defs/timestamp"}, "collection_state": {"enum": ["enabled", "disabled"]},
+        "capacity": {"$ref": "#/$defs/capacity"}
+      },
+      "allOf": [
+        {"if": {"properties": {"collection_state": {"const": "enabled"}}}, "then": {"required": ["capacity"]}},
+        {"if": {"properties": {"collection_state": {"const": "disabled"}}}, "then": {"not": {"required": ["capacity"]}}}
+      ]
+    },
+    "attempt_final": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schema_version", "kind", "job_id", "participant_id", "attempt_id", "environment_key", "observed_at", "capacity", "retained_content", "f3"],
+      "properties": {
+        "schema_version": {"$ref": "#/$defs/schema_version"}, "kind": {"const": "nvflare.resource_stats.attempt_final"},
+        "job_id": {"$ref": "#/$defs/job_id"}, "participant_id": {"$ref": "#/$defs/participant_id"},
+        "attempt_id": {"$ref": "#/$defs/attempt_id"}, "environment_key": {"$ref": "#/$defs/hash_key"},
+        "observed_at": {"$ref": "#/$defs/timestamp"}, "capacity": {"$ref": "#/$defs/capacity"},
+        "retained_content": {"$ref": "#/$defs/retained_content"}, "f3": {"$ref": "#/$defs/f3"}
+      }
+    },
+    "attempt_parent_exit": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schema_version", "kind", "job_id", "participant_id", "attempt_id", "environment_key", "observed_at", "outcome"],
+      "properties": {
+        "schema_version": {"$ref": "#/$defs/schema_version"}, "kind": {"const": "nvflare.resource_stats.attempt_parent_exit"},
+        "job_id": {"$ref": "#/$defs/job_id"}, "participant_id": {"$ref": "#/$defs/participant_id"},
+        "attempt_id": {"$ref": "#/$defs/attempt_id"}, "environment_key": {"$ref": "#/$defs/hash_key"},
+        "observed_at": {"$ref": "#/$defs/timestamp"},
+        "outcome": {"enum": ["finished_ok", "finished_error", "terminated", "launch_failed"]},
+        "return_code": {"type": "integer", "minimum": -2147483648, "maximum": 2147483647}
+      },
+      "allOf": [
+        {"if": {"properties": {"outcome": {"const": "launch_failed"}}}, "then": {"not": {"required": ["return_code"]}}, "else": {"required": ["return_code"]}}
+      ]
+    },
+    "participant_summary": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schema_version", "kind", "job_id", "participant_key", "attempts"],
+      "properties": {
+        "schema_version": {"$ref": "#/$defs/schema_version"}, "kind": {"const": "nvflare.resource_stats.participant_summary"},
+        "job_id": {"$ref": "#/$defs/job_id"}, "participant_key": {"$ref": "#/$defs/hash_key"},
+        "attempts": {"type": "array", "minItems": 1, "maxItems": 128, "items": {"$ref": "#/$defs/participant_attempt"}}
+      }
+    },
+    "resource_summary": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schema_version", "kind", "job_id", "report_cutoff_at", "finalized_at", "roster", "totals"],
+      "properties": {
+        "schema_version": {"$ref": "#/$defs/schema_version"}, "kind": {"const": "nvflare.resource_stats.resource_summary"},
+        "job_id": {"$ref": "#/$defs/job_id"}, "report_cutoff_at": {"$ref": "#/$defs/timestamp"},
+        "finalized_at": {"$ref": "#/$defs/timestamp"},
+        "roster": {"type": "array", "minItems": 1, "maxItems": 10000, "items": {"$ref": "#/$defs/roster_entry"}},
+        "totals": {"$ref": "#/$defs/totals"}
+      }
+    },
+    "manifest": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schema_version", "kind", "job_id", "entries"],
+      "properties": {
+        "schema_version": {"$ref": "#/$defs/schema_version"}, "kind": {"const": "nvflare.resource_stats.manifest"},
+        "job_id": {"$ref": "#/$defs/job_id"},
+        "entries": {"type": "array", "minItems": 1, "maxItems": 10001, "items": {"$ref": "#/$defs/manifest_entry"}}
+      }
+    }
+  }
+}

@@ -1,0 +1,5 @@
+Hardware detail for site-1
+Model metadata is optional and may be suppressed by site policy.
+
+CPU: AMD EPYC 9654 (x86_64); 0.1427 CPU h
+GPU (full GPU): NVIDIA H100 80GB HBM3, 80 GiB per instance; 0.0951 instance h
