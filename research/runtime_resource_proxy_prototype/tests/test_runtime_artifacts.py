@@ -143,6 +143,16 @@ class TestRuntimeProbe(unittest.TestCase):
         self.assertIsNone(metric["value"])
         self.assertEqual(["WORKSPACE_PATH_NOT_DIRECTORY"], metric["caveat_codes"])
 
+    def test_storage_observes_only_the_supplied_workspace_filesystem(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            with patch("runtime_probe.os.statvfs", wraps=os.statvfs) as statvfs:
+                metric = probe_storage(workspace)
+        statvfs.assert_called_once_with(workspace)
+        self.assertEqual("visible_storage_capacity_bytes", metric["name"])
+        self.assertEqual("reported", metric["status"])
+        self.assertGreater(metric["value"], 0)
+
 
 class TestGeneratedArtifacts(unittest.TestCase):
     def test_generator_writes_consistent_artifact_tree(self):
@@ -170,6 +180,16 @@ class TestGeneratedArtifacts(unittest.TestCase):
             self.assertEqual(2, summary["coverage"]["expected_participant_count"])
             self.assertEqual(1, summary["coverage"]["reported_participant_count"])
             self.assertNotIn(str(output_dir), json.dumps(summary))
+            metric_names = {metric["name"] for metric in summary["qualified_totals"]["metrics"]}
+            self.assertNotIn("visible_storage_capacity_byte_seconds", metric_names)
+            rollup_names = {
+                metric["name"] for metric in participant_summary["attempts"][0]["rollups"]
+            }
+            self.assertNotIn("visible_storage_capacity_byte_seconds", rollup_names)
+            startup_names = {
+                metric["name"] for metric in participant_summary["attempts"][0]["startup_snapshot"]["metrics"]
+            }
+            self.assertIn("visible_storage_capacity_bytes", startup_names)
             gpu_total = next(
                 metric for metric in summary["qualified_totals"]["metrics"] if metric["name"] == "visible_gpu_seconds"
             )

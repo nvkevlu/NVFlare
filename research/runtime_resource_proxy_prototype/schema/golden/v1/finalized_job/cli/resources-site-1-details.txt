@@ -1,8 +1,8 @@
 Resources visible to the job while it ran.
 Job job-20260909-001 | selected site: site-1 | job coverage: PARTIAL (3 accepted / 4 expected)
 
-SITE     ROLE    STATUS    QUALITY     MEASURED TIME  FULL GPU h  CPU h   MEM GiB h  STORAGE GiB h  SAVED RESULT GiB  F3 REMOTE ACCEPTED GiB
-site-1   client  accepted  REPORTED            37m3s      2.4700 19.7600    118.5600       632.3200           0.0000               137.5567
+SITE     ROLE    STATUS    QUALITY     MEASURED TIME  FULL GPU h  CPU h   MEM GiB h  SAVED RESULT GiB  F3 REMOTE ACCEPTED GiB
+site-1   client  accepted  REPORTED            37m3s      2.4700 19.7600    118.5600           0.0000               137.5567
 
 Notices:
   MEASURED TIME is the sum of the measurement periods in each received report.

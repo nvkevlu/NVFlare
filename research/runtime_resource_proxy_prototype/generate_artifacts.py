@@ -174,6 +174,8 @@ def _metric_by_name(metrics: Iterable[dict[str, Any]], name: str) -> dict[str, A
 def _capacity_changed(start: dict[str, Any], final: dict[str, Any]) -> bool:
     final_by_name = {metric["name"]: metric for metric in final["metrics"]}
     for metric in start["metrics"]:
+        if metric["name"] == "visible_storage_capacity_bytes":
+            continue
         final_metric = final_by_name.get(metric["name"])
         if final_metric is None or final_metric["value"] != metric["value"]:
             return True
@@ -320,7 +322,6 @@ def _qualified_totals(
         "visible_gpu_seconds",
         "visible_cpu_unit_seconds",
         "visible_memory_byte_seconds",
-        "visible_storage_capacity_byte_seconds",
         "retained_content_bytes",
         "f3_payload_bytes_sent",
         "f3_message_count_sent",
@@ -415,7 +416,7 @@ def _human_row(participant: dict[str, Any]) -> str:
         coverage = "missing" if report_status == "missing" else report_status
         return (
             f"{participant['participant_id']:<24} {participant['role']:<7} {report_status:<11} {'—':>10} "
-            f"{'N/A':>7} {'N/A':>7} {'N/A':>11} {'N/A':>15} {'N/A':>12} {'N/A':>12} {coverage}"
+            f"{'N/A':>7} {'N/A':>7} {'N/A':>11} {'N/A':>12} {'N/A':>12} {coverage}"
         )
     attempt = participant["attempts"][0]
     rollups = attempt["rollups"]
@@ -424,7 +425,6 @@ def _human_row(participant: dict[str, Any]) -> str:
     gpu = _find_metric(rollups, "visible_gpu_seconds")
     cpu = _find_metric(rollups, "visible_cpu_unit_seconds")
     memory = _find_metric(rollups, "visible_memory_byte_seconds")
-    storage = _find_metric(rollups, "visible_storage_capacity_byte_seconds")
     coverage = _record_status(rollups + [retained, network])
     return (
         f"{participant['participant_id']:<24} {participant['role']:<7} "
@@ -433,7 +433,6 @@ def _human_row(participant: dict[str, Any]) -> str:
         f"{_human_hours(gpu['value'] if gpu else None):>7} "
         f"{_human_hours(cpu['value'] if cpu else None):>7} "
         f"{_human_hours(memory['value'] if memory else None, 1024**3 * 3600):>11} "
-        f"{_human_hours(storage['value'] if storage else None, 1024**3 * 3600):>15} "
         f"{_human_bytes(retained['value'] if retained else None):>12} "
         f"{_human_bytes(network['value'] if network else None):>12} {coverage}"
     )
@@ -451,13 +450,12 @@ def _human_all_sites(summary: dict[str, Any]) -> str:
         "",
         (
             "SITE                     ROLE    STATUS        DURATION   GPU h   CPU h   MEM GiB h "
-            " STORAGE GiB h     RETAINED     F3 BYTES COVERAGE"
+            "    RETAINED     F3 BYTES COVERAGE"
         ),
     ]
     lines.extend(_human_row(participant) for participant in summary["participants"])
     totals = {metric["name"]: metric for metric in summary["qualified_totals"]["metrics"]}
     memory_hours = _human_hours(totals.get("visible_memory_byte_seconds", {}).get("value"), 1024**3 * 3600)
-    storage_hours = _human_hours(totals.get("visible_storage_capacity_byte_seconds", {}).get("value"), 1024**3 * 3600)
     lines.extend(
         [
             "",
@@ -465,8 +463,7 @@ def _human_all_sites(summary: dict[str, Any]) -> str:
             (
                 f"  GPU {_human_hours(totals.get('visible_gpu_seconds', {}).get('value'))} h | "
                 f"CPU {_human_hours(totals.get('visible_cpu_unit_seconds', {}).get('value'))} h | "
-                f"Memory {memory_hours} GiB h | "
-                f"Storage {storage_hours} GiB h"
+                f"Memory {memory_hours} GiB h"
             ),
             (
                 f"  Retained {_human_bytes(totals.get('retained_content_bytes', {}).get('value'))} | "
@@ -653,15 +650,11 @@ def generate(output_dir: Path, job_id: str, study: str, observation_seconds: flo
             unit="byte_seconds",
             observed_at=ended_at,
         ),
-        _proxy_rollup(
-            _metric_by_name(start_snapshot["metrics"], "visible_storage_capacity_bytes"),
-            duration_seconds,
-            name="visible_storage_capacity_byte_seconds",
-            unit="byte_seconds",
-            observed_at=ended_at,
-        ),
     ]
-    attempt_status = _record_status(final_snapshot["metrics"] + rollups + [retained_metric] + network["metrics"])
+    final_compute_metrics = [
+        metric for metric in final_snapshot["metrics"] if metric["name"] != "visible_storage_capacity_bytes"
+    ]
+    attempt_status = _record_status(final_compute_metrics + rollups + [retained_metric] + network["metrics"])
     final_record = {
         "schema_version": RESOURCE_SCHEMA_VERSION,
         "kind": "nvflare.resource_stats.attempt_final",

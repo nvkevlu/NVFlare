@@ -420,10 +420,10 @@ def _validate_storage(value: Any, path: str) -> None:
         storage,
         path,
         resource="storage",
-        statuses=MEASUREMENT_STATUSES,
+        statuses=POINT_STATUSES,
         reported_required={"capacity_bytes"},
     )
-    if status not in {"reported", "partial"}:
+    if status != "reported":
         return
     _integer(storage["capacity_bytes"], f"{path}.capacity_bytes", maximum=U64_MAX, positive=True)
 
@@ -596,7 +596,7 @@ def _validate_f3_total(value: Any, path: str) -> None:
         _validate_counter(total["remote_accepted"], f"{path}.remote_accepted")
 
 
-_TOTAL_FIELDS = ("cpu", "memory", "storage", "gpu", "retained_content", "f3")
+_TOTAL_FIELDS = ("cpu", "memory", "gpu", "retained_content", "f3")
 
 
 def _validate_totals(value: Any, path: str) -> None:
@@ -604,7 +604,6 @@ def _validate_totals(value: Any, path: str) -> None:
     _exact_keys(totals, set(_TOTAL_FIELDS), set(), path)
     _validate_group_total(totals["cpu"], f"{path}.cpu", resource="cpu", gpu=False)
     _validate_scalar_total(totals["memory"], f"{path}.memory", resource="memory", field="byte_seconds")
-    _validate_scalar_total(totals["storage"], f"{path}.storage", resource="storage", field="byte_seconds")
     _validate_group_total(totals["gpu"], f"{path}.gpu", resource="gpu", gpu=True)
     _validate_retained_total(totals["retained_content"], f"{path}.retained_content")
     _validate_f3_total(totals["f3"], f"{path}.f3")
@@ -759,7 +758,6 @@ def _expected_job_totals(participants: Sequence[Mapping[str, Any]]) -> dict[str,
     return {
         "cpu": _expected_group_total(participants, accepted, "cpu"),
         "memory": _expected_scalar_total(participants, accepted, "memory", "byte_seconds"),
-        "storage": _expected_scalar_total(participants, accepted, "storage", "byte_seconds"),
         "gpu": _expected_group_total(participants, accepted, "gpu"),
         "retained_content": _expected_retained_total(participants, accepted),
         "f3": _expected_f3_total(participants, accepted),
@@ -778,7 +776,6 @@ _COMMON_ATTEMPT_FIELDS = {
 RESOURCE_TIME_FORMULAS = {
     "cpu.unit_seconds": "attempt_start.cpu.visible_units * (closed_at - opened_at)",
     "memory.byte_seconds": "attempt_start.memory.visible_bytes * (closed_at - opened_at)",
-    "storage.byte_seconds": "participant_start.storage.capacity_bytes * participant_lifetime_seconds",
     "gpu.instance_seconds": "attempt_start.gpu.groups[].count * (closed_at - opened_at)",
 }
 
@@ -978,8 +975,6 @@ def _capacity_signature(resource: str, value: Mapping[str, Any]) -> Any:
         return value["visible_units"]
     if resource == "memory":
         return value["visible_bytes"]
-    if resource == "storage":
-        return value["capacity_bytes"]
     counts: dict[str, int] = defaultdict(int)
     for group in value["groups"]:
         counts[group["kind"]] += int(group["count"])
@@ -999,8 +994,8 @@ def derive_participant_totals(
 
     In the JSON, an attempt is a measurement period.  Its start and end must use
     one NVFlare clock, but the schema does not choose which component records
-    them.  A final sample is optional stability evidence.  Persistent storage
-    spans the site's job run.  The saved-result byte total and F3 totals are counted once.
+    them. A final sample is optional stability evidence. The saved-result byte
+    total and F3 totals are counted once.
     Each product is rounded half-even to nine fractional digits before summing.
     """
 
@@ -1017,7 +1012,6 @@ def derive_participant_totals(
     gpu_values: dict[tuple[str, str, str, str], list[Decimal]] = defaultdict(list)
     gpu_templates: dict[tuple[str, str, str, str], dict[str, str]] = {}
     memory_values: list[Decimal] = []
-    storage_values: list[Decimal] = []
 
     # A completed participant lifecycle with no attempts authoritatively says
     # that no transient resource window occurred.  This is a reported zero,
@@ -1093,30 +1087,7 @@ def derive_participant_totals(
         _sum_decimals(resource_window_values, "$.resource_window_seconds")
     )
 
-    participant_start = participant_record["start"]
     participant_final = participant_record["final"]
-    storage_start = participant_start["storage"]
-    storage_final = participant_final["storage"]
-    if storage_start["status"] in {"reported", "partial"}:
-        numeric["storage"] = True
-        participant_seconds = _duration_seconds(participant_start["observed_at"], participant_final["observed_at"])
-        storage_values.append(
-            _resource_product(
-                Decimal(storage_start["capacity_bytes"]),
-                participant_seconds,
-                "$.start.storage",
-            )
-        )
-        if (
-            storage_final["status"] not in {"reported", "partial"}
-            or _capacity_signature("storage", storage_start) != _capacity_signature("storage", storage_final)
-            or storage_start["status"] == "partial"
-            or storage_final["status"] == "partial"
-        ):
-            degraded["storage"] = True
-    else:
-        degraded["storage"] = True
-
     retained = participant_final["retained_content"]
     retained_value = 0
     if retained["status"] in {"reported", "partial"}:
@@ -1192,7 +1163,6 @@ def derive_participant_totals(
     totals = {
         "cpu": cpu_total,
         "memory": scalar_resource("memory", memory_values),
-        "storage": scalar_resource("storage", storage_values),
         "gpu": gpu_total,
         "retained_content": retained_total,
         "f3": f3_total,

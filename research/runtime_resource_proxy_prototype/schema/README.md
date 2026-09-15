@@ -38,11 +38,11 @@ The schema accepts exactly eight record kinds:
 
 | Kind suffix | Purpose |
 | --- | --- |
-| participant_start | Start of one site's job run and its storage observation. |
+| participant_start | Start of one site's job run and its visible workspace-filesystem capacity observation. |
 | attempt_start | Start time and resources for one measurement period. |
 | attempt_final | Optional final resource observation for that period. |
 | attempt_end | End time and reason for that period. |
-| participant_final | End of the site run, one saved-result byte total, and F3 counters. |
+| participant_final | Final visible workspace-filesystem capacity observation, one saved-result byte total, and F3 counters. |
 | participant_summary | One final site report. |
 | resource_summary | Final server result for the job. |
 | manifest | Hashes of the stored server files. |
@@ -172,13 +172,17 @@ visible entity in that group. Different memory values create different groups.
 Model, memory, and MIG profile are optional. MIG fields are absent for ordinary
 full-GPU data and when no MIG instance is present.
 
-## Storage and saved results
+## Visible workspace-filesystem capacity and saved results
 
-Storage is observed for the filesystem that contains the existing job
-workspace. capacity_bytes is the total visible filesystem capacity.
+At participant start and final, NVFlare observes the total visible capacity of
+the filesystem containing the existing job workspace. It queries only that
+filesystem and does not enumerate or sum other mounted filesystems.
 
-Storage time covers the site job-run interval only when workspace continuity is
-known. If continuity is uncertain, storage is partial or unavailable.
+Each `capacity_bytes` value is an independent point observation. The two values
+need not match, and neither proves availability between observations. This is
+visible workspace-filesystem capacity—not usage, allocation, billable storage,
+or storage owned by the job. It is not converted to byte-seconds and does not
+appear in participant or job totals.
 
 The saved-result observation contains only status and a byte count. It does not
 expose filenames or hash model content. The collector uses a complete, bounded
@@ -241,7 +245,6 @@ makes the affected total partial.
 A period with known times but no start observation contributes to measured time
 but not a numeric resource total. The resource total is partial or unavailable.
 
-Storage uses the participant start-to-final interval, not each attempt.
 The saved-result byte total and F3 counters contribute once per site report.
 
 ## F3 counters
@@ -284,6 +287,9 @@ At the report cutoff, every expected participant is one of:
 
 Only accepted reports contribute numeric values. Missing or invalid reports
 make affected job totals partial.
+
+Visible workspace-filesystem capacity is not a job total. It remains only in
+each accepted participant report archived beside the reconciled summary.
 
 An accepted report can still contain partial measurements. In the canonical
 example, `site-2` has one period without a final resource observation, a gap,

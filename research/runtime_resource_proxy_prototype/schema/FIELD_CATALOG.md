@@ -11,7 +11,7 @@ The contract deliberately separates two time scopes:
 
 | Scope | Starts | Ends | What it measures |
 | --- | --- | --- | --- |
-| Site job run | NVFlare begins this site's part of the job | NVFlare finishes this site's part of the job | storage, saved-result byte total, and F3 |
+| Site job run | NVFlare begins this site's part of the job | NVFlare finishes this site's part of the job | independent start/final visible workspace-filesystem capacity observations plus terminal saved-result and F3 facts |
 | Measurement period (`attempt`) | NVFlare records a resource observation and start time | NVFlare records the end time | CPU, memory, and GPU capacity-time |
 
 An attempt is a measurement period. It does not imply a process, allocation, lease, or roadmap
@@ -25,8 +25,8 @@ contribute CPU, memory, or GPU time.
 | `attempt_start` | schema_version, kind, job_id, participant_id, attempt_id, environment_key, opened_at, capacity | Resource observation and start time for one measurement period. |
 | `attempt_final` | same identity, capacity | Optional final observation used to check whether capacity changed. |
 | `attempt_end` | same identity, opened_at, closed_at, reason | End time and reason for one measurement period. |
-| `participant_start` | schema_version, kind, job_id, participant_id, observed_at, storage | Start of one site's job run and its storage observation. |
-| `participant_final` | same participant identity, observed_at, storage, retained_content, f3 | End-of-site storage, saved-result, and F3 observation. |
+| `participant_start` | schema_version, kind, job_id, participant_id, observed_at, storage | Start of one site's job run and its visible workspace-filesystem capacity observation. |
+| `participant_final` | same participant identity, observed_at, storage, retained_content, f3 | Final visible workspace-filesystem capacity observation plus saved-result and F3 facts. |
 | `participant_summary` | schema_version, kind, job_id, participant_key, start, final, attempts | Final site report accepted by the server. |
 | `resource_summary` | schema_version, kind, job_id, report_cutoff_at, finalized_at, participants, totals | Final server result. |
 | `manifest` | schema_version, kind, job_id, entries | Exact path/digest inventory. |
@@ -45,7 +45,7 @@ small collection fragments. Their bodies are embedded without repeated identity 
 | attempt_id | exactly 32 lowercase hexadecimal characters | Random 128-bit identity for one measurement period. |
 | environment_key | `sha256-` plus 64 lowercase hexadecimal characters | Job-scoped platform HMAC for one measurement scope; it may repeat only for non-overlapping periods. |
 | participant_key | same sha256-prefixed form | Job-scoped platform HMAC used in archive paths and the expected participant list. |
-| observed_at | calendar-valid UTC RFC 3339 ending in `Z`, with zero to nine fractional digits | Participant storage/terminal observation time. |
+| observed_at | calendar-valid UTC RFC 3339 ending in `Z`, with zero to nine fractional digits | Time of a participant start or final observation. |
 | opened_at | same timestamp form | NVFlare start time for one measurement period. |
 | closed_at | same timestamp form, not earlier than opened_at | NVFlare end time for that period, using the same clock. |
 | report_cutoff_at | same timestamp form | Fixed last acceptance point for participant summaries. |
@@ -57,10 +57,12 @@ identity authentication; the server must match a report to its authenticated job
 
 ## Measurement-period capacity
 
-Both `attempt_start.capacity` and `attempt_final.capacity` contain exactly `cpu`, `memory`, and
-`gpu`. Storage is intentionally absent: it is measured once for the site job run rather than once
-per measurement period. The embedded `start` and `final` bodies contain capacity only. Timestamps
-remain on the measurement period.
+Both `attempt_start.capacity` and `attempt_final.capacity` contain exactly
+`cpu`, `memory`, and `gpu`. Storage is intentionally absent: visible
+workspace-filesystem capacity is observed independently at participant start
+and final rather than used as measurement-period capacity. The embedded
+`start` and `final` bodies contain capacity only. Timestamps remain on the
+measurement period.
 
 Point-capacity objects use `reported`, `unavailable`, or `error`:
 
@@ -123,21 +125,21 @@ A reported empty `groups` array means CUDA-runtime enumeration succeeded and fou
 It is a generic observation, not a required consequence of a resource release. A process that
 already initialized CUDA under different visibility cannot establish a new inventory reliably.
 
-## Site-run storage
+## Visible workspace-filesystem capacity
 
-`participant_start.storage` and `participant_final.storage` use lifecycle-status rules:
+`participant_start.storage` and `participant_final.storage` are independent point observations:
 
 | Field | Presence | Type/bound | Rule |
 | --- | --- | --- | --- |
-| status | required | reported, partial, unavailable, error | Capacity plus continuous-availability coverage. |
-| capacity_bytes | reported/partial only | positive U64 integer string | `statvfs` total for the filesystem containing the existing job workspace. |
-| issues | partial/unavailable/error only | 1–4 sorted unique values | Contextual cause. |
+| status | required | reported, unavailable, error | Point-observation state. |
+| capacity_bytes | reported only | positive U64 integer string | Total visible capacity of the filesystem containing the existing NVFlare job workspace. |
+| issues | unavailable/error only | 1–4 sorted unique values | Contextual cause. |
 
-Free bytes, filesystem class, and absolute path are not retained. Storage byte-seconds use the
-participant start-to-final interval exactly once. `reported` requires NVFlare to establish
-continuous workspace availability over that interval. If continuity is uncertain but a numeric
-proxy remains usable, storage is `partial`; otherwise it is unavailable/error. V1 deliberately has
-no storage sub-windows.
+The collector queries only that one filesystem. It does not enumerate or sum other mounted
+filesystems. Free bytes, filesystem class, and absolute path are not retained. The start and final
+values need not match; each says only what was visible at that instant. The value is not usage,
+allocation, billable storage, or storage owned by the job. V1 does not calculate storage
+byte-seconds and does not include visible workspace-filesystem capacity in participant or job totals.
 
 ## Attempt end
 
@@ -160,7 +162,8 @@ measurement time but degrades compute totals because capacity is unknown.
 
 ## Participant terminal facts
 
-`participant_final` contains storage plus one retained-content observation and one F3 observation.
+`participant_final` contains the final visible workspace-filesystem capacity
+observation plus one retained-content observation and one F3 observation.
 These facts are never repeated in attempt finals.
 
 ### Retained content
@@ -217,7 +220,6 @@ The same totals shape appears on every accepted participant entry and once at jo
 | --- | --- | --- |
 | cpu | status, groups | `unit_seconds`, grouped by optional model and architecture. |
 | memory | status, byte_seconds | memory byte-seconds across measurement periods. |
-| storage | status, byte_seconds | participant-lifetime filesystem-capacity byte-seconds. |
 | gpu | status, groups | `instance_seconds`, grouped by kind and optional metadata. |
 | retained_content | status, bytes | one terminal saved-result byte total. |
 | f3 | status, remote_accepted | one participant-lifetime primary counter pair. |
@@ -249,7 +251,8 @@ entries add:
 Job totals are deterministic sums of accepted participant totals. Missing, invalid, or disabled members
 make an otherwise numeric job total partial; no numeric contribution makes it unavailable. Counts,
 coverage, contributors, warnings, and qualifications derive from the expected participant list and
-are not stored.
+are not stored. Visible workspace-filesystem capacity remains in archived
+participant reports and is never copied into participant or job totals.
 
 ## Formula and bounds
 
@@ -257,7 +260,6 @@ are not stored.
 attempt CPU time    = attempt-start CPU units × (closed_at - opened_at)
 attempt memory time = attempt-start memory bytes × (closed_at - opened_at)
 attempt GPU time    = attempt-start GPU instances × (closed_at - opened_at)
-storage time        = participant-start storage bytes × (participant-final - participant-start)
 ```
 
 Products round at most once to nine fractional digits using round-half-even before summation.

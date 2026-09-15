@@ -53,9 +53,9 @@
           },
           "memory": {
             "status": "reported",
-            "visible_bytes": "1073741824",
+            "visible_bytes": "10000000000001",
             "evidence": {
-              "physical_bytes": "1073741824"
+              "physical_bytes": "10000000000001"
             }
           },
           "gpu": {
@@ -77,9 +77,9 @@
           },
           "memory": {
             "status": "reported",
-            "visible_bytes": "1073741824",
+            "visible_bytes": "10000000000001",
             "evidence": {
-              "physical_bytes": "1073741824"
+              "physical_bytes": "10000000000001"
             }
           },
           "gpu": {

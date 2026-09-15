@@ -42,7 +42,7 @@ It was one possible implementation, not an approved requirement.
 | --- | --- | --- |
 | How much data survives a process or pod crash? | Site fragments in the normal workspace may be lost. | State actual coverage honestly. Do not require a new mount, service, or privileged storage path. |
 | Can the selected component write a final report after a child fails? | Partial data is useful only when the platform still has it. | Use existing NVFlare state and message paths; otherwise mark the site missing or partial. |
-| How is workspace continuity established for storage time? | Filesystem capacity cannot be multiplied across a period when the workspace was absent. | Report storage time only for an interval the platform can support. |
+| Which component assembles logical fragments into the final site report, and how does it handle conflicting fragments? | The schema defines the final shape but not a production fragment reducer. | Correlate only platform-owned identities; accept identical retries and reject conflicting bytes without new setup. |
 
 Site-side files are self-reported and not immutable. Server-side accepted
 participant files are protected by existing server job storage after receipt;
@@ -57,6 +57,7 @@ component.
 | What is the report cutoff? | The server needs a fixed time to classify missing reports. | Tie it to existing job finalization and document late-report behavior. |
 | How are duplicate retries handled? | A lost acknowledgement must not create a second report. | Accept identical bytes; reject different bytes after first acceptance. |
 | How is the server's own report ingested? | It should use the same schema without pretending to send remotely. | Validate and store it through the same internal acceptance API. |
+| How are the archive and `RESOURCE_STATS` query component published consistently? | The CLI and Phase 2 must not read bytes that differ from the validated archive. | Expose the component only after validation; treat absence or mismatch as unavailable or corrupt. Physical copy versus storage alias is an implementation detail. |
 
 ## Resource adapters
 
@@ -65,7 +66,6 @@ component.
 | Which CUDA API and versions are supported? | Numeric GPU counts depend on successful runtime enumeration. | The raw CUDA mask is never count authority. NVML can enrich only matched devices. |
 | Which operating systems are in the first supported implementation? | CPU, memory, and model probes are platform-specific. | Choose the initial support matrix from ordinary-user evidence; unsupported platforms report unavailable. |
 | Which CPU model normalizer is used on each OS? | Raw model strings may expose too much or split equivalent models. | Use a bounded normalized value; omit it for heterogeneous visible CPUs. |
-| Which filesystems can prove continuity? | Shared and ephemeral filesystems have different behavior. | Keep the visible-capacity qualification and never claim ownership. |
 | Which existing NVFlare state identifies the complete saved-result set? | Exact size requires a complete, bounded set. | Use existing platform state. If none exists, report unavailable; do not add a registry, job setting, or arbitrary path scan. Store only the total bytes, not filenames or content hashes. |
 
 ## F3 integration
@@ -107,6 +107,11 @@ These are no longer open:
 - full GPUs and MIG instances are separate;
 - raw identity and topology fields are excluded;
 - missing data is not zero;
+- v1 observes the visible capacity of only the filesystem containing the
+  existing NVFlare job workspace at participant start and final; it does not
+  enumerate or sum mounts or calculate or aggregate storage capacity-time,
+  because a shared filesystem cannot be attributed to the job without new
+  privileges or configuration;
 - the server component name is exactly RESOURCE_STATS; and
 - the resource-statistics schema does not choose the roadmap process model.
 

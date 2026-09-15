@@ -11,7 +11,7 @@
       "role": "client",
       "status": "accepted",
       "received_at": "2026-09-09T00:15:01.2Z",
-      "summary_sha256": "6fae9d75a53bf4e8a22259265f91ccae415987c9fbd9a6a55a43f9ee5f14b92a",
+      "summary_sha256": "ae56e12d5f8a28fe52b0e7d4f124d35f7934abf9325ebd1b7ad66a955b9b2bd5",
       "resource_window_seconds": "901",
       "totals": {
         "cpu": {
@@ -24,10 +24,6 @@
           ]
         },
         "memory": {
-          "status": "reported",
-          "byte_seconds": "967441383424"
-        },
-        "storage": {
           "status": "reported",
           "byte_seconds": "9010000000000901"
         },
@@ -60,10 +56,6 @@
       ]
     },
     "memory": {
-      "status": "reported",
-      "byte_seconds": "967441383424"
-    },
-    "storage": {
       "status": "reported",
       "byte_seconds": "9010000000000901"
     },

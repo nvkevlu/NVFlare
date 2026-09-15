@@ -64,15 +64,13 @@ class TestCanonicalReviewArtifacts(unittest.TestCase):
             self.assertEqual("2223", receipt["scenario_basis"]["reference_runtime_seconds"])
             self.assertEqual("590801346560", receipt["scenario_basis"]["reference_logical_state_bytes"])
             self.assertIn("did not measure the proposed post-encoding F3 counter", receipt["scenario_basis"]["f3_note"])
-            self.assertEqual("2223", receipt["derived_examples"]["participant_lifetime_seconds"])
             self.assertEqual("2223", receipt["derived_examples"]["site_1_resource_window_seconds"])
             self.assertEqual("1923", receipt["derived_examples"]["site_2_resource_window_seconds"])
             self.assertEqual("2223", receipt["derived_examples"]["server_resource_window_seconds"])
             self.assertEqual("6369", receipt["derived_examples"]["accepted_resource_window_seconds"])
             self.assertEqual("145656", receipt["derived_examples"]["job_cpu_unit_seconds"])
             self.assertEqual("15984", receipt["derived_examples"]["job_gpu_instance_seconds"])
-            self.assertEqual("7332643045638144", receipt["derived_examples"]["job_storage_byte_seconds"])
-            self.assertEqual("9010000000000901", receipt["derived_examples"]["large_storage_byte_seconds"])
+            self.assertEqual("9010000000000901", receipt["derived_examples"]["large_memory_byte_seconds"])
 
     def test_archive_manifest_digests_and_query_copy_are_exact(self):
         resource_root = COMMITTED_ROOT / "server_run" / "resource_stats"
@@ -131,7 +129,7 @@ class TestCanonicalReviewArtifacts(unittest.TestCase):
         self.assertIn("32m3s", human)
         self.assertIn("MEASURED TIME 1h46m9s", human)
         self.assertIn("4.4400", human)
-        self.assertIn("1896.9600", human)
+        self.assertNotIn("STORAGE", human)
         self.assertIn("REPORTED", human)
         self.assertIn("Site QUALITY PARTIAL", human)
         self.assertIn("SAVED RESULT GiB", human)
@@ -159,6 +157,8 @@ class TestCanonicalReviewArtifacts(unittest.TestCase):
         self.assertIn("NVIDIA A100 80GB", selected_partial)
         self.assertEqual(summary, envelope["data"]["summary"])
         self.assertEqual({"job_id": summary["job_id"], "site": "all"}, envelope["data"]["selection"])
+        self.assertNotIn("storage", summary["totals"])
+        self.assertTrue(all("storage" not in entry.get("totals", {}) for entry in summary["participants"]))
         self.assertTrue(
             all(
                 group["kind"] == "full_gpu"

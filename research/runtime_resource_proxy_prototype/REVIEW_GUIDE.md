@@ -5,20 +5,24 @@ This is the best place to start a design review.
 ## Suggested meeting path
 
 1. Read the idea and hard requirements below.
-2. Inspect the generated all-site CLI output.
-3. Walk through the four-participant example and its partial-data behavior.
-4. Review the collection rules and formulas only where questions arise.
-5. End with [GAPS.md](GAPS.md), the authoritative list of remaining decisions.
+2. Use the [rollup-flow map](ROLLUP_FLOW.md) to follow observations through the
+   site and job summaries.
+3. Inspect the generated all-site CLI output.
+4. Walk through the four-participant example and its partial-data behavior.
+5. Review the collection rules and formulas only where questions arise.
+6. End with [GAPS.md](GAPS.md), the authoritative list of remaining decisions.
 
 The field and code catalogs are lookup material. The decision-history document
 is optional background and does not belong in the main meeting path.
 
 ## The idea in one paragraph
 
-Phase 1 records the CPU, memory, storage, and GPUs that an NVFlare job can see.
-It also records one saved-result byte total and NVFlare message payload bytes.
-The result is useful for later cost estimation, but it is not utilization,
-reserved capacity, or a bill.
+Phase 1 records the CPU, memory, and GPUs that an NVFlare job can see over
+measured periods. It also records the point-in-time visible
+workspace-filesystem capacity, one saved-result byte total, and NVFlare
+message payload bytes. The workspace filesystem is the one containing the
+existing job workspace. The result is useful for later cost estimation, but
+it is not utilization, reserved capacity, or a bill.
 
 This design defines the data and the calculations. It does **not** choose how
 NVFlare will run tasks. CP may run tasks directly, NVFlare may use child
@@ -123,11 +127,12 @@ The retained evidence is a **five-round 14B full-model qualification from
 reference values and the distinction between evidence-based and illustrative
 fields.
 
-The golden example is not a replay of that run. Its CPU, memory, storage, and
-measurement-period partitions are illustrative. Its F3 values use the derived
-logical state volume as a realistic scale, but the historical run did not
-record bytes at the proposed post-encoding F3 acceptance boundary. The F3
-values are therefore example counters, not recovered benchmark measurements.
+The golden example is not a replay of that run. Its CPU, memory,
+visible workspace-filesystem capacity, and measurement-period partitions are
+illustrative. Its F3 values use the derived logical state volume as a realistic
+scale, but the historical run did not record bytes at the proposed
+post-encoding F3 acceptance boundary. The F3 values are therefore example
+counters, not recovered benchmark measurements.
 
 There is no proposed `resource.json` record:
 
@@ -135,7 +140,7 @@ There is no proposed `resource.json` record:
 | --- | --- |
 | `participant_summary.json` | One client or server's detailed input report. |
 | `resource_summary.json` | The server's reconciled participant list and job totals. |
-| `RESOURCE_STATS` | A byte-identical job-store copy of `resource_summary.json`. |
+| `RESOURCE_STATS` | The fixed job-store query component; its payload is the exact `resource_summary.json` bytes. |
 | `resources-all.json` | Example JSON printed by the CLI; it wraps the resource summary. |
 
 Existing NVFlare files named `resources.json` are unrelated site or component
@@ -145,7 +150,8 @@ configuration.
 
 A site report has three parts:
 
-1. Job-run start and finish facts.
+1. Job-run start and finish facts, including independent visible
+   workspace-filesystem capacity observations at each point.
 2. Zero or more measurement periods.
 3. Facts collected once at the end: one saved-result byte total and F3
    counters.
@@ -202,14 +208,17 @@ cannot add devices or change the count.
 Full GPUs and MIG instances remain separate. MIG fields and CLI columns appear
 only when a positive MIG value exists.
 
-### Storage
+### Visible workspace-filesystem capacity
 
-NVFlare reads the capacity of the filesystem that contains the existing job
-workspace. No new volume or mount is required.
+NVFlare reads the total visible capacity of the filesystem containing the
+existing job workspace at participant start and final. It queries only that
+filesystem. It does not enumerate or sum other mounted filesystems, and no new
+volume or mount is required.
 
-Storage time is reported only when NVFlare can establish that the workspace was
-available for the stated interval. Otherwise the result is partial or
-unavailable.
+The two observations are independent and need not match. They are not evidence
+of availability between those instants. V1 does not turn them into storage
+time, include them in participant or job totals, or describe them as usage,
+allocation, billable storage, or storage owned by the job.
 
 ### Saved results
 
@@ -240,13 +249,12 @@ memory time = visible memory bytes × duration
 GPU time = visible GPU instances × duration
 ```
 
-Storage uses the site job-run interval when workspace continuity is known.
 Saved-result bytes and F3 counters are added once, not once per measurement
 period.
 
-Different sites may be using the same physical machine or shared storage.
-Therefore a job total is a sum of received reports, not a claim about physical
-capacity.
+Different sites may be using the same physical compute resources. Therefore a
+job compute total is a sum of received reports, not a claim about physical
+capacity. Visible workspace-filesystem capacity observations are not summed.
 
 ## Missing and partial data
 
@@ -254,13 +262,14 @@ The allowed states depend on the kind of fact:
 
 | Fact | Allowed states |
 | --- | --- |
-| CPU, memory, or GPU at one point in time | `reported`, `unavailable`, `error` |
-| Storage, saved results, or F3 counters | `reported`, `partial`, `unavailable`, `error` |
+| CPU, memory, GPU, or visible workspace-filesystem capacity at one point in time | `reported`, `unavailable`, `error` |
+| Saved results or F3 counters | `reported`, `partial`, `unavailable`, `error` |
 | Derived resource-time total | `reported`, `partial`, `unavailable` |
 
 `partial` means usable numeric data exists but some coverage is missing.
-Point-in-time CPU, memory, and GPU cannot be partial: NVFlare either obtains a
-valid selected value at that moment or it does not.
+Point-in-time CPU, memory, GPU, and visible workspace-filesystem capacity
+cannot be partial: NVFlare either obtains a valid selected value at that
+moment or it does not.
 
 The expected participant list uses:
 
@@ -275,7 +284,7 @@ The short issue codes are defined in
 [CODE_CATALOG.md](schema/CODE_CATALOG.md). They are intentionally generic so
 the resource name does not have to be repeated in every code.
 
-## Storage and trust
+## Report storage and trust
 
 The schema does not require site-side fragment files. The prototype shows one
 best-effort option that writes them in the existing job workspace. If an

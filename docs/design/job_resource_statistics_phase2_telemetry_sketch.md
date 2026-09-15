@@ -30,7 +30,8 @@ measurements.
 Phase 1 values have a different meaning:
 
 - visible CPU, memory, and GPU capacity;
-- capacity multiplied by measured time;
+- CPU, memory, and GPU capacity multiplied by measured time;
+- point-in-time visible workspace-filesystem capacity in participant reports;
 - one saved-result byte total; and
 - F3 payload counters.
 
@@ -70,7 +71,6 @@ The first version should publish a small job-level summary:
 | Memory byte-seconds | totals.memory |
 | Full-GPU instance-seconds | totals.gpu full_gpu groups |
 | MIG instance-seconds | totals.gpu MIG groups, only when present |
-| Storage byte-seconds | totals.storage |
 | Saved-result bytes | totals.retained_content |
 | Accepted remote F3 payload bytes/messages | totals.f3.remote_accepted |
 | Overall quality | derived from the stored statuses |
@@ -93,13 +93,17 @@ resource_proxy.accepted_reports
 resource_proxy.cpu_unit_seconds
 resource_proxy.memory_byte_seconds
 resource_proxy.full_gpu_instance_seconds
-resource_proxy.storage_byte_seconds
 resource_proxy.saved_result_bytes
 resource_proxy.f3_remote_payload_bytes
 resource_proxy.quality
 ~~~
 
 These names are proposed, not final.
+
+There is no job-level storage-capacity or storage-time field. The point-in-time
+visible workspace-filesystem capacity observations remain in archived
+participant reports. They are intentionally absent from `RESOURCE_STATS`
+totals, so the proposed job-level Phase 2 publication does not include them.
 
 Do not use names such as CPU used, GPU used, allocated GPU, reserved memory, or
 cost. Phase 1 does not establish those meanings.
@@ -196,7 +200,7 @@ Phase 2 is best effort.
 | RESOURCE_STATS is absent | Publish nothing; record one short diagnostic. |
 | Schema version is unsupported | Publish nothing; identify the version. |
 | Phase 1 validation fails | Publish nothing; report invalid input. |
-| JobStatsReporter is not already active | Phase 1 remains available through storage and CLI; this feature does not add an enablement setting. |
+| JobStatsReporter is not already active | Phase 1 remains available through the job store and CLI; this feature does not add an enablement setting. |
 | Reporter publication fails | Keep the Phase 1 result; retry only within the normal reporter policy. |
 
 No failure in this table may fail the federated job.

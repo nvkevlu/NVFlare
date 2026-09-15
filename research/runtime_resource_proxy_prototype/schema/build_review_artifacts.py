@@ -325,8 +325,8 @@ def _large_participant() -> dict[str, Any]:
     }
     capacity["memory"] = {
         "status": "reported",
-        "visible_bytes": "1073741824",
-        "evidence": {"physical_bytes": "1073741824"},
+        "visible_bytes": "10000000000001",
+        "evidence": {"physical_bytes": "10000000000001"},
     }
     return {
         "schema_version": "1.0",
@@ -516,7 +516,7 @@ def _human_cli(summary: dict[str, Any], selected_site: str | None = None) -> str
     header = "SITE     ROLE    STATUS    QUALITY     MEASURED TIME  FULL GPU h"
     if show_mig:
         header += "  MIG CI h"
-    header += "  CPU h   MEM GiB h  STORAGE GiB h  SAVED RESULT GiB  F3 REMOTE ACCEPTED GiB"
+    header += "  CPU h   MEM GiB h  SAVED RESULT GiB  F3 REMOTE ACCEPTED GiB"
     selection = "" if selected_site is None else f" | selected site: {selected_site}"
     lines = [
         "Resources visible to the job while it ran.",
@@ -530,7 +530,7 @@ def _human_cli(summary: dict[str, Any], selected_site: str | None = None) -> str
             mig = f"{'N/A':>8} " if show_mig else ""
             lines.append(
                 f"{member['participant_id']:<8} {member['role']:<7} {member['status']:<9} {'—':<11} {'—':>13} "
-                f"{'N/A':>12} {mig}{'N/A':>7} {'N/A':>11} {'N/A':>14} {'N/A':>16} {'N/A':>22}"
+                f"{'N/A':>12} {mig}{'N/A':>7} {'N/A':>11} {'N/A':>16} {'N/A':>22}"
             )
             continue
         totals = member["totals"]
@@ -549,7 +549,6 @@ def _human_cli(summary: dict[str, Any], selected_site: str | None = None) -> str
             f"{member['participant_id']:<8} {member['role']:<7} {member['status']:<9} {quality:<11} "
             f"{_duration(member['resource_window_seconds']):>13} {_hours(_gpu_time(totals, 'full_gpu')):>11} {mig}"
             f"{_hours(cpu):>7} {_hours(_scalar(totals, 'memory', 'byte_seconds'), Decimal(2**30 * 3600)):>11} "
-            f"{_hours(_scalar(totals, 'storage', 'byte_seconds'), Decimal(2**30 * 3600)):>14} "
             f"{_hours(retained, Decimal(2**30)):>16} {_hours(f3, Decimal(2**30)):>22}"
         )
     if selected_site is None:
@@ -576,7 +575,6 @@ def _human_cli(summary: dict[str, Any], selected_site: str | None = None) -> str
         aggregate += (
             f"CPU {_hours(total_cpu)} h | "
             f"MEM {_hours(_scalar(totals, 'memory', 'byte_seconds'), Decimal(2**30 * 3600))} GiB h | "
-            f"STORAGE {_hours(_scalar(totals, 'storage', 'byte_seconds'), Decimal(2**30 * 3600))} GiB h | "
             f"SAVED RESULT {_hours(total_retained, Decimal(2**30))} GiB | "
             f"F3 REMOTE ACCEPTED {_hours(total_f3, Decimal(2**30))} GiB"
         )
@@ -811,7 +809,8 @@ def build(output_root: Path = DEFAULT_OUTPUT) -> dict[str, Any]:
             ),
             "scope_note": (
                 "The A100 model, four-GPU baseline, runtime scale, model-state size, and saved-result size are "
-                "evidence-based; CPU, memory, storage, and site-2 period/resource changes are illustrative."
+                "evidence-based; CPU, memory, visible workspace-filesystem capacity, and site-2 period/resource changes "
+                "are illustrative."
             ),
             "reference_runtime_seconds": "2223",
             "reference_model_state_bytes": "29540067328",
@@ -824,7 +823,6 @@ def build(output_root: Path = DEFAULT_OUTPUT) -> dict[str, Any]:
             ),
         },
         "derived_examples": {
-            "participant_lifetime_seconds": "2223",
             "site_1_resource_window_seconds": summary["participants"][0]["resource_window_seconds"],
             "site_2_resource_window_seconds": summary["participants"][1]["resource_window_seconds"],
             "server_resource_window_seconds": summary["participants"][3]["resource_window_seconds"],
@@ -841,8 +839,7 @@ def build(output_root: Path = DEFAULT_OUTPUT) -> dict[str, Any]:
             "job_gpu_instance_seconds": str(
                 _decimal_sum(summary["totals"]["gpu"]["groups"], "instance_seconds")
             ),
-            "job_storage_byte_seconds": summary["totals"]["storage"]["byte_seconds"],
-            "large_storage_byte_seconds": large_summary["totals"]["storage"]["byte_seconds"],
+            "large_memory_byte_seconds": large_summary["totals"]["memory"]["byte_seconds"],
         },
     }
     _write(output_root / "generation_receipt.json", _json_bytes(receipt))

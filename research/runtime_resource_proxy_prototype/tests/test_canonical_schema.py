@@ -258,7 +258,7 @@ class TestCanonicalV1Contract(unittest.TestCase):
         self.assertEqual("71136", totals["cpu"]["groups"][0]["unit_seconds"])
         self.assertEqual("458290190352384", totals["memory"]["byte_seconds"])
         self.assertEqual("8892", totals["gpu"]["groups"][0]["instance_seconds"])
-        self.assertEqual("2444214348546048", totals["storage"]["byte_seconds"])
+        self.assertEqual({"cpu", "memory", "gpu", "retained_content", "f3"}, set(totals))
         self.assertEqual("0", totals["retained_content"]["bytes"])
         self.assertEqual("147700336640", totals["f3"]["remote_accepted"]["payload_bytes"])
         self.assertTrue(all("retained_content" not in attempt["final"] for attempt in participant["attempts"]))
@@ -405,8 +405,7 @@ class TestCanonicalV1Contract(unittest.TestCase):
             [("NVIDIA A100 80GB", "7092")],
             [(group["model"], group["instance_seconds"]) for group in partial_totals["gpu"]["groups"]],
         )
-        self.assertEqual("reported", partial_totals["storage"]["status"])
-        self.assertEqual("2444214348546048", partial_totals["storage"]["byte_seconds"])
+        self.assertNotIn("storage", partial_totals)
         self.assertEqual("unavailable", partial_totals["retained_content"]["status"])
         self.assertEqual("reported", partial_totals["f3"]["status"])
         attempt_end = self._golden("attempt_end_terminated.json")
@@ -423,7 +422,7 @@ class TestCanonicalV1Contract(unittest.TestCase):
         self.assertEqual({"status": "reported", "groups": []}, totals["cpu"])
         self.assertEqual({"status": "reported", "byte_seconds": "0"}, totals["memory"])
         self.assertEqual({"status": "reported", "groups": []}, totals["gpu"])
-        self.assertEqual("2444214348546048", totals["storage"]["byte_seconds"])
+        self.assertNotIn("storage", totals)
 
     def test_server_participant_is_reported_without_inventing_a_gpu(self):
         participant = self._golden("participant_summary_server.json")
@@ -433,19 +432,37 @@ class TestCanonicalV1Contract(unittest.TestCase):
         self.assertFalse(participant["attempts"][0]["start"]["capacity"]["gpu"]["cuda_mask_present"])
         self.assertEqual("295400673280", totals["f3"]["remote_accepted"]["payload_bytes"])
 
-    def test_uncertain_continuous_storage_keeps_numeric_proxy_as_partial(self):
+    def test_workspace_filesystem_capacity_is_point_in_time_and_never_a_total(self):
         participant = self._golden("participant_summary.json")
-        for lifecycle_fact in (participant["start"], participant["final"]):
-            lifecycle_fact["storage"] = {
-                "status": "partial",
-                "capacity_bytes": "1099511627776",
-                "issues": ["observation_incomplete"],
-            }
-        _, totals = derive_participant_totals(participant)
-        self.assertEqual(
-            {"status": "partial", "byte_seconds": "2444214348546048"},
-            totals["storage"],
-        )
+        baseline_totals = derive_participant_totals(participant)[1]
+        self.assertEqual("1099511627776", participant["start"]["storage"]["capacity_bytes"])
+        self.assertEqual("1099511627776", participant["final"]["storage"]["capacity_bytes"])
+
+        changed = copy.deepcopy(participant)
+        changed["final"]["storage"]["capacity_bytes"] = "2199023255552"
+        validate_record(changed)
+        self.assertEqual(baseline_totals, derive_participant_totals(changed)[1])
+
+        unavailable = copy.deepcopy(participant)
+        unavailable["start"]["storage"] = {"status": "unavailable", "issues": ["unsupported"]}
+        validate_record(unavailable)
+        self.assertEqual(baseline_totals, derive_participant_totals(unavailable)[1])
+
+        partial = copy.deepcopy(participant)
+        partial["start"]["storage"] = {
+            "status": "partial",
+            "capacity_bytes": "1099511627776",
+            "issues": ["observation_incomplete"],
+        }
+        self._assert_invalid_both(partial)
+
+        zero = copy.deepcopy(participant)
+        zero["start"]["storage"]["capacity_bytes"] = "0"
+        self._assert_invalid_both(zero)
+
+        overflow = copy.deepcopy(participant)
+        overflow["start"]["storage"]["capacity_bytes"] = str(2**64)
+        self._assert_invalid_both(overflow)
 
     def test_overlapping_different_environments_sum_resource_window_seconds(self):
         participant = self._golden("participant_summary.json")
@@ -468,7 +485,8 @@ class TestCanonicalV1Contract(unittest.TestCase):
         participant = self._golden("participant_summary_large_value.json")
         window_seconds, totals = derive_participant_totals(participant)
         self.assertEqual("901", window_seconds)
-        self.assertEqual("9010000000000901", totals["storage"]["byte_seconds"])
+        self.assertEqual("9010000000000901", totals["memory"]["byte_seconds"])
+        self.assertNotIn("storage", totals)
         self.assertEqual(totals, self._golden("resource_summary_large_value.json")["totals"])
 
         maximum = self._golden("participant_final.json")
@@ -495,13 +513,18 @@ class TestCanonicalV1Contract(unittest.TestCase):
             [(group["model"], group["unit_seconds"]) for group in summary["totals"]["cpu"]["groups"]],
         )
         self.assertEqual("986880405405696", summary["totals"]["memory"]["byte_seconds"])
-        self.assertEqual("7332643045638144", summary["totals"]["storage"]["byte_seconds"])
+        self.assertEqual({"cpu", "memory", "gpu", "retained_content", "f3"}, set(summary["totals"]))
+        self.assertTrue(all("storage" not in entry.get("totals", {}) for entry in summary["participants"]))
         self.assertEqual("29540266113", summary["totals"]["retained_content"]["bytes"])
         self.assertEqual("590801346560", summary["totals"]["f3"]["remote_accepted"]["payload_bytes"])
 
         changed = copy.deepcopy(summary)
         changed["totals"]["memory"]["byte_seconds"] = "1"
         self._assert_invalid(changed, "deterministic sum")
+
+        old_storage_total = copy.deepcopy(summary)
+        old_storage_total["totals"]["storage"] = {"status": "reported", "byte_seconds": "1"}
+        self._assert_invalid_both(old_storage_total)
 
         old_name = copy.deepcopy(summary)
         old_name["roster"] = old_name.pop("participants")

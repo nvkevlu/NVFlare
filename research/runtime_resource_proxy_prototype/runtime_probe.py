@@ -414,7 +414,6 @@ def probe_storage(workspace: Path) -> dict[str, Any]:
         stats = os.statvfs(workspace)
         block_size = stats.f_frsize or stats.f_bsize
         total = block_size * stats.f_blocks
-        available = block_size * stats.f_bavail
     except OSError:
         return _metric(
             "visible_storage_capacity_bytes",
@@ -425,7 +424,7 @@ def probe_storage(workspace: Path) -> dict[str, Any]:
             coverage="none",
             caveats=["WORKSPACE_FILESYSTEM_UNREADABLE"],
         )
-    if block_size <= 0 or total <= 0 or available < 0:
+    if block_size <= 0 or total <= 0:
         return _metric(
             "visible_storage_capacity_bytes",
             None,
@@ -440,9 +439,9 @@ def probe_storage(workspace: Path) -> dict[str, Any]:
         total,
         "bytes",
         "posix.statvfs",
-        dimensions={"scope_label": "job_run_filesystem", "available_bytes": available},
-        scope="job_run_filesystem",
-        caveats=["CAPACITY_NOT_ALLOCATION_OR_BILLING", "FILESYSTEM_MAY_BE_SHARED"],
+        dimensions={"scope_label": "job_workspace_filesystem"},
+        scope="job_workspace_filesystem",
+        caveats=["CAPACITY_NOT_USAGE_ALLOCATION_BILLING_OR_JOB_OWNED", "FILESYSTEM_MAY_BE_SHARED"],
     )
 
 

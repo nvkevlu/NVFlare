@@ -19,7 +19,8 @@ Included:
 - visible CPU capacity;
 - visible memory capacity;
 - CUDA-enumerated GPUs;
-- capacity of the filesystem that contains the existing job workspace;
+- point-in-time visible capacity of the filesystem that contains the existing
+  job workspace;
 - one exact byte total for a complete NVFlare result set already known to the
   platform; and
 - F3 application-payload counters.
@@ -88,13 +89,13 @@ a design decision, so the assumption has been removed.
 The intended flow is:
 
 1. NVFlare begins a site's part of the job.
-2. NVFlare records the job-workspace filesystem capacity.
+2. NVFlare records the visible capacity of the job-workspace filesystem.
 3. When a measurement period begins, NVFlare records its start time and visible
    CPU, memory, and GPU values.
 4. At a normal end, NVFlare may take one final resource observation.
 5. NVFlare records the period end time.
-6. At site completion, NVFlare records one saved-result byte total and closes
-   the F3 counters.
+6. At site completion, NVFlare records the final visible workspace-filesystem
+   capacity, one saved-result byte total, and the closed F3 counters.
 7. The site sends one final report through an existing authenticated NVFlare
    path.
 8. The server validates the report, combines all received site reports, and
@@ -110,11 +111,11 @@ Candidate v1 has eight closed record types:
 
 | Record | Purpose |
 | --- | --- |
-| **participant_start** | Start of one site's part of the job and initial storage observation. |
+| **participant_start** | Start of one site's part of the job and initial visible workspace-filesystem capacity observation. |
 | **attempt_start** | Start of one measurement period and its CPU, memory, and GPU observation. |
 | **attempt_final** | Optional final resource observation for that period. |
 | **attempt_end** | End time and reason for that period. |
-| **participant_final** | End of the site run, one saved-result byte total, and F3 counters. |
+| **participant_final** | Final visible workspace-filesystem capacity observation, one saved-result byte total, and F3 counters. |
 | **participant_summary** | One complete site report built from the preceding facts. |
 | **resource_summary** | Job result with every expected participant classified. |
 | **manifest** | Hashes of the exact stored server files. |
@@ -189,17 +190,23 @@ memory values use different groups.
 
 MIG fields and CLI columns are omitted when no positive MIG value is present.
 
-### Storage capacity
+### Visible workspace-filesystem capacity
 
-Read the total capacity of the filesystem that contains the existing NVFlare
-job workspace. Do not export its absolute path.
+At participant start and final, read the total visible capacity of exactly the
+filesystem containing the existing NVFlare job workspace. Do not enumerate or
+sum other mounted filesystems, and do not export the workspace's absolute path.
 
-Storage capacity may describe a shared filesystem. It is a visible proxy, not
-proof of capacity owned by this job.
+Treat the two readings as independent point observations. They need not match
+and do not prove availability between those instants. The capacity may describe
+a shared filesystem; it is not usage, allocation, billable storage, or storage
+owned by this job.
 
-Calculate storage time only when NVFlare can establish that the workspace was
-available for the stated interval. Otherwise mark the result partial or
-unavailable.
+Do not calculate storage byte-seconds. Do not add visible workspace-filesystem
+capacity to participant totals or combine it across participants.
+
+This is a deliberate v1 boundary: a shared filesystem cannot be attributed to
+the job without privileges or configuration that this feature is not allowed
+to require.
 
 ### Saved-result byte total
 
@@ -280,7 +287,6 @@ A final resource observation does not define duration. It checks whether the
 startup value appears to have remained valid. If it is missing or numerically
 different, mark the affected total partial.
 
-Storage uses the site job-run interval only when workspace continuity is known.
 The saved-result byte total and F3 counters contribute once per site report.
 
 A measurement period that started but could not capture resources may retain
@@ -298,13 +304,14 @@ Status depends on the fact being described:
 
 | Fact | Allowed status |
 | --- | --- |
-| Point-in-time CPU, memory, or GPU | **reported**, **unavailable**, **error** |
-| Storage, saved results, or F3 counters | **reported**, **partial**, **unavailable**, **error** |
+| Point-in-time CPU, memory, GPU, or visible workspace-filesystem capacity | **reported**, **unavailable**, **error** |
+| Saved results or F3 counters | **reported**, **partial**, **unavailable**, **error** |
 | Derived resource-time total | **reported**, **partial**, **unavailable** |
 
-Point-in-time CPU, memory, and GPU cannot be partial. NVFlare either obtains a
-valid selected value at that moment or it does not. Other facts may be partial
-when they retain useful numeric data but have incomplete coverage.
+Point-in-time CPU, memory, GPU, and visible workspace-filesystem capacity
+cannot be partial. NVFlare either obtains a valid selected value at that
+moment or it does not. Saved-result and F3 facts may be partial when they
+retain useful numeric data but have incomplete coverage.
 
 The server classifies each expected participant as:
 
@@ -401,9 +408,11 @@ Text output shows:
 - GPU hours;
 - CPU hours;
 - memory GiB-hours;
-- storage GiB-hours;
 - saved-result GiB; and
 - accepted remote F3 GiB.
+
+The default command does not show or aggregate visible workspace-filesystem
+capacity. Those point observations remain in the accepted participant reports.
 
 The command says clearly that job totals may contain overlapping physical
 resources and are not physical capacity.
@@ -452,7 +461,7 @@ The detailed mapping is in
 | Slice | Work | Done when |
 | --- | --- | --- |
 | P1-01 | Finalize the schema, fields, units, codes, formulas, and examples. | Schema, validator, and goldens agree. |
-| P1-02 | Add normal-user CPU, memory, GPU, and workspace probes at the selected NVFlare call site. | No extra setup is required; probe failure cannot fail a job. |
+| P1-02 | Add normal-user CPU, memory, GPU, and visible workspace-filesystem capacity probes at the selected NVFlare call site. | No extra setup is required; probe failure cannot fail a job. |
 | P1-03 | Add per-job F3 counters. | Included traffic, excluded traffic, acceptance, and cutoff behavior are tested. |
 | P1-04 | Build one final site report and deliver it through an existing authenticated path. | Missing, duplicate, invalid, and retried reports behave predictably. |
 | P1-05 | Store the server summary and expose the CLI/API. | The stored JSON, manifest, query copy, and CLI output match the goldens. |
@@ -467,7 +476,8 @@ Tests must cover:
 - finite, unlimited, malformed, and unreadable memory limits;
 - CUDA-enumerated full GPUs, zero visible GPUs, unavailable CUDA, and MIG;
 - hardware-model suppression and heterogeneous CPUs;
-- shared and unreadable workspace filesystems;
+- exact selection of the existing job-workspace filesystem, no enumeration or
+  summation of other mounts, and unreadable workspace filesystems;
 - exact saved-result byte totals;
 - all included and excluded F3 traffic classes;
 - fan-out, forwarding, local delivery, failed send, and cutoff;
@@ -511,15 +521,18 @@ The main finalized-job example has four expected participants:
 - the server has a complete 37-minute, 3-second report.
 
 `site-1` reports 32 visible CPU units, 192 GiB of memory, four A100 80 GB
-GPUs, 1 TiB of visible workspace capacity, a known empty saved-result set, and
-147,700,336,640 bytes of accepted remote F3 payload. Its derived values are:
+GPUs, a 1 TiB point-in-time visible workspace-filesystem capacity, a known
+empty saved-result set, and 147,700,336,640 bytes of accepted remote F3
+payload. Its derived values are:
 
 ~~~text
 CPU:     32 × 2,223 = 71,136 CPU-unit-seconds
 Memory:  192 GiB × 2,223 = 458,290,190,352,384 byte-seconds
 GPU:     4 × 2,223 = 8,892 GPU-instance-seconds
-Storage: 1 TiB × 2,223 = 2,444,214,348,546,048 byte-seconds
 ~~~
+
+The 1 TiB visible workspace-filesystem capacity observation is not multiplied
+by time and is not included in participant or job totals.
 
 The [`site-2` report](../../research/runtime_resource_proxy_prototype/schema/golden/v1/participant_summary_partial_periods.json)
 contains a five-minute 16-CPU, 128-GiB, two-GPU period that ends without a
@@ -546,8 +559,9 @@ The scale comes from a completed five-round, two-client Qwen2.5-14B Colossus
 qualification. That run used four A100s per client, lasted 37:03, exchanged a
 29,540,067,328-byte state in twenty directions, and observed a
 29,540,266,113-byte saved result. The golden example is not a replay: its CPU,
-memory, storage, and measurement-period partitions are illustrative. The
-historical run recorded logical tensor size but did not measure post-encoding
+memory, visible workspace-filesystem capacity, and measurement-period
+partitions are illustrative. The historical run recorded logical tensor size
+but did not measure post-encoding
 F3 acceptance bytes. The example sets its F3 counters to the derived logical
 volume only to use a realistic scale.
 

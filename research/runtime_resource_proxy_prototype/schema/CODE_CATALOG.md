@@ -12,15 +12,16 @@ display notices are not stored data.
 
 | Context | Allowed statuses | Meaning |
 | --- | --- | --- |
-| Point-in-time CPU/memory/GPU | reported, unavailable, error | Complete numeric observation; no usable observation; or collection/integrity failure. |
-| Participant-lifetime storage | reported, partial, unavailable, error | Numeric capacity with complete/uncertain continuous availability, no usable value, or failure. |
+| Point-in-time CPU/memory/GPU/visible workspace-filesystem capacity | reported, unavailable, error | Complete numeric observation; no usable observation; or collection/integrity failure. |
 | Participant-terminal retained content and F3 | reported, partial, unavailable, error | Complete facts; usable incomplete facts; no usable observation; or failure. |
 | Participant/job totals | reported, partial, unavailable | Complete contributions; numeric contributions with a gap/uncertainty; or no usable contribution. |
 
 For resource observations, `reported` requires the applicable numeric facts and forbids issues.
 `partial` requires numeric facts plus applicable issues. `unavailable` and `error` contain no
-numeric result and require issues. Point-in-time capacity cannot be partial: a source either
-produced a valid selected value or it did not. Derived totals never store issues.
+numeric result and require issues. Point-in-time capacity, including the
+visible workspace-filesystem capacity observation, cannot be partial: a source
+either produced a valid selected value or it did not. Derived totals never
+store issues.
 
 An observed zero is explicit: the string `"0"`, an empty reported GPU group array, retained
 content with `bytes: "0"`, or a completed participant summary with no measurement periods.
@@ -70,7 +71,6 @@ code on retained content means NVFlare has no existing bounded result set.
 | --- | --- |
 | Capacity unavailable | observation_incomplete, attribution_incomplete, unsupported, dependency_missing |
 | Capacity error | permission_denied, malformed_source |
-| Storage partial | observation_incomplete, attribution_incomplete |
 | Retained partial | observation_incomplete, attribution_incomplete |
 | Retained unavailable | not_bound, observation_incomplete, attribution_incomplete, unsupported, dependency_missing |
 | Retained error | permission_denied, malformed_source |
@@ -157,8 +157,13 @@ Documentation may explain that:
 
 - runtime-visible values are not utilization, ownership, total physical capacity, or billing;
 - CPU/memory/GPU time is calculated for each recorded measurement period;
-- storage spans the site job run, not every measurement period;
-- CPU, memory, storage, and GPU visibility may be shared;
+- visible workspace-filesystem capacity is observed only for the filesystem
+  containing the existing NVFlare job workspace; other mounted filesystems
+  are not enumerated or summed;
+- visible workspace-filesystem capacity is not usage, allocation, billable
+  storage, or storage owned by the job, and it is not included in participant
+  or job totals;
+- CPU, memory, GPU, and visible workspace-filesystem capacity may describe shared resources;
 - a raw CUDA mask was diagnostic only when `cuda_mask_present` is true;
 - full GPUs and MIG instances are not combined;
 - participant-visible totals may overlap, including intentionally across jobs;

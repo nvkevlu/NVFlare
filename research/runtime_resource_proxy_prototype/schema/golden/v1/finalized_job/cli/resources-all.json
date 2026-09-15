@@ -37,10 +37,6 @@
               "status": "reported",
               "byte_seconds": "458290190352384"
             },
-            "storage": {
-              "status": "reported",
-              "byte_seconds": "2444214348546048"
-            },
             "gpu": {
               "status": "reported",
               "groups": [
@@ -87,10 +83,6 @@
             "memory": {
               "status": "partial",
               "byte_seconds": "375826818269184"
-            },
-            "storage": {
-              "status": "reported",
-              "byte_seconds": "2444214348546048"
             },
             "gpu": {
               "status": "partial",
@@ -144,10 +136,6 @@
               "status": "reported",
               "byte_seconds": "152763396784128"
             },
-            "storage": {
-              "status": "reported",
-              "byte_seconds": "2444214348546048"
-            },
             "gpu": {
               "status": "reported",
               "groups": []
@@ -185,10 +173,6 @@
         "memory": {
           "status": "partial",
           "byte_seconds": "986880405405696"
-        },
-        "storage": {
-          "status": "partial",
-          "byte_seconds": "7332643045638144"
         },
         "gpu": {
           "status": "partial",

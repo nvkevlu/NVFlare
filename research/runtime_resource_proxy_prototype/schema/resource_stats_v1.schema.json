@@ -33,7 +33,7 @@
     "CPU, memory, and GPU time is attempt-start capacity multiplied by the half-open opened_at-to-closed_at interval; both times use one NVFlare clock, and each product is rounded half-even to nine fractional digits",
     "attempt start and final contain capacity only; missing final data or numeric capacity change makes the affected participant total partial",
     "reconfigured means that NVFlare ended a measurement period after observing a capacity change; it does not require or imply another period",
-    "storage time is participant-start capacity multiplied by the site start-to-final interval; it is not repeated for each measurement period",
+    "storage.capacity_bytes is an independent point-in-time observation of the total visible capacity of exactly the filesystem containing the existing NVFlare job workspace; other mounted filesystems are not enumerated or summed, and storage is not included in participant or job totals",
     "the saved-result byte total and F3 counters contribute once per site report",
     "periods may reuse an environment_key only when they do not overlap",
     "NVFlare closes all three F3 counters before writing participant_final; later callbacks do not change the totals, and job code cannot exclude summary traffic",
@@ -212,26 +212,15 @@
       "required": ["status", "capacity_bytes"],
       "properties": {
         "status": {"const": "reported"},
-        "capacity_bytes": {"$ref": "#/$defs/positive_unsigned"}
-      }
-    },
-    "storage_partial": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["status", "capacity_bytes", "issues"],
-      "properties": {
-        "status": {"const": "partial"},
-        "capacity_bytes": {"$ref": "#/$defs/positive_unsigned"},
-        "issues": {
-          "type": "array", "minItems": 1, "maxItems": 4, "uniqueItems": true,
-          "items": {"enum": ["attribution_incomplete", "observation_incomplete"]}
+        "capacity_bytes": {
+          "$ref": "#/$defs/positive_unsigned",
+          "description": "Point-in-time total visible capacity of the filesystem containing the existing NVFlare job workspace; not usage, allocation, billable storage, or storage owned by the job."
         }
       }
     },
     "storage": {
       "oneOf": [
         {"$ref": "#/$defs/storage_reported"},
-        {"$ref": "#/$defs/storage_partial"},
         {"$ref": "#/$defs/capacity_unavailable"},
         {"$ref": "#/$defs/capacity_error"}
       ]
@@ -516,11 +505,10 @@
     },
     "totals": {
       "type": "object", "additionalProperties": false,
-      "required": ["cpu", "memory", "storage", "gpu", "retained_content", "f3"],
+      "required": ["cpu", "memory", "gpu", "retained_content", "f3"],
       "properties": {
         "cpu": {"$ref": "#/$defs/cpu_total"},
         "memory": {"$ref": "#/$defs/byte_seconds_total"},
-        "storage": {"$ref": "#/$defs/byte_seconds_total"},
         "gpu": {"$ref": "#/$defs/gpu_total"},
         "retained_content": {"$ref": "#/$defs/retained_total"},
         "f3": {"$ref": "#/$defs/f3_total"}

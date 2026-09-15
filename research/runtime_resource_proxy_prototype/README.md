@@ -8,28 +8,30 @@ small Python contracts. It does not implement production NVFlare integration.
 | Step | Read | Purpose |
 | ---: | --- | --- |
 | 1 | [Review guide](REVIEW_GUIDE.md) | Walk through the proposal in plain language. |
-| 2 | [All-site CLI](schema/golden/v1/finalized_job/cli/resources-all.txt), [one site report](schema/golden/v1/participant_summary.json), and [job summary](schema/golden/v1/resource_summary.json) | See the user output, site input, and server rollup. |
-| 3 | [Open decisions](GAPS.md) | Review the authoritative list of choices still to make. |
-| 4 | [Phase 1 implementation plan](../../docs/design/job_resource_statistics_implementation_plan.md) | Discuss code placement, delivery, tests, or work breakdown. |
-| 5 | [Phase 2 JobStatsReporter sketch](../../docs/design/job_resource_statistics_phase2_telemetry_sketch.md) | Discuss publication after Phase 1. |
+| 2 | [Rollup flow](ROLLUP_FLOW.md) | Follow observations through the site report, job summary, and `RESOURCE_STATS`. |
+| 3 | [All-site CLI](schema/golden/v1/finalized_job/cli/resources-all.txt), [one site report](schema/golden/v1/participant_summary.json), and [job summary](schema/golden/v1/resource_summary.json) | See the user output, site input, and server rollup. |
+| 4 | [Open decisions](GAPS.md) | Review the authoritative list of choices still to make. |
+| 5 | [Phase 1 implementation plan](../../docs/design/job_resource_statistics_implementation_plan.md) | Discuss code placement, delivery, tests, or work breakdown. |
+| 6 | [Phase 2 JobStatsReporter sketch](../../docs/design/job_resource_statistics_phase2_telemetry_sketch.md) | Discuss publication after Phase 1. |
 
-The main design meeting can stop after step 3. The catalogs below are lookup
+The main design meeting can stop after step 4. The catalogs below are lookup
 material for questions about an exact field or rule.
 
 ## What is included
 
 The prototype contains:
 
-- ordinary-user CPU, memory, GPU, and filesystem probes;
+- ordinary-user CPU, memory, GPU, and visible workspace-filesystem capacity probes;
 - a closed JSON Schema and semantic validator;
-- exact resource-time calculations;
+- exact CPU, memory, and GPU resource-time calculations;
 - an F3 counter and cutoff prototype;
 - server reconciliation with missing participants kept visible;
-- an exact server archive, manifest, and `RESOURCE_STATS` query copy; and
+- an exact server archive, manifest, and `RESOURCE_STATS` query component; and
 - generated human and JSON CLI output.
 
-The review guide is the single narrative for requirements, trust, collection
-rules, formulas, and the worked example.
+The review guide is the primary overview of requirements, trust, collection
+rules, formulas, and the worked example. The rollup-flow document expands the
+record transformations.
 
 ## Concrete artifacts
 
@@ -87,8 +89,8 @@ python3 -m unittest discover \
 
 The generator rewrites the standalone goldens and complete finalized-job tree,
 including all digests. The tests cover schema and semantic validation, exact
-arithmetic, GPU authority, F3 finalization, storage, CLI output, and
-deterministic regeneration.
+arithmetic, GPU authority, F3 finalization, visible workspace-filesystem
+capacity observation, CLI output, and deterministic regeneration.
 
 For a one-off observation of the current machine:
 

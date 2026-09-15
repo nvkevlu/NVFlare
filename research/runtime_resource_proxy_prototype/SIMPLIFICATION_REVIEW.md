@@ -66,9 +66,9 @@ than copied into another warning array.
 
 ## Status decisions
 
-Point-in-time CPU, memory, and GPU observations use reported, unavailable, or
-error. Storage, saved-result, and F3 observations may also use partial when
-usable numeric data has incomplete coverage.
+Point-in-time CPU, memory, GPU, and visible workspace-filesystem capacity observations use
+reported, unavailable, or error. Saved-result and F3 observations may also use
+partial when usable numeric data has incomplete coverage.
 
 Expected participants use:
 
@@ -141,7 +141,7 @@ period.
 For each complete period:
 
 ~~~text
-resource time = observed capacity × (closed_at - opened_at)
+CPU, memory, or GPU time = observed capacity × (closed_at - opened_at)
 ~~~
 
 Both times use one NVFlare clock. The schema does not choose which component
@@ -155,15 +155,19 @@ and does not affect arithmetic.
 
 ## Storage decisions
 
-Filesystem capacity and saved-result bytes are different values.
+Visible workspace-filesystem capacity and saved-result bytes are different values.
 
-- Filesystem capacity is a visible proxy for the existing job-workspace
-  filesystem.
+- Visible workspace-filesystem capacity is observed at participant start and final for
+  only the filesystem containing the existing NVFlare job workspace. Other
+  mounted filesystems are not enumerated or summed.
 - The saved-result byte total is the exact sum for a complete result set
   NVFlare already knows about.
 
-Storage time is available only when workspace continuity is supported by
-existing platform facts. No extra volume or mount is introduced.
+The two capacity observations are independent. V1 does not calculate or
+aggregate storage capacity-time because a shared filesystem cannot be
+attributed to the job without extra privileges or configuration. The value is
+not usage, allocation, billable storage, or storage owned by the job. No extra
+volume or mount is introduced.
 
 Site fragments are normal self-reported workspace files. They can be lost or
 changed before the server receives the final report. Server-side accepted files
@@ -198,6 +202,10 @@ The CLI uses:
 - QUALITY for measurement completeness;
 - MEASURED TIME for the sum of reported periods; and
 - Totals from received reports for the aggregate.
+
+The default table and totals omit visible workspace-filesystem capacity and any
+storage-time measure. The point observations remain in the participant report;
+the CLI does not invent a cross-participant capacity total.
 
 The CLI starts with the short label `Resources visible to the job while it ran.`
 

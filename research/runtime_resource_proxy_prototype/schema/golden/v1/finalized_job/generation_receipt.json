@@ -7,13 +7,13 @@
     "site-2": "739d6492134fe0fb2eaaf20574a62108318d02afd9a3724a3397f2c01f53bdd5",
     "server": "6681b52e29f6dccfdaffd455ff977728f3add7dcd701cf58828da1af0399b8d7"
   },
-  "resource_summary_sha256": "62d7fb97ddd40120e2239aeb5fc2d32adce8865db1122d57a4f0d7c343447c33",
-  "manifest_sha256": "42bb4f439ef87e21cde6f83abed9f3c47f83ae36cc904ac9cbd46d0dbc41efe8",
+  "resource_summary_sha256": "da712b7be319655068e996a56c845b5a5f0fa3971bd0b9bf92965f095b079ce8",
+  "manifest_sha256": "956fb7e54b16dc1bf2d75bcfb9c8c45f9e47f5dcf51fd34537dc52e76b1a0cdd",
   "query_copy_matches_resource_summary": true,
   "scenario_basis": {
     "description": "Illustrative values scaled to a completed two-client Qwen2.5-14B qualification.",
     "reference_label": "Five-round 14B full-model qualification, 2026-07-31",
-    "scope_note": "The A100 model, four-GPU baseline, runtime scale, model-state size, and saved-result size are evidence-based; CPU, memory, storage, and site-2 period/resource changes are illustrative.",
+    "scope_note": "The A100 model, four-GPU baseline, runtime scale, model-state size, and saved-result size are evidence-based; CPU, memory, visible workspace-filesystem capacity, and site-2 period/resource changes are illustrative.",
     "reference_runtime_seconds": "2223",
     "reference_model_state_bytes": "29540067328",
     "reference_logical_state_directions": "20",
@@ -22,14 +22,12 @@
     "f3_note": "The historical run recorded model-state size; its logical volume was derived, and it did not measure the proposed post-encoding F3 counter."
   },
   "derived_examples": {
-    "participant_lifetime_seconds": "2223",
     "site_1_resource_window_seconds": "2223",
     "site_2_resource_window_seconds": "1923",
     "server_resource_window_seconds": "2223",
     "accepted_resource_window_seconds": "6369",
     "job_cpu_unit_seconds": "145656",
     "job_gpu_instance_seconds": "15984",
-    "job_storage_byte_seconds": "7332643045638144",
-    "large_storage_byte_seconds": "9010000000000901"
+    "large_memory_byte_seconds": "9010000000000901"
   }
 }
