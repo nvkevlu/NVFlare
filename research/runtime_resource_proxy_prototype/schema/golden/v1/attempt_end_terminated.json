@@ -1,7 +1,7 @@
 {
   "schema_version": "1.0",
   "kind": "nvflare.resource_stats.attempt_end",
-  "job_id": "job-preempted-resume",
+  "job_id": "job-partial-periods",
   "participant_id": "site-1",
   "attempt_id": "55555555555555555555555555555555",
   "environment_key": "sha256-5555555555555555555555555555555555555555555555555555555555555555",

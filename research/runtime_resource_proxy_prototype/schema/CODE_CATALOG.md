@@ -1,13 +1,12 @@
 # Canonical v1 status and issue catalog
 
-This is the human projection of the closed vocabularies in
-`resource_stats_v1.schema.json`. `contract_v1.py` enforces contextual combinations and
-cross-record consequences. Unknown statuses, issues, roles, end reasons, group kinds, and record
-kinds are rejected.
+This file lists every allowed status and code. `resource_stats_v1.schema.json` defines their JSON
+shape. `contract_v1.py` checks relationships between records. Any value not listed here is
+rejected.
 
-The contract has no persisted source, coverage, caveat, warning, or qualification codes. Typed
-field location and schema version already determine source semantics, units, and display text. A
-renderer may show derived notices, but those notices are not canonical facts.
+The contract does not store separate source, coverage, caveat, warning, or qualification codes.
+The typed field already identifies the resource and unit. The CLI may explain a result, but those
+display notices are not stored data.
 
 ## Resource statuses
 
@@ -18,46 +17,43 @@ renderer may show derived notices, but those notices are not canonical facts.
 | Participant-terminal retained content and F3 | reported, partial, unavailable, error | Complete facts; usable incomplete facts; no usable observation; or failure. |
 | Participant/job totals | reported, partial, unavailable | Complete contributions; numeric contributions with a gap/uncertainty; or no usable contribution. |
 
-`reported` requires the applicable numeric facts and forbids issues. `partial` requires numeric
-facts plus applicable issues. `unavailable` and `error` contain no numeric result and require
-issues. Point-in-time capacity cannot be partial: a source either produced a valid selected value
-or it did not.
+For resource observations, `reported` requires the applicable numeric facts and forbids issues.
+`partial` requires numeric facts plus applicable issues. `unavailable` and `error` contain no
+numeric result and require issues. Point-in-time capacity cannot be partial: a source either
+produced a valid selected value or it did not. Derived totals never store issues.
 
 An observed zero is explicit: the string `"0"`, an empty reported GPU group array, an empty
-reported retained-entry array, or a completed participant summary with no transient attempts.
+reported retained-entry array, or a completed participant summary with no measurement periods.
 Missing, failed, disabled, or unbound collection is never encoded as zero. In particular, a
-`launch_failed` capacity is unavailable rather than a reported zero, although its supervisor-owned
+`launch_failed` capacity is unavailable rather than a reported zero, although its known
 opened-to-closed duration remains part of `resource_window_seconds`.
 
 Aggregate status has no stored issue list. It is derived deterministically:
 
-- `reported`: every expected enabled contribution used by that total is complete;
-- `partial`: at least one numeric contribution exists and a lifecycle fact is incomplete/changed
-  or a roster member is missing, invalid, or disabled; and
+- `reported`: every expected participant is accepted and every contribution used by that total is complete;
+- `partial`: at least one numeric contribution exists and a measurement is incomplete or changed,
+  or an expected participant is missing, invalid, or disabled; and
 - `unavailable`: no numeric contribution exists for that total.
 
 Workload failure or termination alone does not make resource time partial. Matching start/final
-capacity plus a trusted end completely describes the capacity window regardless of task outcome.
+capacity plus a known end completely describes the measurement period regardless of task outcome.
 
-## Roster state
+## Expected participant status
 
 | Domain | Exact values | Rule |
 | --- | --- | --- |
-| roster role | client, server | Stored once per fixed expected-participant roster entry; never inferred from participant ID. |
-| roster status | accepted, missing, invalid, disabled | Partitions the expected participants at server finalization. |
+| role | client, server | Stored once for each expected participant; never inferred from its ID. |
+| status | accepted, missing, invalid, disabled | Tells what happened to that participant's report. |
 
-Expected members come from authenticated job deployment/selection state, independently of report
-arrivals. At cutoff, every expected member is classified exactly once and the roster is immutable:
-`accepted` means a valid authenticated participant summary arrived by cutoff; `missing` means none
-did; `invalid` adds trusted receipt time and issues because a candidate arrived but failed
-validation; and `disabled` means policy disabled collection for that member. Counts, coverage, and
-warnings derive from these entries.
+The server already knows which participants the job expects. It does not build this list from
+resource reports. At the cutoff, each participant is accepted, missing, invalid, or disabled.
+Counts and CLI notices come from these entries.
 
 ## Issue allowlist
 
 | Issue | Meaning in its typed context |
 | --- | --- |
-| not_bound | The required platform counter or registry was not connected. |
+| not_bound | NVFlare has no existing bounded source for this fact. |
 | counter_gap | Some events may be absent; the stored counter is a lower bound. |
 | observation_incomplete | Only part of the relevant interval or registered set was observed. |
 | attribution_incomplete | Facts that could not be safely attributed were excluded. |
@@ -67,8 +63,8 @@ warnings derive from these entries.
 | malformed_source | A source failed parsing, range, or consistency validation. |
 
 `issues` is a unique, sorted array of one to four values. The containing typed object supplies the
-subject: for example, `not_bound` on F3 means an unbound transport counter, while the same code on
-retained content means an unbound artifact registry.
+subject: for example, `not_bound` on F3 means no existing job counter is available, while the same
+code on retained content means NVFlare has no existing bounded list of result files.
 
 | Context/status | Exact allowed issues |
 | --- | --- |
@@ -81,30 +77,27 @@ retained content means an unbound artifact registry.
 | F3 partial | counter_gap, observation_incomplete, attribution_incomplete |
 | F3 unavailable | not_bound, observation_incomplete, attribution_incomplete, unsupported, dependency_missing |
 | F3 error | permission_denied, malformed_source |
-| Invalid roster entry | malformed_source, permission_denied |
+| Invalid participant report | malformed_source, permission_denied |
 
-Reported objects never carry issues. Missing/changed attempt final capacity, launch failure,
-disabled collection, and roster gaps are already visible lifecycle/roster facts, so their derived
-effects are not duplicated as issue codes.
+Reported objects never carry issues. Missing or changed final capacity, launch failure, disabled
+collection, and missing participant reports are already visible facts, so their effects are not
+duplicated as issue codes.
 
-## Attempt-end reason
+## Measurement-period end reason
 
-`reason` is stored beside `closed_at` in embedded `end`. Standalone `attempt_end` also repeats the
-supervisor-owned `opened_at`, making its duration self-contained:
+`reason` is stored beside `closed_at` in embedded `end`. Standalone `attempt_end` also repeats
+`opened_at`, making its duration self-contained:
 
 | Reason | Meaning and shape |
 | --- | --- |
-| released | Ordinary closure/release of a transient resource lease; requires an attempt start. |
-| failed | Closure following a failure after a trusted start capacity snapshot; requires start. |
-| terminated | Closure due to cancellation, preemption, or administration; requires an attempt start. |
-| launch_failed | The resource lease opened but no accepted capacity snapshot exists; forbids start/final. |
-| reconfigured | Trusted lifecycle authority observed an in-place stable capacity-vector transition; requires a same-environment successor at the exact boundary, and equal vectors are rejected when both snapshots are comparable. |
+| released | NVFlare ended the measurement period normally; requires an attempt start. |
+| failed | The period ended after a failure; requires an attempt start. |
+| terminated | The period ended after cancellation, preemption, or administration; requires an attempt start. |
+| launch_failed | NVFlare knows the period bounds but no capacity snapshot exists; forbids start/final. |
+| reconfigured | NVFlare ended the period after observing a capacity change; does not imply another period. |
 
-There is no process return code. `opened_at` and `closed_at` come from the same durable-supervisor
-clock; `closed_at` means confirmed lease closure, not a worker snapshot or OS-process exit. The same
-process may have sequential attempts as resources are released, reacquired, or reconfigured.
-A full release and reacquisition can use `released` even if timestamp resolution makes the two
-windows touch.
+There is no process return code. `opened_at` and `closed_at` come from the same NVFlare clock.
+The schema does not choose which component supplies that clock or what process event ends a period.
 
 ## GPU group kind
 
@@ -121,16 +114,15 @@ for `mig_compute_instance`. Full-GPU and MIG-instance time stay separate through
 
 | Field | Included fact |
 | --- | --- |
-| remote_accepted | Remote application payload accepted by transport before the atomic freeze; the primary total. |
+| remote_accepted | Remote application payload accepted before NVFlare closes the counters; the primary total. |
 | local_delivered | Direct/local application delivery, kept separately. |
 | remote_failed_before_acceptance | Remote traffic that failed before transport acceptance. |
 
 F3 is a participant-lifetime terminal fact, not an attempt fact. Reported/partial F3 contains all
 three counter pairs; unavailable/error contains no counters. Zero messages requires zero bytes.
-The lifecycle supervisor atomically freezes the three counters before participant-final
-serialization. Callback completions after the freeze never enter canonical counters, and no
-ordinal is exposed. Summary publication bypasses accounting through a platform-owned
-non-spoofable path; neither circular diagnostic is stored in the immutable terminal fact.
+NVFlare closes the three counters in one operation before writing participant_final. Callbacks
+that finish later do not change the stored totals. Platform code excludes resource-summary
+publication; job code cannot request that exclusion.
 
 The normative included traffic classes are `task_request`, `task_response`, `task_result`,
 `job_application`, and `job_stream_data`. The integration excludes `job_stream_control`,
@@ -156,26 +148,24 @@ There is no summary revision. The server:
 4. rejects a different digest as a conflicting replacement; and
 5. does not reserve the slot for an invalid candidate.
 
-This does not collapse resource windows. Distinct attempt IDs stay separate inside the one
-accepted participant summary, including sequential windows that reuse an environment key.
+This does not merge measurement periods. Distinct attempt IDs stay separate inside the one
+accepted site report, including sequential periods that reuse an environment key.
 
 ## Derived notices, not stored codes
 
 A v1 renderer can derive that:
 
 - runtime-visible values are not utilization, ownership, total physical capacity, or billing;
-- transient CPU/memory/GPU time is integrated per stable vector, so GPU may be zero while CPU and
-  memory continue in a successor window;
-- persistent storage spans the participant lifecycle, not every transient attempt;
+- CPU/memory/GPU time is calculated for each recorded measurement period;
+- storage spans the site job run, not every measurement period;
 - CPU, memory, storage, and GPU visibility may be shared;
 - a raw CUDA mask was diagnostic only when `cuda_mask_present` is true;
 - full GPUs and MIG instances are not combined;
 - participant-visible totals may overlap, including intentionally across jobs;
-- roster gaps make an otherwise numeric aggregate partial;
-- F3 includes remote-accepted application payload only in its primary total, ignores callback
-  completions after its atomic freeze, and excludes summary publication behaviorally; and
-- attempt capacity snapshots are worker self-reports preserved by supervisor-owned durable
-  storage, while attempt bounds and participant lifecycle facts are supervisor-observed.
+- missing expected participant reports make an otherwise numeric aggregate partial;
+- F3 includes remote-accepted application payload only in its primary total, ignores callbacks
+  that finish after NVFlare closes the counters, and excludes the summary message; and
+- site observations are self-reported until the server receives and stores the final report.
 
 Persisting a second warning/caveat list would create possible contradiction without adding
 evidence.

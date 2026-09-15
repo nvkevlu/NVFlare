@@ -81,14 +81,14 @@ class TestF3FinalizationCounter(unittest.TestCase):
         self.assertEqual({"payload_bytes": 0, "message_count": 0}, snapshot["outcomes"]["remote_transport_accepted"])
         self.assertEqual({"payload_bytes": 48, "message_count": 2}, snapshot["outcomes"]["local_delivery"])
 
-    def test_summary_publication_uses_an_opaque_platform_capability(self):
+    def test_summary_publication_uses_a_separate_nvflare_operation(self):
         counter = F3FinalizationCounter()
         summary_event = JobTrafficEvent(JobTrafficClass.JOB_APPLICATION, 512)
 
         # The event has the same included class as regular application traffic.
-        # It is excluded only because the platform-owned publisher carries the
-        # counter's opaque in-process capability.
-        counter.summary_publisher().send_remote(summary_event, lambda: None)
+        # NVFlare uses a separate internal operation for the summary. A regular
+        # job message with the same traffic class is still counted.
+        counter.send_resource_summary(summary_event, lambda: None)
         counter.send_remote(JobTrafficEvent(JobTrafficClass.JOB_APPLICATION, 128), lambda: None)
         snapshot = counter.snapshot()
 

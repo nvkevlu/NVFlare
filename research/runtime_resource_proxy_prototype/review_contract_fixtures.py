@@ -12,14 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Write deterministic, review-only artifacts for the hardened prototype contracts.
+"""Write deterministic, review-only artifacts for the prototype contracts.
 
 The normal generator deliberately captures only what the local process can
 actually observe.  These fixtures exercise proposed runtime boundaries that
 cannot be honestly installed in this standalone process yet: a CUDA runtime
-adapter, a trusted F3 sender hook, a supervisor/worker handoff, and platform-owned
-launcher preparation.  Every file emitted here declares itself a synthetic
-contract fixture; none is a local resource observation or production evidence.
+adapter, an NVFlare-only F3 sender hook, reporter selection, and server storage.  Every
+file emitted here declares itself a synthetic contract fixture; none is a local
+resource observation or production evidence.
 """
 
 from __future__ import annotations
@@ -33,17 +33,15 @@ from typing import Any
 from f3_finalization import F3FinalizationCounter, JobTrafficClass, JobTrafficEvent
 from prototype_contract import (
     FixedResourceStatsStore,
-    SupervisorOwnedAttemptStore,
     ReporterLeaseConflict,
     ReporterLeaseRegistry,
     RESOURCE_STATS_COMPONENT,
-    build_sanitized_launch_plan,
+    WorkspaceAttemptStore,
 )
 from runtime_probe import probe_gpu_records
 
 
 _FIXTURE_ATTEMPT_ID = "1" * 32
-_FIXTURE_HANDOFF_LOCATOR = "4" * 32
 _TERMINATED_FIXTURE_ATTEMPT_ID = "2" * 32
 
 
@@ -125,7 +123,7 @@ def _f3_fixture() -> dict[str, Any]:
     counter.deliver_direct(JobTrafficEvent(JobTrafficClass.JOB_APPLICATION, 256), lambda: None)
     counter.send_remote(JobTrafficEvent(JobTrafficClass.PLATFORM_CONTROL, 64), lambda: None)
     frozen = counter.freeze()
-    counter.summary_publisher().send_remote(JobTrafficEvent(JobTrafficClass.JOB_APPLICATION, 1024), lambda: None)
+    counter.send_resource_summary(JobTrafficEvent(JobTrafficClass.JOB_APPLICATION, 1024), lambda: None)
     counter.send_remote(JobTrafficEvent(JobTrafficClass.TASK_RESULT, 512), lambda: None)
     post_cutoff = counter.snapshot()
     def canonical_counter(bucket: dict[str, int]) -> dict[str, int]:
@@ -166,50 +164,6 @@ def _f3_fixture() -> dict[str, Any]:
     }
 
 
-def _bootstrap_fixture() -> dict[str, Any]:
-    plans = []
-    for launcher in ("process", "docker", "k8s", "slurm"):
-        plan = build_sanitized_launch_plan(
-            launcher=launcher,
-            python_executable="/opt/nvflare/python",
-            trusted_bootstrap_path="/opt/nvflare/platform/resource_bootstrap.py",
-            platform_args=("--workspace", "/workspace"),
-            environment={
-                "PYTHONPATH": "/job/custom:/site/custom",
-                "PYTHONHOME": "/job/python",
-                "CUDA_VISIBLE_DEVICES": "fixture-mask-never-exported",
-            },
-            attempt_id=_FIXTURE_ATTEMPT_ID,
-            handoff_locator=_FIXTURE_HANDOFF_LOCATOR,
-            custom_import_paths=("/job/custom", "/site/custom"),
-            platform_owned_cwd="/opt/nvflare/platform",
-        )
-        plans.append(
-            {
-                "launcher": plan.launcher,
-                "attempt_id": plan.attempt_id,
-                "handoff_locator": plan.handoff_locator,
-                "platform_owned_cwd": plan.platform_owned_cwd,
-                "trusted_bootstrap_path": plan.trusted_bootstrap_path,
-                "argv": list(plan.argv),
-                "pre_python_environment": plan.pre_python_environment,
-                "post_snapshot_custom_import_paths": list(plan.post_snapshot_custom_import_paths),
-                "bootstrap_steps": list(plan.bootstrap_steps),
-            }
-        )
-    return {
-        "schema_version": "prototype-0.3",
-        "kind": "nvflare.resource_stats.trusted_bootstrap_fixture",
-        "provenance": "synthetic_contract_fixture",
-        "plans": plans,
-        "production_gap": (
-            "Every real launcher must provision the absolute bootstrap as a platform-owned file, use the "
-            "platform-owned working directory and minimal environment, and preserve the exact attempt and "
-            "handoff arguments."
-        ),
-    }
-
-
 def _lease_fixture(job_id: str) -> dict[str, Any]:
     registry = ReporterLeaseRegistry()
     owner = registry.acquire(job_id, "fixture-environment-1", "rank-0")
@@ -230,10 +184,9 @@ def _lease_fixture(job_id: str) -> dict[str, Any]:
 
 
 def _fragment_fixture(root: Path, job_id: str) -> dict[str, Any]:
-    job_writable_root = root / "simulated_job_writable"
-    supervisor_owned_root = root / "supervisor_owned_fragments"
-    store = SupervisorOwnedAttemptStore(supervisor_owned_root, job_writable_root)
-    start = store.persist_worker_fragment(
+    workspace_root = root / "job_workspace"
+    store = WorkspaceAttemptStore(workspace_root)
+    start = store.persist_observation(
         job_id,
         _FIXTURE_ATTEMPT_ID,
         "start.json",
@@ -248,7 +201,7 @@ def _fragment_fixture(root: Path, job_id: str) -> dict[str, Any]:
             },
         },
     )
-    final = store.persist_worker_fragment(
+    final = store.persist_observation(
         job_id,
         _FIXTURE_ATTEMPT_ID,
         "final.json",
@@ -270,14 +223,13 @@ def _fragment_fixture(root: Path, job_id: str) -> dict[str, Any]:
     records = [_relative_record(receipt.path, root) for receipt in (start, final, terminated)]
     return {
         "schema_version": "prototype-0.3",
-        "kind": "nvflare.resource_stats.supervisor_owned_fragment_fixture",
+        "kind": "nvflare.resource_stats.workspace_fragment_fixture",
         "provenance": "synthetic_contract_fixture",
-        "job_writable_root": "simulated_job_writable",
-        "supervisor_owned_root": "supervisor_owned_fragments",
+        "workspace_root": "job_workspace",
         "records": records,
-        "kubernetes_note": (
-            "A production Kubernetes supervisor-owned root must be durable outside a worker-only emptyDir; "
-            "this local fixture cannot prove that deployment property."
+        "trust_note": (
+            "These files are self-reported and best-effort until the server receives the final site report. "
+            "The prototype requires no extra mount, service, privilege, or configuration."
         ),
     }
 
@@ -306,14 +258,13 @@ def write_review_contract_fixtures(output_dir: Path, job_id: str, resource_summa
     root = Path(output_dir) / "review_contracts"
     root.mkdir(parents=True, exist_ok=True)
     files = {
-        "trusted_bootstrap_plans.json": _bootstrap_fixture(),
         "gpu_cuda_runtime_validated.json": _gpu_fixture(),
         "f3_finalization.json": _f3_fixture(),
         "reporter_lease.json": _lease_fixture(job_id),
     }
     for name, contents in files.items():
         _write_json(root / name, contents)
-    _write_json(root / "supervisor_owned_fragments.json", _fragment_fixture(root, job_id))
+    _write_json(root / "workspace_fragments.json", _fragment_fixture(root, job_id))
     _write_json(
         root / "fixed_resource_stats_component.json",
         _fixed_component_fixture(root, job_id, resource_summary_bytes),

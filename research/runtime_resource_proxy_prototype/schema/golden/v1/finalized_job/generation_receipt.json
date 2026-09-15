@@ -2,16 +2,15 @@
   "generator": "build_review_artifacts.py",
   "schema_version": "1.0",
   "job_id": "job-20260909-001",
-  "participant_summary_sha256": "1e3ceb4962f4b1b0726236d310bd8f94a1a0a9bfe51faa1c65a99c58f232cc01",
-  "resource_summary_sha256": "b7f3a4ae7306e35d36e465f89937319756c1aaa6a90f5366717b49a01186b224",
-  "manifest_sha256": "b1b555cbf2ea58fb5dd7bdf02a20c931f73f8952e907d5d216edd56f84cc896b",
+  "participant_summary_sha256": "f99452e76db1f22c950dd6db61edc1cc82cad5bbadf0eea377ccc5516d25de21",
+  "resource_summary_sha256": "0e1cbc66db4f531d951a291d94de4d6cc382134d5d4c6307df34e82426e8fbbf",
+  "manifest_sha256": "7b733cd22eac12d24932d49247ac49aee032bfda267fb665da7def4fd8faaf0f",
   "query_copy_matches_resource_summary": true,
   "derived_examples": {
     "participant_lifetime_seconds": "480",
     "resource_window_seconds": "480",
-    "gpu_free_cpu_memory_window_seconds": "300",
     "cpu_unit_seconds": "720",
-    "gpu_instance_seconds": "180",
+    "gpu_instance_seconds": "480",
     "storage_byte_seconds": "527765581332480",
     "large_storage_byte_seconds": "9010000000000901"
   }

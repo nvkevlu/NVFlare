@@ -1,383 +1,276 @@
-# Runtime resource statistics: linear review guide
+# Phase 1 resource statistics: review guide
 
-This is the recommended entry point for a design review. It explains the system from collection
-to CLI output and points to the artifact that makes each step concrete. The candidate reductions
-and their rationale are recorded in the [simplification review record](SIMPLIFICATION_REVIEW.md).
+This is the best place to start a design review.
 
-## One-minute explanation
+## The idea in one paragraph
 
-NVFlare cannot reliably infer cloud allocation or billable usage from inside a job. Phase 1
-therefore records narrower facts it can defend:
+Phase 1 records the CPU, memory, storage, and GPUs that an NVFlare job can see.
+It also records saved-result sizes and NVFlare message payload bytes. The result
+is useful for later cost estimation, but it is not utilization, reserved
+capacity, or a bill.
 
-- CPU, memory, and GPU capacity visible inside each stable reporter-environment vector;
-- how long the durable lifecycle owner confirms each vector remained open;
-- persistent run-filesystem capacity across the whole logical participant;
-- exact bytes in platform-registered retained result files; and
-- exact application payload accepted at the F3 outbound sender boundary.
+This design defines the data and the calculations. It does **not** choose how
+NVFlare will run tasks. CP may run tasks directly, NVFlare may use child
+processes, or the resource-management work may choose another design. All of
+those implementations can produce the same report.
 
-This follows the [GPU-release roadmap](../../docs/roadmap.rst): a durable, GPU-free site
-supervisor keeps the logical job alive while transient workers acquire, reconfigure, and release
-compute resources. One **attempt** is one stable `(resource lease, reporter environment,
-CPU/memory/GPU vector)` window—not the entire job, scheduler allocation, or necessarily a retry.
-A GPU-only release opens a zero-GPU successor while held CPU/memory continue to accrue. Only a
-period after all counted compute resources have been released has no open attempt and contributes
-zero to every transient resource. Persistent storage and F3 may continue across either case.
+## Hard requirements
 
-The supervisor immediately authenticates and durably stores resource-worker snapshots. Its own
-clock records **opened_at** at confirmed acquisition before bootstrap and **end.closed_at** after
-release/reconfiguration; worker snapshots do not define duration timestamps. It creates one
-detailed participant file.
-The server snapshots expected identity and role from authenticated job-selection/deployment state
-independently of resource-report arrivals, classifies that immutable roster at a cutoff, accepts
-at most one immutable participant summary per participant, computes a compact job summary, and
-publishes that exact summary through `RESOURCE_STATS`.
+These requirements come from the Phase 1 source document and the latest review:
+
+- Run with the permissions NVFlare already has.
+- Require no root access or privileged container.
+- Require no host agent, Docker socket, additional Kubernetes RBAC permission,
+  cloud permission, or Slurm administrator access.
+- Require no new mount, sidecar, service, launcher flag, environment variable,
+  operator setting, or deployment setup.
+- Read values from the environment where the job runs. Do not read scheduler
+  requests, container specifications, cloud metadata, or billing data.
+- A failed or slow probe must not fail the job.
+- Do not turn missing data into zero.
+
+NVFlare itself will need code changes. Users and operators should not need to
+change how they install, configure, launch, or run a job.
+
+## What the user sees
+
+The proposed command is:
 
 ```text
-durable GPU-free site supervisor: participant start ---------------- participant final
-                                 storage start         storage + retained + all-job F3
-                                      |                              |
- attempt A: CPU + memory + GPU -------| reconfigured                 |
- attempt B: CPU + memory + zero GPU --|---------------- reconfigured |
- attempt C: CPU + memory + GPU -------|----------------------- release
-        opened_at -> untimed worker snapshots -> end.closed_at
-                  \____________ immediate durable handoff __________/
-                                           |
-                               one detailed participant file
-                                           |
-                      client terminal send / server local ingest
-                                           v
-                       fixed roster + participant/job totals
-                                           |
-                       resource_summary.json + manifest
-                                           |
-                           RESOURCE_STATS query copy and CLI
+nvflare job resources JOB_ID
+nvflare job resources JOB_ID --site site-1
+nvflare job resources JOB_ID --format json
 ```
 
-### Four terms to keep distinct
+The full generated examples are:
 
-| Term | Plain meaning |
+- [all-site text output](schema/golden/v1/finalized_job/cli/resources-all.txt)
+- [one-site text output](schema/golden/v1/finalized_job/cli/resources-site-1-details.txt)
+- [JSON output](schema/golden/v1/finalized_job/cli/resources-all.json)
+- [partial multi-period output](schema/golden/v1/finalized_job/cli/resources-partial-periods.txt)
+
+The text output starts with this warning:
+
+> Resources visible to the job while it ran. These are not utilization,
+> reserved capacity, or billing data.
+
+## Three plain terms
+
+| Plain term | JSON term | Meaning |
+| --- | --- | --- |
+| Site report | `participant_summary` | Everything one client or server reports for one job. |
+| Measurement period | `attempt` | A start and end time for which one resource observation applies. It is not necessarily a process launch or scheduler attempt. |
+| Expected participant list | `roster` | The clients and server that the job already expects. It is used to show missing reports. |
+
+The JSON names remain unchanged because they are already used by the prototype.
+Human-facing prose should use the plain terms.
+
+## What one site reports
+
+A site report has three parts:
+
+1. Job-run start and finish facts.
+2. Zero or more measurement periods.
+3. Facts collected once at the end: saved-result sizes and F3 counters.
+
+Each measurement period contains:
+
+- a random internal ID;
+- an internal measurement-scope key used to avoid duplicate simultaneous
+  reports;
+- a start and end time from one NVFlare clock;
+- CPU, memory, and GPU values observed at the start; and
+- an optional final observation.
+
+The scope key is generated inside NVFlare. It requires no user setting, process
+argument, or launcher change in the data contract. The implementation may use a
+different internal mechanism as long as duplicate reports are handled.
+
+The contract does not require another period after a resource change. If the
+chosen implementation observes a later period, it may record one. If the final
+observation differs from the start, or is missing, the affected totals are
+marked partial.
+
+## How the values are collected
+
+### CPU
+
+NVFlare reads the CPU affinity, effective CPU set, and finite CPU quota that the
+process can see. It uses the smallest applicable value. If none is available,
+it falls back to the online CPU count.
+
+`quota_units` is quota divided by period. It is rounded down to at most nine
+decimal places so the report never overstates capacity.
+
+The normalized CPU model and architecture are optional. If the visible CPUs
+have different models, the model is omitted.
+
+### Memory
+
+NVFlare uses the smaller of:
+
+- a finite memory limit visible to the process; and
+- physical memory visible to the process.
+
+Swap is not included.
+
+### GPU
+
+A numeric GPU count requires successful CUDA-runtime enumeration. A raw
+`CUDA_VISIBLE_DEVICES` string is diagnostic only and never creates a count.
+
+NVML may add model and memory details only for devices CUDA already found. It
+cannot add devices or change the count.
+
+Full GPUs and MIG instances remain separate. MIG fields and CLI columns appear
+only when a positive MIG value exists.
+
+### Storage
+
+NVFlare reads the capacity of the filesystem that contains the existing job
+workspace. No new volume or mount is required.
+
+Storage time is reported only when NVFlare can establish that the workspace was
+available for the stated interval. Otherwise the result is partial or
+unavailable.
+
+### Saved results
+
+At completion, NVFlare records exact sizes only when existing platform state
+provides a complete, bounded list of result files. If it has no such list, this
+value is unavailable. The feature adds no artifact registry or job setting and
+does not scan unrelated directories.
+
+### Network
+
+The primary network value is the F3 application payload accepted for remote
+send. Local delivery and failure before remote acceptance are separate
+counters.
+
+These counts exclude transport headers, TLS, retransmissions, and general
+operating-system traffic. They are not cloud-billed network bytes.
+
+## How time-based totals are calculated
+
+For one complete measurement period:
+
+```text
+duration = end time - start time
+CPU time = visible CPU units × duration
+memory time = visible memory bytes × duration
+GPU time = visible GPU instances × duration
+```
+
+Storage uses the site job-run interval when workspace continuity is known.
+Saved-result bytes and F3 counters are added once, not once per measurement
+period.
+
+Different sites may be using the same physical machine or shared storage.
+Therefore a job total is a sum of received reports, not a claim about physical
+capacity.
+
+## Missing and partial data
+
+The allowed states depend on the kind of fact:
+
+| Fact | Allowed states |
 | --- | --- |
-| Logical participant | One site's participation in the federated job from start through terminal finalization. |
-| Durable site supervisor | Platform-owned, GPU-free owner that preserves identity and accepted fragments across worker release/resume. |
-| Resource window / attempt | One half-open interval of a stable lease/environment capacity vector, bounded by supervisor `opened_at` and `end.closed_at`. |
-| Resource worker | Disposable or resumable execution environment that runs custom work while a resource window is open. |
+| CPU, memory, or GPU at one point in time | `reported`, `unavailable`, `error` |
+| Storage, saved results, or F3 counters | `reported`, `partial`, `unavailable`, `error` |
+| Derived resource-time total | `reported`, `partial`, `unavailable` |
 
-The contract uses these lifecycle meanings rather than a generic "parent" or "child," because the
-roadmap implementation may restart a Client Job, cycle a worker below it, or preserve only
-CPU-side state. The accounting boundary is a trusted capacity-vector transition, not a particular
-process class. A changed GPU vector must be probed in a fresh, CUDA-uninitialized worker/helper;
-an already initialized CUDA process is not assumed to rediscover new visibility.
+`partial` means usable numeric data exists but some coverage is missing.
+Point-in-time CPU, memory, and GPU cannot be partial: NVFlare either obtains a
+valid selected value at that moment or it does not.
 
-### Current code versus roadmap target
+The expected participant list uses:
 
-| Layer | Current behavior | Roadmap-compatible interpretation |
-| --- | --- | --- |
-| Client Parent (CP) | Long-lived site control process that currently reserves resources before launching a Client Job and frees them after it exits. | Natural home, or coordinator, for the durable GPU-free supervisor responsibilities. |
-| Client Job (CJ) | Currently lives for the participant job and waits between tasks. | May become a transient worker, preserve CPU-side state, or coordinate a fresh GPU worker/helper; changed GPU visibility is never inferred from a stale CUDA context. |
-| External trainer | May already restart per task and release CUDA process memory. | Its exit is not by itself an NVFlare/Slurm resource-release confirmation and therefore cannot close an attempt. |
+| State | Meaning |
+| --- | --- |
+| `accepted` | A valid final site report was received. |
+| `missing` | A report was expected but did not arrive. |
+| `invalid` | A report arrived but failed validation. |
+| `disabled` | Collection was already disabled by existing policy. No new setting is introduced here. |
 
-The current lifecycle is documented in
-[system architecture](../../docs/system_architecture/system_architecture.rst). The roadmap changes
-which process holds resources, but the design keys accounting to the trusted acquire/release hook
-so it remains valid as that implementation lands.
+The short issue codes are defined in
+[CODE_CATALOG.md](schema/CODE_CATALOG.md). They are intentionally generic so
+the resource name does not have to be repeated in every code.
 
-## What to open during the meeting
+## Storage and trust
 
-| Order | File | What it answers |
-| ---: | --- | --- |
-| 1 | [Candidate decisions](SIMPLIFICATION_REVIEW.md) | What was removed, what remains, and why typed objects were chosen. |
-| 2 | [Contract overview](schema/README.md) | The cross-record rules, formulas, trust boundary, privacy policy, and artifact topology. |
-| 3 | [Field catalog](schema/FIELD_CATALOG.md) | Every stored field, type, condition, unit, and bound. |
-| 4 | [Status/issue catalog](schema/CODE_CATALOG.md) | What reported, partial, unavailable, error, disabled, and each issue mean. |
-| 5 | [Participant start](schema/golden/v1/participant_start.json) and [final](schema/golden/v1/participant_final.json) | Persistent storage and exactly-once retained/F3 facts across the logical participant. |
-| 6 | [Attempt start](schema/golden/v1/attempt_start.json) and [final](schema/golden/v1/attempt_final.json) | CPU/memory/GPU capacity inside one acquired resource window. |
-| 7 | [Preemption end](schema/golden/v1/attempt_end_terminated.json) | How the supervisor closes a released window without inventing a worker final. |
-| 8 | [Participant golden](schema/golden/v1/participant_summary.json) and [preempt/resume golden](schema/golden/v1/participant_summary_preempted_resume.json) | Normal zero-GPU reconfiguration versus a true all-resource gap and recovery. |
-| 9 | [Resource summary golden](schema/golden/v1/resource_summary.json) | The compact fixed roster and typed participant/job totals. |
-| 10 | [Manifest golden](schema/golden/v1/manifest.json) | Canonical paths and SHA-256 digests, with no duplicate length or kind fields. |
-| 11 | [Finalized job tree](schema/golden/v1/finalized_job/) | The coherent server archive, exact query copy, and CLI projections. |
-| 12 | [Remaining gaps](GAPS.md) | What is contract-complete versus still requiring NVFlare integration or product policy. |
+The schema does not require site-side fragment files. The prototype shows one
+best-effort option that writes them in the existing job workspace. If an
+implementation uses that option, the files are self-reported rather than
+immutable: job code may change or remove them, and a crash may lose them.
 
-## Proposed review order
+The server validates the final site report and stores the accepted bytes in the
+existing job store under the exact component name `RESOURCE_STATS`. The
+manifest hashes those server-side files.
 
-| Section | Plain-language question | Candidate direction |
-| --- | --- | --- |
-| 1. Product output | What must a user or estimator be able to answer? | Default CLI versus JSON/detail output. |
-| 2. Identity and role | What joins records and prevents duplicate reporters? | Role once in the fixed expected-participant roster. |
-| 3. Hardware metadata | Which CPU/GPU model facts may be disclosed? | Normalization, suppression, heterogeneous CPUs. |
-| 4. Capacity | What is observed and what evidence makes it authoritative? | Typed selectors and CUDA-only GPU counts. |
-| 5. Lifecycle and trust | Which facts follow the participant versus a resource window? | Durable GPU-free supervisor, one clock, immediate handoff, vector-transition end. |
-| 6. Status and issues | How do zero, partial, unavailable, disabled, and error differ? | Small closed vocabularies. |
-| 7. Resource time | Which timestamp and capacity define each formula? | Supervisor open/close for compute; participant start/final for storage. |
-| 8. Retained/F3 | Which exact output and traffic facts are included? | Participant-lifetime registered files and three F3 buckets, finalized once. |
-| 9. Aggregation | What is canonical and how are retries handled? | Immutable participant summary and compact roster/totals. |
-| 10. CLI/Phase 2 | What is shown now and exported later? | Adaptive MIG display and `JobStatsReporter` boundary. |
+This prototype does not require a separate protected site directory. If
+stronger crash recovery is later needed, the team must choose a solution that
+still satisfies the no-new-privileges and no-new-configuration requirements.
 
-The ten sections are ready for review in the [candidate decision record](SIMPLIFICATION_REVIEW.md).
-The meeting pass should confirm both the simplifications and that the executable artifacts
-faithfully implement the lifecycle audit corrections.
+## Security boundary
 
-## Step 1: begin the participant and acquire a resource window
+The first observation must come from NVFlare platform code before job code can
+change the result. The exact call site depends on the process model that the
+resource-management work selects.
 
-The GPU-free supervisor first records the persistent run-filesystem capacity for the logical
-participant. Later, whenever a stable compute vector opens, it creates a random attempt ID and
-records **opened_at** on its own clock as soon as acquisition is confirmed. A fresh worker then
-enters an absolute platform-owned bootstrap artifact using `python -I -S`, a platform-owned
-working directory, and a fixed minimal pre-Python environment allowlist. `-S -m` is not sufficient
-because cwd can shadow the module. Custom-code import paths remain withheld until the capacity
-snapshot has been accepted. The attempt ID and opaque supervisor-handoff locator must both be
-explicitly allowlisted through process, Docker, Kubernetes, and Slurm launch paths. Bootstrap time
-is already inside the window.
+An earlier prototype prescribed process-specific bootstrap and launch changes.
+They are no longer part of this design.
 
-The resource worker reports typed CPU, memory, and GPU objects:
+If the selected process model cannot provide a trustworthy initial observation
+without extra privileges or operator setup, the value must be marked
+unavailable. The implementation must not weaken the deployment constraints.
 
-- CPU: minimum applicable affinity, effective cpuset, and finite quota expressed as normalized
-  `quota_units`; online CPUs are a host-visible fallback only.
-- Memory: minimum finite cgroup/physical bytes.
-- GPU: groups returned by successful CUDA-runtime enumeration only.
+## What is agreed and what is still open
 
-The raw CUDA visibility string is never stored or parsed for a count. A true successful zero is
-represented by an empty group array; unavailable enumeration has no numeric result. A MIG group
-is omitted when no MIG instance is visible, so the routine client record and human output remain
-small.
+### Agreed
 
-Every GPU-vector change applies new visibility and probes it in a fresh, CUDA-uninitialized worker
-or platform helper before custom GPU work resumes. An already CUDA-initialized process cannot be
-assumed to re-enumerate. A CPU/memory successor is numeric zero-GPU only after a successful empty
-CUDA enumeration; otherwise GPU is unavailable. The contract does not make OS process exit the
-accounting boundary, though worker replacement may be needed for a valid GPU transition.
+- Field types, units, bounds, privacy rules, and status codes.
+- CPU and memory selection rules.
+- CUDA-runtime authority for GPU counts.
+- Resource-time formulas.
+- F3 counter meanings.
+- The exact `RESOURCE_STATS` server component.
+- CLI behavior and golden examples.
+- No extra privileges, configuration, or deployment setup.
+- The data contract does not choose the task process model.
 
-Review: [participant start](schema/golden/v1/participant_start.json),
-[attempt start](schema/golden/v1/attempt_start.json),
-[zero GPU](schema/golden/v1/attempt_start_zero_gpu.json), and
-[CUDA unavailable](schema/golden/v1/attempt_start_cuda_unavailable.json).
+### Open
 
-## Step 2: close the resource window honestly
+- Which existing NVFlare component records job-run and measurement-period
+  boundaries.
+- What starts and ends a measurement period in the selected process model.
+- How a trustworthy pre-job-code observation is made in that model.
+- How much site-side data can survive a crash using only existing storage.
+- How the measurement-scope key is derived from information NVFlare already
+  has.
+- Whether `reconfigured` remains useful as an end reason. It no longer implies
+  a successor period.
 
-Before a normal release or reconfiguration, the worker provides an optional second CPU/memory/GPU
-snapshot. It has no duration timestamp and is only capacity-change evidence. After the lifecycle
-owner confirms the transition, it records required **end.closed_at** on the same clock as
-**opened_at**. For a partial release that changes the vector while retaining the same reporter
-environment and other counted resources, reason **reconfigured** closes the old vector and the
-successor opens at that exact boundary. If the worker crashes or is preempted, the supervisor
-closes resources and records the end without synthesizing a final sample.
+These are listed in [GAPS.md](GAPS.md) as decisions, not requirements.
 
-This is a one-way lifecycle assertion: **reconfigured** requires an immediate same-environment
-successor at the boundary. When both snapshots are comparable, they must differ; an unavailable
-successor snapshot is allowed and makes affected totals partial or unavailable. A fully released
-lease can be reacquired at that exact timestamp with a changed vector and still remain a
-release/reacquire pair; adjacency alone is not reconfiguration.
+## File map
 
-A launch failure after acquisition still has **opened_at** and **end.closed_at**. Its known
-duration contributes to `resource_window_seconds`, but the missing capacity snapshot makes
-transient totals partial or unavailable.
+| File | Purpose |
+| --- | --- |
+| [Implementation plan](../../docs/design/job_resource_statistics_implementation_plan.md) | Agreed behavior, open integration decisions, and implementation slices. |
+| [Phase 2 sketch](../../docs/design/job_resource_statistics_phase2_telemetry_sketch.md) | How `JobStatsReporter` may publish a finalized Phase 1 result. |
+| [Schema guide](schema/README.md) | Exact record shapes and calculations. |
+| [Field catalog](schema/FIELD_CATALOG.md) | Every field, type, and unit. |
+| [Code catalog](schema/CODE_CATALOG.md) | Every status, issue, and end reason. |
+| [JSON Schema](schema/resource_stats_v1.schema.json) | Machine-readable structure. |
+| [Validator](schema/contract_v1.py) | Cross-record and arithmetic checks. |
+| [Artifact generator](schema/build_review_artifacts.py) | Rebuilds the golden JSON and CLI output. |
+| [Open decisions](GAPS.md) | Questions that the resource-management design must answer. |
 
-Worker start/final contents remain self-reports. Supervisor-owned, write-once durable storage
-prevents later mutation of accepted bytes; it does not turn worker observations into independent
-supervisor measurements. A worker-writable file or Kubernetes `emptyDir` alone is not this
-boundary. The supervisor hands off each accepted fact immediately; it does not wait for logical
-job completion.
+## Rebuild and test
 
-Review: [normal final](schema/golden/v1/attempt_final.json), the released ends embedded in the
-[participant summary](schema/golden/v1/participant_summary.json), and the standalone
-[preemption end](schema/golden/v1/attempt_end_terminated.json).
-
-## Step 3: derive resource time
-
-For each attempt, the supervisor/server derives the CPU, memory, and GPU interval from one durable
-lifecycle-owner clock:
-
-```text
-resource-window seconds = end.closed_at - opened_at
-compute resource time = worker start capacity × resource-window seconds
+```bash
+python3 research/runtime_resource_proxy_prototype/schema/build_review_artifacts.py
+python3 -m unittest discover \
+  -s research/runtime_resource_proxy_prototype/tests \
+  -p 'test_*.py'
 ```
-
-The calculation uses decimal arithmetic and preserves exact large values as strings. Worker
-snapshots do not carry duration timestamps. A missing attempt final or changed numeric attempt
-final makes the result partial because the start value is an uncertain extrapolation over some or
-all of the interval. It is not averaged with the final snapshot.
-
-The main golden keeps CPU and memory throughout an eight-minute participant while releasing its
-GPU for the middle five minutes. It therefore has three contiguous stable vectors:
-
-| Window | Duration | CPU/memory | GPU |
-| --- | ---: | --- | --- |
-| A | 60 s | held | 1 |
-| B | 300 s | held | reported zero |
-| C | 120 s | held | 1 |
-
-It reports **480 resource-window seconds**, **480 seconds of CPU/memory capacity**, and **180
-GPU-instance-seconds**. The two GPU transitions use **reconfigured** and have no all-resource gap.
-The separate preempt/resume golden releases every counted compute resource for 300 seconds; that
-interval has no attempt and its missing worker final makes the transient totals partial.
-
-One scheduler allocation may contain concurrent reporter environments. Their attempt durations
-are summed, so `resource_window_seconds` can exceed participant wall time.
-
-Storage uses the logical participant clock instead:
-
-```text
-storage-capacity time = participant-start filesystem capacity
-                      × (participant-final time - participant-start time)
-```
-
-It includes release/resume intervals only when the supervisor guarantees the persistent run
-filesystem remained continuously available. Otherwise storage time is partial or unavailable.
-The durable supervisor's own CPU and memory are excluded from the per-job compute proxy.
-
-CPU totals group by optional normalized model and architecture. GPU totals group by full GPU or
-MIG kind and optional model, per-entity memory, and MIG profile. Suppressed/unknown metadata forms
-an unlabeled group without changing numeric authority.
-
-One TiB of storage for one day is `94997804639846400` byte-seconds, already above JavaScript's
-safe integer range. All measured and derived counters are canonical decimal strings to preserve
-exact values across languages. Review the independent
-[participant final](schema/golden/v1/participant_final.json) and
-[derived participant](schema/golden/v1/participant_summary_large_value.json) fixtures.
-
-## Step 4: retained content and F3
-
-Retained content includes only final regular files explicitly registered and frozen by the
-platform. Each entry stores a normalized relative path, exact descriptor size, and digest. The
-total is derived; the system does not sweep the workspace or count its archive. The supervisor
-freezes this registry once at logical participant finalization, so files created across several
-resource windows are not counted repeatedly.
-
-F3 belongs to the logical participant and spans all its resource windows and release/resume gaps.
-The durable participant owner atomically freezes three factual buckets before participant-final
-serialization:
-
-- `remote_accepted`: remote payload accepted for transport before the atomic freeze; the primary total;
-- `local_delivered`: direct delivery, never folded into the primary total;
-- `remote_failed_before_acceptance`: remote sends that failed before acceptance.
-
-Each bucket stores application payload bytes and messages. Counter callbacks completing after the
-atomic freeze are ignored for canonical totals. Fixed included traffic classes, freeze behavior,
-and non-spoofable platform-only summary-publication exclusion belong to platform behavior, not
-record labels or counters in the immutable summary; including the publication's own size would be
-circular.
-
-The included classes are exactly `task_request`, `task_response`, `task_result`,
-`job_application`, and `job_stream_data`; `job_stream_control`, `bulk_envelope`,
-`workspace_transfer`, `platform_control`, `log_export`, unknown classes, and summary publication
-are excluded. At each destination, payload bytes mean `len(message.payload)` after encoding and
-optional end-to-end encryption, immediately before direct delivery or remote send. Headers,
-transport framing, network/TLS overhead, compression effects, and retransmissions are excluded.
-Fan-out counts once per destination, and forwarding counts once again at each participant sender
-hop. Remote counts advance only after send acceptance; direct delivery uses its separate bucket.
-
-Review: [participant final](schema/golden/v1/participant_final.json).
-
-## Step 5: participant acceptance and retries
-
-The participant file preserves one participant start/final and all detailed resource-window attempts,
-including optional worker finals and trusted release/preemption ends. It does not repeat role or
-materialize resource-time totals.
-
-There is deliberately no participant revision number. The first valid, authenticated summary
-received by the report cutoff wins. A retry with the identical SHA-256 digest is an idempotent
-no-op; a different digest is a conflicting attempt to replace an accepted measurement and is
-rejected. A malformed/invalid candidate does not reserve the participant slot. Distinct resource
-windows remain distinct items inside the one terminal participant summary; multiple attempts are
-normal and do not by themselves mean a retry.
-
-The client supervisor sends attempt fragments only to its own durable local store as they occur.
-It sends one consolidated participant summary to the central server at terminal completion, with
-exact-byte retries allowed by the digest rule. The server parent/job supervisor performs the same
-lifecycle ownership for `role: server`, but locally ingests its summary instead of sending to
-itself.
-
-Review: [participant summary](schema/golden/v1/participant_summary.json).
-
-## Step 6: server aggregation
-
-The expected-participant roster is sourced from authenticated job-selection/deployment state,
-never the resource reports that happen to arrive. At the report cutoff the server snapshots that
-membership, makes it immutable, and classifies each slot, so missing reporters remain visible.
-This roster is the single coverage source. Every entry records participant ID, job-scoped
-participant key, role, and `accepted | missing | invalid | disabled`. Accepted entries also
-contain receipt time, summary digest, derived `resource_window_seconds`, and compact typed totals.
-Invalid entries add trusted receipt time and compact issues; missing/disabled entries need only
-identity, role, and status.
-The job `totals` has the same shape:
-
-- resource time: CPU groups, memory byte-seconds, storage byte-seconds, and GPU groups;
-- retained content: bytes; and
-- F3: only remote-accepted payload bytes and messages.
-
-Roster gaps make a numeric job total partial. With no usable contributions, it is unavailable.
-Counts and warning prose derive from the roster/status facts; they are not stored in parallel.
-Cross-job overlap remains intentional. These participant-visible sums are never advertised as
-available physical capacity.
-
-`resource_window_seconds` is a sum of reporter-environment windows. It may exceed participant
-wall time when multiple environments run concurrently; this is intentional and is not a physical-
-capacity claim.
-
-Review: [resource summary](schema/golden/v1/resource_summary.json).
-
-## Step 7: archive, query, and CLI
-
-The server archive is:
-
-```text
-resource_stats/
-  resource_summary.json
-  participants/<participant_key>.json
-  manifest.json
-```
-
-The manifest contains only sorted path/digest pairs for the resource summary and exactly one file
-per accepted participant. The exact validated `resource_summary.json` bytes are the job-store
-`RESOURCE_STATS` query copy. Storage uses an exact component and narrow save/get APIs; a generic
-prefix must not authorize arbitrary `RESOURCE_STATS_*` names.
-
-The default CLI presents a compact per-participant table and qualified accepted-report aggregate.
-It keeps report-acceptance **STATUS** separate from measurement **QUALITY**, calls summed reporter-
-environment duration **ENV WINDOW**, and labels the primary payload column **F3 REMOTE**. It adds a MIG
-column or MIG-specific prose only when the selected data contains positive MIG instance-time.
-JSON preserves all typed groups and base units. A missing expected participant remains a valid
-partial result; an unknown participant, not-ready job, absent legacy data, or failed integrity
-check has a distinct command error.
-
-The table's window-time column is the sum of stable reporter-environment vectors, not necessarily
-elapsed logical-job time. It can exceed wall time under concurrent environments. A GPU-only
-reconfiguration stops GPU time but continues still-held CPU/memory time; a full-release gap stops
-all transient totals. Storage-capacity time intentionally spans the participant lifecycle when
-continuous workspace availability is guaranteed.
-
-```text
-nvflare job resources JOB_ID --site all
-nvflare job resources JOB_ID --site SITE
-nvflare --format json job resources JOB_ID --site all
-```
-
-Review the coherent files in [the finalized job tree](schema/golden/v1/finalized_job/), especially
-the [human output](schema/golden/v1/finalized_job/cli/resources-all.txt) and
-[JSON output](schema/golden/v1/finalized_job/cli/resources-all.json). The
-[partial preempt/resume output](schema/golden/v1/finalized_job/cli/resources-preempted-resume.txt)
-makes the true all-resource gap and incomplete transient totals visible. The
-[complete selected-site output](schema/golden/v1/finalized_job/cli/resources-site-1-details.txt)
-includes its optional hardware detail below the selected participant.
-
-## Phase 2 relationship
-
-Phase 1 owns measurement, validation, durable evidence, finalization, query data, and CLI
-semantics. Phase 2 can have `JobStatsReporter` publish selected finalized values to telemetry.
-It reads the validated Phase 1 result and must not create a second definition of capacity,
-resource time, F3 inclusion, or participant coverage.
-
-Phase 2 receives no per-window open, reconfigure, close, or resume events. It begins only after
-Phase 1 has accepted participant summaries and finalized `resource_summary.json`.
-
-Hardware model labels in telemetry are optional and require an explicit label/cardinality/privacy
-review. Detailed attempt records and raw evidence remain in the Phase 1 archive rather than being
-turned into high-cardinality metrics.
-
-## What remains implementation work
-
-The contract and fixtures are reviewable; NVFlare production integration is not complete. The
-remaining roadmap lifecycle hook, launcher, CUDA adapter, durable supervisor handoff, artifact
-registry, CellNet hook, server materializer, and CLI work is tracked in [GAPS.md](GAPS.md). The real local captures under
-[`generated/`](generated/) are probe evidence and predate the canonical v1 format; do not use
-them as wire-format examples.

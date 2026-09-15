@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://nvflare.nvidia.com/schemas/resource_stats/v1/resource_stats.json",
   "title": "NVFlare typed resource-statistics record v1",
-  "description": "Closed canonical records for trusted lifecycle capture, participant reconstruction, and finalized job resource statistics.",
+  "description": "Closed records for per-site observations and finalized job resource statistics.",
   "oneOf": [
     {"$ref": "#/$defs/attempt_start"},
     {"$ref": "#/$defs/attempt_final"},
@@ -29,21 +29,27 @@
     "full GPUs and MIG compute instances remain separate groups; a missing MIG group in a reported inventory means observed zero",
     "CPU quota_units is exact quota_us/period_us Decimal division conservatively floored to nine fractional digits; CPU visible_units is the minimum of present affinity_count, cpuset_count, and quota_units, or online_count only when none is available",
     "model and architecture are optional normalized metadata; their absence never changes numeric status",
-    "transient CPU, memory, and GPU time is attempt-start capacity multiplied by the supervisor-owned half-open opened_at-to-closed_at interval, rounded half-even to nine fractional digits per attempt",
-    "attempt start and final contain capacity only; missing final data or numeric capacity change makes the affected transient participant total partial without changing the supervisor-owned interval",
-    "reconfigured is asserted by trusted lifecycle authority and requires a same-environment successor at the same timestamp; when both numeric vectors are comparable they must differ, while a full release and reacquisition may use released even when timestamps are equal",
-    "persistent storage time is participant-start capacity multiplied by the participant start-to-final interval; it is never multiplied once per transient attempt",
-    "retained content and F3 are terminal participant facts and contribute exactly once, never once per resumed transient attempt",
-    "one trusted reporter is accepted per execution environment at a time; half-open intervals may reuse an environment_key only when they do not overlap",
-    "the three F3 counters are atomically frozen before participant-final serialization; callback completions after freeze never enter canonical counters, and summary publication uses a platform-owned non-spoofable exclusion path",
-    "the immutable expected-participant roster comes from authenticated deployment/selection state independently of resource-report arrivals, and classifies every expected member at cutoff",
-    "job totals are deterministic sums of accepted roster totals; roster and attempt facts explain partial and unavailable totals",
-    "manifest and accepted-roster digests cover the exact archived bytes"
+    "an attempt is one measurement period and does not imply a process or resource-management architecture",
+    "CPU, memory, and GPU time is attempt-start capacity multiplied by the half-open opened_at-to-closed_at interval; both times use one NVFlare clock, and each product is rounded half-even to nine fractional digits",
+    "attempt start and final contain capacity only; missing final data or numeric capacity change makes the affected participant total partial",
+    "reconfigured means that NVFlare ended a measurement period after observing a capacity change; it does not require or imply another period",
+    "storage time is participant-start capacity multiplied by the site start-to-final interval; it is not repeated for each measurement period",
+    "saved-result sizes and F3 counters contribute once per site report",
+    "periods may reuse an environment_key only when they do not overlap",
+    "NVFlare closes all three F3 counters before writing participant_final; later callbacks do not change the totals, and job code cannot exclude summary traffic",
+    "the server gets its expected participant list independently of resource-report arrivals and classifies every member at the cutoff",
+    "job totals are deterministic sums of accepted site totals; participant status and resource status explain partial or unavailable totals",
+    "manifest digests cover the exact stored server bytes"
   ],
   "x-nvflare-privacy": [
-    "hardware models may be omitted by site policy",
+    "hardware models are optional and may be omitted; this feature introduces no model-publication setting",
     "CPU model is emitted only when all affinity-visible CPUs normalize to one model",
     "forbidden: raw cpuinfo, flags, topology, serials, UUIDs, PCI addresses, host identifiers, and raw CUDA mask values"
+  ],
+  "x-nvflare-deployment-constraints": [
+    "collection uses the permissions, workspace, and message paths NVFlare already has",
+    "collection requires no root access, privileged container, host service, sidecar, Docker socket, additional Kubernetes RBAC permission, cloud permission, or Slurm administrator access",
+    "collection requires no new mount, launcher argument, environment variable, job setting, operator setting, or deployment setup"
   ],
   "$defs": {
     "schema_version": {"const": "1.0"},

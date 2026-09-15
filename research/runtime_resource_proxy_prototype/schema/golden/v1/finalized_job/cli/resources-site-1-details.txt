@@ -1,20 +1,17 @@
-Runtime-visible capacity-time proxies; not utilization, requested quantities, guarantees, or billable usage.
-Job job-20260909-001 | selected site: site-1 | coverage: PARTIAL (1 accepted / 2 expected)
+Resources visible to the job while it ran. These are not utilization, reserved capacity, or billing data.
+Job job-20260909-001 | selected site: site-1 | job coverage: PARTIAL (1 accepted / 2 expected)
 
-SITE     ROLE    STATUS    QUALITY      ENV WINDOW  FULL GPU h  CPU h   MEM GiB h  STORAGE GiB h  RETAINED MiB  F3 REMOTE KiB
-site-1   client  accepted  REPORTED           8m0s      0.0500  0.2000      1.0667       136.5333       18.0000         5.5000
+SITE     ROLE    STATUS    QUALITY     MEASURED TIME  FULL GPU h  CPU h   MEM GiB h  STORAGE GiB h  SAVED RESULT MiB  F3 REMOTE ACCEPTED KiB
+site-1   client  accepted  REPORTED             8m0s      0.1333  0.2000      1.0667       136.5333          18.0000                 5.5000
 
 Notices:
-  Participant-visible proxies may overlap; this is not physical capacity.
-  ENV WINDOW is summed reporter-environment time and may exceed participant wall time.
-  A GPU-free window still counts CPU and memory if those resources remain visible.
-  PARTIAL means measurement evidence or expected-report coverage is incomplete; STATUS is acceptance.
-  Storage time spans the participant lifecycle while its persistent workspace remains available.
-  Totals cover accepted reports only; roster gaps make them partial.
-  Worker observations are self-reported; accepted bytes are preserved by the site supervisor.
+  MEASURED TIME is the sum of the measurement periods in each received report.
+  JOB COVERAGE PARTIAL means not every expected report was accepted.
+  Reports may describe overlapping physical resources. Job totals are not physical capacity.
+  Site observations are self-reported. The server protects only the received report bytes.
 
 Hardware detail for site-1
-Model metadata is optional and may be suppressed by site policy.
+Model metadata is optional. Its absence does not change numeric results.
 
 CPU: AMD EPYC 9654 (x86_64); 0.2000 CPU h
-GPU (full GPU): NVIDIA H100 80GB HBM3, 80 GiB per instance; 0.0500 instance h
+GPU (full GPU): NVIDIA H100 80GB HBM3, 80 GiB per instance; 0.1333 instance h

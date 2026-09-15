@@ -1,263 +1,355 @@
-# Canonical resource-statistics contract v1
+# Resource statistics schema v1
 
-This directory is the candidate Phase 1 resource-statistics contract. It supersedes exploratory
-shapes under `../examples/` and `../generated/`.
+This directory contains the proposed Phase 1 wire contract.
 
-Conformance requires both machine-readable parts:
+The contract says what a site reports and how the server calculates totals. It
+does not choose whether CP, a job process, a child process, or another NVFlare
+component collects the data.
 
-- `resource_stats_v1.schema.json` fixes shapes, wire types, nullability, enums, and structural
-  bounds using JSON Schema Draft 2020-12.
-- `contract_v1.py` enforces duplicate-key and byte/depth limits, numeric formulas, selector
-  evidence, lifecycle relationships, overlap rules, aggregate arithmetic, and bundle integrity.
+## Files
 
-`FIELD_CATALOG.md` is the human field/unit/bound index. `CODE_CATALOG.md` is the status, issue,
-roster, and lifecycle-code index. Files under `golden/v1/` are executable examples.
-
-A production reader must bound received UTF-8 bytes, reject duplicate keys, validate the schema,
-run semantic validation with authenticated platform context, and only then aggregate or display a
-record. A digest proves byte identity, not the truth of an untrusted worker observation.
-
-## Version and record kinds
-
-Every object rejects unknown fields and has exact `schema_version: "1.0"` plus one kind:
-
-| Kind | Purpose |
+| File | Purpose |
 | --- | --- |
-| `nvflare.resource_stats.participant_start` | Durable supervisor begins participant accounting and observes persistent storage. |
-| `nvflare.resource_stats.attempt_start` | Worker observes transient CPU/memory/GPU after one resource lease becomes active. |
-| `nvflare.resource_stats.attempt_final` | Optional worker stability observation before lease closure. |
-| `nvflare.resource_stats.attempt_end` | Lifecycle owner confirms the resource lease/window closed. |
-| `nvflare.resource_stats.participant_final` | Supervisor freezes storage, retained content, and F3 once for the participant. |
-| `nvflare.resource_stats.participant_summary` | Immutable participant lifecycle reconstruction. |
-| `nvflare.resource_stats.resource_summary` | Server roster plus checked participant/job totals. |
-| `nvflare.resource_stats.manifest` | Canonical path/digest inventory. |
+| [resource_stats_v1.schema.json](resource_stats_v1.schema.json) | Closed Draft 2020-12 JSON Schema. |
+| [contract_v1.py](contract_v1.py) | Cross-record checks and exact arithmetic. |
+| [FIELD_CATALOG.md](FIELD_CATALOG.md) | Every field, type, unit, and limit. |
+| [CODE_CATALOG.md](CODE_CATALOG.md) | Every status, issue, and end reason. |
+| [golden/v1](golden/v1) | Valid example records and final CLI output. |
+| [build_review_artifacts.py](build_review_artifacts.py) | Deterministic generator for the goldens. |
 
-This is still an unpublished prototype, so the incompatible roadmap alignment retains candidate
-version `"1.0"`. After release, incompatible semantics require an explicit version transition;
-readers must never silently reinterpret old bytes.
+Unknown fields are rejected. New meanings require a new schema version.
 
-## Roadmap-compatible lifecycle
+## Plain terms and JSON names
 
-The contract separates the long-lived logical participant from short-lived compute allocations:
+| Plain term | JSON name |
+| --- | --- |
+| Site report | participant_summary |
+| Measurement period | attempt |
+| Expected participant list | roster |
+| Saved-result files | retained_content |
+| Measurement-scope key | environment_key |
 
-```text
-participant_start ─────────────────────────────────── participant_final
-       │                                                        │
-       ├─ attempt A: opened ── start/final capacity ── closed   │
-       │                all-counted-resources-released gap       │
-       └─ attempt B:             opened ── capacity ── closed ──┘
-```
+An attempt is a measurement period. It does not imply a process launch,
+scheduler attempt, resource lease, or any particular roadmap architecture.
 
-An attempt is one stable transient resource-allocation window, not one federated job and not
-necessarily one OS process. A durable GPU-free supervisor may preserve participant identity while
-workers or leases are released and reacquired. The same process may produce multiple sequential
-attempts through trusted acquire/release hooks. Every reacquisition gets a new `attempt_id`.
+## Record types
 
-Every attempt carries supervisor-owned `opened_at`; `end.closed_at` is the time that same durable
-supervisor confirms lease closure. Worker start/final bodies contain capacity only, so duration
-never mixes worker and supervisor clocks. Resource time always uses `[opened_at,closed_at)`.
+The schema accepts exactly eight record kinds:
 
-End reasons are `released | failed | terminated | launch_failed | reconfigured`. There is no
-return code because process outcome is not the measured boundary. `launch_failed` means a lease
-opened but no trusted capacity snapshot exists; it still contributes window seconds while making
-transient totals unavailable/partial. All other reasons require start. Failure/termination alone
-does not lower evidence quality if matching start/final capacity exists. `reconfigured` is
-asserted by trusted lifecycle authority and requires a same-environment successor at that exact
-boundary. Equal numeric vectors are rejected when both snapshots are comparable; an unavailable
-successor remains representable. A full release and reacquisition may use `released` even when
-its timestamps touch.
+| Kind suffix | Purpose |
+| --- | --- |
+| participant_start | Start of one site's job run and its storage observation. |
+| attempt_start | Start time and resources for one measurement period. |
+| attempt_final | Optional final resource observation for that period. |
+| attempt_end | End time and reason for that period. |
+| participant_final | End of the site run, saved-result sizes, and F3 counters. |
+| participant_summary | One final site report. |
+| resource_summary | Final server result for the job. |
+| manifest | Hashes of the stored server files. |
 
-An accepted participant summary requires participant start and final. If the durable supervisor
-never produces terminal facts/a summary, the server roster is missing or invalid rather than
-accepting a half-terminal record. An individual attempt may still lack final after crash or
-preemption; its trusted end preserves the interval and the affected compute totals become partial.
+The small start, final, and end records are logical collection fragments. The
+schema does not require them to be separate files. participant_summary is the
+final site-level record. resource_summary is the result read by the CLI and
+Phase 2.
 
-## Capture, handoff, and trust
+## Architecture and deployment constraints
 
-1. The durable supervisor begins the participant lifecycle, captures storage, and persists a
-   `participant_start` fact outside disposable worker storage.
-2. On resource acquisition, it mints an attempt ID, records `opened_at`, and passes the identity
-   plus an opaque supervisor-handoff locator through every launcher allowlist.
-3. A platform-owned sanitized bootstrap runs before custom imports, observes CPU/memory/GPU after
-   the allocation is applied, and immediately hands `attempt_start` to the supervisor.
-4. The worker may hand off capacity-only `attempt_final` just before release. This is stability
-   evidence only, not a clock boundary.
-5. The lifecycle owner closes/releases the lease and writes supervisor-owned `closed_at` in a
-   self-contained `attempt_end`, even if launch or execution failed. A later allocation starts a
-   new attempt.
-6. At participant finalization, the supervisor freezes persistent storage and registered retained
-   content, atomically freezes all three participant-wide F3 counters, and then serializes one
-   `participant_final` fact. Callback completions after the freeze are ignored.
-7. It constructs one canonical participant summary. Clients send it through the terminal outcome
-   path; the server participant uses equivalent local durable ingestion. Exact-byte retries are
-   idempotent.
+The schema contains no launcher name, process-coordination token, process ID,
+storage path, or resource-manager field.
 
-Attempt start/final capacity values are worker self-reports preserved by supervisor-owned storage.
-Attempt opened/closed bounds and participant lifecycle timestamps are supervisor-observed. These trust properties come
-from transport/storage context rather than a payload `trust` claim.
+It requires no new:
 
-## Typed resource observations
+- privilege;
+- container capability;
+- host service;
+- mount;
+- launcher argument;
+- environment variable; or
+- user or operator configuration.
 
-Transient attempt `capacity` has exactly `cpu`, `memory`, and `gpu`:
+The implementation uses normal NVFlare code and existing workspace and message
+paths. The component that calls the collector is still an open design choice.
 
-- CPU `visible_units` is the minimum of available affinity count, effective cpuset count, and
-  quota units. Raw quota/period division uses exact decimals and conservatively floors to nine
-  fractional digits (`1 / 3` becomes `0.333333333`). `online_count` is used only when none is
-  usable. Optional model is emitted only for a homogeneous affinity-visible CPU set and when
-  policy permits.
-- Memory `visible_bytes` is the minimum finite value among physical RAM and effective cgroup
-  limit. Swap is excluded.
-- GPU groups are numeric only when CUDA-runtime enumeration succeeds. `cuda_mask_present` is a
-  diagnostic boolean; raw mask contents/token counts are forbidden. NVML may enrich matching
-  CUDA-enumerated devices but cannot establish count. Optional `memory_bytes` is runtime-reported
-  memory per visible entity, not aggregate group memory; differing values form separate groups.
-  Full GPUs and MIG instances remain separate.
+## Identity
 
-A GPU-only release closes the old vector and immediately opens a successor that may report an
-empty GPU group array while CPU/memory continue. That zero requires runtime enumeration in a fresh
-or CUDA-uninitialized worker/helper after the new visibility is applied. A reused CUDA-initialized
-process cannot establish the new vector.
+**attempt_id** is a random 128-bit ID written as 32 lowercase hexadecimal
+characters. It is an internal record ID. The schema does not define how it
+crosses process boundaries.
 
-Participant `storage` is observed at participant start/final. It is `statvfs` total capacity for
-the durable participant run filesystem. It is intentionally absent from attempts because that
-filesystem can persist while compute workers and GPUs are released. Reported storage requires a
-supervisor guarantee of continuous workspace availability; uncertain continuity uses partial (if
-a numeric proxy remains usable) or unavailable/error. V1 has no storage sub-windows.
+**environment_key** is a job-scoped HMAC value. In prose, it is the
+measurement-scope key. It prevents simultaneous reports for the same
+measurement scope.
 
-Optional hardware model/architecture labels do not change numeric status. Site policy may omit
-them. Raw CPU info/flags/topology, device UUID/PCI/serial identity, host identity, absolute paths,
-and raw environment values are forbidden.
+The key is generated from information and key material NVFlare already has. It
+needs no new secret or user configuration. Its exact input is open and must be
+changed if the selected process model cannot produce it without extra setup.
 
-## Status and issue rules
+Periods with the same key may be sequential but may not overlap. Different
+keys may overlap. Reports from different jobs may describe the same physical
+hardware and are intentionally not deduplicated.
 
-Point CPU/memory/GPU uses `reported | unavailable | error`. Participant storage, retained content,
-and F3 use `reported | partial | unavailable | error`. Materialized totals use
-`reported | partial | unavailable`. Disabled collection is a server roster state, not a repeated
-lifecycle field.
+**participant_key** is a job-scoped HMAC used for server file names. The public
+participant ID and role appear only in the server's expected participant list.
 
-The exact issue vocabulary is:
+## Trust model
 
-```text
-not_bound  counter_gap  observation_incomplete  attribution_incomplete
-unsupported  permission_denied  dependency_missing  malformed_source
-```
+Resource observations are self-reported by the NVFlare site environment.
 
-Reported values carry numeric facts and no issues. Partial values carry usable facts plus issues.
-Unavailable/error values carry no numeric result. The typed location narrows which issue values
-are legal; see `CODE_CATALOG.md`. No separate source, coverage, caveat, warning, or qualification
-lists are persisted because they would duplicate derivable facts.
+If the implementation writes site fragments, it may use the existing job
+workspace. Job code may be able to change or remove them, and a crash may lose
+them. A local write-once API prevents accidental conflicting writes through
+that API, but it is not immutable evidence.
 
-## Formulas and the two clocks
+After the server receives a final site report, it validates the report and
+stores the exact accepted bytes. The manifest hashes those server-side bytes.
+A matching digest proves byte identity, not the truth of the original
+observation.
 
-For each supervisor-owned half-open `[opened_at,closed_at)` window:
+No separate protected site directory is required by this contract.
 
-```text
-CPU-unit-seconds       = start CPU units × (closed_at - opened_at)
-memory byte-seconds    = start memory bytes × (closed_at - opened_at)
-GPU-instance-seconds   = start group count × (closed_at - opened_at)
-```
+## CPU
 
-`attempt_final` has no timestamp and never changes an interval endpoint. It only checks whether
-numeric capacity stayed stable. A missing final, nonreported final, or numeric change makes the
-affected total partial; startup capacity remains the explicit proxy.
+A reported CPU object contains:
 
-Storage uses the participant clock exactly once:
+- visible_units;
+- at least one strong evidence value: affinity_count, cpuset_count, or
+  quota_units; or
+- online_count only when none of those strong values is available.
 
-```text
-storage byte-seconds = participant-start capacity × (participant final - participant start)
-```
+visible_units is the minimum of the applicable strong values. If none is
+available, it equals online_count.
 
-Retained content and F3 also come exactly once from participant final. They are not summed across
-resumed attempts. The accepted roster's `resource_window_seconds` is the sum of every environment
-window, including launch failures; overlapping different environments can make it exceed
-participant wall time. A valid summary with `attempts: []` derives reported zero transient compute
-time. Launch-failed capacity is unavailable, not zero.
+quota_units is exact quota divided by period, rounded down to at most nine
+fractional decimal places. For example:
 
-Products round once, when needed, to nine fractional digits using round-half-even before summing.
-CPU/GPU totals are grouped by optional normalized hardware metadata. Suppressed metadata creates
-an unlabeled group without invalidating the numeric value.
+~~~text
+150000 / 100000 = 1.5
+1 / 3 = 0.333333333
+~~~
 
-## F3 and retained content
+Raw quota and period values are not stored.
 
-The participant final has one retained-content registry snapshot and one atomic F3 counter freeze.
-Retained entries are sorted registered regular files with safe relative path, size, and SHA-256;
-reported empty entries means exact zero. The workspace tree is not scanned.
+Model and architecture are optional. A CPU model is present only when all
+affinity-visible CPUs normalize to one model.
 
-F3 contains three required counter pairs: `remote_accepted`, `local_delivered`, and
-`remote_failed_before_acceptance`. Only remote-accepted application payload is the primary
-aggregate. The lifecycle supervisor atomically freezes all three counters before serializing
-participant final; callback completions after that freeze never enter canonical counters, and no
-ordinal is exposed. Summary publication bypasses accounting through a platform-owned
-non-spoofable path instead of being embedded in the summary itself. The exact included traffic
-classes are `task_request`, `task_response`, `task_result`, `job_application`, and
-`job_stream_data`. The integration excludes
-`job_stream_control`, `bulk_envelope`, `workspace_transfer`, `platform_control`, `log_export`,
-unknown classes, and summary publication. Because F3 belongs to the supervisor lifecycle,
-applicable traffic while no GPU worker is running is still represented.
+## Memory
 
-For an included message, `payload_bytes` is `len(message.payload)` after `encode_payload` and,
-when enabled, end-to-end `encrypt_payload`, sampled immediately before direct delivery or
-`Communicator.send`. It excludes headers, SFM/driver/TLS/network framing, transport compression,
-and retransmissions. Cardinality is per destination: fan-out counts once for every destination,
-and a forwarding participant counts its sender hop again. F3 therefore measures participant-hop
-traffic, not unique logical data. Direct delivery increments `local_delivered`; a remote send
-increments `remote_accepted` only after `Communicator.send` returns successfully, while a failure
-before acceptance increments `remote_failed_before_acceptance`.
+A reported memory object contains visible_bytes and its evidence.
 
-## Acceptance, aggregation, and overlap
+visible_bytes is the smaller finite value from:
 
-One participant summary contains 0–4,096 unique attempts sorted by attempt ID. The higher bound
-supports long allocation-per-round jobs; the independent 64 MiB record limit remains decisive.
+- the process-visible memory limit; and
+- process-visible physical memory.
 
-Attempts with the same `environment_key` may be sequential but their half-open intervals cannot
-overlap. Bundle validation enforces this across all participant files, preventing concurrent rank
-duplicates without rejecting later reuse of an execution environment. Different environment keys
-may overlap; `resource_window_seconds` deliberately sums their durations. Cross-job overlap remains
-intentional and totals are never presented as physical capacity or utilization.
+An unlimited memory value is omitted. Swap is excluded.
 
-The fixed expected-participant roster comes from authenticated job deployment/selection state,
-independently of which resource reports arrive. At cutoff, every expected member is classified
-exactly once as `accepted | missing | invalid | disabled`, and that roster is immutable. The server
-accepts the first valid authenticated participant digest by cutoff. An identical digest retry is
-idempotent; a conflicting digest is rejected rather than treated as a revision. Role is stored once
-per roster entry. Roster gaps make otherwise numeric job totals partial; no usable numeric
-contribution makes them unavailable.
+## GPU
 
-## Numeric representation and limits
+A reported numeric GPU inventory requires successful CUDA-runtime enumeration.
 
-Measured values are canonical non-negative decimal strings, never JSON numbers. This preserves
-U128 products beyond JavaScript's safe-integer range. Integer strings have no sign, exponent,
-decimal point, or leading zero. Fractional strings have at most nine digits and no trailing zero.
+The presence of CUDA_VISIBLE_DEVICES may be stored only as the boolean
+cuda_mask_present. The raw string is never stored and never provides a numeric
+count.
 
-Core limits are: JSON depth 32; 4,096 attempts per participant; 10,000 roster entries; 4,096
-CPU/GPU groups; 4,096 retained entries; four issues per list; 128 ASCII characters per model; and
-512 bytes per safe relative path. Participant/resource summaries are bounded to 64 MiB. Exact
-per-record limits are in `FIELD_CATALOG.md`.
+A successful empty CUDA inventory is reported with an empty groups array. An
+unavailable CUDA runtime produces an unavailable or error object, not a zero.
 
-## Manifest and query copy
+NVML may add metadata only to devices already found by CUDA. It cannot add a
+device or change a count.
 
-The server archive is:
+Full GPUs and MIG instances use separate groups. memory_bytes is memory per
+visible entity in that group. Different memory values create different groups.
 
-```text
+Model, memory, and MIG profile are optional. MIG fields are absent for ordinary
+full-GPU data and when no MIG instance is present.
+
+## Storage and saved results
+
+Storage is observed for the filesystem that contains the existing job
+workspace. capacity_bytes is the total visible filesystem capacity.
+
+Storage time covers the site job-run interval only when workspace continuity is
+known. If continuity is uncertain, storage is partial or unavailable.
+
+Saved-result entries contain a relative path, exact size, and SHA-256 digest.
+Paths are relative to an existing NVFlare result root. The collector uses a
+complete, bounded file list already known to NVFlare. If no such list exists,
+the value is unavailable with `not_bound`. The feature adds no registry or job
+setting and does not scan unrelated directories.
+
+## Measurement periods
+
+A participant_summary contains zero or more attempts. Each attempt has:
+
+- attempt_id;
+- environment_key;
+- opened_at;
+- optional start resource observation;
+- optional final resource observation; and
+- an end object with closed_at and reason.
+
+opened_at and closed_at must use one NVFlare clock. The period is the half-open
+interval from opened_at to closed_at.
+
+A launch_failed period has no start or final observation. Other periods require
+a start observation. A final observation is optional.
+
+End reasons are:
+
+- released;
+- reconfigured;
+- failed;
+- terminated; and
+- launch_failed.
+
+These reasons describe why the measurement ended. They do not change the
+formula. reconfigured does not require or imply another measurement period.
+
+A completed accepted report with no attempts means zero observed compute time
+only when NVFlare knows that the attempt list is complete. Otherwise the site
+must be missing or invalid.
+
+## Resource-time formulas
+
+For each period:
+
+~~~text
+duration_seconds = closed_at - opened_at
+cpu_unit_seconds = visible_cpu_units × duration_seconds
+memory_byte_seconds = visible_memory_bytes × duration_seconds
+gpu_instance_seconds = visible_gpu_count × duration_seconds
+~~~
+
+Each product is rounded to nine decimal places with round-half-even before
+summing.
+
+The start observation supplies capacity. The optional final observation checks
+whether that value remained stable. A missing or numerically different final
+makes the affected total partial.
+
+A period with known times but no start observation contributes to measured time
+but not a numeric resource total. The resource total is partial or unavailable.
+
+Storage uses the participant start-to-final interval, not each attempt.
+Saved-result sizes and F3 counters contribute once per site report.
+
+## F3 counters
+
+The final site record has three counters:
+
+- remote_accepted;
+- local_delivered; and
+- remote_failed_before_acceptance.
+
+Each counter contains payload_bytes and messages.
+
+Remote accepted bytes are measured after payload encoding and optional
+end-to-end encryption, immediately before the normal send. The remote counter
+increments only after send acceptance.
+
+Count task request, task response, task result, job application, and job stream
+data. Exclude control traffic, workspace transfer, log export, unknown classes,
+and resource-summary publication.
+
+Fan-out counts once per destination. Forwarding counts once per sender hop.
+Lower-level framing, TLS, compression, and retransmission are outside the
+metric.
+
+Before serializing participant_final, NVFlare closes all counters in one
+operation. Later callbacks do not change canonical totals.
+
+## Expected participant list
+
+The server already knows the clients and server expected for the job. It must
+not infer that list from received resource reports.
+
+At the report cutoff, every expected participant is one of:
+
+- accepted;
+- missing;
+- invalid; or
+- disabled.
+
+Only accepted reports contribute numeric values. Missing or invalid reports
+make affected job totals partial.
+
+A retry with identical bytes is accepted as the same report. Different bytes
+for an already accepted participant are rejected.
+
+## Server files
+
+The stored tree is:
+
+~~~text
 resource_stats/
   resource_summary.json
-  participants/<participant_key>.json
   manifest.json
-```
+  participants/
+    <participant_key>.json
+~~~
 
-The manifest contains sorted `relative_path`/`sha256` pairs for exactly the resource summary and
-accepted participant files. Bundle validation recomputes membership and digests. The exact
-validated `resource_summary.json` bytes are the narrow `RESOURCE_STATS` job-store query copy.
+The job-store query component is exactly RESOURCE_STATS. A generic prefix is
+not allowed.
 
-## Viewable examples
+The manifest contains the SHA-256 digest of resource_summary.json and every
+accepted participant file. The query copy must be byte-for-byte identical to
+the stored resource_summary.json.
 
-The records and finalized job tree under `golden/v1/` demonstrate sequential compute windows,
-zero-GPU windows, all-compute gaps, crash/preemption recovery, persistent storage, terminal
-F3/retained facts, large-number arithmetic, and unavailable CUDA. The CLI projections omit MIG
-rows when MIG is inapplicable.
+These files use the job's existing storage, retention, deletion, and
+authorization behavior.
 
-Regenerate and validate them from the repository root with:
+## Large numbers
 
-```bash
-python3 -B research/runtime_resource_proxy_prototype/schema/build_review_artifacts.py
-```
+Canonical numeric quantities are strings.
+
+Integer quantities are unsigned decimal strings. Fractional quantities are
+plain decimal strings with at most nine fractional digits. Exponents, NaN, and
+Infinity are rejected.
+
+Strings preserve values such as byte-seconds that are larger than JavaScript's
+safe integer range.
+
+## Privacy
+
+Never store:
+
+- host names or network addresses;
+- process IDs;
+- GPU UUIDs or PCI addresses;
+- raw CUDA masks;
+- raw cpuinfo, CPU flags, or topology;
+- hardware serial numbers;
+- absolute workspace paths; or
+- raw command output or exception text.
+
+Normalized CPU and GPU models are optional and may be omitted. This feature
+does not add a model-publication setting. Omission does not change a valid
+numeric status.
+
+## Validation
+
+Run:
+
+~~~bash
+python3 -m unittest discover \
+  -s research/runtime_resource_proxy_prototype/tests \
+  -p 'test_*.py'
+~~~
+
+The Python validator checks relationships that JSON Schema cannot express
+cleanly, including:
+
+- CPU selector reconciliation;
+- time ordering;
+- non-overlapping periods for one measurement-scope key;
+- final/start stability;
+- exact totals;
+- expected participant status;
+- manifest hashes; and
+- privacy restrictions.
+
+Regenerate examples with:
+
+~~~bash
+python3 research/runtime_resource_proxy_prototype/schema/build_review_artifacts.py
+~~~

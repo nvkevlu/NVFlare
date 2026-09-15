@@ -1,7 +1,7 @@
 {
   "schema_version": "1.0",
   "kind": "nvflare.resource_stats.participant_summary",
-  "job_id": "job-preempted-resume",
+  "job_id": "job-partial-periods",
   "participant_key": "sha256-eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
   "start": {
     "observed_at": "2026-09-09T14:00:00Z",

@@ -247,70 +247,31 @@ class TestCanonicalV1Contract(unittest.TestCase):
         raw_cpu["capacity"]["cpu"]["raw_cpuinfo"] = "processor: 0"
         self._assert_invalid_both(raw_cpu)
 
-    def test_gpu_free_window_counts_cpu_memory_and_storage_spans_participant(self):
+    def test_one_stable_measurement_period_uses_the_reported_duration(self):
         participant = self._golden("participant_summary.json")
         window_seconds, totals = derive_participant_totals(participant)
         self.assertEqual("480", window_seconds)
         self.assertEqual("2026-09-09T14:00:00Z", participant["start"]["observed_at"])
         self.assertEqual("2026-09-09T14:08:00Z", participant["final"]["observed_at"])
-        self.assertEqual("2026-09-09T14:01:00Z", participant["attempts"][0]["end"]["closed_at"])
-        self.assertEqual("2026-09-09T14:01:00Z", participant["attempts"][1]["opened_at"])
-        self.assertEqual([], participant["attempts"][1]["start"]["capacity"]["gpu"]["groups"])
+        self.assertEqual(1, len(participant["attempts"]))
+        self.assertEqual("2026-09-09T14:08:00Z", participant["attempts"][0]["end"]["closed_at"])
         self.assertEqual("720", totals["cpu"]["groups"][0]["unit_seconds"])
         self.assertEqual("4123168604160", totals["memory"]["byte_seconds"])
-        self.assertEqual("180", totals["gpu"]["groups"][0]["instance_seconds"])
+        self.assertEqual("480", totals["gpu"]["groups"][0]["instance_seconds"])
         self.assertEqual("527765581332480", totals["storage"]["byte_seconds"])
         self.assertEqual("18874368", totals["retained_content"]["bytes"])
         self.assertEqual("5632", totals["f3"]["remote_accepted"]["payload_bytes"])
         self.assertTrue(all("retained_content" not in attempt["final"] for attempt in participant["attempts"]))
         self.assertTrue(all("f3" not in attempt["final"] for attempt in participant["attempts"]))
 
-    def test_gpu_only_release_opens_an_immediate_zero_gpu_window(self):
+    def test_reconfigured_is_only_an_end_reason_and_does_not_require_a_successor(self):
         participant = self._golden("participant_summary.json")
-        environment_key = participant["attempts"][0]["environment_key"]
-        with_gpu = copy.deepcopy(participant["attempts"][0]["start"]["capacity"])
-        without_gpu = copy.deepcopy(with_gpu)
-        without_gpu["gpu"] = {"status": "reported", "cuda_mask_present": False, "groups": []}
-        participant["attempts"] = [
-            {
-                "attempt_id": "1" * 32,
-                "environment_key": environment_key,
-                "opened_at": "2026-09-09T14:00:00Z",
-                "start": {"capacity": copy.deepcopy(with_gpu)},
-                "final": {"capacity": copy.deepcopy(with_gpu)},
-                "end": {"closed_at": "2026-09-09T14:01:00Z", "reason": "reconfigured"},
-            },
-            {
-                "attempt_id": "2" * 32,
-                "environment_key": environment_key,
-                "opened_at": "2026-09-09T14:01:00Z",
-                "start": {"capacity": copy.deepcopy(without_gpu)},
-                "final": {"capacity": copy.deepcopy(without_gpu)},
-                "end": {"closed_at": "2026-09-09T14:06:00Z", "reason": "released"},
-            },
-        ]
+        participant["attempts"][0]["end"]["reason"] = "reconfigured"
+        validate_record(participant)
+        window_seconds, _ = derive_participant_totals(participant)
+        self.assertEqual("480", window_seconds)
 
-        window_seconds, totals = derive_participant_totals(participant)
-        self.assertEqual("360", window_seconds)
-        self.assertEqual("540", totals["cpu"]["groups"][0]["unit_seconds"])
-        self.assertEqual("3092376453120", totals["memory"]["byte_seconds"])
-        self.assertEqual("60", totals["gpu"]["groups"][0]["instance_seconds"])
-
-        gap_after_reconfiguration = copy.deepcopy(participant)
-        gap_after_reconfiguration["attempts"][1]["opened_at"] = "2026-09-09T14:01:00.1Z"
-        self._assert_invalid(gap_after_reconfiguration, "exact closure boundary")
-
-        release_and_immediate_reacquire = copy.deepcopy(participant)
-        release_and_immediate_reacquire["attempts"][0]["end"]["reason"] = "released"
-        validate_record(release_and_immediate_reacquire)
-
-        unchanged_reconfiguration = copy.deepcopy(participant)
-        unchanged_reconfiguration["attempts"][1]["start"] = copy.deepcopy(
-            unchanged_reconfiguration["attempts"][0]["start"]
-        )
-        self._assert_invalid(unchanged_reconfiguration, "requires a changed numeric capacity vector")
-
-    def test_launch_failed_has_supervisor_bounds_and_no_capacity_snapshot(self):
+    def test_launch_failed_has_nvflare_bounds_and_no_capacity_snapshot(self):
         participant = self._golden("participant_summary.json")
         participant["attempts"] = [
             {
@@ -366,7 +327,7 @@ class TestCanonicalV1Contract(unittest.TestCase):
         )
         self._assert_invalid_both(participant)
 
-    def test_final_capacity_and_preemption_resume_derivation_are_honest(self):
+    def test_final_capacity_and_partial_period_derivation_are_honest(self):
         participant = self._golden("participant_summary.json")
         _, totals = derive_participant_totals(participant)
         self.assertEqual("reported", totals["cpu"]["status"])
@@ -386,25 +347,25 @@ class TestCanonicalV1Contract(unittest.TestCase):
         _, failed_with_final_totals = derive_participant_totals(failed_with_final)
         self.assertEqual(totals, failed_with_final_totals)
 
-        resumed = self._golden("participant_summary_preempted_resume.json")
-        resumed_seconds, resumed_totals = derive_participant_totals(resumed)
-        self.assertEqual("180", resumed_seconds)
-        self.assertNotIn("final", resumed["attempts"][0])
-        self.assertEqual("terminated", resumed["attempts"][0]["end"]["reason"])
-        self.assertEqual("released", resumed["attempts"][1]["end"]["reason"])
-        self.assertEqual("partial", resumed_totals["cpu"]["status"])
-        self.assertEqual(["90", "240"], [group["unit_seconds"] for group in resumed_totals["cpu"]["groups"]])
-        self.assertEqual("partial", resumed_totals["memory"]["status"])
-        self.assertEqual("2576980377600", resumed_totals["memory"]["byte_seconds"])
-        self.assertEqual("partial", resumed_totals["gpu"]["status"])
+        partial_periods = self._golden("participant_summary_partial_periods.json")
+        measured_seconds, partial_totals = derive_participant_totals(partial_periods)
+        self.assertEqual("180", measured_seconds)
+        self.assertNotIn("final", partial_periods["attempts"][0])
+        self.assertEqual("terminated", partial_periods["attempts"][0]["end"]["reason"])
+        self.assertEqual("released", partial_periods["attempts"][1]["end"]["reason"])
+        self.assertEqual("partial", partial_totals["cpu"]["status"])
+        self.assertEqual(["90", "240"], [group["unit_seconds"] for group in partial_totals["cpu"]["groups"]])
+        self.assertEqual("partial", partial_totals["memory"]["status"])
+        self.assertEqual("2576980377600", partial_totals["memory"]["byte_seconds"])
+        self.assertEqual("partial", partial_totals["gpu"]["status"])
         self.assertEqual(
             [("NVIDIA A100 80GB PCIe", "240"), ("NVIDIA H100 80GB HBM3", "60")],
-            [(group["model"], group["instance_seconds"]) for group in resumed_totals["gpu"]["groups"]],
+            [(group["model"], group["instance_seconds"]) for group in partial_totals["gpu"]["groups"]],
         )
-        self.assertEqual("reported", resumed_totals["storage"]["status"])
-        self.assertEqual("527765581332480", resumed_totals["storage"]["byte_seconds"])
-        self.assertEqual("reported", resumed_totals["retained_content"]["status"])
-        self.assertEqual("reported", resumed_totals["f3"]["status"])
+        self.assertEqual("reported", partial_totals["storage"]["status"])
+        self.assertEqual("527765581332480", partial_totals["storage"]["byte_seconds"])
+        self.assertEqual("reported", partial_totals["retained_content"]["status"])
+        self.assertEqual("reported", partial_totals["f3"]["status"])
         attempt_end = self._golden("attempt_end_terminated.json")
         self.assertNotIn("capacity", attempt_end)
         self.assertNotIn("return_code", attempt_end)
@@ -529,7 +490,7 @@ class TestCanonicalV1Contract(unittest.TestCase):
 
         overlapping = copy.deepcopy(second)
         overlapping["attempts"][0]["opened_at"] = "2026-09-09T14:07:59Z"
-        with self.assertRaisesRegex(ContractError, "overlapping trusted reporters"):
+        with self.assertRaisesRegex(ContractError, "overlapping reporters"):
             validate_bundle(*self._bundle([first, overlapping]))
 
     def test_f3_bucket_semantics_and_freeze_shape_are_closed(self):

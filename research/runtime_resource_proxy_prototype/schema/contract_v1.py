@@ -919,7 +919,7 @@ def _validate_attempt_summary(value: Any, path: str) -> tuple[str, int, int]:
         _fail(f"{path}.end.closed_at", "must not precede opened_at")
     if attempt["end"]["reason"] == "launch_failed":
         if "start" in attempt or "final" in attempt:
-            _fail(path, "a launch_failed attempt cannot contain worker startup or final observations")
+            _fail(path, "a launch_failed attempt cannot contain start or final capacity observations")
     elif "start" not in attempt:
         _fail(f"{path}.start", "is required unless end.reason is launch_failed")
     return environment_key, opened_ns, closed_ns
@@ -958,37 +958,11 @@ def _validate_participant_summary(record: Mapping[str, Any], path: str) -> None:
 
     for environment_intervals in intervals.values():
         environment_intervals.sort()
-        previous: tuple[int, int, str, Mapping[str, Any]] | None = None
-        for opened_ns, closed_ns, item_path, attempt in environment_intervals:
-            if previous is not None and opened_ns < previous[1]:
+        previous_closed_ns: int | None = None
+        for opened_ns, closed_ns, item_path, _attempt in environment_intervals:
+            if previous_closed_ns is not None and opened_ns < previous_closed_ns:
                 _fail(item_path, "overlaps another attempt in the same execution environment")
-            if previous is not None:
-                previous_closed_ns = previous[1]
-                previous_path = previous[2]
-                previous_attempt = previous[3]
-                if previous_attempt["end"]["reason"] == "reconfigured" and opened_ns != previous_closed_ns:
-                    _fail(
-                        f"{previous_path}.end.reason",
-                        "reconfigured requires a same-environment successor at the exact closure boundary",
-                    )
-                previous_vector = _compute_capacity_signature(previous_attempt)
-                current_vector = _compute_capacity_signature(attempt)
-                if (
-                    previous_attempt["end"]["reason"] == "reconfigured"
-                    and previous_vector is not None
-                    and current_vector is not None
-                    and previous_vector == current_vector
-                ):
-                    _fail(
-                        f"{previous_path}.end.reason",
-                        "reconfigured requires a changed numeric capacity vector when both snapshots are comparable",
-                    )
-            previous = (opened_ns, closed_ns, item_path, attempt)
-        if previous is not None and previous[3]["end"]["reason"] == "reconfigured":
-            _fail(
-                f"{previous[2]}.end.reason",
-                "reconfigured requires a same-environment successor at the exact closure boundary",
-            )
+            previous_closed_ns = closed_ns
 
 
 def _duration_seconds(start: str, end: str) -> Decimal:
@@ -1021,16 +995,6 @@ def _capacity_signature(resource: str, value: Mapping[str, Any]) -> Any:
     return tuple(sorted(counts.items()))
 
 
-def _compute_capacity_signature(attempt: Mapping[str, Any]) -> tuple[Any, ...] | None:
-    start = attempt.get("start")
-    if start is None:
-        return None
-    capacity = start["capacity"]
-    if any(capacity[resource]["status"] != "reported" for resource in ("cpu", "memory", "gpu")):
-        return None
-    return tuple(_capacity_signature(resource, capacity[resource]) for resource in ("cpu", "memory", "gpu"))
-
-
 def _derived_status(numeric_seen: bool, degraded: bool) -> str:
     if not numeric_seen:
         return "unavailable"
@@ -1040,13 +1004,13 @@ def _derived_status(numeric_seen: bool, degraded: bool) -> str:
 def derive_participant_totals(
     participant_record: Mapping[str, Any],
 ) -> tuple[str, dict[str, Any]]:
-    """Derive resource-window seconds and totals from participant lifecycle facts.
+    """Derive totals from one site's resource-statistics report.
 
-    Transient compute time always ends at the supervisor-confirmed attempt end;
-    an attempt final is only stability evidence.  Persistent storage spans the
-    participant start-to-final interval.  Retained content and F3 are consumed
-    exactly once from participant final.  Each product is rounded half-even to
-    nine fractional digits before values are summed.
+    In the JSON, an attempt is a measurement period.  Its start and end must use
+    one NVFlare clock, but the schema does not choose which component records
+    them.  A final sample is optional stability evidence.  Persistent storage
+    spans the site's job run.  Saved-result sizes and F3 totals are counted once.
+    Each product is rounded half-even to nine fractional digits before summing.
     """
 
     validate_record(participant_record)
@@ -1560,7 +1524,7 @@ def validate_bundle(
             if current[0] < previous[1]:
                 _fail(
                     "participant_records",
-                    "overlapping trusted reporters for environment "
+                    "overlapping reporters for environment "
                     f"{environment_key}: {previous[2]}/{previous[3]} and {current[2]}/{current[3]}",
                 )
             previous = current

@@ -184,8 +184,6 @@ def _participant_final_body(
 
 def _main_participant() -> dict[str, Any]:
     capacity = _compute_capacity()
-    gpu_free_capacity = deepcopy(capacity)
-    gpu_free_capacity["gpu"]["groups"] = []
     return {
         "schema_version": "1.0",
         "kind": KIND_PARTICIPANT_SUMMARY,
@@ -202,24 +200,6 @@ def _main_participant() -> dict[str, Any]:
                 attempt_id="1" * 32,
                 environment_key="sha256-" + "b" * 64,
                 opened_at="2026-09-09T14:00:00Z",
-                closed_at="2026-09-09T14:01:00Z",
-                capacity=capacity,
-                include_final=True,
-                end_reason="reconfigured",
-            ),
-            _attempt(
-                attempt_id="2" * 32,
-                environment_key="sha256-" + "b" * 64,
-                opened_at="2026-09-09T14:01:00Z",
-                closed_at="2026-09-09T14:06:00Z",
-                capacity=gpu_free_capacity,
-                include_final=True,
-                end_reason="reconfigured",
-            ),
-            _attempt(
-                attempt_id="3" * 32,
-                environment_key="sha256-" + "b" * 64,
-                opened_at="2026-09-09T14:06:00Z",
                 closed_at="2026-09-09T14:08:00Z",
                 capacity=capacity,
                 include_final=True,
@@ -228,9 +208,9 @@ def _main_participant() -> dict[str, Any]:
     }
 
 
-def _preempted_resume_participant() -> dict[str, Any]:
+def _partial_periods_participant() -> dict[str, Any]:
     first_capacity = _compute_capacity()
-    resumed_capacity = _compute_capacity(
+    second_capacity = _compute_capacity(
         cpu_units="2",
         cpu_model="Intel Xeon Platinum 8480+",
         selector_count="8",
@@ -247,7 +227,7 @@ def _preempted_resume_participant() -> dict[str, Any]:
     return {
         "schema_version": "1.0",
         "kind": KIND_PARTICIPANT_SUMMARY,
-        "job_id": "job-preempted-resume",
+        "job_id": "job-partial-periods",
         "participant_key": "sha256-" + "e" * 64,
         "start": _participant_start_body("2026-09-09T14:00:00Z"),
         "final": _participant_final_body(
@@ -269,7 +249,7 @@ def _preempted_resume_participant() -> dict[str, Any]:
                 environment_key="sha256-" + "5" * 64,
                 opened_at="2026-09-09T14:06:00Z",
                 closed_at="2026-09-09T14:08:00Z",
-                capacity=resumed_capacity,
+                capacity=second_capacity,
                 include_final=True,
             ),
         ],
@@ -474,14 +454,14 @@ def _human_cli(summary: dict[str, Any], selected_site: str | None = None) -> str
     if not members:
         raise ValueError(f"unknown site '{selected_site}'")
     show_mig = _show_mig(members)
-    header = "SITE     ROLE    STATUS    QUALITY      ENV WINDOW  FULL GPU h"
+    header = "SITE     ROLE    STATUS    QUALITY     MEASURED TIME  FULL GPU h"
     if show_mig:
         header += "  MIG CI h"
-    header += "  CPU h   MEM GiB h  STORAGE GiB h  RETAINED MiB  F3 REMOTE KiB"
+    header += "  CPU h   MEM GiB h  STORAGE GiB h  SAVED RESULT MiB  F3 REMOTE ACCEPTED KiB"
     selection = "" if selected_site is None else f" | selected site: {selected_site}"
     lines = [
-        "Runtime-visible capacity-time proxies; not utilization, requested quantities, guarantees, or billable usage.",
-        f"Job {summary['job_id']}{selection} | coverage: {coverage} "
+        "Resources visible to the job while it ran. These are not utilization, reserved capacity, or billing data.",
+        f"Job {summary['job_id']}{selection} | job coverage: {coverage} "
         f"({accepted} accepted / {len(summary['roster'])} expected)",
         "",
         header,
@@ -490,8 +470,8 @@ def _human_cli(summary: dict[str, Any], selected_site: str | None = None) -> str
         if member["status"] != "accepted":
             mig = f"{'N/A':>8} " if show_mig else ""
             lines.append(
-                f"{member['participant_id']:<8} {member['role']:<7} {member['status']:<9} {'—':<11} {'—':>11} "
-                f"{'N/A':>12} {mig}{'N/A':>7} {'N/A':>11} {'N/A':>14} {'N/A':>13} {'N/A':>14}"
+                f"{member['participant_id']:<8} {member['role']:<7} {member['status']:<9} {'—':<11} {'—':>13} "
+                f"{'N/A':>12} {mig}{'N/A':>7} {'N/A':>11} {'N/A':>14} {'N/A':>16} {'N/A':>22}"
             )
             continue
         totals = member["totals"]
@@ -508,10 +488,10 @@ def _human_cli(summary: dict[str, Any], selected_site: str | None = None) -> str
         mig = f"{_hours(_gpu_time(totals, 'mig_compute_instance')):>8} " if show_mig else ""
         lines.append(
             f"{member['participant_id']:<8} {member['role']:<7} {member['status']:<9} {quality:<11} "
-            f"{_duration(member['resource_window_seconds']):>11} {_hours(_gpu_time(totals, 'full_gpu')):>11} {mig}"
+            f"{_duration(member['resource_window_seconds']):>13} {_hours(_gpu_time(totals, 'full_gpu')):>11} {mig}"
             f"{_hours(cpu):>7} {_hours(_scalar(totals, 'memory', 'byte_seconds'), Decimal(2**30 * 3600)):>11} "
             f"{_hours(_scalar(totals, 'storage', 'byte_seconds'), Decimal(2**30 * 3600)):>14} "
-            f"{_hours(retained, Decimal(2**20)):>13} {_hours(f3, Decimal(1024)):>14}"
+            f"{_hours(retained, Decimal(2**20)):>16} {_hours(f3, Decimal(1024)):>22}"
         )
     if selected_site is None:
         totals = summary["totals"]
@@ -529,7 +509,7 @@ def _human_cli(summary: dict[str, Any], selected_site: str | None = None) -> str
             Decimal(0),
         )
         aggregate = (
-            f"  ENV WINDOW {_duration(format(total_window, 'f'))} | "
+            f"  MEASURED TIME {_duration(format(total_window, 'f'))} | "
             f"FULL GPU {_hours(_gpu_time(totals, 'full_gpu'))} h | "
         )
         if show_mig:
@@ -538,30 +518,33 @@ def _human_cli(summary: dict[str, Any], selected_site: str | None = None) -> str
             f"CPU {_hours(total_cpu)} h | "
             f"MEM {_hours(_scalar(totals, 'memory', 'byte_seconds'), Decimal(2**30 * 3600))} GiB h | "
             f"STORAGE {_hours(_scalar(totals, 'storage', 'byte_seconds'), Decimal(2**30 * 3600))} GiB h | "
-            f"RETAINED {_hours(total_retained, Decimal(2**20))} MiB | "
-            f"F3 REMOTE {_hours(total_f3, Decimal(1024))} KiB"
+            f"SAVED RESULT {_hours(total_retained, Decimal(2**20))} MiB | "
+            f"F3 REMOTE ACCEPTED {_hours(total_f3, Decimal(1024))} KiB"
         )
         lines.extend(
             [
                 "",
-                f"Accepted-report totals | quality: {_measurement_quality(totals)}",
+                f"Totals from received reports | overall: {_measurement_quality(totals)}",
                 aggregate,
             ]
         )
-    lines.extend(
+    notices = ["  MEASURED TIME is the sum of the measurement periods in each received report."]
+    if coverage == "PARTIAL":
+        notices.append("  JOB COVERAGE PARTIAL means not every expected report was accepted.")
+    if any(
+        member["status"] == "accepted" and _measurement_quality(member["totals"]) == "PARTIAL"
+        for member in members
+    ):
+        notices.append("  Site QUALITY PARTIAL means that site's measurement evidence is incomplete.")
+    if selected_site is None and _measurement_quality(summary["totals"]) == "PARTIAL":
+        notices.append("  OVERALL PARTIAL means job coverage or at least one resource total is incomplete.")
+    notices.extend(
         [
-            "",
-            "Notices:",
-            "  Participant-visible proxies may overlap; this is not physical capacity.",
-            "  ENV WINDOW is summed reporter-environment time and may exceed participant wall time.",
-            "  A GPU-free window still counts CPU and memory if those resources remain visible.",
-            "  PARTIAL means measurement evidence or expected-report coverage is incomplete; STATUS is acceptance.",
-            "  Storage time spans the participant lifecycle while its persistent workspace remains available.",
-            "  Totals cover accepted reports only; roster gaps make them partial.",
-            "  Worker observations are self-reported; accepted bytes are preserved by the site supervisor.",
-            "",
+            "  Reports may describe overlapping physical resources. Job totals are not physical capacity.",
+            "  Site observations are self-reported. The server protects only the received report bytes.",
         ]
     )
+    lines.extend(["", "Notices:", *notices, ""])
     return "\n".join(lines)
 
 
@@ -569,7 +552,7 @@ def _hardware_details(summary: dict[str, Any], participant_id: str) -> str:
     member = next(entry for entry in summary["roster"] if entry["participant_id"] == participant_id)
     lines = [
         f"Hardware detail for {participant_id}",
-        "Model metadata is optional and may be suppressed by site policy.",
+        "Model metadata is optional. Its absence does not change numeric results.",
         "",
     ]
     for group in member["totals"]["cpu"].get("groups", []):
@@ -630,7 +613,7 @@ def build(output_root: Path = DEFAULT_OUTPUT) -> dict[str, Any]:
     terminated_end = {
         "schema_version": "1.0",
         "kind": KIND_ATTEMPT_END,
-        "job_id": "job-preempted-resume",
+        "job_id": "job-partial-periods",
         "participant_id": "site-1",
         "attempt_id": "5" * 32,
         "environment_key": "sha256-" + "5" * 64,
@@ -638,11 +621,11 @@ def build(output_root: Path = DEFAULT_OUTPUT) -> dict[str, Any]:
         "closed_at": "2026-09-09T14:01:00Z",
         "reason": "terminated",
     }
-    preempted_resume = _preempted_resume_participant()
-    preempted_resume_bytes = _json_bytes(preempted_resume)
-    preempted_summary = _resource_summary(
-        preempted_resume,
-        preempted_resume_bytes,
+    partial_periods = _partial_periods_participant()
+    partial_periods_bytes = _json_bytes(partial_periods)
+    partial_periods_summary = _resource_summary(
+        partial_periods,
+        partial_periods_bytes,
         participant_id="site-1",
         received="2026-09-09T14:08:00.1Z",
         cutoff="2026-09-09T14:08:01Z",
@@ -670,7 +653,7 @@ def build(output_root: Path = DEFAULT_OUTPUT) -> dict[str, Any]:
         "participant_start.json": main_participant_start,
         "participant_final.json": main_participant_final,
         "participant_summary.json": participant,
-        "participant_summary_preempted_resume.json": preempted_resume,
+        "participant_summary_partial_periods.json": partial_periods,
         "participant_summary_large_value.json": large_participant,
         "resource_summary.json": summary,
         "resource_summary_large_value.json": large_summary,
@@ -708,8 +691,8 @@ def build(output_root: Path = DEFAULT_OUTPUT) -> dict[str, Any]:
     _write(output_root / "cli" / "resources-all.txt", cli_text_bytes)
     _write(output_root / "cli" / "resources-site-1-details.txt", detail_bytes)
     _write(
-        output_root / "cli" / "resources-preempted-resume.txt",
-        _human_cli(preempted_summary).encode("utf-8"),
+        output_root / "cli" / "resources-partial-periods.txt",
+        _human_cli(partial_periods_summary).encode("utf-8"),
     )
 
     receipt = {
@@ -723,7 +706,6 @@ def build(output_root: Path = DEFAULT_OUTPUT) -> dict[str, Any]:
         "derived_examples": {
             "participant_lifetime_seconds": "480",
             "resource_window_seconds": summary["roster"][0]["resource_window_seconds"],
-            "gpu_free_cpu_memory_window_seconds": "300",
             "cpu_unit_seconds": summary["roster"][0]["totals"]["cpu"]["groups"][0]["unit_seconds"],
             "gpu_instance_seconds": summary["roster"][0]["totals"]["gpu"]["groups"][0]["instance_seconds"],
             "storage_byte_seconds": summary["roster"][0]["totals"]["storage"]["byte_seconds"],

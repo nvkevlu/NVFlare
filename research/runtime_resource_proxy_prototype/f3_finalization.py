@@ -17,20 +17,21 @@
 This module intentionally does not import or modify NVFlare's production F3
 transport.  It fixes the contract a production hook must preserve:
 
-* only a small, explicit allowlist of trusted job traffic classes contributes
+* only a small, explicit list of NVFlare job traffic classes contributes
   to the primary counter;
 * a remote counter increment happens only after the transport-send callable
   returned normally, while direct delivery is kept in a separate bucket;
-* summary publication is suppressed by an opaque in-process capability, never
-  by a payload, topic, channel, or user-controlled label; and
+* resource-summary messages use a private NVFlare sender so they cannot count
+  themselves; a payload, topic, channel, or job-controlled label cannot request
+  this exclusion; and
 * the first ``freeze()`` records a fixed event-sequence cutoff.  Events that
   complete after that cutoff remain visible only as post-publication diagnostics,
   never as circular fields inside the immutable participant summary.
 
-The opaque capability is an integration boundary, not a sandbox against code
-that can introspect arbitrary Python objects in the same process.  A product
-implementation would keep it in platform-owned delivery code and bind traffic
-classes from a trusted lifecycle registry rather than from message headers.
+This prototype exposes the required behavior as a separate method. Product
+code should keep that call inside NVFlare and assign traffic classes from
+NVFlare state rather than message headers. The data contract does not choose
+where the counter or sender runs.
 """
 
 from __future__ import annotations
@@ -42,7 +43,7 @@ from typing import Any, Callable, TypeVar
 
 
 class JobTrafficClass(str, Enum):
-    """Bounded logical classes supplied by trusted platform integration."""
+    """Bounded logical classes assigned by NVFlare integration code."""
 
     TASK_REQUEST = "task_request"
     TASK_RESPONSE = "task_response"
@@ -113,40 +114,19 @@ class _Totals:
 T = TypeVar("T")
 
 
-class _SummaryPublicationSender:
-    """Platform-owned summary-delivery facade carrying the opaque capability."""
-
-    __slots__ = ("_counter", "_capability")
-
-    def __init__(self, counter: "F3FinalizationCounter", capability: object):
-        self._counter = counter
-        self._capability = capability
-
-    def send_remote(self, event: JobTrafficEvent, transport_send: Callable[[], T]) -> T:
-        """Deliver a terminal summary without adding it to the job F3 proxy."""
-
-        return self._counter._send_remote(event, transport_send, capability=self._capability)
-
-    def deliver_direct(self, event: JobTrafficEvent, direct_delivery: Callable[[], T]) -> T:
-        """Deliver a local terminal summary without adding it to the job proxy."""
-
-        return self._counter._deliver_direct(event, direct_delivery, capability=self._capability)
-
-
 class F3FinalizationCounter:
     """Thread-safe model of one logical participant's F3 finalization boundary.
 
     ``send_remote`` considers a transport accepted only when ``transport_send``
     returns normally.  This mirrors the current F3 ``communicator.send``
     boundary, whose failure signal is an exception.  It is intentionally not a
-    receiver-delivery acknowledgement.  The counter belongs to the durable
-    participant lifecycle owner so it can span zero or more transient compute
-    attempts and the GPU-free gaps between them.
+    receiver-delivery acknowledgement.  The integration may keep this counter
+    wherever the selected NVFlare process model can cover the site's job run.
+    This class does not choose that process model.
     """
 
     def __init__(self) -> None:
         self._lock = Lock()
-        self._summary_publication_capability = object()
         self._event_sequence = 0
         self._cutoff_sequence: int | None = None
 
@@ -164,20 +144,26 @@ class F3FinalizationCounter:
 
         return INCLUDED_JOB_TRAFFIC_CLASSES
 
-    def summary_publisher(self) -> _SummaryPublicationSender:
-        """Return the sole facade that can mark a send as summary publication."""
-
-        return _SummaryPublicationSender(self, self._summary_publication_capability)
-
     def send_remote(self, event: JobTrafficEvent, transport_send: Callable[[], T]) -> T:
         """Send remotely and count only a transport-accepted outcome."""
 
-        return self._send_remote(event, transport_send, capability=None)
+        return self._send_remote(event, transport_send)
 
     def deliver_direct(self, event: JobTrafficEvent, direct_delivery: Callable[[], T]) -> T:
         """Deliver directly and retain it separately from remote transport."""
 
-        return self._deliver_direct(event, direct_delivery, capability=None)
+        return self._deliver_direct(event, direct_delivery)
+
+    def send_resource_summary(self, event: JobTrafficEvent, transport_send: Callable[[], T]) -> T:
+        """Send the final resource report without counting the report itself."""
+
+        try:
+            result = transport_send()
+        finally:
+            with self._lock:
+                self._event_sequence += 1
+                self._excluded_summary_publication.add(event)
+        return result
 
     def freeze(self) -> dict[str, Any]:
         """Fix the first cutoff; repeated calls leave that cutoff unchanged."""
@@ -197,41 +183,34 @@ class F3FinalizationCounter:
         self,
         event: JobTrafficEvent,
         transport_send: Callable[[], T],
-        *,
-        capability: object | None,
     ) -> T:
         try:
             result = transport_send()
         except Exception:
-            self._record(event, accepted=False, direct=False, capability=capability)
+            self._record(event, accepted=False, direct=False)
             raise
-        self._record(event, accepted=True, direct=False, capability=capability)
+        self._record(event, accepted=True, direct=False)
         return result
 
     def _deliver_direct(
         self,
         event: JobTrafficEvent,
         direct_delivery: Callable[[], T],
-        *,
-        capability: object | None,
     ) -> T:
         try:
             result = direct_delivery()
         except Exception:
-            self._record(event, accepted=False, direct=True, capability=capability)
+            self._record(event, accepted=False, direct=True)
             raise
-        self._record(event, accepted=True, direct=True, capability=capability)
+        self._record(event, accepted=True, direct=True)
         return result
 
-    def _record(self, event: JobTrafficEvent, *, accepted: bool, direct: bool, capability: object | None) -> None:
+    def _record(self, event: JobTrafficEvent, *, accepted: bool, direct: bool) -> None:
         with self._lock:
             self._event_sequence += 1
 
             if event.traffic_class not in INCLUDED_JOB_TRAFFIC_CLASSES:
                 self._excluded_traffic_class.add(event)
-                return
-            if capability is self._summary_publication_capability:
-                self._excluded_summary_publication.add(event)
                 return
             if self._cutoff_sequence is not None:
                 self._late_after_cutoff.add(event)

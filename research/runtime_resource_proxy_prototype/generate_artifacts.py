@@ -18,7 +18,7 @@ The generator intentionally records what it can actually observe on the local
 machine and marks unbound NVFlare-only signals (currently F3 traffic) as
 unavailable.  It never fabricates a GPU, server process, or network counter.
 
-Its exploratory record shapes predate the canonical roadmap-compatible v1
+Its exploratory record shapes predate the canonical v1
 contract and deliberately remain historical probe evidence.  Use
 ``schema/build_review_artifacts.py`` for normative records and CLI output.
 """
@@ -42,7 +42,7 @@ from review_contract_fixtures import write_review_contract_fixtures
 from runtime_probe import probe_cpu, probe_gpu, probe_memory, probe_storage
 
 
-RESOURCE_SCHEMA_VERSION = "1.0"
+RESOURCE_SCHEMA_VERSION = "prototype-local-0.3"
 CLI_SCHEMA_VERSION = "1"
 PROTOTYPE_KIND = "runtime_resource_proxy_prototype"
 
@@ -791,7 +791,7 @@ def generate(output_dir: Path, job_id: str, study: str, observation_seconds: flo
     manifest_path = server_resource_dir / "manifest.json"
     manifest_bytes = _write_json(manifest_path, manifest)
 
-    # The query copy has one exact, parent-owned component name.  Do not model
+    # The query copy has one exact RESOURCE_STATS component name.  Do not model
     # it as a generic DataTypes prefix or caller-chosen filename.
     query_store = FixedResourceStatsStore(job_store_dir)
     query_copy_receipt = query_store.save_resource_stats(job_id, resource_summary_bytes)

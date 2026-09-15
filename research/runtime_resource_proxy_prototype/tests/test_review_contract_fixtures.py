@@ -36,17 +36,6 @@ class TestReviewContractFixtures(unittest.TestCase):
             self.assertEqual("synthetic_contract_fixture", receipt["provenance"])
             self.assertTrue((root / "manifest.json").is_file())
 
-            bootstrap = json.loads((root / "trusted_bootstrap_plans.json").read_text())
-            self.assertEqual({"process", "docker", "k8s", "slurm"}, {p["launcher"] for p in bootstrap["plans"]})
-            for plan in bootstrap["plans"]:
-                self.assertEqual(["-I", "-S", "-u"], plan["argv"][1:4])
-                self.assertEqual("/opt/nvflare/platform", plan["platform_owned_cwd"])
-                self.assertEqual("/opt/nvflare/platform/resource_bootstrap.py", plan["trusted_bootstrap_path"])
-                self.assertEqual("4" * 32, plan["handoff_locator"])
-                self.assertNotIn("PYTHONPATH", plan["pre_python_environment"])
-                self.assertNotIn("PYTHONHOME", plan["pre_python_environment"])
-                self.assertEqual("capture_platform_owned_start_snapshot", plan["bootstrap_steps"][2])
-
             gpu = json.loads((root / "gpu_cuda_runtime_validated.json").read_text())
             self.assertEqual(
                 ["visible_full_gpu_count", "visible_mig_compute_instance_count"],
@@ -70,13 +59,17 @@ class TestReviewContractFixtures(unittest.TestCase):
             self.assertTrue(lease["different_job_same_environment"]["cross_job_overlap"] == "allowed")
             self.assertFalse(lease["owner"]["participant_total_is_capacity"])
 
-            fragments = json.loads((root / "supervisor_owned_fragments.json").read_text())
-            self.assertEqual("supervisor_owned_fragments", fragments["supervisor_owned_root"])
+            fragments = json.loads((root / "workspace_fragments.json").read_text())
+            self.assertEqual("job_workspace", fragments["workspace_root"])
+            self.assertIn("no extra mount", fragments["trust_note"])
             end_record = next(record for record in fragments["records"] if "end.json" in record["relative_path"])
             end_path = root / end_record["relative_path"]
             attempt_end = json.loads(end_path.read_text())
-            self.assertEqual("site_supervisor", attempt_end["resource_window"]["clock_owner"])
-            self.assertEqual("supervisor_confirmed_acquire_release", attempt_end["resource_window"]["basis"])
+            self.assertEqual(
+                "opened_at_and_closed_at_use_one_nvflare_clock",
+                attempt_end["resource_window"]["clock_rule"],
+            )
+            self.assertEqual("integration_supplied", attempt_end["resource_window"]["basis"])
             self.assertEqual("terminated", attempt_end["reason"])
             self.assertEqual("not_invented", attempt_end["resource_observations"]["state"])
 

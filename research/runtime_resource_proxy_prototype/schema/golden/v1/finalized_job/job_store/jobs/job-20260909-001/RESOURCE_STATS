@@ -11,7 +11,7 @@
       "role": "client",
       "status": "accepted",
       "received_at": "2026-09-09T14:08:00.1Z",
-      "summary_sha256": "1e3ceb4962f4b1b0726236d310bd8f94a1a0a9bfe51faa1c65a99c58f232cc01",
+      "summary_sha256": "f99452e76db1f22c950dd6db61edc1cc82cad5bbadf0eea377ccc5516d25de21",
       "resource_window_seconds": "480",
       "totals": {
         "cpu": {
@@ -39,7 +39,7 @@
               "kind": "full_gpu",
               "model": "NVIDIA H100 80GB HBM3",
               "memory_bytes": "85899345920",
-              "instance_seconds": "180"
+              "instance_seconds": "480"
             }
           ]
         },
@@ -89,7 +89,7 @@
           "kind": "full_gpu",
           "model": "NVIDIA H100 80GB HBM3",
           "memory_bytes": "85899345920",
-          "instance_seconds": "180"
+          "instance_seconds": "480"
         }
       ]
     },

@@ -5,63 +5,62 @@ This is the human index for `resource_stats_v1.schema.json`. The JSON Schema and
 `null` is never a valid substitute for missing data, and measured numeric values are canonical
 decimal strings rather than JSON numbers.
 
-## Two lifecycle scopes
+## Two time scopes
 
-The contract deliberately separates two clocks:
+The contract deliberately separates two time scopes:
 
 | Scope | Starts | Ends | What it measures |
 | --- | --- | --- | --- |
-| Participant lifecycle | durable supervisor begins participant accounting | supervisor freezes terminal participant facts | persistent storage, retained content, and F3 |
-| Transient attempt | a stable compute-resource lease is acquired and observed | trusted lifecycle owner closes the stable vector by reconfiguration or lease release | CPU, memory, and GPU capacity-time |
+| Site job run | NVFlare begins this site's part of the job | NVFlare finishes this site's part of the job | storage, saved-result files, and F3 |
+| Measurement period (`attempt`) | NVFlare records a resource observation and start time | NVFlare records the end time | CPU, memory, and GPU capacity-time |
 
-An attempt is a resource-allocation window, not a process lifetime. One process may emit several
-sequential attempts through trusted acquire/release hooks. Conversely, a replacement process may
-continue the same participant lifecycle with a new attempt. Time between attempts contributes no
-transient CPU, memory, or GPU time.
+An attempt is a measurement period. It does not imply a process, allocation, lease, or roadmap
+architecture. One site report may contain several periods. Time outside recorded periods does not
+contribute CPU, memory, or GPU time.
 
 ## Top-level records
 
 | Record | Always required | Purpose |
 | --- | --- | --- |
-| `attempt_start` | schema_version, kind, job_id, participant_id, attempt_id, environment_key, opened_at, capacity | Immediate capacity report for one supervisor-opened transient lease. |
-| `attempt_final` | same identity, capacity | Optional worker stability observation before lease closure. |
-| `attempt_end` | same identity, opened_at, closed_at, reason | Self-contained supervisor confirmation of the resource-window bounds and closure. |
-| `participant_start` | schema_version, kind, job_id, participant_id, observed_at, storage | Immediate durable-supervisor start fact for participant-lifetime storage. |
-| `participant_final` | same participant identity, observed_at, storage, retained_content, f3 | One terminal participant fact, captured before summary publication. |
-| `participant_summary` | schema_version, kind, job_id, participant_key, start, final, attempts | Immutable reconstruction accepted by the server. |
-| `resource_summary` | schema_version, kind, job_id, report_cutoff_at, finalized_at, roster, totals | Frozen server result. |
+| `attempt_start` | schema_version, kind, job_id, participant_id, attempt_id, environment_key, opened_at, capacity | Resource observation and start time for one measurement period. |
+| `attempt_final` | same identity, capacity | Optional final observation used to check whether capacity changed. |
+| `attempt_end` | same identity, opened_at, closed_at, reason | End time and reason for one measurement period. |
+| `participant_start` | schema_version, kind, job_id, participant_id, observed_at, storage | Start of one site's job run and its storage observation. |
+| `participant_final` | same participant identity, observed_at, storage, retained_content, f3 | End-of-site storage, saved-result, and F3 observation. |
+| `participant_summary` | schema_version, kind, job_id, participant_key, start, final, attempts | Final site report accepted by the server. |
+| `resource_summary` | schema_version, kind, job_id, report_cutoff_at, finalized_at, roster, totals | Final server result. |
 | `manifest` | schema_version, kind, job_id, entries | Exact path/digest inventory. |
 
 Each record has exact `schema_version: "1.0"` and its namespaced
-`nvflare.resource_stats.*` kind. This candidate has no extension bag. The standalone lifecycle
-records exist so each fact can be handed immediately to supervisor-owned durable storage; their
-bodies are embedded without repeated identity in `participant_summary`.
+`nvflare.resource_stats.*` kind. This candidate has no general-purpose extension object. The standalone records are
+small collection fragments. Their bodies are embedded without repeated identity in
+`participant_summary`.
 
 ## Common identity and time
 
 | Field | Type and serialized rule | Purpose |
 | --- | --- | --- |
 | job_id | 1–128 ASCII characters; alphanumeric first, then alphanumeric, dot, underscore, or hyphen | Authenticated job identity. |
-| participant_id | 1–128 ASCII alphanumeric/underscore/hyphen characters; alphanumeric first | Authenticated roster/display identity on standalone lifecycle records. |
-| attempt_id | exactly 32 lowercase hexadecimal characters | Supervisor-minted random 128-bit resource-window identity. A reacquired lease gets a new value. |
-| environment_key | `sha256-` plus 64 lowercase hexadecimal characters | Job-scoped platform HMAC for one trusted execution environment; it may repeat only for non-overlapping windows. |
-| participant_key | same sha256-prefixed form | Job-scoped platform HMAC used in archive paths and the roster. |
+| participant_id | 1–128 ASCII alphanumeric/underscore/hyphen characters; alphanumeric first | Authenticated display identity on standalone records. |
+| attempt_id | exactly 32 lowercase hexadecimal characters | Random 128-bit identity for one measurement period. |
+| environment_key | `sha256-` plus 64 lowercase hexadecimal characters | Job-scoped platform HMAC for one measurement scope; it may repeat only for non-overlapping periods. |
+| participant_key | same sha256-prefixed form | Job-scoped platform HMAC used in archive paths and the expected participant list. |
 | observed_at | calendar-valid UTC RFC 3339 ending in `Z`, with zero to nine fractional digits | Participant storage/terminal observation time. |
-| opened_at | same timestamp form | Durable-supervisor time at which an attempt resource lease opened. |
-| closed_at | same timestamp form, not earlier than opened_at | Same-supervisor time at which that lease was confirmed closed. |
+| opened_at | same timestamp form | NVFlare start time for one measurement period. |
+| closed_at | same timestamp form, not earlier than opened_at | NVFlare end time for that period, using the same clock. |
 | report_cutoff_at | same timestamp form | Fixed last acceptance point for participant summaries. |
-| finalized_at | same timestamp form, not earlier than cutoff | Server materialization time. |
+| finalized_at | same timestamp form, not earlier than cutoff | Time when the server built the final result. |
 | received_at | same timestamp form, not later than cutoff | Trusted server receipt time for an accepted or invalid candidate. |
 
 Keys are keyed HMAC outputs, not plain hashes of enumerable labels. Shape validation is not
-identity authentication; the transport/launcher must reconcile identity against trusted context.
+identity authentication; the server must match a report to its authenticated job context.
 
-## Transient attempt capacity
+## Measurement-period capacity
 
 Both `attempt_start.capacity` and `attempt_final.capacity` contain exactly `cpu`, `memory`, and
-`gpu`. Persistent storage is intentionally absent: it is measured once on the participant
-lifecycle rather than multiplied by each resumed compute window. Their embedded `start` and
-`final` bodies contain capacity only; they do not mix worker clocks with supervisor duration.
+`gpu`. Storage is intentionally absent: it is measured once for the site job run rather than once
+per measurement period. The embedded `start` and `final` bodies contain capacity only. Timestamps
+remain on the measurement period.
 
 Point-capacity objects use `reported`, `unavailable`, or `error`:
 
@@ -80,7 +79,7 @@ Point-capacity objects use `reported`, `unavailable`, or `error`:
 | evidence.cpuset_count | optional strong evidence | positive U32 integer string | Logical CPUs in the effective cgroup cpuset. |
 | evidence.quota_units | optional strong evidence | positive decimal CPU units, same bound | Exact finite quota/period ratio, conservatively floored to nine fractional digits before persistence. |
 | evidence.online_count | fallback only | positive U32 integer string | Used only when no affinity/cpuset/quota evidence is usable. |
-| model | optional on reported | normalized display-safe ASCII, at most 128 characters | Emitted only for a homogeneous affinity-visible set and when site policy permits. |
+| model | optional on reported | normalized display-safe ASCII, at most 128 characters | Emitted only for a homogeneous affinity-visible set; this feature adds no publication setting. |
 | architecture | optional on reported | normalized ASCII label, 1–32 characters | Metadata; it does not affect numeric authority. |
 | issues | unavailable/error only | 1–4 sorted unique values | Contextual cause; see `CODE_CATALOG.md`. |
 
@@ -120,23 +119,22 @@ separate groups. `mig_profile` is optional only for
 optional metadata. The total of group counts fits U32. NVML may enrich a CUDA-enumerated group but
 cannot add groups or change count authority. A non-MIG client simply has no MIG group.
 
-After a GPU-only release, a successor window may report `groups: []` while CPU and memory remain
-reported. That zero-GPU vector requires successful CUDA-runtime enumeration in a fresh or
-uninitialized worker/helper after the new visibility is applied. A process that already initialized
-CUDA under the old visibility cannot establish the successor vector.
+A reported empty `groups` array means CUDA-runtime enumeration succeeded and found no visible GPU.
+It is a generic observation, not a required consequence of a resource release. A process that
+already initialized CUDA under different visibility cannot establish a new inventory reliably.
 
-## Participant-lifetime storage
+## Site-run storage
 
 `participant_start.storage` and `participant_final.storage` use lifecycle-status rules:
 
 | Field | Presence | Type/bound | Rule |
 | --- | --- | --- | --- |
 | status | required | reported, partial, unavailable, error | Capacity plus continuous-availability coverage. |
-| capacity_bytes | reported/partial only | positive U64 integer string | `statvfs` total for the filesystem containing the durable participant run directory. |
+| capacity_bytes | reported/partial only | positive U64 integer string | `statvfs` total for the filesystem containing the existing job workspace. |
 | issues | partial/unavailable/error only | 1–4 sorted unique values | Contextual cause. |
 
 Free bytes, filesystem class, and absolute path are not retained. Storage byte-seconds use the
-participant start-to-final interval exactly once. `reported` requires the supervisor to guarantee
+participant start-to-final interval exactly once. `reported` requires NVFlare to establish
 continuous workspace availability over that interval. If continuity is uncertain but a numeric
 proxy remains usable, storage is `partial`; otherwise it is unavailable/error. V1 deliberately has
 no storage sub-windows.
@@ -148,17 +146,17 @@ An embedded `end` contains `closed_at` and one reason. A standalone `attempt_end
 
 | reason | Meaning |
 | --- | --- |
-| released | The lifecycle owner confirmed ordinary release/closure of the resource lease. |
-| failed | The lease closed following a failure after a trusted start capacity snapshot. |
-| terminated | The lease was closed by cancellation, preemption, or administrative termination. |
-| launch_failed | A lease opened, but no trusted capacity snapshot exists; start/final are forbidden. |
-| reconfigured | Trusted lifecycle authority observed an in-place stable capacity-vector transition; a same-environment successor opens at this exact boundary, and equal vectors are rejected when both snapshots are comparable. |
+| released | NVFlare ended the measurement period normally. |
+| failed | The measurement period ended after a failure. |
+| terminated | The measurement period ended after cancellation, preemption, or administration. |
+| launch_failed | NVFlare knows the period bounds, but no start capacity exists; start/final are forbidden. |
+| reconfigured | NVFlare ended the period after observing a capacity change. This does not imply another period. |
 
-There is no return code because the contract measures a resource window, not an OS-process
-outcome. `opened_at` and `closed_at` come from the same durable supervisor clock, and every
-duration uses exactly that interval. Failed or terminated work does not by itself make
+There is no return code because the contract measures a period, not an OS-process outcome.
+`opened_at` and `closed_at` come from the same NVFlare clock, and every duration uses exactly that
+interval. Failed or terminated work does not by itself make
 capacity-time partial when matching start/final evidence exists. `launch_failed` still contributes
-window seconds but degrades transient totals because capacity is unknown.
+measurement time but degrades compute totals because capacity is unknown.
 
 ## Participant terminal facts
 
@@ -180,14 +178,14 @@ Reported/partial F3 requires exactly three counter pairs. Every pair contains U1
 
 | Counter | Meaning |
 | --- | --- |
-| remote_accepted | Remote application payload accepted by transport before the atomic freeze; the primary F3 total. |
+| remote_accepted | Remote application payload accepted before NVFlare closes the counters; the primary F3 total. |
 | local_delivered | Direct/local application delivery, kept separate. |
 | remote_failed_before_acceptance | Remote traffic that failed before sender acceptance. |
 
-The lifecycle supervisor atomically freezes all three counters before serializing
-`participant_final`. Callback completions after that freeze never enter canonical counters, and no
-cutoff ordinal is exposed. Summary publication is excluded through a platform-owned,
-non-spoofable path before counting; its traffic is likewise not embedded in the summary itself.
+NVFlare closes all three counters in one operation before serializing `participant_final`.
+Callbacks that finish later do not change the stored totals. Job code cannot
+mark traffic as excluded. The resource-summary message is excluded inside
+NVFlare and is not embedded in the summary itself.
 The included classes are `task_request`, `task_response`, `task_result`, `job_application`, and
 `job_stream_data`; `job_stream_control`, `bulk_envelope`, `workspace_transfer`,
 `platform_control`, `log_export`, unknown classes, and summary publication are excluded.
@@ -199,28 +197,26 @@ must not precede participant start. Every attempt `opened_at` and `end.closed_at
 this lifecycle.
 
 `attempts` contains 0–4,096 unique entries sorted by `attempt_id`. Zero attempts authoritatively
-means zero transient resource windows and derives reported zero CPU, memory, and GPU time. An
-end-only `launch_failed` attempt instead makes those transient totals unavailable unless another
+means zero measurement periods and derives reported zero CPU, memory, and GPU time. An end-only
+`launch_failed` attempt instead makes those compute totals unavailable unless another
 attempt contributes a numeric value, in which case they are partial.
 
 Each attempt always has `attempt_id`, `environment_key`, `opened_at`, and `end.closed_at/reason`.
 Except for `launch_failed`, it also requires capacity-only `start`; capacity-only `final` is
-optional. Resource time always uses the supervisor-owned half-open `[opened_at,closed_at)` window;
+optional. Resource time always uses the half-open `[opened_at,closed_at)` measurement period;
 final is stability evidence only. Missing final or changed numeric capacity makes the affected
 total partial. Attempts with the same environment key may be sequential but cannot overlap.
-Different environment keys may overlap. `reconfigured` is asserted by trusted lifecycle
-authority and requires a same-environment successor at the exact boundary. When both snapshots
-have comparable numeric vectors, they must differ; an unavailable successor is still honest. A
-full release and reacquisition may use `released` even when its timestamps happen to touch.
+Different environment keys may overlap. `reconfigured` is descriptive only. It does not require
+or imply a successor period.
 
 ## Compact totals
 
-The same totals shape appears on every accepted roster entry and once at job level:
+The same totals shape appears on every accepted participant entry and once at job level:
 
 | Member | Required when reported/partial | Unit and grouping |
 | --- | --- | --- |
 | cpu | status, groups | `unit_seconds`, grouped by optional model and architecture. |
-| memory | status, byte_seconds | transient memory byte-seconds. |
+| memory | status, byte_seconds | memory byte-seconds across measurement periods. |
 | storage | status, byte_seconds | participant-lifetime filesystem-capacity byte-seconds. |
 | gpu | status, groups | `instance_seconds`, grouped by kind and optional metadata. |
 | retained_content | status, bytes | one terminal registered-content byte count. |
@@ -228,15 +224,16 @@ The same totals shape appears on every accepted roster entry and once at job lev
 
 Totals statuses are `reported`, `partial`, or `unavailable`. Reported/partial requires the numeric
 field or group array; unavailable forbids it. Totals contain no issues because status derives from
-lifecycle/roster facts. CPU and GPU groups are consolidated, unique, and sorted. Empty reported
+site and participant-status facts. CPU and GPU groups are consolidated, unique, and sorted. Empty reported
 groups are valid zero.
 
-## Resource summary and roster
+## Resource summary and expected participant list
 
-The roster has 1–10,000 unique entries sorted by role, participant ID, then participant key.
+The expected participant list has 1–10,000 unique entries sorted by role, participant ID, then
+participant key.
 Expected members come from authenticated job deployment/selection state independently of
 resource-report arrivals. At cutoff, every expected member is classified exactly once as
-`accepted`, `missing`, `invalid`, or `disabled`; the finalized roster is immutable.
+`accepted`, `missing`, `invalid`, or `disabled`; the final list does not change.
 Every entry contains `participant_id`, `participant_key`, `role`, and `status`. Missing/disabled
 entries contain only those fields. Invalid entries add trusted `received_at` and issues. Accepted
 entries add:
@@ -245,12 +242,13 @@ entries add:
 | --- | --- | --- |
 | received_at | UTC timestamp | No later than `report_cutoff_at`. |
 | summary_sha256 | 64 lowercase hexadecimal characters | Digest of accepted participant bytes. |
-| resource_window_seconds | canonical U128 decimal seconds, at most 9 fractional digits | Sum of all opened-to-closed environment windows, including launch failures; it may exceed participant wall time. |
+| resource_window_seconds | canonical U128 decimal seconds, at most 9 fractional digits | Sum of all measurement-period durations, including launch failures; it may exceed elapsed site-run time when periods use different scopes. |
 | totals | compact totals | Recomputed from referenced lifecycle facts. |
 
-Job totals are deterministic sums of accepted roster totals. Missing, invalid, or disabled members
+Job totals are deterministic sums of accepted participant totals. Missing, invalid, or disabled members
 make an otherwise numeric job total partial; no numeric contribution makes it unavailable. Counts,
-coverage, contributors, warnings, and qualifications derive from the roster and are not stored.
+coverage, contributors, warnings, and qualifications derive from the expected participant list and
+are not stored.
 
 ## Formula and bounds
 
@@ -269,14 +267,14 @@ All U32/U64/U128 bounds are inclusive. Booleans are never integers.
 | JSON nesting | 32 levels |
 | Attempts per participant | 0–4,096 |
 | GPU/CPU groups per applicable array | 0–4,096 |
-| Roster participants | 1–10,000 |
+| Expected participants | 1–10,000 |
 | Retained entries | 0–4,096 |
 | Issues per list | 1–4 when present |
 | Hardware-model label | 128 ASCII characters |
 | Relative path | 512 bytes in the safe ASCII grammar |
 
-The 4,096-attempt bound accommodates long process-per-round or allocation-per-round jobs while
-preventing an unbounded array. It is an implementation-capacity candidate, not a promise that
+The 4,096-attempt bound accommodates jobs with many measurement periods while preventing an
+unbounded array. It is an implementation-capacity candidate, not a promise that
 4,096 maximally sized attempts fit: the independent 64 MiB participant-summary limit remains
 decisive.
 
@@ -297,7 +295,8 @@ decisive.
 
 Allowed data is restricted to authenticated product identity, job-scoped HMAC keys, normalized
 hardware display metadata, normalized registered relative paths, numeric facts, statuses, and
-issues. Site policy may suppress optional CPU/GPU model metadata without changing numeric status.
+issues. Optional CPU/GPU model metadata may be omitted without changing numeric status. This
+feature adds no model-publication setting.
 
 Forbidden data includes environment/argument dumps, raw CUDA masks, GPU UUID/PCI identity, CPU
 serials/flags/topology, host/IP/PID/container/pod/scheduler identity, absolute cgroup/workspace
