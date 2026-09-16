@@ -181,6 +181,91 @@ def _finite_v1_cpu_quota() -> tuple[Optional[float], list[dict[str, int]]]:
     return min(item["quota_us"] / item["period_us"] for item in quotas), quotas
 
 
+def _parse_cpuset_count(value: Optional[str]) -> Optional[int]:
+    """Return the number of unique CPUs in a Linux cpulist.
+
+    The persisted probe record needs only the count.  In particular, it must
+    not retain CPU identifiers because they expose execution-environment
+    topology without improving the capacity calculation.
+    """
+
+    if value is None or not value.strip():
+        return None
+
+    intervals = []
+    for token in value.split(","):
+        match = re.fullmatch(r"\s*([0-9]+)(?:-([0-9]+))?\s*", token)
+        if not match:
+            return None
+        start = int(match.group(1))
+        end = int(match.group(2)) if match.group(2) is not None else start
+        if end < start:
+            return None
+        intervals.append((start, end))
+
+    intervals.sort()
+    merged = []
+    for start, end in intervals:
+        if not merged or start > merged[-1][1] + 1:
+            merged.append([start, end])
+        else:
+            merged[-1][1] = max(merged[-1][1], end)
+
+    count = sum(end - start + 1 for start, end in merged)
+    return count if 0 < count <= 0xFFFFFFFF else None
+
+
+def _minimum_cpuset_count(
+    mount_point: Optional[Path],
+    cgroup_dir: Optional[Path],
+    *,
+    primary_name: str,
+    fallback_name: Optional[str] = None,
+) -> Optional[int]:
+    """Read effective cpusets leaf-to-root and return the narrowest count."""
+
+    if cgroup_dir is None or mount_point is None:
+        return None
+    counts = []
+    for directory in _ancestors(cgroup_dir, mount_point):
+        count = _parse_cpuset_count(_read_text(directory / primary_name))
+        if count is None and fallback_name:
+            # Older cgroup-v1 kernels may not provide
+            # cpuset.effective_cpus.  cpuset.cpus is the best available
+            # fallback; empty inherited values are ignored and an ancestor's
+            # concrete value remains authoritative.
+            count = _parse_cpuset_count(_read_text(directory / fallback_name))
+        if count is not None:
+            counts.append(count)
+    return min(counts) if counts else None
+
+
+def _effective_cpuset_count() -> tuple[Optional[int], str]:
+    mount_point, cgroup_dir = _cgroup_v2_location()
+    if cgroup_dir is not None and mount_point is not None:
+        return (
+            _minimum_cpuset_count(
+                mount_point,
+                cgroup_dir,
+                primary_name="cpuset.cpus.effective",
+            ),
+            "v2",
+        )
+
+    mount_point, cgroup_dir = _cgroup_v1_location("cpuset")
+    if cgroup_dir is not None and mount_point is not None:
+        return (
+            _minimum_cpuset_count(
+                mount_point,
+                cgroup_dir,
+                primary_name="cpuset.effective_cpus",
+                fallback_name="cpuset.cpus",
+            ),
+            "v1",
+        )
+    return None, "none"
+
+
 def _finite_memory_max() -> tuple[Optional[int], str, list[int]]:
     mount_point, cgroup_dir = _cgroup_v2_location()
     if cgroup_dir is not None and mount_point is not None:
@@ -220,6 +305,64 @@ def _online_cpu_count() -> Optional[int]:
     except (AttributeError, OSError, ValueError):
         value = os.cpu_count()
     return value if isinstance(value, int) and value > 0 else None
+
+
+def _normalize_cpu_model(value: str) -> Optional[str]:
+    # /proc/cpuinfo is normally ASCII, but dropping non-ASCII trademark glyphs
+    # makes common model labels conform to the schema's display-safe alphabet.
+    value = value.encode("ascii", errors="ignore").decode("ascii")
+    value = re.sub(r"[^A-Za-z0-9 ._()+/@-]+", " ", value)
+    value = " ".join(value.split())[:128].rstrip()
+    return value if value and value[0].isalnum() else None
+
+
+def _normalize_architecture(value: str) -> Optional[str]:
+    value = value.strip().lower()
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,31}", value):
+        return None
+    return value
+
+
+def _linux_cpu_identity(affinity_cpu_ids: Optional[set[int]]) -> dict[str, str]:
+    """Return non-identifying CPU metadata for the affinity-visible set."""
+
+    identity = {}
+    architecture = _normalize_architecture(platform.machine())
+    if architecture:
+        identity["architecture"] = architecture
+
+    if not affinity_cpu_ids:
+        return identity
+    text = _read_text(Path("/proc/cpuinfo"))
+    if text is None:
+        return identity
+
+    models_by_cpu: dict[int, set[str]] = {}
+    for block in re.split(r"\n\s*\n", text):
+        processor_id = None
+        model = None
+        for line in block.splitlines():
+            key, separator, raw_value = line.partition(":")
+            if not separator:
+                continue
+            key = key.strip().lower()
+            raw_value = raw_value.strip()
+            if key == "processor" and raw_value.isdigit():
+                processor_id = int(raw_value)
+            elif key in ("model name", "cpu model"):
+                model = _normalize_cpu_model(raw_value)
+        if processor_id is not None and model:
+            models_by_cpu.setdefault(processor_id, set()).add(model)
+
+    selected_models = []
+    for cpu_id in affinity_cpu_ids:
+        models = models_by_cpu.get(cpu_id)
+        if not models or len(models) != 1:
+            return identity
+        selected_models.append(next(iter(models)))
+    if len(set(selected_models)) == 1:
+        identity["model"] = selected_models[0]
+    return identity
 
 
 def _physical_memory_bytes() -> Optional[int]:
@@ -297,10 +440,13 @@ def probe_cpu(allow_host_fallback: bool = False) -> dict[str, Any]:
         )
 
     try:
-        affinity_count = len(os.sched_getaffinity(0))
+        affinity_cpu_ids = set(os.sched_getaffinity(0))
+        affinity_count = len(affinity_cpu_ids) or None
     except (AttributeError, OSError):
+        affinity_cpu_ids = None
         affinity_count = None
     online_count = _online_cpu_count()
+    cpuset_count, cpuset_version = _effective_cpuset_count()
 
     quota, quota_inputs = _finite_v2_cpu_quota()
     _mount_point, v2_cgroup_dir = _cgroup_v2_location()
@@ -308,7 +454,7 @@ def probe_cpu(allow_host_fallback: bool = False) -> dict[str, Any]:
     if quota is None and cgroup_version == "v1":
         quota, quota_inputs = _finite_v1_cpu_quota()
 
-    candidates = [value for value in (affinity_count, quota) if value is not None]
+    candidates = [value for value in (affinity_count, cpuset_count, quota) if value is not None]
     if not candidates and online_count is not None:
         candidates.append(online_count)
     if not candidates:
@@ -325,6 +471,8 @@ def probe_cpu(allow_host_fallback: bool = False) -> dict[str, Any]:
     source_parts = []
     if affinity_count is not None:
         source_parts.append("sched_getaffinity")
+    if cpuset_count is not None:
+        source_parts.append(f"cgroup_{cpuset_version}.effective_cpuset")
     if quota is not None:
         source_parts.append(f"cgroup_{cgroup_version}.cpu_quota")
     if not source_parts:
@@ -337,9 +485,11 @@ def probe_cpu(allow_host_fallback: bool = False) -> dict[str, Any]:
         coverage="partial" if affinity_count is None else "complete",
         inputs={
             "affinity_logical_cpu_count": affinity_count,
+            "effective_cpuset_logical_cpu_count": cpuset_count,
             "online_logical_cpu_count": online_count,
             "cgroup_cpu_quotas": quota_inputs,
         },
+        dimensions=_linux_cpu_identity(affinity_cpu_ids),
     )
 
 

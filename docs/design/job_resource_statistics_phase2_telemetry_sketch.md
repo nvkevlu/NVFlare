@@ -9,17 +9,20 @@ JobStatsReporter. It does not collect or recalculate Phase 1 data.
 
 | Phase | Responsibility |
 | --- | --- |
-| Phase 1 | Observe runtime-visible resources, build site reports, validate them, calculate job totals, and store the final RESOURCE_STATS record. |
-| Phase 2 | Read that finalized record and optionally publish an approved subset. |
+| Phase 1 | Observe runtime-visible resources, build site reports, validate them, calculate job totals, and archive the final files in the existing server `WORKSPACE`. |
+| Phase 2 | Read the finalized summary, or receive it directly from the Phase 1 finalizer, and optionally publish an approved subset. |
 
-Phase 2 reads the exact server-side RESOURCE_STATS component through the narrow
-Phase 1 read API. Phase 1 has already validated the participant archive,
-manifest, and query copy before making that record available. Phase 2 does not
-read the manifest or participant files independently, nor does it read current
-host values, job code, launcher data, or in-progress reports.
+There is no `RESOURCE_STATS` job-store component. For an immediate publication,
+the preferred adapter receives the already validated `resource_summary.json`
+bytes and digest directly from the root-server Phase 1 finalizer. For a later
+publication or retry, it uses the same safe fixed-member reader as the CLI to
+read `resource_stats/resource_summary.json` and `resource_stats/manifest.json`
+from the existing archived `WORKSPACE` component.
 
-If RESOURCE_STATS is missing, invalid, or not final, Phase 2 publishes nothing.
-A Phase 2 failure never changes the Phase 1 result or the job outcome.
+Phase 2 does not read participant files independently, current host values,
+job code, launcher data, or in-progress reports. If the summary is missing,
+invalid, or not final, it publishes nothing. A Phase 2 failure never changes
+the Phase 1 result or the job outcome.
 
 ## 2. Why JobStatsReporter is relevant
 
@@ -43,11 +46,11 @@ Phase 1 capacity field.
 
 The adapter accepts a record only when all of these are true:
 
-- the component name is exactly RESOURCE_STATS;
 - the record kind is nvflare.resource_stats.resource_summary;
 - the schema version is supported;
 - the server has finalized the expected participant list;
-- the Phase 1 API returns it as a finalized, validated record; and
+- the Phase 1 finalizer supplies validated canonical bytes, or the shared
+  archive reader verifies those bytes against the manifest; and
 - the job ID matches the requested job.
 
 The adapter does not repair a bad record. It logs one short diagnostic and
@@ -102,27 +105,41 @@ These names are proposed, not final.
 
 There is no job-level storage-capacity or storage-time field. The point-in-time
 visible workspace-filesystem capacity observations remain in archived
-participant reports. They are intentionally absent from `RESOURCE_STATS`
-totals, so the proposed job-level Phase 2 publication does not include them.
+participant reports. They are intentionally absent from job totals, so the
+proposed job-level Phase 2 publication does not include them.
 
 Do not use names such as CPU used, GPU used, allocated GPU, reserved memory, or
 cost. Phase 1 does not establish those meanings.
 
-## 6. Timing
+## 6. Timing and current-code integration
 
-Publish only after Phase 1 has written the final RESOURCE_STATS record.
+Publish only after Phase 1 has finalized the summary.
 
-A simple sequence is:
+The current JobStatsReporter lives inside the client/server job application and
+writes `job_stats_run_summary.*` during server `END_RUN`. The root server has
+not yet received all client terminal reports or built the Phase 1 summary at
+that point. The in-job reporter therefore cannot simply open the final summary.
 
-1. Phase 1 finalizes the expected participant list.
-2. Phase 1 validates received reports and calculates totals.
-3. Phase 1 writes the participant records, summary, and manifest.
-4. Phase 1 writes the exact RESOURCE_STATS query copy.
-5. Phase 2 reads that validated copy through the narrow Phase 1 API.
-6. JobStatsReporter publishes the approved fields.
+The preferred sequence is:
 
-No extra wait is added to job completion. If publication is asynchronous, the
-adapter may retry without changing Phase 1 data.
+1. The root-server Phase 1 finalizer validates received reports and calculates
+   totals at the existing terminal-outcome cutoff.
+2. It writes accepted participant files and `resource_summary.json`.
+3. It writes `manifest.json` last and fsyncs/atomically publishes the files.
+4. It passes the exact validated summary bytes plus their SHA-256 digest to one
+   parent-side telemetry adapter.
+5. The adapter maps only approved fields and asks JobStatsReporter's telemetry
+   sink to publish them.
+6. Phase 1 continues with the existing `WORKSPACE` archival regardless of the
+   publication result.
+
+This requires a parent-side adapter or a small reusable publication interface;
+it does not require an active reporter in every job process. If publication
+must happen after archival, the adapter reads the same two fixed `WORKSPACE`
+members as the CLI and performs the same checks.
+
+No extra wait is added to job completion. An asynchronous retry uses the
+archived workspace and never changes Phase 1 bytes.
 
 ## 7. Retry behavior
 
@@ -130,7 +147,7 @@ Use a stable event ID based on:
 
 - job ID;
 - Phase 1 schema version; and
-- the SHA-256 digest of the exact RESOURCE_STATS bytes.
+- the SHA-256 digest of the exact canonical `resource_summary.json` bytes.
 
 A repeated publication with the same event ID is a retry, not a new
 measurement.
@@ -197,7 +214,7 @@ Phase 2 is best effort.
 | Failure | Result |
 | --- | --- |
 | Phase 1 is not final | Publish nothing yet. |
-| RESOURCE_STATS is absent | Publish nothing; record one short diagnostic. |
+| Final summary is absent from archived `WORKSPACE` | Publish nothing; record one short diagnostic. |
 | Schema version is unsupported | Publish nothing; identify the version. |
 | Phase 1 validation fails | Publish nothing; report invalid input. |
 | JobStatsReporter is not already active | Phase 1 remains available through the job store and CLI; this feature does not add an enablement setting. |
@@ -218,7 +235,7 @@ integration and remains outside the JobStatsReporter adapter.
 Tests should cover:
 
 - refusal before Phase 1 finalization;
-- refusal for a missing or invalid RESOURCE_STATS component;
+- refusal for a missing, invalid, or digest-mismatched archived summary;
 - exact field mapping;
 - preservation of partial and unavailable status;
 - omission of absent MIG groups;
@@ -238,8 +255,8 @@ The team still needs to choose:
 3. Whether hardware models are ever allowed.
 4. The JobStatsReporter event type and size limit.
 5. Retry duration and duplicate-delivery expectations.
-6. Whether every active JobStatsReporter publishes the Phase 1 subset. This
-   must be an implementation decision, not a new user or operator setting.
+6. Which reusable publication interface exposes the existing telemetry sink to
+   the one root-parent adapter.
 
 None of these decisions changes the Phase 1 schema or permits a new privilege,
 configuration field, launch option, or deployment step.

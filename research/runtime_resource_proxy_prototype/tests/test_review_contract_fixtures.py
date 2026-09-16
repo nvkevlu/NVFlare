@@ -73,11 +73,15 @@ class TestReviewContractFixtures(unittest.TestCase):
             self.assertEqual("terminated", attempt_end["reason"])
             self.assertEqual("not_invented", attempt_end["resource_observations"]["state"])
 
-            component = json.loads((root / "fixed_resource_stats_component.json").read_text())
-            self.assertEqual("RESOURCE_STATS", component["component"])
-            self.assertTrue(component["exact_component_allowed"])
-            self.assertFalse(component["prefix_variant_allowed"])
-            self.assertTrue(component["byte_identical_to_canonical_summary"])
+            archive = json.loads((root / "workspace_archive_reader.json").read_text())
+            self.assertEqual("workspace", archive["component"])
+            self.assertEqual("resource_stats/resource_summary.json", archive["summary_member"])
+            self.assertEqual("resource_stats/manifest.json", archive["manifest_member"])
+            self.assertTrue(archive["summary_matches_canonical"])
+            self.assertTrue(archive["manifest_readable"])
+            self.assertTrue(archive["participant_matches"])
+            self.assertFalse(archive["separate_query_component_created"])
+            self.assertTrue((root / archive["relative_path"]).is_file())
 
 
 if __name__ == "__main__":

@@ -52,8 +52,20 @@ small collection fragments. Their bodies are embedded without repeated identity 
 | finalized_at | same timestamp form, not earlier than cutoff | Time when the server built the final result. |
 | received_at | same timestamp form, not later than cutoff | Trusted server receipt time for an accepted or invalid candidate. |
 
-Keys are keyed HMAC outputs, not plain hashes of enumerable labels. Shape validation is not
-identity authentication; the server must match a report to its authenticated job context.
+Keys are keyed HMAC outputs, not plain hashes of enumerable labels. The root server creates a
+random 256-bit key for the job and uses these UTF-8 HMAC-SHA-256 inputs:
+
+```text
+participant key input = "participant\0" + role + "\0" + participant_id
+current environment input =
+    "environment\0" + role + "\0" + participant_id + "\0current-job-process"
+```
+
+Serialization is `sha256-` followed by the lowercase HMAC hex digest. Only derived values enter
+the server-owned `JobMetaKey.RESOURCE_STATS_CONTEXT` map in existing job metadata; the HMAC key
+never leaves the root server. A future platform-owned reporter slot can use another final input
+component without changing the serialized type. Shape validation is not identity authentication;
+the server must match a report to its authenticated job and expected-participant context.
 
 ## Measurement-period capacity
 

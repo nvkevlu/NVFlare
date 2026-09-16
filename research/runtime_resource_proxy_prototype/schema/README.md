@@ -61,6 +61,12 @@ set; and the server has the complete saved-result byte total. Other JSON files
 directly under `golden/v1` include standalone boundary cases and are not all
 part of that job.
 
+Within that review fixture, `server_run` is the inspectable pre-archive source
+and `job_store/.../workspace` is the generated minimal `WORKSPACE` ZIP. A real
+workspace archive also contains the job's other run, result, log, and audit
+files. Keeping the unpacked source beside the ZIP makes generation reviewable;
+it does not propose two persisted production copies.
+
 ## Architecture and deployment constraints
 
 The schema contains no launcher name, process-coordination token, process ID,
@@ -77,21 +83,28 @@ It requires no new:
 - user or operator configuration.
 
 The implementation uses normal NVFlare code and existing workspace and message
-paths. The component that calls the collector is still an open design choice.
+paths. The current-code adapter calls the collector at explicit client-job and
+server-job process hooks, stages the final report in the existing workspace,
+and uses the existing terminal-outcome path. See
+[Current-code integration](../CURRENT_CODE_INTEGRATION.md).
 
 ## Identity
 
 **attempt_id** is a random 128-bit ID written as 32 lowercase hexadecimal
-characters. It is an internal record ID. The schema does not define how it
-crosses process boundaries.
+characters. It is an internal record ID. In the current adapter, one job process
+creates and closes one attempt, so the ID does not cross a process boundary.
 
 **environment_key** is a job-scoped HMAC value. In prose, it is the
 measurement-scope key. It prevents simultaneous reports for the same
 measurement scope.
 
-The key is generated from information and key material NVFlare already has. It
-needs no new secret or user configuration. Its exact input is open and must be
-changed if the selected process model cannot produce it without extra setup.
+The root server creates a random per-job HMAC key and derives one participant
+key and one current-process environment key for each expected participant. It
+puts only the derived keys in a reserved server-owned field in the existing job
+metadata; the HMAC key never leaves the root parent. The current adapter needs
+one environment key for each client-job or server-job process scope. The exact
+domain-separated HMAC inputs are in the
+[field catalog](FIELD_CATALOG.md#common-identity-and-time).
 
 Periods with the same key may be sequential but may not overlap. Different
 keys may overlap. Reports from different jobs may describe the same physical
@@ -312,15 +325,23 @@ resource_stats/
     <participant_key>.json
 ~~~
 
-The job-store query component is exactly RESOURCE_STATS. A generic prefix is
-not allowed.
+Current NVFlare archives this tree inside the job's existing `workspace`
+component. Its fixed ZIP member names are:
 
-The manifest contains the SHA-256 digest of resource_summary.json and every
-accepted participant file. The query copy must be byte-for-byte identical to
-the stored resource_summary.json.
+~~~text
+resource_stats/resource_summary.json
+resource_stats/manifest.json
+resource_stats/participants/<participant_key>.json
+~~~
 
-These files use the job's existing storage, retention, deletion, and
-authorization behavior.
+The manifest contains the SHA-256 digest of `resource_summary.json` and every
+accepted participant file. A server-side reader checks the digest before
+returning a record. It reads only these fixed names, bounds each returned
+member, rejects duplicate names, and never extracts an arbitrary archive path.
+
+There is no second resource-statistics component. Queries use the existing
+workspace archive and therefore inherit the job's existing authorization,
+retention, and deletion behavior.
 
 ## Large numbers
 

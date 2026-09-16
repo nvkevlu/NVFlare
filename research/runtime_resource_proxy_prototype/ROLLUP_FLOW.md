@@ -1,8 +1,8 @@
 # From observations to the final job summary
 
 This document shows how one site's resource observations become a final job
-result. It also explains the two different start/final pairs and the purpose of
-the `RESOURCE_STATS` job-store component.
+result. It also explains the two different start/final pairs and how the CLI
+reads that result from the job's existing archived workspace.
 
 ## The complete flow
 
@@ -20,7 +20,7 @@ flowchart TD
     E["Accepted participant entry<br/>resource window + recomputed totals"]
     L["Expected participant list<br/>accepted / missing / invalid / disabled"]
     R["resource_summary<br/>participant entries + job totals"]
-    Q["RESOURCE_STATS<br/>fixed job-store query component"]
+    Q["Existing workspace archive<br/>resource_stats/resource_summary.json"]
     C["CLI / Phase 2"]
 
     AS --> A
@@ -220,66 +220,71 @@ once.
 See the complete [site-2 report](schema/golden/v1/participant_summary_partial_periods.json)
 and its compact entry in the [job summary](schema/golden/v1/resource_summary.json).
 
-## Why `RESOURCE_STATS` exists
+## How the CLI reads the result
 
-The proposed storage design has two views of the same finalized job summary:
+There is one stored copy. Before the server run is archived, the finalized
+workspace contains:
 
 ```text
-server job workspace                         job store
-resource_stats/                              jobs/<job_id>/
-├── resource_summary.json                    └── RESOURCE_STATS
+resource_stats/
+├── resource_summary.json
 ├── manifest.json
 └── participants/
     └── <participant_key>.json
 ```
 
-`resource_summary.json` belongs to the self-contained server archive. It sits
-beside the exact accepted participant reports and the manifest that hashes the
-whole bundle. That layout supports validation, investigation, and provenance.
+Current NVFlare already saves the completed run directory as the job's
+`workspace` component. In filesystem storage, that component is a ZIP file.
+The proposed command reuses that archive instead of creating a second job-store
+component.
 
-`RESOURCE_STATS` is not another record type or JSON format. It is the fixed
-name of a job-store component whose payload is the exact serialized
-`resource_summary.json`.
+The CLI is remote, so it does not open the server's filesystem itself. Its
+authenticated server handler follows this sequence:
 
-It gives the CLI and the optional Phase 2 publisher a stable, small query
-surface. Existing job storage can package the completed run workspace for
-download. Without this component, a reader could have to retrieve and unpack
-that larger workspace simply to obtain the final summary. The component also
-uses normal job-storage authorization, retention, and deletion behavior; it
-does not require callers to know a server filesystem path.
+1. Require the job to have reached a terminal state.
+2. Ask the existing job manager to stage the `workspace` component for reading.
+3. Open that ZIP on the server and read exactly
+   `resource_stats/resource_summary.json` and `resource_stats/manifest.json`.
+4. Reject a missing, duplicate, encrypted, oversized, or manifest-mismatched
+   member. Never extract caller-selected paths.
+5. For `--site`, map the requested display ID to the accepted
+   `participant_key` in the summary, validate that key, and read exactly
+   `resource_stats/participants/<participant_key>.json`.
+6. Return the validated JSON through the normal admin-command response.
 
-The component is not another rollup or a different representation. Its bytes
-must be identical to `resource_summary.json`. Only the reconciled summary is
-published there; the detailed participant reports are not.
+This uses existing job authorization, retention, and deletion behavior. It
+adds no mount, service, privilege, launcher argument, or operator setting. The
+tradeoff is that ZIP access still reads the archive directory and may seek
+through a large workspace. If that becomes a measured performance problem, it
+can be optimized later without changing the v1 record layout.
 
-`RESOURCE_STATS` is a proposed exact component name, not a generic component
-prefix. The production integration would add narrow `save_resource_stats` and
-`get_resource_stats` APIs. This avoids letting callers invent arbitrary job
-component names.
-
-The data model needs one logical final summary. The prototype uses a physical
-copy to make the archive and query responsibilities explicit. Physical
-duplication is not essential: production storage could expose one object
-through both views, provided `get_resource_stats` returns the exact validated
-summary bytes.
+The executable `WorkspaceResourceStatsReader` prototype demonstrates the
+narrow read boundary. It accepts the archive path selected by trusted server
+code, but it does not accept an arbitrary member name. The manifest protects
+bundle integrity; it is not a signature and does not replace the server's job
+authorization.
 
 ## What is specified and what remains open
 
 The schema, validator, formulas, golden records, archive relationships, and
 job-total reconciliation are executable today in this prototype.
 
-The production NVFlare component that collects logical fragments, assembles the
-final `participant_summary`, and sends it to the server is still an open Phase
-1 implementation decision. The prototype's canonical generator constructs the
-completed site report directly and then extracts standalone fragment examples;
-it does not yet implement a production fragment reducer. Duplicate and conflict
-handling during that assembly therefore still needs to be specified with the
-chosen integration point.
+The current-code proposal chooses a concrete Phase 1 path. Each current client
+and server job process records one process-lifetime measurement period and
+stages one final `participant_summary` in its existing workspace. The client
+parent carries that report in the existing terminal-outcome exchange. The
+server parent authenticates the sender, validates and accepts the exact report
+bytes, reconciles the job summary, and writes the bundle before the existing
+workspace archival step.
 
-The production integration must also define how it publishes the archive and
-query component consistently. It should expose `RESOURCE_STATS` only after the
-final bundle has passed validation. A missing or mismatched query component
-must be treated as unavailable or corrupt rather than as an alternative result.
+The exact current hooks and message flow are in
+[Current-code integration](CURRENT_CODE_INTEGRATION.md). A future task runner
+may create different process or resource boundaries; that roadmap choice does
+not change the v1 records or formulas.
 
-These unresolved integration choices are tracked in the authoritative
-[open-decision list](GAPS.md).
+The command reports a missing member as unavailable and a duplicate, malformed,
+or manifest-mismatched member as corrupt. It does not search alternate archive
+paths for a substitute result.
+
+The remaining bounded implementation and support-matrix decisions are tracked
+in the authoritative [open-decision list](GAPS.md).

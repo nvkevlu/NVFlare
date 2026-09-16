@@ -26,9 +26,14 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from generate_artifacts import generate  # noqa: E402
+from prototype_contract import WorkspaceResourceStatsReader  # noqa: E402
 from runtime_probe import (  # noqa: E402
     _decode_mountinfo,
+    _effective_cpuset_count,
+    _linux_cpu_identity,
+    _parse_cpuset_count,
     _path_under_mount,
+    probe_cpu,
     probe_gpu,
     probe_gpu_records,
     probe_storage,
@@ -42,6 +47,93 @@ class TestRuntimeProbe(unittest.TestCase):
     def test_cgroup_path_at_mount_root_is_not_duplicated(self):
         mount = {"root": "/slice", "mount_point": "/sys/fs/cgroup/cpu"}
         self.assertEqual(Path("/sys/fs/cgroup/cpu"), _path_under_mount(mount, "/slice"))
+
+    def test_cpuset_parser_counts_unique_ranges_without_preserving_topology(self):
+        self.assertEqual(7, _parse_cpuset_count("0-3,2-5,8"))
+        self.assertIsNone(_parse_cpuset_count("3-1"))
+        self.assertIsNone(_parse_cpuset_count("0-3,token"))
+
+    def test_v2_effective_cpuset_uses_narrowest_ancestor(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            mount = Path(temp_dir)
+            parent = mount / "parent"
+            leaf = parent / "leaf"
+            leaf.mkdir(parents=True)
+            (mount / "cpuset.cpus.effective").write_text("0-15", encoding="utf-8")
+            (parent / "cpuset.cpus.effective").write_text("2-9", encoding="utf-8")
+            (leaf / "cpuset.cpus.effective").write_text("4-5,8", encoding="utf-8")
+
+            with patch("runtime_probe._cgroup_v2_location", return_value=(mount, leaf)):
+                count, version = _effective_cpuset_count()
+
+        self.assertEqual(3, count)
+        self.assertEqual("v2", version)
+
+    def test_v1_cpuset_falls_back_to_cpuset_cpus(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            mount = Path(temp_dir)
+            leaf = mount / "leaf"
+            leaf.mkdir()
+            (mount / "cpuset.effective_cpus").write_text("0-7", encoding="utf-8")
+            (leaf / "cpuset.cpus").write_text("2-3", encoding="utf-8")
+
+            with (
+                patch("runtime_probe._cgroup_v2_location", return_value=(None, None)),
+                patch("runtime_probe._cgroup_v1_location", return_value=(mount, leaf)),
+            ):
+                count, version = _effective_cpuset_count()
+
+        self.assertEqual(2, count)
+        self.assertEqual("v1", version)
+
+    def test_cpu_identity_uses_only_affinity_visible_homogeneous_models(self):
+        cpuinfo = """
+processor : 0
+model name : AMD EPYC 9654
+flags : private topology detail
+
+processor : 1
+model name : AMD   EPYC 9654
+
+processor : 2
+model name : Intel Xeon Platinum 8480+
+"""
+        with (
+            patch("runtime_probe._read_text", return_value=cpuinfo),
+            patch("runtime_probe.platform.machine", return_value="x86_64"),
+        ):
+            identity = _linux_cpu_identity({0, 1})
+            heterogeneous = _linux_cpu_identity({0, 2})
+
+        self.assertEqual({"architecture": "x86_64", "model": "AMD EPYC 9654"}, identity)
+        self.assertEqual({"architecture": "x86_64"}, heterogeneous)
+        self.assertNotIn("flags", json.dumps(identity))
+        self.assertNotIn("processor", json.dumps(identity))
+
+    def test_cpu_capacity_selects_cpuset_and_emits_only_normalized_identity(self):
+        with (
+            patch("runtime_probe.platform.system", return_value="Linux"),
+            patch("runtime_probe.os.sched_getaffinity", return_value={0, 1, 2, 3}, create=True),
+            patch("runtime_probe._online_cpu_count", return_value=8),
+            patch("runtime_probe._effective_cpuset_count", return_value=(2, "v2")),
+            patch(
+                "runtime_probe._finite_v2_cpu_quota",
+                return_value=(3.5, [{"quota_us": 350000, "period_us": 100000}]),
+            ),
+            patch("runtime_probe._cgroup_v2_location", return_value=(Path("/not-emitted"), Path("/not-emitted/job"))),
+            patch(
+                "runtime_probe._linux_cpu_identity",
+                return_value={"architecture": "x86_64", "model": "AMD EPYC 9654"},
+            ),
+        ):
+            metric = probe_cpu()
+
+        self.assertEqual(2, metric["value"])
+        self.assertEqual(2, metric["inputs"]["effective_cpuset_logical_cpu_count"])
+        self.assertEqual({"architecture": "x86_64", "model": "AMD EPYC 9654"}, metric["dimensions"])
+        emitted = json.dumps(metric)
+        self.assertNotIn("/not-emitted", emitted)
+        self.assertNotIn("cpuset.cpus.effective", emitted)
 
     def test_gpu_mask_is_not_treated_as_a_device_count(self):
         for mask in ("", "0,0", "-1", "MIG-GPU-irrelevant/1/2"):
@@ -163,7 +255,7 @@ class TestGeneratedArtifacts(unittest.TestCase):
             client_dir = output_dir / "client_run" / "resource_stats"
             server_dir = output_dir / "server_run" / "resource_stats"
             resource_summary_path = server_dir / "resource_summary.json"
-            query_copy_path = output_dir / "job_store" / "jobs" / "test-job" / "RESOURCE_STATS"
+            workspace_archive_path = output_dir / "job_store" / "jobs" / "test-job" / "workspace"
             self.assertTrue((client_dir / "participant_summary.json").is_file())
             participant_summary = json.loads((client_dir / "participant_summary.json").read_text())
             retained = participant_summary["attempts"][0]["retained_content"]
@@ -171,9 +263,18 @@ class TestGeneratedArtifacts(unittest.TestCase):
             self.assertNotIn("entries", retained)
             self.assertNotIn("relative_path", json.dumps(retained))
             self.assertTrue(resource_summary_path.is_file())
-            self.assertEqual(resource_summary_path.read_bytes(), query_copy_path.read_bytes())
-            self.assertTrue(receipt["integrity"]["query_copy_matches_resource_summary"])
-            self.assertEqual("RESOURCE_STATS", receipt["integrity"]["query_copy_component"])
+            workspace_reader = WorkspaceResourceStatsReader(workspace_archive_path)
+            self.assertEqual(resource_summary_path.read_bytes(), workspace_reader.read_resource_summary_bytes())
+            self.assertEqual((server_dir / "manifest.json").read_bytes(), workspace_reader.read_manifest_bytes())
+            archive_participant_key = participant_summary["participant_key"].replace("sha256:", "sha256-")
+            self.assertEqual(
+                (server_dir / "participants" / f"{archive_participant_key}.json").read_bytes(),
+                workspace_reader.read_participant_summary_bytes(archive_participant_key),
+            )
+            self.assertTrue(receipt["integrity"]["workspace_resource_summary_matches"])
+            self.assertTrue(receipt["integrity"]["workspace_manifest_matches"])
+            self.assertTrue(receipt["integrity"]["workspace_participant_matches"])
+            self.assertEqual("workspace", receipt["integrity"]["workspace_component"])
 
             summary = json.loads(resource_summary_path.read_text())
             self.assertEqual("test-job", summary["job"]["id"])

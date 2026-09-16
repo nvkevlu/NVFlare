@@ -1,119 +1,182 @@
-# Open resource-statistics decisions
+# Remaining resource-statistics decisions
 
-These are decisions, not current requirements.
+This file separates decisions that are now concrete from work that still needs
+design review. The detailed current-code path is in
+[CURRENT_CODE_INTEGRATION.md](CURRENT_CODE_INTEGRATION.md).
 
-Any answer must preserve this deployment rule:
+Every answer must preserve this deployment rule:
 
 > Resource statistics must work with existing NVFlare permissions and setup.
-> No new privilege, mount, service, launcher setting, environment variable, or
-> user/operator configuration may be required.
+> No new privilege, mount, service, launcher argument, environment variable,
+> or user/operator configuration may be required.
 
-## Process and timing
+## Now concrete
 
-| Question | Why it matters | Allowed direction |
-| --- | --- | --- |
-| Which existing NVFlare component records a site's start and finish? | The schema needs start and end times but must not choose the task architecture. | CP, a job process, a child-process parent, or another existing platform component may do it. |
-| What starts and ends a measurement period? | Capacity is multiplied by this duration. | Define it after the resource-management process model is chosen. |
-| Can resource changes be observed during one site run? | Without an event, a startup value may become stale. | Record another period when the chosen design exposes a reliable event; otherwise use the final observation and mark the total partial. |
-| Is the reconfigured end reason useful? | Arithmetic does not need it. | Keep it as a diagnostic only, or remove it before v1 is final. It must not imply a successor period. |
-| Which clock supplies both period timestamps? | Mixing clocks can create wrong durations. | Use one clock already available to the selected NVFlare component. |
+The following questions are no longer open in the prototype design.
 
-## Initial observation
+| Area | Current design |
+| --- | --- |
+| Current measurement period | One period covers the lifetime of today's client or server job process. Future code may open more periods through the same API without changing the schema. |
+| Start hooks | In client `worker_process.py` and server `runner_process.py`, after workspace construction and before the explicit custom-directory import path is added. |
+| Final hooks | After runner `END_RUN` processing and before F3/streaming shutdown. |
+| Parent handling | Client parent reads, bounds, and hashes the frozen report after `job_handle.wait()`; root server parent validates accepted reports and performs the job reduction after the server job process exits. |
+| Client delivery | Add the exact bounded `participant_summary` bytes and digest to the existing authenticated CP terminal-outcome request on `task/report_job_failure`. |
+| Cutoff | Reuse the current client-outcome cutoff: normally the configured wait whose current default is 900 seconds; abort and server-failure paths skip that client wait after one server-local acceptance attempt. Acceptance close, ledger snapshot, and candidate commit use one lock. Add no second report window. |
+| Duplicate reports | First valid digest wins; identical retries are idempotent; a different later digest is rejected and never overwrites accepted bytes. |
+| Expected participants | Root server freezes the server plus every selected client before start-job delivery; incoming reports do not create this set. |
+| Opaque keys | Root server derives participant and current-process environment keys with a per-job HMAC key, then places only the derived map in reserved existing job metadata. Client delivery uses its current metadata-file rewrite; Phase 1 adds the corresponding narrow deployed-file update in `ServerEngine` for the SJ. No secret or new launcher input leaves the root parent. |
+| Server participant | Read from the returned/shared server workspace and pass through the same internal validator without a loopback network request. |
+| Durable storage | Write participants, `resource_summary.json`, and `manifest.json` under the existing server run directory, then let normal job completion archive them in `WORKSPACE`. |
+| CLI source | Read and verify fixed members directly from archived `WORKSPACE`. There is no `RESOURCE_STATS` component or other duplicate. |
+| Trust statement | Site observations are authenticated self-reports, not tamper-resistant attestation. Workspace fragments can be changed or lost before receipt. |
+| Future execution work | It may change who opens/closes periods and who delivers the site report. The schema, reconciliation, archive, and CLI stay stable; the CP terminal path is the adapter for current code, not a roadmap constraint. |
 
-| Question | Why it matters | Constraint |
-| --- | --- | --- |
-| Where can NVFlare observe resources before job code can change the result? | A job-provided sitecustomize or import path may run before a normal entry function. | Use an existing platform call site. Do not add operator setup or extra privilege. |
-| What happens when a launch mode cannot provide that boundary? | The result would not be trustworthy. | Mark the affected value unavailable; do not weaken the requirement or invent a privileged collector. |
+## Remaining Phase 1 design decisions
 
-The earlier isolated-bootstrap and launcher-argument prototype has been removed.
-It was one possible implementation, not an approved requirement.
+These are the decisions the team still needs to make before a production
+implementation is complete.
 
-## Identity and duplicate reports
+### 1. GPU adapter support and matching
 
-| Question | Why it matters | Constraint |
-| --- | --- | --- |
-| How is environment_key derived? | It prevents two ranks in one measurement scope from reporting the same capacity at once. | Use only information NVFlare already has. No user value or new launcher argument. |
-| What is one measurement scope for multi-node work? | A process-visible value may cover only one node. | Report the actual scope. Do not present a partial scope as whole-participant capacity. |
-| Is the 4,096-period bound sufficient? | Very long jobs might create many periods. | Confirm with real workloads before v1 is fixed. |
+The authority rule is fixed: only successful CUDA Runtime enumeration may emit
+a numeric GPU count, and NVML can only enrich those CUDA-validated entities.
+The implementation still needs to choose:
 
-## Site files and crashes
+- the minimum supported CUDA Runtime and NVML versions;
+- how it loads the process-visible runtime without adding a package or setup
+  requirement;
+- the precise CUDA-to-NVML match for full GPUs and MIG compute instances; and
+- which failures make all GPU capacity unavailable versus only suppressing
+  model, memory, or MIG enrichment.
 
-| Question | Why it matters | Constraint |
-| --- | --- | --- |
-| How much data survives a process or pod crash? | Site fragments in the normal workspace may be lost. | State actual coverage honestly. Do not require a new mount, service, or privileged storage path. |
-| Can the selected component write a final report after a child fails? | Partial data is useful only when the platform still has it. | Use existing NVFlare state and message paths; otherwise mark the site missing or partial. |
-| Which component assembles logical fragments into the final site report, and how does it handle conflicting fragments? | The schema defines the final shape but not a production fragment reducer. | Correlate only platform-owned identities; accept identical retries and reject conflicting bytes without new setup. |
+Raw `CUDA_VISIBLE_DEVICES` and `nvidia-smi` remain diagnostic only.
 
-Site-side files are self-reported and not immutable. Server-side accepted
-participant files are protected by existing server job storage after receipt;
-only the reconciled summary is copied to the `RESOURCE_STATS` job-store
-component.
+### 2. F3 correlation and provenance
 
-## Delivery and server finalization
+The current route table and explicit exclusions are now audited in
+[CURRENT_CODE_INTEGRATION.md](CURRENT_CODE_INTEGRATION.md#current-route-and-binding-table).
+The low-level route alone cannot distinguish real work from polling or model
+data from workspace ZIP data. Production still needs to implement and test:
 
-| Question | Why it matters | Options |
-| --- | --- | --- |
-| Which existing authenticated path carries the final site report? | The report must arrive without a second completion wait. | Extend the terminal job-outcome exchange or add a bounded internal accounting message. |
-| What is the report cutoff? | The server needs a fixed time to classify missing reports. | Tie it to existing job finalization and document late-report behavior. |
-| How are duplicate retries handled? | A lost acknowledgement must not create a second report. | Accept identical bytes; reject different bytes after first acceptance. |
-| How is the server's own report ingested? | It should use the same schema without pretending to send remotely. | Validate and store it through the same internal acceptance API. |
-| How are the archive and `RESOURCE_STATS` query component published consistently? | The CLI and Phase 2 must not read bytes that differ from the validated archive. | Expose the component only after validation; treat absence or mismatch as unavailable or corrupt. Physical copy versus storage alias is an implementation detail. |
+- pending-byte correlation between an accepted `get_task` request and its real
+  task reply;
+- trusted provenance from an included large object into its shared
+  DownloadService/stream transaction, with workspace transfer marked excluded;
+- trusted class re-establishment at intermediate forwarding hops; and
+- logical stream ID/sequence/destination deduplication for reliable retries.
 
-## Resource adapters
+The implementation also needs job-scoped counters in each sending process and
+an exact parent merge. The existing process-global `StatsPool` is not
+sufficient. A path without the required provenance reports `not_bound` or
+`counter_gap`; it never falls back to generic sent/received totals.
 
-| Question | Why it matters | Constraint |
-| --- | --- | --- |
-| Which CUDA API and versions are supported? | Numeric GPU counts depend on successful runtime enumeration. | The raw CUDA mask is never count authority. NVML can enrich only matched devices. |
-| Which operating systems are in the first supported implementation? | CPU, memory, and model probes are platform-specific. | Choose the initial support matrix from ordinary-user evidence; unsupported platforms report unavailable. |
-| Which CPU model normalizer is used on each OS? | Raw model strings may expose too much or split equivalent models. | Use a bounded normalized value; omit it for heterogeneous visible CPUs. |
-| Which existing NVFlare state identifies the complete saved-result set? | Exact size requires a complete, bounded set. | Use existing platform state. If none exists, report unavailable; do not add a registry, job setting, or arbitrary path scan. Store only the total bytes, not filenames or content hashes. |
+### 3. Saved-result binding
 
-## F3 integration
+Current `Workspace` result and run roots can overlap, and applications choose
+their own persisted files. No generic authoritative result-file registry was
+found. The first implementation should therefore emit
+`retained_content.status=unavailable` with `not_bound` unless an existing
+owning component supplies a complete bounded set.
 
-The code still needs a concrete hook that:
+The remaining decision is whether one current owner can make that guarantee.
+Do not scan the workspace, infer model filenames, or add a registry or job
+setting just to populate this field.
 
-- counts only approved job traffic;
-- counts remote bytes after encoding and optional end-to-end encryption;
-- increments remote totals only after send acceptance;
-- keeps local delivery and pre-acceptance failure separate;
-- counts fan-out per destination and forwarding per sender hop;
-- closes counters before the final report; and
-- excludes resource-summary publication through platform code.
+### 4. Initial supported platforms
 
-The hook must use the existing F3 path. It may not add a permission or setting.
+The prototype implements Linux affinity, cgroup v1/v2 CPU and memory limits,
+`/proc/cpuinfo`, and `statvfs`. It models an injectable CUDA Runtime adapter but
+does not embed the production adapter yet. The team must decide whether v1 is
+Linux-only or which ordinary-user evidence provides equivalent semantics on
+another operating system. Unsupported adapters report unavailable; they do not
+silently use a different meaning.
 
-## Phase 2
+### 5. Attempt-bound and reason cleanup
 
-The team must choose:
+The schema currently allows at most 4,096 measurement periods in one
+participant report. Confirm this against expected future long-running jobs.
 
-- final resource_proxy field names;
-- job-only versus per-site publication;
-- whether hardware models may be published;
-- the JobStatsReporter event type and payload limit;
-- retry duration and duplicate-delivery behavior;
-- which already-active reporter or reporters publish the Phase 1 subset; and
-- how it coexists with current JobStatsReporter utilization output.
+`reconfigured` is also currently an allowed end reason. Today's process model
+does not expose a mid-process resource-change event. Keep the reason only if
+the upcoming execution API can use it without inferring a resource change;
+otherwise remove it before v1 is fixed.
 
-Phase 2 reads only finalized RESOURCE_STATS data. It does not solve any Phase 1
-collection or process-model question.
+### 6. Root-parent restart recovery
+
+The normal and failure finalization paths are specified. Production tests must
+still decide whether resource-report acceptance survives a root-server process
+restart during a running job. If that current recovery mode is supported, the
+derived expected-participant map, accepted digests, and cutoff state must be
+restored from server-owned files in the existing run workspace. The HMAC key
+does not need to be restored once all derived keys exist.
+
+Until that recovery is implemented and tested, a root-parent loss can make the
+resource summary unavailable. It must not reconstruct accepted measurements
+from log text or unauthenticated site files.
+
+## Known limitations, not open requirements
+
+- A `PYTHONPATH`-injected `sitecustomize` can run before the proposed in-process
+  start hook. Solving hostile-code attestation would require a stronger
+  isolation boundary and is not a Phase 1 claim.
+- Hard process or pod loss can remove local fragments. Existing workspace
+  return paths improve normal-completion recovery but do not make fragments
+  durable.
+- A Slurm launcher whose rank-zero workspace contains only one node's evidence
+  must report that actual scope or mark multi-node coverage partial. It must
+  not present one rank as whole-participant capacity.
+- The current workspace archival path can publish a terminal job status after
+  repeated archival failure. The CLI then reports the resource summary
+  unavailable; there is intentionally no fallback copy.
+- V1 validates and installs a client report before resolving that client's
+  terminal outcome. Client request timeouts bound network waiting, not local
+  preparation or server filesystem calls. Slow workspace I/O can delay
+  resolution and can hold the shared commit lock past the nominal outcome
+  deadline. It does not change the job outcome or add a later reporting window.
+- Totals across participants or jobs can refer to overlapping physical
+  resources. They are measured visible capacity-time, not inventory or
+  capacity ownership.
+
+## Remaining Phase 2 decisions
+
+The current in-job JobStatsReporter finishes before the root parent can build
+the final Phase 1 summary. Phase 2 therefore needs a parent-side adapter, or a
+post-archive reader using the same fixed-member helper as the CLI.
+
+The team still needs to choose:
+
+- final `resource_proxy.*` field names;
+- job-only versus selected per-site publication;
+- whether hardware models may ever be published;
+- the telemetry event type and payload limit;
+- retry duration and duplicate-delivery behavior; and
+- the reusable JobStatsReporter publication interface exposed to the root
+  server parent.
+
+Phase 2 never collects Phase 1 data, never reads a duplicate job-store
+component, and never changes the job outcome.
 
 ## Closed decisions (reference only)
 
-These are no longer open:
-
 - no extra privileges or configuration;
 - no scheduler, container, cloud, or billing APIs;
-- CUDA runtime is the only numeric GPU-count authority;
-- full GPUs and MIG instances are separate;
+- site data is self-reported rather than described as immutable evidence;
+- CUDA Runtime is the only numeric GPU-count authority;
+- full GPUs and MIG instances are separate, and MIG fields are omitted when
+  inapplicable;
+- CPU and GPU model strings are optional, bounded, and omitted when unsafe or
+  heterogeneous;
 - raw identity and topology fields are excluded;
 - missing data is not zero;
-- v1 observes the visible capacity of only the filesystem containing the
-  existing NVFlare job workspace at participant start and final; it does not
-  enumerate or sum mounts or calculate or aggregate storage capacity-time,
-  because a shared filesystem cannot be attributed to the job without new
-  privileges or configuration;
-- the server component name is exactly RESOURCE_STATS; and
-- the resource-statistics schema does not choose the roadmap process model.
+- the visible capacity of only the job-workspace filesystem is observed at
+  participant start and final, never multiplied by time or aggregated;
+- the client report rides the existing authenticated terminal-outcome request;
+- participant and current-process environment keys are HMAC-derived and only
+  derived values travel through reserved existing job metadata;
+- the server reconciles against a frozen expected-participant set;
+- the existing `WORKSPACE` archive is the sole durable source for the CLI;
+- no `RESOURCE_STATS` component exists; and
+- the schema does not choose the future task/resource process model.
 
-The rationale is kept in [SIMPLIFICATION_REVIEW.md](SIMPLIFICATION_REVIEW.md)
-and does not need to be presented unless a closed point is reopened.
+The rationale for earlier simplification is kept in
+[SIMPLIFICATION_REVIEW.md](SIMPLIFICATION_REVIEW.md).

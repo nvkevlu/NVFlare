@@ -140,7 +140,7 @@ There is no proposed `resource.json` record:
 | --- | --- |
 | `participant_summary.json` | One client or server's detailed input report. |
 | `resource_summary.json` | The server's reconciled participant list and job totals. |
-| `RESOURCE_STATS` | The fixed job-store query component; its payload is the exact `resource_summary.json` bytes. |
+| job `workspace` archive | The existing archived run directory; it contains `resource_stats/resource_summary.json`, its manifest, and accepted participant reports. |
 | `resources-all.json` | Example JSON printed by the CLI; it wraps the resource summary. |
 
 Existing NVFlare files named `resources.json` are unrelated site or component
@@ -275,8 +275,8 @@ The expected participant list uses:
 
 | State | Meaning |
 | --- | --- |
-| `accepted` | A valid final site report was received. |
-| `missing` | A report was expected but did not arrive. |
+| `accepted` | A valid final site report was accepted into the server run workspace before cutoff. |
+| `missing` | No valid report was accepted there, including an absent transfer or server storage loss. |
 | `invalid` | A report arrived but failed validation. |
 | `disabled` | Collection was already disabled by existing policy. No new setting is introduced here. |
 
@@ -293,10 +293,16 @@ immutable: job code may change or remove them, and a crash may lose them.
 
 The server validates each final site report and archives the exact accepted
 report bytes with the reconciled summary and manifest in the existing server
-job workspace. The manifest hashes those archive files. Separately, the server
-saves a byte-identical copy of the reconciled `resource_summary.json` in the
-job store under the exact component name `RESOURCE_STATS` for queries and
-Phase 2.
+job workspace. The manifest hashes those archive files. The CLI and Phase 2
+read the reconciled summary from that existing archived workspace; the design
+does not create a separate query copy.
+
+The CLI's authenticated server handler stages the existing `workspace`
+component, reads only fixed `resource_stats/...` ZIP members, and checks the
+manifest before returning them. A `--site` query first resolves the display ID
+to the participant key recorded in the accepted summary. The reader rejects
+missing, duplicate, encrypted, oversized, or digest-mismatched members and
+does not extract caller-selected paths.
 
 This prototype does not require a separate protected site directory. If
 stronger crash recovery is later needed, the team must choose a solution that
@@ -304,30 +310,35 @@ still satisfies the no-new-privileges and no-new-configuration requirements.
 
 ## Security boundary
 
-The first observation must come from NVFlare platform code before job code can
-change the result. The exact call site depends on the process model that the
-resource-management work selects.
+NVFlare platform code takes the first observation at the earliest practical
+current hook: in the client and server job processes after workspace
+construction and before NVFlare explicitly adds the job's custom directory to
+`sys.path`. Each current job process records one process-lifetime measurement
+period.
+
+This is not tamper-resistant attestation. A launcher can put custom code on
+`PYTHONPATH` before Python enters the job-process `main()`, so `sitecustomize`
+can run earlier. The design therefore calls the values authenticated site
+self-reports. Exact hooks and this limitation are documented in
+[Current-code integration](CURRENT_CODE_INTEGRATION.md).
 
 An earlier prototype prescribed process-specific bootstrap and launch changes.
 They are no longer part of this design.
 
-If the selected process model cannot provide a trustworthy initial observation
-without extra privileges or operator setup, the value must be marked
-unavailable. The implementation must not weaken the deployment constraints.
+A future task runner may open and close different measurement periods through
+the same record API. That roadmap decision does not change the v1 contract or
+permit extra privileges or operator setup.
 
 ## Remaining decisions
 
 [GAPS.md](GAPS.md) is the authoritative decision list. The main themes are:
 
-- Which existing NVFlare component records job-run and measurement-period
-  boundaries.
-- What starts and ends a measurement period in the selected process model.
-- How a trustworthy pre-job-code observation is made in that model.
-- How much site-side data can survive a crash using only existing storage.
-- How the measurement-scope key is derived from information NVFlare already
-  has.
-- Whether `reconfigured` remains useful as an end reason. It no longer implies
-  a successor period.
+- GPU runtime/NVML version support and device matching;
+- F3 polling/stream correlation, forwarding provenance, and parent merge;
+- whether an existing owner can provide a complete saved-result set;
+- initial supported operating systems;
+- the attempt bound and whether `reconfigured` remains useful; and
+- root-parent restart recovery for the expected map and accepted-report ledger.
 
 The closed field, formula, privacy, deployment, and storage decisions are
 already reflected in the examples and catalogs. Review their rationale only if
@@ -337,6 +348,7 @@ needed in [SIMPLIFICATION_REVIEW.md](SIMPLIFICATION_REVIEW.md).
 
 | File | Purpose |
 | --- | --- |
+| [Current-code integration](CURRENT_CODE_INTEGRATION.md) | Exact current hooks, transport, acceptance, archival, and CLI lookup. |
 | [Implementation plan](../../docs/design/job_resource_statistics_implementation_plan.md) | Agreed behavior, open integration decisions, and implementation slices. |
 | [Phase 2 sketch](../../docs/design/job_resource_statistics_phase2_telemetry_sketch.md) | How `JobStatsReporter` may publish a finalized Phase 1 result. |
 | [Schema guide](schema/README.md) | Exact record shapes and calculations. |

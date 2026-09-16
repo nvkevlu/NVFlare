@@ -17,9 +17,9 @@
 The normal generator deliberately captures only what the local process can
 actually observe.  These fixtures exercise proposed runtime boundaries that
 cannot be honestly installed in this standalone process yet: a CUDA runtime
-adapter, an NVFlare-only F3 sender hook, reporter selection, and server storage.  Every
-file emitted here declares itself a synthetic contract fixture; none is a local
-resource observation or production evidence.
+adapter, an NVFlare-only F3 sender hook, reporter selection, and archived
+workspace access.  Every file emitted here declares itself a synthetic contract
+fixture; none is a local resource observation or production evidence.
 """
 
 from __future__ import annotations
@@ -29,20 +29,24 @@ import json
 import os
 from pathlib import Path
 from typing import Any
+from zipfile import ZIP_STORED, ZipFile, ZipInfo
 
 from f3_finalization import F3FinalizationCounter, JobTrafficClass, JobTrafficEvent
 from prototype_contract import (
-    FixedResourceStatsStore,
+    RESOURCE_MANIFEST_MEMBER,
+    RESOURCE_SUMMARY_MEMBER,
     ReporterLeaseConflict,
     ReporterLeaseRegistry,
-    RESOURCE_STATS_COMPONENT,
+    WORKSPACE_COMPONENT,
     WorkspaceAttemptStore,
+    WorkspaceResourceStatsReader,
 )
 from runtime_probe import probe_gpu_records
 
 
 _FIXTURE_ATTEMPT_ID = "1" * 32
 _TERMINATED_FIXTURE_ATTEMPT_ID = "2" * 32
+_FIXTURE_PARTICIPANT_KEY = "sha256-" + "a" * 64
 
 
 def _json_bytes(value: Any) -> bytes:
@@ -234,19 +238,72 @@ def _fragment_fixture(root: Path, job_id: str) -> dict[str, Any]:
     }
 
 
-def _fixed_component_fixture(root: Path, job_id: str, resource_summary_bytes: bytes) -> dict[str, Any]:
-    store = FixedResourceStatsStore(root / "server_job_store")
-    receipt = store.save_resource_stats(job_id, resource_summary_bytes)
+def _write_archive(path: Path, members: dict[str, bytes]) -> None:
+    """Write a deterministic ZIP shaped like the existing WORKSPACE component."""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with ZipFile(path, "w", compression=ZIP_STORED) as archive:
+        for name, data in sorted(members.items()):
+            info = ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
+            info.compress_type = ZIP_STORED
+            info.external_attr = 0o600 << 16
+            archive.writestr(info, data)
+
+
+def _workspace_archive_fixture(root: Path, job_id: str, resource_summary_bytes: bytes) -> dict[str, Any]:
+    participant_relative_path = f"participants/{_FIXTURE_PARTICIPANT_KEY}.json"
+    participant_member = f"resource_stats/{participant_relative_path}"
+    participant_bytes = _json_bytes(
+        {
+            "schema_version": "prototype-0.3",
+            "kind": "nvflare.resource_stats.participant_summary",
+            "job_id": job_id,
+            "participant_key": _FIXTURE_PARTICIPANT_KEY,
+            "provenance": "synthetic_contract_fixture",
+        }
+    )
+    manifest_bytes = _json_bytes(
+        {
+            "schema_version": "prototype-0.3",
+            "kind": "nvflare.resource_stats.manifest",
+            "entries": [
+                {
+                    "relative_path": "resource_summary.json",
+                    "byte_count": len(resource_summary_bytes),
+                    "sha256": hashlib.sha256(resource_summary_bytes).hexdigest(),
+                },
+                {
+                    "relative_path": participant_relative_path,
+                    "byte_count": len(participant_bytes),
+                    "sha256": hashlib.sha256(participant_bytes).hexdigest(),
+                },
+            ],
+        }
+    )
+    archive_path = root / "server_job_store" / "jobs" / job_id / WORKSPACE_COMPONENT
+    _write_archive(
+        archive_path,
+        {
+            RESOURCE_SUMMARY_MEMBER: resource_summary_bytes,
+            RESOURCE_MANIFEST_MEMBER: manifest_bytes,
+            participant_member: participant_bytes,
+        },
+    )
+    reader = WorkspaceResourceStatsReader(archive_path)
     return {
         "schema_version": "prototype-0.3",
-        "kind": "nvflare.resource_stats.fixed_component_fixture",
+        "kind": "nvflare.resource_stats.workspace_archive_reader_fixture",
         "provenance": "synthetic_contract_fixture",
-        "component": RESOURCE_STATS_COMPONENT,
-        "exact_component_allowed": FixedResourceStatsStore.is_allowed_component(RESOURCE_STATS_COMPONENT),
-        "prefix_variant_allowed": FixedResourceStatsStore.is_allowed_component(f"{RESOURCE_STATS_COMPONENT}_site-1"),
-        "relative_path": receipt.path.resolve().relative_to(root.resolve()).as_posix(),
-        "sha256": receipt.sha256,
-        "byte_identical_to_canonical_summary": store.get_resource_stats(job_id) == resource_summary_bytes,
+        "component": WORKSPACE_COMPONENT,
+        "relative_path": archive_path.resolve().relative_to(root.resolve()).as_posix(),
+        "summary_member": RESOURCE_SUMMARY_MEMBER,
+        "manifest_member": RESOURCE_MANIFEST_MEMBER,
+        "participant_member": participant_member,
+        "archive_sha256": hashlib.sha256(archive_path.read_bytes()).hexdigest(),
+        "summary_matches_canonical": reader.read_resource_summary_bytes() == resource_summary_bytes,
+        "manifest_readable": reader.read_manifest_bytes() == manifest_bytes,
+        "participant_matches": reader.read_participant_summary_bytes(_FIXTURE_PARTICIPANT_KEY) == participant_bytes,
+        "separate_query_component_created": False,
     }
 
 
@@ -266,8 +323,8 @@ def write_review_contract_fixtures(output_dir: Path, job_id: str, resource_summa
         _write_json(root / name, contents)
     _write_json(root / "workspace_fragments.json", _fragment_fixture(root, job_id))
     _write_json(
-        root / "fixed_resource_stats_component.json",
-        _fixed_component_fixture(root, job_id, resource_summary_bytes),
+        root / "workspace_archive_reader.json",
+        _workspace_archive_fixture(root, job_id, resource_summary_bytes),
     )
     manifest_entries = [_relative_record(path, root) for path in sorted(root.glob("*.json"))]
     manifest = {

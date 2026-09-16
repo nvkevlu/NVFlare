@@ -38,8 +38,9 @@ import time
 import uuid
 from pathlib import Path
 from typing import Any, Iterable
+from zipfile import ZIP_STORED, ZipFile, ZipInfo
 
-from prototype_contract import FixedResourceStatsStore
+from prototype_contract import WORKSPACE_COMPONENT, WorkspaceResourceStatsReader
 from review_contract_fixtures import write_review_contract_fixtures
 from runtime_probe import probe_cpu, probe_gpu, probe_memory, probe_storage
 
@@ -571,6 +572,19 @@ def _write_manifest(resource_dir: Path) -> dict[str, Any]:
     }
 
 
+def _write_workspace_archive(path: Path, resource_dir: Path) -> None:
+    """Package resource records in the existing archived workspace component."""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with ZipFile(path, "w", compression=ZIP_STORED) as archive:
+        for source in sorted(candidate for candidate in resource_dir.rglob("*") if candidate.is_file()):
+            member_name = f"resource_stats/{source.relative_to(resource_dir).as_posix()}"
+            info = ZipInfo(member_name, date_time=(1980, 1, 1, 0, 0, 0))
+            info.compress_type = ZIP_STORED
+            info.external_attr = 0o600 << 16
+            archive.writestr(info, source.read_bytes())
+
+
 def generate(output_dir: Path, job_id: str, study: str, observation_seconds: float) -> dict[str, Any]:
     if observation_seconds < 0:
         raise ValueError("observation_seconds must be non-negative")
@@ -777,11 +791,10 @@ def generate(output_dir: Path, job_id: str, study: str, observation_seconds: flo
     manifest_path = server_resource_dir / "manifest.json"
     manifest_bytes = _write_json(manifest_path, manifest)
 
-    # The query copy has one exact RESOURCE_STATS component name.  Do not model
-    # it as a generic DataTypes prefix or caller-chosen filename.
-    query_store = FixedResourceStatsStore(job_store_dir)
-    query_copy_receipt = query_store.save_resource_stats(job_id, resource_summary_bytes)
-    query_copy_path = query_copy_receipt.path
+    workspace_archive_path = job_store_dir / "jobs" / job_id / WORKSPACE_COMPONENT
+    _write_workspace_archive(workspace_archive_path, server_resource_dir)
+    workspace_reader = WorkspaceResourceStatsReader(workspace_archive_path)
+    archive_participant_key = participant_key.replace("sha256:", "sha256-")
     descriptor = {
         "schema_version": RESOURCE_SCHEMA_VERSION,
         "kind": "nvflare.resource_stats.job_metadata_descriptor",
@@ -904,8 +917,17 @@ def generate(output_dir: Path, job_id: str, study: str, observation_seconds: flo
         ],
         "integrity": {
             "resource_summary_sha256": _sha256(resource_summary_bytes),
-            "query_copy_matches_resource_summary": query_copy_path.read_bytes() == resource_summary_bytes,
-            "query_copy_component": query_copy_path.name,
+            "workspace_component": workspace_archive_path.name,
+            "workspace_sha256": _sha256(workspace_archive_path.read_bytes()),
+            "workspace_resource_summary_member": "resource_stats/resource_summary.json",
+            "workspace_resource_summary_matches": (
+                workspace_reader.read_resource_summary_bytes() == resource_summary_bytes
+            ),
+            "workspace_manifest_matches": workspace_reader.read_manifest_bytes() == manifest_bytes,
+            "workspace_participant_matches": (
+                workspace_reader.read_participant_summary_bytes(archive_participant_key)
+                == participant_summary_bytes
+            ),
         },
         "review_contract_fixtures": review_contract_fixtures,
     }

@@ -8,13 +8,14 @@ small Python contracts. It does not implement production NVFlare integration.
 | Step | Read | Purpose |
 | ---: | --- | --- |
 | 1 | [Review guide](REVIEW_GUIDE.md) | Walk through the proposal in plain language. |
-| 2 | [Rollup flow](ROLLUP_FLOW.md) | Follow observations through the site report, job summary, and `RESOURCE_STATS`. |
-| 3 | [All-site CLI](schema/golden/v1/finalized_job/cli/resources-all.txt), [one site report](schema/golden/v1/participant_summary.json), and [job summary](schema/golden/v1/resource_summary.json) | See the user output, site input, and server rollup. |
-| 4 | [Open decisions](GAPS.md) | Review the authoritative list of choices still to make. |
-| 5 | [Phase 1 implementation plan](../../docs/design/job_resource_statistics_implementation_plan.md) | Discuss code placement, delivery, tests, or work breakdown. |
-| 6 | [Phase 2 JobStatsReporter sketch](../../docs/design/job_resource_statistics_phase2_telemetry_sketch.md) | Discuss publication after Phase 1. |
+| 2 | [Rollup flow](ROLLUP_FLOW.md) | Follow observations through the site report, job summary, archived workspace, and CLI. |
+| 3 | [Current-code integration](CURRENT_CODE_INTEGRATION.md) | See exact current hooks, terminal-outcome transport, server acceptance, archival, and CLI lookup. |
+| 4 | [All-site CLI](schema/golden/v1/finalized_job/cli/resources-all.txt), [one site report](schema/golden/v1/participant_summary.json), and [job summary](schema/golden/v1/resource_summary.json) | See the user output, site input, and server rollup. |
+| 5 | [Open decisions](GAPS.md) | Review the authoritative list of choices still to make. |
+| 6 | [Phase 1 implementation plan](../../docs/design/job_resource_statistics_implementation_plan.md) | Discuss code placement, delivery, tests, or work breakdown. |
+| 7 | [Phase 2 JobStatsReporter sketch](../../docs/design/job_resource_statistics_phase2_telemetry_sketch.md) | Discuss publication after Phase 1. |
 
-The main design meeting can stop after step 4. The catalogs below are lookup
+The main design meeting can stop after step 5. The catalogs below are lookup
 material for questions about an exact field or rule.
 
 ## What is included
@@ -25,8 +26,10 @@ The prototype contains:
 - a closed JSON Schema and semantic validator;
 - exact CPU, memory, and GPU resource-time calculations;
 - an F3 counter and cutoff prototype;
+- a terminal-outcome report envelope and idempotent acceptance prototype;
 - server reconciliation with missing participants kept visible;
-- an exact server archive, manifest, and `RESOURCE_STATS` query component; and
+- a byte-consistent minimal `WORKSPACE` archive, manifest, and safe fixed-member
+  workspace reader; and
 - generated human and JSON CLI output.
 
 The review guide is the primary overview of requirements, trust, collection
@@ -45,7 +48,7 @@ record transformations.
 | [Site-2 report](schema/golden/v1/participant_summary_partial_periods.json) | Two measured periods separated by a five-minute gap. |
 | [Server report](schema/golden/v1/participant_summary_server.json) | Server report with no visible GPU and the saved-result total. |
 | [Job summary](schema/golden/v1/resource_summary.json) | Reconciled expected participants and job totals. |
-| [Finalized job tree](schema/golden/v1/finalized_job) | Byte-consistent archive, manifest, job-store copy, and CLI outputs. |
+| [Finalized job fixture](schema/golden/v1/finalized_job) | Pre-archive `server_run` construction input, a minimal representative existing `WORKSPACE` archive, manifest, and CLI outputs. The unpacked input is retained only so reviewers can inspect and regenerate the ZIP; it is not a second proposed job-store component. |
 | [Generation receipt](schema/golden/v1/finalized_job/generation_receipt.json) | Digests, derived totals, and the Colossus scale reference. |
 
 Other JSON files directly under [schema/golden/v1](schema/golden/v1) are
@@ -56,6 +59,7 @@ job history.
 
 | File | Purpose |
 | --- | --- |
+| [Current-code integration](CURRENT_CODE_INTEGRATION.md) | Exact current collection, transport, persistence, and CLI hooks. |
 | [Schema guide](schema/README.md) | Record relationships and calculation rules. |
 | [Field catalog](schema/FIELD_CATALOG.md) | Every field, type, unit, and bound. |
 | [Code catalog](schema/CODE_CATALOG.md) | Every status, issue, end reason, and F3 class. |
@@ -64,7 +68,8 @@ job history.
 | [Artifact generator](schema/build_review_artifacts.py) | Deterministic source for the canonical artifacts. |
 | [Runtime probe](runtime_probe.py) | Ordinary-user collection experiments. |
 | [F3 finalization](f3_finalization.py) | Counter inclusion, acceptance, and cutoff behavior. |
-| [Prototype contracts](prototype_contract.py) | Reporter, workspace-file, and narrow server-storage APIs. |
+| [Terminal report transport](terminal_report_transport.py) | Executable envelope, authenticated participant binding, validation, retry, conflict, and cutoff rules. |
+| [Prototype contracts](prototype_contract.py) | Reporter, workspace-file, and fixed-member workspace-archive reader. |
 | [Behavior fixtures](review_contract_fixtures.py) | Synthetic cases a standalone process cannot observe. |
 
 Optional background:
@@ -90,7 +95,8 @@ python3 -m unittest discover \
 The generator rewrites the standalone goldens and complete finalized-job tree,
 including all digests. The tests cover schema and semantic validation, exact
 arithmetic, GPU authority, F3 finalization, visible workspace-filesystem
-capacity observation, CLI output, and deterministic regeneration.
+capacity observation, terminal-report validation and replay, safe workspace
+archive access, CLI output, and deterministic regeneration.
 
 For a one-off observation of the current machine:
 

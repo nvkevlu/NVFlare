@@ -44,7 +44,7 @@ capacity plus a known end completely describes the measurement period regardless
 | Domain | Exact values | Rule |
 | --- | --- | --- |
 | role | client, server | Stored once for each expected participant; never inferred from its ID. |
-| status | accepted, missing, invalid, disabled | Tells what happened to that participant's report. |
+| status | accepted, missing, invalid, disabled | Tells what happened to that participant's report. `accepted` requires validated bytes installed in the server run workspace before cutoff. `missing` means no such bytes were accepted, including absent transfer or server-storage loss. `invalid` means a received candidate failed validation and no later valid report won. `disabled` comes only from existing platform policy. |
 
 The server already knows which participants the job expects. It does not build this list from
 resource reports. At the cutoff, each participant is accepted, missing, invalid, or disabled.
@@ -128,6 +128,12 @@ The normative included traffic classes are `task_request`, `task_response`, `tas
 `job_application`, and `job_stream_data`. The integration excludes `job_stream_control`,
 `bulk_envelope`, `workspace_transfer`, `platform_control`, `log_export`, unknown classes, and
 summary publication. These are platform-defined classifications, not caller-supplied labels.
+
+`task_request` and `task_response` mean a request/reply pair that carries a real task; empty
+polling, `__try_again__`, and `__end_run__` are excluded. An accepted request's bytes remain
+pending until its reply establishes that fact. `job_stream_data` requires platform-owned
+provenance from an included parent payload; an unbound DownloadService transaction is excluded.
+Reliable stream retransmissions do not add another logical byte or message contribution.
 
 `payload_bytes` is `len(message.payload)` after `encode_payload` and optional end-to-end
 `encrypt_payload`, sampled immediately before direct delivery or `Communicator.send`. It excludes

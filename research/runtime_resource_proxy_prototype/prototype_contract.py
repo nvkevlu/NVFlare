@@ -19,7 +19,8 @@ helpers test three rules that are independent of that choice:
 
 * only one reporter covers the same job and measurement scope at a time;
 * local fragments are self-reports stored in the existing job workspace; and
-* the server uses the exact ``RESOURCE_STATS`` component name.
+* finalized records are read from fixed members of the existing archived
+  ``workspace`` component.
 
 Nothing here requires a new launcher argument, mount, service, privilege, or
 operator setting.  The local write-once helper prevents accidental replacement
@@ -38,12 +39,21 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
+from zipfile import BadZipFile, ZipFile
 
 
-RESOURCE_STATS_COMPONENT = "RESOURCE_STATS"
+WORKSPACE_COMPONENT = "workspace"
+RESOURCE_STATS_ARCHIVE_DIR = "resource_stats"
+RESOURCE_SUMMARY_MEMBER = f"{RESOURCE_STATS_ARCHIVE_DIR}/resource_summary.json"
+RESOURCE_MANIFEST_MEMBER = f"{RESOURCE_STATS_ARCHIVE_DIR}/manifest.json"
+MAX_RESOURCE_SUMMARY_BYTES = 64 * 1024 * 1024
+MAX_RESOURCE_MANIFEST_BYTES = 4 * 1024 * 1024
+MAX_PARTICIPANT_SUMMARY_BYTES = 64 * 1024 * 1024
 
 _ATTEMPT_ID_PATTERN = re.compile(r"^[0-9a-f]{32}$")
 _SAFE_PATH_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+_PARTICIPANT_KEY_PATTERN = re.compile(r"^sha256-[0-9a-f]{64}$")
+_SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 _OBSERVATION_FRAGMENT_NAMES = frozenset({"start.json", "final.json"})
 _ALL_FRAGMENT_NAMES = _OBSERVATION_FRAGMENT_NAMES | {"end.json"}
 _ATTEMPT_END_REASONS = frozenset({"released", "reconfigured", "failed", "terminated", "launch_failed"})
@@ -55,6 +65,10 @@ class ReporterLeaseConflict(RuntimeError):
 
 class WriteOnceRecordConflict(RuntimeError):
     """Raised when this API finds different bytes at an existing record path."""
+
+
+class WorkspaceArchiveError(RuntimeError):
+    """Raised when a requested resource-statistics archive member is unsafe or invalid."""
 
 
 def _require_attempt_id(attempt_id: str) -> str:
@@ -243,33 +257,154 @@ class WorkspaceAttemptStore:
         return _write_once(self.fragment_path(job_id, attempt_id, "end.json"), _json_bytes(record))
 
 
-class FixedResourceStatsStore:
-    """Prototype of a narrow final-summary API with one exact component name."""
+class WorkspaceResourceStatsReader:
+    """Read fixed resource-statistics members from an existing workspace ZIP.
 
-    def __init__(self, job_store_root: Path):
-        self.job_store_root = Path(job_store_root).resolve()
-        self.job_store_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    This reader never extracts an archive member to disk and never accepts a
+    caller-provided member name.  The manifest checks bundle consistency; it is
+    not a signature or site-authentication mechanism. Normal job-storage
+    authorization remains the outer security boundary.
+    """
+
+    def __init__(
+        self,
+        workspace_archive: Path,
+        *,
+        max_resource_summary_bytes: int = MAX_RESOURCE_SUMMARY_BYTES,
+        max_manifest_bytes: int = MAX_RESOURCE_MANIFEST_BYTES,
+        max_participant_summary_bytes: int = MAX_PARTICIPANT_SUMMARY_BYTES,
+    ):
+        self.workspace_archive = Path(workspace_archive)
+        self.max_resource_summary_bytes = self._require_positive_bound(
+            max_resource_summary_bytes, "max_resource_summary_bytes"
+        )
+        self.max_manifest_bytes = self._require_positive_bound(max_manifest_bytes, "max_manifest_bytes")
+        self.max_participant_summary_bytes = self._require_positive_bound(
+            max_participant_summary_bytes, "max_participant_summary_bytes"
+        )
 
     @staticmethod
-    def is_allowed_component(component_name: str) -> bool:
-        return component_name == RESOURCE_STATS_COMPONENT
+    def _require_positive_bound(value: int, label: str) -> int:
+        if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+            raise ValueError(f"{label} must be a positive integer")
+        return value
 
-    def save_resource_stats(self, job_id: str, resource_summary: bytes) -> FragmentReceipt:
-        """Persist the byte-exact finalized summary without a caller-selected component."""
+    def _read_exact_member(self, member_name: str, max_bytes: int) -> bytes:
+        """Return one fixed member after duplicate, encryption, and size checks."""
 
-        job_id = _require_path_id(job_id, "job_id")
-        if not isinstance(resource_summary, bytes):
-            raise TypeError("resource_summary must be bytes")
-        path = self.job_store_root / "jobs" / job_id / RESOURCE_STATS_COMPONENT
-        return _write_once(path, resource_summary)
+        if not self.workspace_archive.is_file():
+            raise WorkspaceArchiveError(f"workspace archive is not a file: {self.workspace_archive}")
+        try:
+            with ZipFile(self.workspace_archive, "r") as archive:
+                matches = [info for info in archive.infolist() if info.filename == member_name]
+                if len(matches) != 1:
+                    raise WorkspaceArchiveError(
+                        f"workspace archive must contain exactly one '{member_name}' member; found {len(matches)}"
+                    )
+                info = matches[0]
+                if info.is_dir():
+                    raise WorkspaceArchiveError(f"workspace member is a directory: {member_name}")
+                if info.flag_bits & 0x1:
+                    raise WorkspaceArchiveError(f"encrypted workspace member is not supported: {member_name}")
+                if info.file_size > max_bytes:
+                    raise WorkspaceArchiveError(
+                        f"workspace member exceeds its {max_bytes}-byte limit: {member_name}"
+                    )
+                with archive.open(info, "r") as stream:
+                    data = stream.read(max_bytes + 1)
+                if len(data) > max_bytes:
+                    raise WorkspaceArchiveError(
+                        f"workspace member exceeds its {max_bytes}-byte limit: {member_name}"
+                    )
+                if len(data) != info.file_size:
+                    raise WorkspaceArchiveError(f"workspace member length is inconsistent: {member_name}")
+                return data
+        except WorkspaceArchiveError:
+            raise
+        except (BadZipFile, OSError, RuntimeError, EOFError) as exc:
+            raise WorkspaceArchiveError(f"cannot read workspace archive: {exc}") from exc
 
-    def get_resource_stats(self, job_id: str) -> bytes | None:
-        """Return the one exact final-summary component, or ``None`` if absent."""
+    def _read_manifest(self) -> tuple[bytes, dict[str, Mapping[str, Any]]]:
+        data = self._read_exact_member(RESOURCE_MANIFEST_MEMBER, self.max_manifest_bytes)
+        manifest = self._load_json_object(data, "resource statistics manifest")
+        if not isinstance(manifest.get("entries"), list):
+            raise WorkspaceArchiveError("resource statistics manifest must contain an entries array")
+        entries: dict[str, Mapping[str, Any]] = {}
+        for entry in manifest["entries"]:
+            if not isinstance(entry, Mapping):
+                raise WorkspaceArchiveError("resource statistics manifest entries must be objects")
+            relative_path = entry.get("relative_path")
+            digest = entry.get("sha256")
+            if (
+                not isinstance(relative_path, str)
+                or not isinstance(digest, str)
+                or not _SHA256_PATTERN.fullmatch(digest)
+            ):
+                raise WorkspaceArchiveError("resource statistics manifest entry is invalid")
+            if relative_path in entries:
+                raise WorkspaceArchiveError(f"duplicate resource statistics manifest entry: {relative_path}")
+            byte_count = entry.get("byte_count")
+            if byte_count is not None and (
+                not isinstance(byte_count, int) or isinstance(byte_count, bool) or byte_count < 0
+            ):
+                raise WorkspaceArchiveError("resource statistics manifest byte_count must be a non-negative integer")
+            entries[relative_path] = entry
+        return data, entries
 
-        job_id = _require_path_id(job_id, "job_id")
-        path = self.job_store_root / "jobs" / job_id / RESOURCE_STATS_COMPONENT
-        if not path.exists():
-            return None
-        if path.is_symlink() or not path.is_file():
-            raise WriteOnceRecordConflict(f"resource-stats component is not a regular file: {path}")
-        return path.read_bytes()
+    @staticmethod
+    def _load_json_object(data: bytes, label: str) -> Mapping[str, Any]:
+        def reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+            result: dict[str, Any] = {}
+            for key, value in pairs:
+                if key in result:
+                    raise WorkspaceArchiveError(f"{label} contains duplicate object key '{key}'")
+                result[key] = value
+            return result
+
+        try:
+            value = json.loads(data, object_pairs_hook=reject_duplicate_keys)
+        except WorkspaceArchiveError:
+            raise
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise WorkspaceArchiveError(f"{label} is not valid UTF-8 JSON") from exc
+        if not isinstance(value, Mapping):
+            raise WorkspaceArchiveError(f"{label} must be a JSON object")
+        return value
+
+    @staticmethod
+    def _verify_manifest_entry(data: bytes, relative_path: str, entries: Mapping[str, Mapping[str, Any]]) -> None:
+        entry = entries.get(relative_path)
+        if entry is None:
+            raise WorkspaceArchiveError(f"resource statistics manifest does not list '{relative_path}'")
+        if entry["sha256"] != hashlib.sha256(data).hexdigest():
+            raise WorkspaceArchiveError(f"resource statistics manifest digest mismatch for '{relative_path}'")
+        if entry.get("byte_count") is not None and entry["byte_count"] != len(data):
+            raise WorkspaceArchiveError(f"resource statistics manifest byte count mismatch for '{relative_path}'")
+
+    def read_manifest_bytes(self) -> bytes:
+        """Return the one fixed resource-statistics manifest member."""
+
+        data, _ = self._read_manifest()
+        return data
+
+    def read_resource_summary_bytes(self) -> bytes:
+        """Return the finalized job summary after checking its manifest entry."""
+
+        data = self._read_exact_member(RESOURCE_SUMMARY_MEMBER, self.max_resource_summary_bytes)
+        self._load_json_object(data, "resource summary")
+        _, entries = self._read_manifest()
+        self._verify_manifest_entry(data, "resource_summary.json", entries)
+        return data
+
+    def read_participant_summary_bytes(self, participant_key: str) -> bytes:
+        """Return one manifest-listed participant selected by its validated key."""
+
+        if not isinstance(participant_key, str) or not _PARTICIPANT_KEY_PATTERN.fullmatch(participant_key):
+            raise ValueError("participant_key must be 'sha256-' followed by 64 lowercase hexadecimal characters")
+        relative_path = f"participants/{participant_key}.json"
+        member_name = f"{RESOURCE_STATS_ARCHIVE_DIR}/{relative_path}"
+        data = self._read_exact_member(member_name, self.max_participant_summary_bytes)
+        self._load_json_object(data, "participant summary")
+        _, entries = self._read_manifest()
+        self._verify_manifest_entry(data, relative_path, entries)
+        return data

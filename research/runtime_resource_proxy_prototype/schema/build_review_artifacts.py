@@ -29,6 +29,7 @@ from copy import deepcopy
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
+from zipfile import ZIP_STORED, ZipFile, ZipInfo
 
 from contract_v1 import (
     KIND_ATTEMPT_END,
@@ -72,6 +73,18 @@ def _digest(data: bytes) -> str:
 def _write(path: Path, data: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(data)
+
+
+def _write_workspace_archive(path: Path, members: dict[str, bytes]) -> None:
+    """Write deterministic members in the existing job-store workspace ZIP."""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with ZipFile(path, "w", compression=ZIP_STORED) as archive:
+        for member_name, data in sorted(members.items()):
+            info = ZipInfo(member_name, date_time=(1980, 1, 1, 0, 0, 0))
+            info.compress_type = ZIP_STORED
+            info.external_attr = 0o600 << 16
+            archive.writestr(info, data)
 
 
 def _compute_capacity(
@@ -768,8 +781,19 @@ def build(output_root: Path = DEFAULT_OUTPUT) -> dict[str, Any]:
     for participant_key, participant_bytes in accepted_bytes.items():
         _write(resource_root / "participants" / f"{participant_key}.json", participant_bytes)
     _write(resource_root / "manifest.json", manifest_bytes)
-    query_copy = output_root / "job_store" / "jobs" / JOB_ID / "RESOURCE_STATS"
-    _write(query_copy, summary_bytes)
+    workspace_archive = output_root / "job_store" / "jobs" / JOB_ID / "workspace"
+    workspace_members = {
+        "resource_stats/resource_summary.json": summary_bytes,
+        "resource_stats/manifest.json": manifest_bytes,
+        **{
+            f"resource_stats/participants/{participant_key}.json": participant_bytes
+            for participant_key, participant_bytes in accepted_bytes.items()
+        },
+    }
+    _write_workspace_archive(workspace_archive, workspace_members)
+    with ZipFile(workspace_archive, "r") as archive:
+        workspace_summary_matches = archive.read("resource_stats/resource_summary.json") == summary_bytes
+        workspace_manifest_matches = archive.read("resource_stats/manifest.json") == manifest_bytes
 
     cli_json = {
         "schema_version": "1",
@@ -801,7 +825,11 @@ def build(output_root: Path = DEFAULT_OUTPUT) -> dict[str, Any]:
         },
         "resource_summary_sha256": _digest(summary_bytes),
         "manifest_sha256": _digest(manifest_bytes),
-        "query_copy_matches_resource_summary": query_copy.read_bytes() == summary_bytes,
+        "workspace_component": workspace_archive.name,
+        "workspace_sha256": _digest(workspace_archive.read_bytes()),
+        "workspace_resource_summary_member": "resource_stats/resource_summary.json",
+        "workspace_resource_summary_matches": workspace_summary_matches,
+        "workspace_manifest_matches": workspace_manifest_matches,
         "scenario_basis": {
             "description": "Illustrative values scaled to a completed two-client Qwen2.5-14B qualification.",
             "reference_label": (
@@ -809,8 +837,8 @@ def build(output_root: Path = DEFAULT_OUTPUT) -> dict[str, Any]:
             ),
             "scope_note": (
                 "The A100 model, four-GPU baseline, runtime scale, model-state size, and saved-result size are "
-                "evidence-based; CPU, memory, visible workspace-filesystem capacity, and site-2 period/resource changes "
-                "are illustrative."
+                "evidence-based; CPU, memory, visible workspace-filesystem capacity, and site-2 period/resource "
+                "changes are illustrative."
             ),
             "reference_runtime_seconds": "2223",
             "reference_model_state_bytes": "29540067328",

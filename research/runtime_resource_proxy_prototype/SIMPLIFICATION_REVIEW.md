@@ -5,7 +5,7 @@ is a decision history, not the main review document.
 
 For the current design, read [REVIEW_GUIDE.md](REVIEW_GUIDE.md).
 
-## Latest correction: process architecture is open
+## Latest correction: current adapter is concrete; future architecture is open
 
 An earlier draft treated one item from the NVFlare roadmap's “Possible
 Features” list as a settled design. It assumed a particular process model and
@@ -15,15 +15,21 @@ That assumption was wrong.
 
 The current design now states:
 
-- Phase 1 defines data and formulas, not the task-process architecture.
+- The v1 adapter for today's code uses one process-lifetime period in each
+  client or server job process and the existing terminal-outcome transport.
 - CP may run tasks directly, NVFlare may use child processes, or another design
-  may be chosen.
+  may be chosen in future roadmap work.
 - A measurement period does not imply a process, allocation, or lease.
 - A resource change does not require a successor measurement period.
 - Process-specific bootstrap and coordination requirements are removed.
 - No new privilege, mount, service, launcher flag, environment variable, or
   user/operator setting is allowed.
 - Site files are self-reported until the server receives the final report.
+
+The exact present-day hooks are in
+[Current-code integration](CURRENT_CODE_INTEGRATION.md). Choosing those hooks
+does not prescribe the future task-runner architecture; a future adapter can
+open different periods without changing the records or formulas.
 
 The previous intermediate commit remains in Git history so reviewers can
 see exactly what changed.
@@ -172,7 +178,7 @@ volume or mount is introduced.
 Site fragments are normal self-reported workspace files. They can be lost or
 changed before the server receives the final report. Server-side accepted files
 use existing server job storage and the manifest. The reconciled summary also
-has a byte-identical `RESOURCE_STATS` job-store copy.
+remains in that archived workspace; there is no separate query copy.
 
 ## F3 decisions
 
@@ -193,8 +199,9 @@ excluded through platform code so job code cannot spoof the exclusion.
 The server uses the expected participants already known to the job. It marks
 each one accepted, missing, invalid, or disabled at the cutoff.
 
-The server stores one exact RESOURCE_STATS component. It does not expose a
-generic component prefix.
+The server stores the bundle in the job's existing `workspace` archive. The
+query handler reads fixed `resource_stats/...` ZIP members and does not accept
+caller-selected archive paths.
 
 The CLI uses:
 

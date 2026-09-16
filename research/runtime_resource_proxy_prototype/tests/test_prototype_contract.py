@@ -12,23 +12,28 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import inspect
+import hashlib
 import json
 import sys
 import tempfile
 import unittest
+import warnings
 from pathlib import Path
+from zipfile import ZIP_STORED, ZipFile
 
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from prototype_contract import (  # noqa: E402
-    RESOURCE_STATS_COMPONENT,
-    FixedResourceStatsStore,
+    MAX_RESOURCE_MANIFEST_BYTES,
+    RESOURCE_MANIFEST_MEMBER,
+    RESOURCE_SUMMARY_MEMBER,
     ReporterLeaseConflict,
     ReporterLeaseRegistry,
+    WorkspaceArchiveError,
     WorkspaceAttemptStore,
+    WorkspaceResourceStatsReader,
     WriteOnceRecordConflict,
 )
 
@@ -97,20 +102,132 @@ class TestWorkspaceAttemptStore(unittest.TestCase):
             self.assertEqual("not_invented", end_record["resource_observations"]["state"])
 
 
-class TestFixedResourceStatsStore(unittest.TestCase):
-    def test_resource_stats_is_one_exact_component_and_api_has_no_caller_selected_component(self):
+class TestWorkspaceResourceStatsReader(unittest.TestCase):
+    PARTICIPANT_KEY = "sha256-" + "a" * 64
+
+    @staticmethod
+    def _manifest(summary: bytes, participant: bytes | None = None, *, summary_digest: str | None = None) -> bytes:
+        entries = [
+            {
+                "relative_path": "resource_summary.json",
+                "byte_count": len(summary),
+                "sha256": summary_digest or hashlib.sha256(summary).hexdigest(),
+            }
+        ]
+        if participant is not None:
+            entries.append(
+                {
+                    "relative_path": f"participants/{TestWorkspaceResourceStatsReader.PARTICIPANT_KEY}.json",
+                    "byte_count": len(participant),
+                    "sha256": hashlib.sha256(participant).hexdigest(),
+                }
+            )
+        return (json.dumps({"entries": entries}, sort_keys=True) + "\n").encode()
+
+    @staticmethod
+    def _write_archive(path: Path, members: list[tuple[str, bytes]]) -> None:
+        with ZipFile(path, "w", compression=ZIP_STORED) as archive:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", UserWarning)
+                for name, data in members:
+                    archive.writestr(name, data)
+
+    def test_reads_only_fixed_manifest_verified_members(self):
         with tempfile.TemporaryDirectory() as temp_dir:
-            store = FixedResourceStatsStore(Path(temp_dir) / "job_store")
-            payload = b'{"kind":"nvflare.resource_stats.resource_summary"}\n'
-            receipt = store.save_resource_stats("job-a", payload)
-            self.assertEqual(RESOURCE_STATS_COMPONENT, receipt.path.name)
-            self.assertEqual(payload, store.get_resource_stats("job-a"))
-            self.assertTrue(FixedResourceStatsStore.is_allowed_component(RESOURCE_STATS_COMPONENT))
-            self.assertFalse(FixedResourceStatsStore.is_allowed_component("RESOURCE_STATS_site-1"))
-            self.assertFalse(FixedResourceStatsStore.is_allowed_component("RESOURCE_STATS.json"))
+            archive_path = Path(temp_dir) / "workspace"
+            summary = b'{"kind":"nvflare.resource_stats.resource_summary"}\n'
+            participant = b'{"kind":"nvflare.resource_stats.participant_summary"}\n'
+            manifest = self._manifest(summary, participant)
+            self._write_archive(
+                archive_path,
+                [
+                    (RESOURCE_SUMMARY_MEMBER, summary),
+                    (RESOURCE_MANIFEST_MEMBER, manifest),
+                    (f"resource_stats/participants/{self.PARTICIPANT_KEY}.json", participant),
+                    ("unrelated/job-log.txt", b"not read"),
+                ],
+            )
 
-            with self.assertRaises(WriteOnceRecordConflict):
-                store.save_resource_stats("job-a", b"different bytes")
+            reader = WorkspaceResourceStatsReader(archive_path)
+            self.assertEqual(summary, reader.read_resource_summary_bytes())
+            self.assertEqual(manifest, reader.read_manifest_bytes())
+            self.assertEqual(participant, reader.read_participant_summary_bytes(self.PARTICIPANT_KEY))
+            with self.assertRaises(ValueError):
+                reader.read_participant_summary_bytes("../resource_summary")
 
-            self.assertNotIn("component", inspect.signature(store.save_resource_stats).parameters)
-            self.assertNotIn("component", inspect.signature(store.get_resource_stats).parameters)
+    def test_manifest_limit_matches_the_v1_contract(self):
+        self.assertEqual(4 * 1024 * 1024, MAX_RESOURCE_MANIFEST_BYTES)
+
+    def test_rejects_duplicate_exact_member(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            archive_path = Path(temp_dir) / "workspace"
+            summary = b"{}\n"
+            self._write_archive(
+                archive_path,
+                [
+                    (RESOURCE_SUMMARY_MEMBER, summary),
+                    (RESOURCE_SUMMARY_MEMBER, summary),
+                    (RESOURCE_MANIFEST_MEMBER, self._manifest(summary)),
+                ],
+            )
+            with self.assertRaisesRegex(WorkspaceArchiveError, "exactly one"):
+                WorkspaceResourceStatsReader(archive_path).read_resource_summary_bytes()
+
+    def test_rejects_oversize_member_before_returning_it(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            archive_path = Path(temp_dir) / "workspace"
+            summary = b"12345"
+            manifest = self._manifest(summary)
+            self._write_archive(
+                archive_path,
+                [
+                    (RESOURCE_SUMMARY_MEMBER, summary),
+                    (RESOURCE_MANIFEST_MEMBER, manifest),
+                ],
+            )
+            reader = WorkspaceResourceStatsReader(archive_path, max_resource_summary_bytes=4)
+            with self.assertRaisesRegex(WorkspaceArchiveError, "4-byte limit"):
+                reader.read_resource_summary_bytes()
+            reader = WorkspaceResourceStatsReader(archive_path, max_manifest_bytes=len(manifest) - 1)
+            with self.assertRaisesRegex(WorkspaceArchiveError, "byte limit"):
+                reader.read_manifest_bytes()
+
+    def test_rejects_manifest_digest_mismatch(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            archive_path = Path(temp_dir) / "workspace"
+            summary = b"{}\n"
+            self._write_archive(
+                archive_path,
+                [
+                    (RESOURCE_SUMMARY_MEMBER, summary),
+                    (RESOURCE_MANIFEST_MEMBER, self._manifest(summary, summary_digest="0" * 64)),
+                ],
+            )
+            with self.assertRaisesRegex(WorkspaceArchiveError, "digest mismatch"):
+                WorkspaceResourceStatsReader(archive_path).read_resource_summary_bytes()
+
+    def test_rejects_duplicate_json_object_keys(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            duplicate_summary = b'{"kind":"first","kind":"second"}\n'
+            summary_archive = root / "duplicate-summary"
+            self._write_archive(
+                summary_archive,
+                [
+                    (RESOURCE_SUMMARY_MEMBER, duplicate_summary),
+                    (RESOURCE_MANIFEST_MEMBER, self._manifest(duplicate_summary)),
+                ],
+            )
+            with self.assertRaisesRegex(WorkspaceArchiveError, "duplicate object key 'kind'"):
+                WorkspaceResourceStatsReader(summary_archive).read_resource_summary_bytes()
+
+            manifest_archive = root / "duplicate-manifest"
+            self._write_archive(
+                manifest_archive,
+                [
+                    (RESOURCE_SUMMARY_MEMBER, b"{}\n"),
+                    (RESOURCE_MANIFEST_MEMBER, b'{"entries":[],"entries":[]}\n'),
+                ],
+            )
+            with self.assertRaisesRegex(WorkspaceArchiveError, "duplicate object key 'entries'"):
+                WorkspaceResourceStatsReader(manifest_archive).read_manifest_bytes()

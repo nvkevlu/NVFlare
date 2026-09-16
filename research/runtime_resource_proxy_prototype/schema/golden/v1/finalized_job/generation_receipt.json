@@ -9,7 +9,11 @@
   },
   "resource_summary_sha256": "da712b7be319655068e996a56c845b5a5f0fa3971bd0b9bf92965f095b079ce8",
   "manifest_sha256": "956fb7e54b16dc1bf2d75bcfb9c8c45f9e47f5dcf51fd34537dc52e76b1a0cdd",
-  "query_copy_matches_resource_summary": true,
+  "workspace_component": "workspace",
+  "workspace_sha256": "5d8d2794275b8f465e271a49174f40546ff19e9015970b00b3194004e4e08b2c",
+  "workspace_resource_summary_member": "resource_stats/resource_summary.json",
+  "workspace_resource_summary_matches": true,
+  "workspace_manifest_matches": true,
   "scenario_basis": {
     "description": "Illustrative values scaled to a completed two-client Qwen2.5-14B qualification.",
     "reference_label": "Five-round 14B full-model qualification, 2026-07-31",

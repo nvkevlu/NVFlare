@@ -19,6 +19,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
+from zipfile import ZipFile
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -60,7 +61,13 @@ class TestCanonicalReviewArtifacts(unittest.TestCase):
             self.assertEqual(generated_standalone, committed_standalone)
             self.assertEqual(receipt, json.loads(generated_files[Path("generation_receipt.json")]))
             self.assertEqual("build_review_artifacts.py", receipt["generator"])
-            self.assertTrue(receipt["query_copy_matches_resource_summary"])
+            self.assertEqual("workspace", receipt["workspace_component"])
+            self.assertEqual(
+                receipt["workspace_sha256"],
+                hashlib.sha256(generated_files[Path("job_store/jobs/job-20260909-001/workspace")]).hexdigest(),
+            )
+            self.assertTrue(receipt["workspace_resource_summary_matches"])
+            self.assertTrue(receipt["workspace_manifest_matches"])
             self.assertEqual("2223", receipt["scenario_basis"]["reference_runtime_seconds"])
             self.assertEqual("590801346560", receipt["scenario_basis"]["reference_logical_state_bytes"])
             self.assertIn("did not measure the proposed post-encoding F3 counter", receipt["scenario_basis"]["f3_note"])
@@ -72,7 +79,7 @@ class TestCanonicalReviewArtifacts(unittest.TestCase):
             self.assertEqual("15984", receipt["derived_examples"]["job_gpu_instance_seconds"])
             self.assertEqual("9010000000000901", receipt["derived_examples"]["large_memory_byte_seconds"])
 
-    def test_archive_manifest_digests_and_query_copy_are_exact(self):
+    def test_archive_manifest_digests_and_workspace_members_are_exact(self):
         resource_root = COMMITTED_ROOT / "server_run" / "resource_stats"
         summary_path = resource_root / "resource_summary.json"
         manifest_path = resource_root / "manifest.json"
@@ -107,8 +114,14 @@ class TestCanonicalReviewArtifacts(unittest.TestCase):
         for entry in manifest["entries"]:
             self.assertEqual(entry["sha256"], hashlib.sha256(files[entry["relative_path"]]).hexdigest())
             self.assertEqual({"relative_path", "sha256"}, set(entry))
-        query_copy = COMMITTED_ROOT / "job_store" / "jobs" / summary["job_id"] / "RESOURCE_STATS"
-        self.assertEqual(summary_bytes, query_copy.read_bytes())
+        workspace_archive = COMMITTED_ROOT / "job_store" / "jobs" / summary["job_id"] / "workspace"
+        with ZipFile(workspace_archive, "r") as archive:
+            self.assertEqual(summary_bytes, archive.read("resource_stats/resource_summary.json"))
+            self.assertEqual(manifest_path.read_bytes(), archive.read("resource_stats/manifest.json"))
+            for participant_key, participant in participant_records.items():
+                member = f"resource_stats/participants/{participant_key}.json"
+                self.assertEqual(files[f"participants/{participant_key}.json"], archive.read(member))
+                self.assertEqual(participant_key, participant["participant_key"])
 
     def test_default_cli_is_compact_and_hides_inapplicable_mig(self):
         summary = json.loads((COMMITTED_ROOT / "server_run" / "resource_stats" / "resource_summary.json").read_text())
