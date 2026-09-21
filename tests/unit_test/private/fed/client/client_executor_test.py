@@ -261,6 +261,61 @@ def test_start_app_pending_handle_operations_before_launcher_returns(tmp_path):
         )
 
 
+def test_start_app_starts_the_cp_f3_counter_before_launcher_selection(tmp_path):
+    job_id = "job-1"
+    job_meta, workspace, client, fl_ctx = _make_start_app_inputs(tmp_path, job_id)
+    executor = JobExecutor(client=client, startup=workspace.get_startup_kit_dir())
+    launcher = MagicMock()
+
+    def get_job_launcher(*_args, **_kwargs):
+        # The counter must exist and still be collecting by the time launcher
+        # selection happens.
+        counter = executor.f3_counters.get(job_id)
+        assert counter is not None
+        assert counter.state == "collecting"
+        return launcher
+
+    with (
+        patch("nvflare.private.fed.client.client_executor.get_job_launcher", side_effect=get_job_launcher),
+        patch.object(threading.Thread, "start", lambda self: None),
+    ):
+        executor.start_app(
+            client,
+            job_id,
+            job_meta,
+            SimpleNamespace(workspace=str(tmp_path), set=[]),
+            None,
+            None,
+            None,
+            fl_ctx,
+        )
+
+
+def test_start_app_forgets_the_cp_f3_counter_when_launch_fails(tmp_path):
+    job_id = "job-1"
+    job_meta, workspace, client, fl_ctx = _make_start_app_inputs(tmp_path, job_id)
+    executor = JobExecutor(client=client, startup=workspace.get_startup_kit_dir())
+    launcher = MagicMock()
+    launcher.launch_job.side_effect = RuntimeError("launch failed")
+
+    with (
+        patch("nvflare.private.fed.client.client_executor.get_job_launcher", return_value=launcher),
+        pytest.raises(RuntimeError, match="launch failed"),
+    ):
+        executor.start_app(
+            client,
+            job_id,
+            job_meta,
+            SimpleNamespace(workspace=str(tmp_path), set=[]),
+            None,
+            None,
+            None,
+            fl_ctx,
+        )
+
+    assert executor.f3_counters.get(job_id) is None
+
+
 @pytest.mark.parametrize("heartbeat_cleanup", [False, True], ids=["user_abort", "heartbeat_cleanup"])
 def test_start_app_preserves_abort_intent_while_launcher_is_running(tmp_path, heartbeat_cleanup):
     job_id = "job-1"
@@ -720,6 +775,47 @@ def test_wait_child_process_reports_terminal_return_code(return_code, process_st
     assert payload[JobFailureMsgKey.REASON] == REPORTABLE_JOB_FAILURES.get(expected_code)
     assert "job-1" not in job_executor.run_processes
     engine.fire_event.assert_called_once_with(EventType.JOB_COMPLETED, fl_ctx)
+
+
+def test_wait_child_process_freezes_zero_traffic_f3_counter_and_forgets_it():
+    client = MagicMock()
+    client.client_name = "site-1"
+    client.send_request_before_shutdown.return_value.get_header.return_value = ReturnCode.OK
+    job_executor = JobExecutor(client=client, startup="startup")
+
+    job_handle = MagicMock()
+    job_executor.run_processes = {
+        "job-1": {
+            RunProcessKey.JOB_HANDLE: job_handle,
+            RunProcessKey.STATUS: ClientStatus.STARTED,
+            _ABORT_REQUESTED_KEY: False,
+        }
+    }
+    # Simulate start_app() having already started the counter for this job.
+    counter = job_executor.f3_counters.start_job("job-1")
+
+    engine = MagicMock()
+    fl_ctx = MagicMock()
+    fl_ctx.get_engine.return_value = engine
+
+    with patch("nvflare.private.fed.client.client_executor.get_return_code", return_value=JobReturnCode.SUCCESS):
+        job_executor._wait_child_process_finish(
+            client=client,
+            job_id="job-1",
+            allocated_resource=None,
+            token=None,
+            resource_manager=MagicMock(),
+            workspace="/tmp/workspace",
+            fl_ctx=fl_ctx,
+        )
+
+    assert counter.freeze() == {
+        "status": "reported",
+        "remote_accepted": {"payload_bytes": "0", "messages": "0"},
+        "local_delivered": {"payload_bytes": "0", "messages": "0"},
+        "remote_failed_before_acceptance": {"payload_bytes": "0", "messages": "0"},
+    }
+    assert job_executor.f3_counters.get("job-1") is None
 
 
 def test_wait_child_process_cleans_up_when_terminal_outcome_report_fails():

@@ -26,6 +26,7 @@ from nvflare.apis.utils.event import fire_event_to_components
 from nvflare.app_common.job_schedulers.job_scheduler import DefaultJobScheduler
 from nvflare.fuel.common.exit_codes import ProcessExitCode
 from nvflare.private.admin_defs import Message, MsgHeader, ReturnCode
+from nvflare.private.fed.resource_stats.f3_registry import F3CounterRegistry
 from nvflare.private.fed.server.job_runner import JobRunner, _FinishedJobState
 from nvflare.private.fed.server.message_send import ClientReply
 
@@ -1462,6 +1463,31 @@ def test_deploy_failed_client_renders_disabled_not_missing(mock_get_bool, mock_c
 
     site2 = next(entry for entry in summary["participants"] if entry["participant_name"] == "site-2")
     assert site2["status"] == "disabled"
+
+
+def test_job_runner_owns_an_f3_counter_registry():
+    runner = JobRunner(workspace_root="/tmp")
+
+    assert isinstance(runner.f3_counters, F3CounterRegistry)
+
+
+def test_zero_traffic_job_f3_counter_is_reported_not_missing():
+    # Mirrors the exact call sequence run()/_job_complete_process perform: start
+    # the SP counter before deployment, close+freeze it before finalization. No
+    # send call site is bound to it yet (F3_GAP.md steps 3-5), so a real job with
+    # no F3 traffic recorded must still produce a clean "reported" zero snapshot,
+    # not a missing/gap contribution.
+    runner = JobRunner(workspace_root="/tmp")
+
+    runner.f3_counters.start_job("job-1")
+    snapshot = runner.f3_counters.close_and_freeze("job-1")
+
+    assert snapshot == {
+        "status": "reported",
+        "remote_accepted": {"payload_bytes": "0", "messages": "0"},
+        "local_delivered": {"payload_bytes": "0", "messages": "0"},
+        "remote_failed_before_acceptance": {"payload_bytes": "0", "messages": "0"},
+    }
 
 
 def test_server_handoff_is_bound_and_accepted_before_finalization(tmp_path):

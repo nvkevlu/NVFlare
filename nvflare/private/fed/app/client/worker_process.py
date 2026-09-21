@@ -33,6 +33,7 @@ from nvflare.private.fed.app.utils import monitor_parent_process
 from nvflare.private.fed.client.client_app_runner import ClientAppRunner
 from nvflare.private.fed.client.client_status import ClientStatus
 from nvflare.private.fed.resource_stats.collector import JobResourceCollector, write_terminal_handoff
+from nvflare.private.fed.resource_stats.f3_job_counter import get_job_f3_counter, start_job_f3_counter
 from nvflare.private.fed.utils.fed_utils import (
     create_stats_pool_files_for_job,
     fobs_initialize,
@@ -65,10 +66,13 @@ def main(args):
         # Launchers keep job custom directories out of PYTHONPATH until this
         # platform-owned snapshot has completed.
         resource_collector = JobResourceCollector(workspace.get_run_dir(args.job_id))
-    except Exception as e:
+        # Started here, before job/site custom code can run, so it is available for
+        # any included traffic the job process sends. Not yet read by anything: no
+        # send call site is bound to it until F3_GAP.md steps 3-5 land.
+        start_job_f3_counter()
+    except Exception:
         # Resource reporting is observational and must never change the job outcome.
-        # Logging is not configured yet at this point in startup, so fall back to stderr.
-        print(f"Could not start resource statistics collection: {secure_format_exception(e)}")
+        pass
     download_workspace(args, secure_train)
     activate_job_python_path((workspace.get_app_custom_dir(args.job_id), workspace.get_site_custom_dir()))
     set_stats_pool_config_for_job(workspace, args.job_id)
@@ -141,6 +145,12 @@ def main(args):
     finally:
 
         def _archive_results():
+            # Command admission is stopping here; close and freeze the CJ F3
+            # counter now, before F3 streaming shutdown, per F3_GAP.md.
+            counter = get_job_f3_counter()
+            if counter:
+                counter.close()
+                counter.freeze()
             if resource_collector:
                 try:
                     write_terminal_handoff(

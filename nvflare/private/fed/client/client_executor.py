@@ -46,6 +46,7 @@ from nvflare.private.fed.resource_stats.collector import (
     read_terminal_handoff,
     remove_terminal_handoff,
 )
+from nvflare.private.fed.resource_stats.f3_registry import F3CounterRegistry
 from nvflare.private.fed.utils.fed_utils import get_job_launcher, get_return_code
 from nvflare.security.logging import secure_format_exception, secure_log_traceback
 
@@ -256,6 +257,11 @@ class JobExecutor(ClientExecutor):
         self.startup = startup
         self.run_processes = {}
         self.lock = threading.Lock()
+        # Client-parent (CP) F3 sender counters, one per running job. Not yet
+        # read by anything: no send call site is bound to a counter until
+        # F3_GAP.md steps 3-5 land. See _wait_child_process_finish for the
+        # close()/freeze() side of this job's lifecycle.
+        self.f3_counters = F3CounterRegistry()
 
         self.job_query_timeout = ConfigService.get_float_var(
             name="job_query_timeout", conf=SystemConfigs.APPLICATION_CONF, default=5.0
@@ -314,6 +320,12 @@ class JobExecutor(ClientExecutor):
         # Preserve deploy-time launch metadata while recording scheduler-maintained start metadata.
         with open(meta_file, "w") as f:
             json.dump(job_meta, f, indent=4)
+
+        # Start the CP F3 counter now that authoritative start metadata has been
+        # confirmed to match what was deployed, and before launcher selection or
+        # launch -- earlier deployment traffic was an incoming SP send, already
+        # accounted for on the SP side, not a CP send.
+        self.f3_counters.start_job(job_id)
 
         job_launcher: JobLauncherSpec = get_job_launcher(job_meta, fl_ctx)
 
@@ -379,6 +391,7 @@ class JobExecutor(ClientExecutor):
             with self.lock:
                 if self.run_processes.get(job_id, {}).get(RunProcessKey.JOB_HANDLE) is pending_handle:
                     self.run_processes.pop(job_id, None)
+            self.f3_counters.forget_job(job_id)
             raise
 
         heartbeat_cleanup = pending_handle.attach(job_handle)
@@ -713,6 +726,13 @@ class JobExecutor(ClientExecutor):
 
                     self.logger.info(f"run ({job_id}): child worker process finished with RC {return_code}")
 
+                    # The job handle has finished: close CP admission and freeze now.
+                    # No send call site is bound to this counter yet (F3_GAP.md steps
+                    # 3-5), so there is nothing to drain; this also guarantees the
+                    # freeze happens before the terminal resource report is sent below,
+                    # so the report cannot count itself.
+                    self.f3_counters.close_and_freeze(job_id)
+
                     failure_reason = REPORTABLE_JOB_FAILURES.get(return_code)
                     participant_summary = None
                     try:
@@ -782,6 +802,7 @@ class JobExecutor(ClientExecutor):
         finally:
             with self.lock:
                 self.run_processes.pop(job_id, None)
+            self.f3_counters.forget_job(job_id)
 
         engine = fl_ctx.get_engine()
         fl_ctx.set_prop(FLContextKey.CURRENT_JOB_ID, job_id, private=True, sticky=False)
