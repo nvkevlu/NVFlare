@@ -33,6 +33,7 @@ from nvflare.private.fed.resource_stats.collector import (
     write_terminal_handoff,
 )
 from nvflare.private.fed.resource_stats.contract import load_and_validate
+from nvflare.private.fed.resource_stats.probes import cgroup_linux, gpu_nvidia
 
 
 def test_monotonic_ns_is_private_and_output_is_compact_seconds():
@@ -87,20 +88,20 @@ def test_v2_cpu_quota_is_conservatively_floored(monkeypatch):
         leaf / "cpu.max": "2 3",
         mount / "cpu.max": "max 100000",
     }
-    monkeypatch.setattr(collector.platform, "system", lambda: "Linux")
-    monkeypatch.setattr(collector.os, "sched_getaffinity", lambda _pid: set(range(8)), raising=False)
+    monkeypatch.setattr(cgroup_linux.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(cgroup_linux.os, "sched_getaffinity", lambda _pid: set(range(8)), raising=False)
     monkeypatch.setattr(
-        collector,
+        cgroup_linux,
         "_cgroup_location",
         lambda controller: (mount, leaf, "v2") if controller is None else (None, None, "none"),
     )
-    monkeypatch.setattr(collector, "_ancestors", lambda _directory, _mount: [leaf, mount])
+    monkeypatch.setattr(cgroup_linux, "_ancestors", lambda _directory, _mount: [leaf, mount])
     monkeypatch.setattr(
-        collector,
+        cgroup_linux,
         "_read_cgroup_file",
-        lambda path: values.get(path, collector._CGROUP_FILE_MISSING),
+        lambda path: values.get(path, cgroup_linux._CGROUP_FILE_MISSING),
     )
-    monkeypatch.setattr(collector, "_cpu_identity", lambda _affinity: {})
+    monkeypatch.setattr(cgroup_linux, "_cpu_identity", lambda _affinity: {})
 
     assert collector.probe_cpu() == {"groups": [{"units": "0.666666666"}]}
 
@@ -131,21 +132,21 @@ def test_v1_cpu_quota_is_conservatively_floored(monkeypatch):
     def ancestors(directory, mount):
         return [directory, mount]
 
-    monkeypatch.setattr(collector.platform, "system", lambda: "Linux")
-    monkeypatch.setattr(collector.os, "sched_getaffinity", lambda _pid: set(range(8)), raising=False)
-    monkeypatch.setattr(collector, "_cgroup_location", location)
-    monkeypatch.setattr(collector, "_ancestors", ancestors)
+    monkeypatch.setattr(cgroup_linux.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(cgroup_linux.os, "sched_getaffinity", lambda _pid: set(range(8)), raising=False)
+    monkeypatch.setattr(cgroup_linux, "_cgroup_location", location)
+    monkeypatch.setattr(cgroup_linux, "_ancestors", ancestors)
     monkeypatch.setattr(
-        collector,
+        cgroup_linux,
         "_read_cgroup_file",
-        lambda path: values.get(path, collector._CGROUP_FILE_MISSING),
+        lambda path: values.get(path, cgroup_linux._CGROUP_FILE_MISSING),
     )
-    monkeypatch.setattr(collector, "_cpu_identity", lambda _affinity: {})
+    monkeypatch.setattr(cgroup_linux, "_cpu_identity", lambda _affinity: {})
 
     assert collector.probe_cpu() == {"groups": [{"units": "0.666666666"}]}
 
 
-@pytest.mark.parametrize("bad_value", ["garbage", collector._CGROUP_FILE_UNREADABLE])
+@pytest.mark.parametrize("bad_value", ["garbage", cgroup_linux._CGROUP_FILE_UNREADABLE])
 def test_v2_cpu_does_not_fall_back_when_applicable_quota_is_invalid(monkeypatch, bad_value):
     mount = Path("/sys/fs/cgroup")
     leaf = mount / "job"
@@ -154,18 +155,18 @@ def test_v2_cpu_does_not_fall_back_when_applicable_quota_is_invalid(monkeypatch,
         leaf / "cpu.max": bad_value,
         mount / "cpu.max": "max 100000",
     }
-    monkeypatch.setattr(collector.platform, "system", lambda: "Linux")
-    monkeypatch.setattr(collector.os, "sched_getaffinity", lambda _pid: set(range(8)), raising=False)
+    monkeypatch.setattr(cgroup_linux.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(cgroup_linux.os, "sched_getaffinity", lambda _pid: set(range(8)), raising=False)
     monkeypatch.setattr(
-        collector,
+        cgroup_linux,
         "_cgroup_location",
         lambda controller: (mount, leaf, "v2") if controller is None else (None, None, "none"),
     )
-    monkeypatch.setattr(collector, "_ancestors", lambda _directory, _mount: [leaf, mount])
+    monkeypatch.setattr(cgroup_linux, "_ancestors", lambda _directory, _mount: [leaf, mount])
     monkeypatch.setattr(
-        collector,
+        cgroup_linux,
         "_read_cgroup_file",
-        lambda path: values.get(path, collector._CGROUP_FILE_MISSING),
+        lambda path: values.get(path, cgroup_linux._CGROUP_FILE_MISSING),
     )
 
     assert collector.probe_cpu() is None
@@ -179,20 +180,20 @@ def test_v2_cpu_accepts_explicit_unlimited_quota(monkeypatch):
         leaf / "cpu.max": "max 100000",
         mount / "cpu.max": "max 100000",
     }
-    monkeypatch.setattr(collector.platform, "system", lambda: "Linux")
-    monkeypatch.setattr(collector.os, "sched_getaffinity", lambda _pid: set(range(8)), raising=False)
+    monkeypatch.setattr(cgroup_linux.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(cgroup_linux.os, "sched_getaffinity", lambda _pid: set(range(8)), raising=False)
     monkeypatch.setattr(
-        collector,
+        cgroup_linux,
         "_cgroup_location",
         lambda controller: (mount, leaf, "v2") if controller is None else (None, None, "none"),
     )
-    monkeypatch.setattr(collector, "_ancestors", lambda _directory, _mount: [leaf, mount])
+    monkeypatch.setattr(cgroup_linux, "_ancestors", lambda _directory, _mount: [leaf, mount])
     monkeypatch.setattr(
-        collector,
+        cgroup_linux,
         "_read_cgroup_file",
-        lambda path: values.get(path, collector._CGROUP_FILE_MISSING),
+        lambda path: values.get(path, cgroup_linux._CGROUP_FILE_MISSING),
     )
-    monkeypatch.setattr(collector, "_cpu_identity", lambda _affinity: {})
+    monkeypatch.setattr(cgroup_linux, "_cpu_identity", lambda _affinity: {})
 
     assert collector.probe_cpu() == {"groups": [{"units": "4"}]}
 
@@ -210,20 +211,20 @@ def test_v1_cpu_does_not_fall_back_when_applicable_quota_is_malformed(monkeypatc
             return cpu_mount, cpu_leaf, "v1"
         return None, None, "none"
 
-    monkeypatch.setattr(collector.platform, "system", lambda: "Linux")
-    monkeypatch.setattr(collector.os, "sched_getaffinity", lambda _pid: set(range(8)), raising=False)
-    monkeypatch.setattr(collector, "_cgroup_location", location)
-    monkeypatch.setattr(collector, "_ancestors", lambda _directory, _mount: [cpu_leaf])
+    monkeypatch.setattr(cgroup_linux.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(cgroup_linux.os, "sched_getaffinity", lambda _pid: set(range(8)), raising=False)
+    monkeypatch.setattr(cgroup_linux, "_cgroup_location", location)
+    monkeypatch.setattr(cgroup_linux, "_ancestors", lambda _directory, _mount: [cpu_leaf])
     monkeypatch.setattr(
-        collector,
+        cgroup_linux,
         "_read_cgroup_file",
-        lambda path: values.get(path, collector._CGROUP_FILE_MISSING),
+        lambda path: values.get(path, cgroup_linux._CGROUP_FILE_MISSING),
     )
 
     assert collector.probe_cpu() is None
 
 
-@pytest.mark.parametrize("bad_value", ["garbage", collector._CGROUP_FILE_UNREADABLE])
+@pytest.mark.parametrize("bad_value", ["garbage", cgroup_linux._CGROUP_FILE_UNREADABLE])
 def test_v2_memory_does_not_fall_back_when_applicable_limit_is_invalid(monkeypatch, bad_value):
     mount = Path("/sys/fs/cgroup")
     leaf = mount / "job"
@@ -231,18 +232,18 @@ def test_v2_memory_does_not_fall_back_when_applicable_limit_is_invalid(monkeypat
         leaf / "memory.max": bad_value,
         mount / "memory.max": "max",
     }
-    monkeypatch.setattr(collector.platform, "system", lambda: "Linux")
-    monkeypatch.setattr(collector.os, "sysconf", lambda key: {"SC_PAGE_SIZE": 4096, "SC_PHYS_PAGES": 1024}[key])
+    monkeypatch.setattr(cgroup_linux.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(cgroup_linux.os, "sysconf", lambda key: {"SC_PAGE_SIZE": 4096, "SC_PHYS_PAGES": 1024}[key])
     monkeypatch.setattr(
-        collector,
+        cgroup_linux,
         "_cgroup_location",
         lambda controller: (mount, leaf, "v2") if controller is None else (None, None, "none"),
     )
-    monkeypatch.setattr(collector, "_ancestors", lambda _directory, _mount: [leaf, mount])
+    monkeypatch.setattr(cgroup_linux, "_ancestors", lambda _directory, _mount: [leaf, mount])
     monkeypatch.setattr(
-        collector,
+        cgroup_linux,
         "_read_cgroup_file",
-        lambda path: values.get(path, collector._CGROUP_FILE_MISSING),
+        lambda path: values.get(path, cgroup_linux._CGROUP_FILE_MISSING),
     )
 
     assert collector.probe_memory() is None
@@ -255,40 +256,40 @@ def test_v2_memory_accepts_explicit_unlimited_limit(monkeypatch):
         leaf / "memory.max": "max",
         mount / "memory.max": "max",
     }
-    monkeypatch.setattr(collector.platform, "system", lambda: "Linux")
-    monkeypatch.setattr(collector.os, "sysconf", lambda key: {"SC_PAGE_SIZE": 4096, "SC_PHYS_PAGES": 1024}[key])
+    monkeypatch.setattr(cgroup_linux.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(cgroup_linux.os, "sysconf", lambda key: {"SC_PAGE_SIZE": 4096, "SC_PHYS_PAGES": 1024}[key])
     monkeypatch.setattr(
-        collector,
+        cgroup_linux,
         "_cgroup_location",
         lambda controller: (mount, leaf, "v2") if controller is None else (None, None, "none"),
     )
-    monkeypatch.setattr(collector, "_ancestors", lambda _directory, _mount: [leaf, mount])
+    monkeypatch.setattr(cgroup_linux, "_ancestors", lambda _directory, _mount: [leaf, mount])
     monkeypatch.setattr(
-        collector,
+        cgroup_linux,
         "_read_cgroup_file",
-        lambda path: values.get(path, collector._CGROUP_FILE_MISSING),
+        lambda path: values.get(path, cgroup_linux._CGROUP_FILE_MISSING),
     )
 
     assert collector.probe_memory() == {"bytes": str(4096 * 1024)}
 
 
-@pytest.mark.parametrize("bad_value", ["garbage", collector._CGROUP_FILE_UNREADABLE])
+@pytest.mark.parametrize("bad_value", ["garbage", cgroup_linux._CGROUP_FILE_UNREADABLE])
 def test_v1_memory_does_not_fall_back_when_applicable_limit_is_invalid(monkeypatch, bad_value):
     mount = Path("/sys/fs/cgroup/memory")
     leaf = mount / "job"
     values = {leaf / "memory.limit_in_bytes": bad_value}
-    monkeypatch.setattr(collector.platform, "system", lambda: "Linux")
-    monkeypatch.setattr(collector.os, "sysconf", lambda key: {"SC_PAGE_SIZE": 4096, "SC_PHYS_PAGES": 1024}[key])
+    monkeypatch.setattr(cgroup_linux.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(cgroup_linux.os, "sysconf", lambda key: {"SC_PAGE_SIZE": 4096, "SC_PHYS_PAGES": 1024}[key])
     monkeypatch.setattr(
-        collector,
+        cgroup_linux,
         "_cgroup_location",
         lambda controller: (mount, leaf, "v1") if controller == "memory" else (None, None, "none"),
     )
-    monkeypatch.setattr(collector, "_ancestors", lambda _directory, _mount: [leaf])
+    monkeypatch.setattr(cgroup_linux, "_ancestors", lambda _directory, _mount: [leaf])
     monkeypatch.setattr(
-        collector,
+        cgroup_linux,
         "_read_cgroup_file",
-        lambda path: values.get(path, collector._CGROUP_FILE_MISSING),
+        lambda path: values.get(path, cgroup_linux._CGROUP_FILE_MISSING),
     )
 
     assert collector.probe_memory() is None
@@ -298,18 +299,18 @@ def test_v1_memory_accepts_kernel_unlimited_sentinel(monkeypatch):
     mount = Path("/sys/fs/cgroup/memory")
     leaf = mount / "job"
     values = {leaf / "memory.limit_in_bytes": "9223372036854771712"}
-    monkeypatch.setattr(collector.platform, "system", lambda: "Linux")
-    monkeypatch.setattr(collector.os, "sysconf", lambda key: {"SC_PAGE_SIZE": 4096, "SC_PHYS_PAGES": 1024}[key])
+    monkeypatch.setattr(cgroup_linux.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(cgroup_linux.os, "sysconf", lambda key: {"SC_PAGE_SIZE": 4096, "SC_PHYS_PAGES": 1024}[key])
     monkeypatch.setattr(
-        collector,
+        cgroup_linux,
         "_cgroup_location",
         lambda controller: (mount, leaf, "v1") if controller == "memory" else (None, None, "none"),
     )
-    monkeypatch.setattr(collector, "_ancestors", lambda _directory, _mount: [leaf])
+    monkeypatch.setattr(cgroup_linux, "_ancestors", lambda _directory, _mount: [leaf])
     monkeypatch.setattr(
-        collector,
+        cgroup_linux,
         "_read_cgroup_file",
-        lambda path: values.get(path, collector._CGROUP_FILE_MISSING),
+        lambda path: values.get(path, cgroup_linux._CGROUP_FILE_MISSING),
     )
 
     assert collector.probe_memory() == {"bytes": str(4096 * 1024)}
@@ -317,10 +318,13 @@ def test_v1_memory_accepts_kernel_unlimited_sentinel(monkeypatch):
 
 def test_raw_cuda_visible_devices_is_not_numeric_authority(monkeypatch):
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1")
-    monkeypatch.setattr(collector, "_load_library", lambda candidates: None)
-    monkeypatch.setattr(collector, "_load_bundled_cuda_runtime", lambda: None)
+    monkeypatch.setattr(gpu_nvidia, "_load_library", lambda candidates: None)
+    monkeypatch.setattr(gpu_nvidia, "_load_bundled_cuda_runtime", lambda: None)
 
-    assert probe_gpu() is None
+    # No CUDA Runtime is loadable anywhere, so the result is the authoritative
+    # empty GPU set -- not the two devices CUDA_VISIBLE_DEVICES claims. The env
+    # var must never be consulted as a numeric authority.
+    assert probe_gpu() == {"groups": []}
 
 
 class _FakeFunction:
@@ -357,20 +361,20 @@ def test_bundled_cuda_runtime_is_resolved_from_allowlisted_distribution(monkeypa
         "nvidia-cuda-runtime-cu13",
         ["nvidia/cu13/lib/libcudart.so.13"],
     )[0]
-    monkeypatch.setattr(collector.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(gpu_nvidia.platform, "system", lambda: "Linux")
 
-    assert collector._find_bundled_cuda_runtime_path((str(tmp_path),)) == runtime.resolve()
+    assert gpu_nvidia._find_bundled_cuda_runtime_path((str(tmp_path),)) == runtime.resolve()
 
 
 def test_bundled_cuda_runtime_rejects_unowned_and_ambiguous_files(monkeypatch, tmp_path):
-    monkeypatch.setattr(collector.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(gpu_nvidia.platform, "system", lambda: "Linux")
     unowned_root = tmp_path / "unowned"
     _make_cuda_runtime_distribution(
         unowned_root,
         "some-framework",
         ["framework/lib/libcudart.so.13"],
     )
-    assert collector._find_bundled_cuda_runtime_path((str(unowned_root),)) is None
+    assert gpu_nvidia._find_bundled_cuda_runtime_path((str(unowned_root),)) is None
 
     ambiguous_root = tmp_path / "ambiguous"
     _make_cuda_runtime_distribution(
@@ -378,11 +382,11 @@ def test_bundled_cuda_runtime_rejects_unowned_and_ambiguous_files(monkeypatch, t
         "nvidia-cuda-runtime",
         ["nvidia/cu13/lib/libcudart.so.13", "nvidia/cu13/lib/libcudart.so.13.0"],
     )
-    assert collector._find_bundled_cuda_runtime_path((str(ambiguous_root),)) is None
+    assert gpu_nvidia._find_bundled_cuda_runtime_path((str(ambiguous_root),)) is None
 
 
 def test_bundled_cuda_runtime_accepts_contained_aliases_of_one_file(monkeypatch, tmp_path):
-    monkeypatch.setattr(collector.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(gpu_nvidia.platform, "system", lambda: "Linux")
     target = _make_cuda_runtime_distribution(
         tmp_path,
         "nvidia-cuda-runtime",
@@ -396,11 +400,11 @@ def test_bundled_cuda_runtime_accepts_contained_aliases_of_one_file(monkeypatch,
         encoding="utf-8",
     )
 
-    assert collector._find_bundled_cuda_runtime_path((str(tmp_path),)) == target.resolve()
+    assert gpu_nvidia._find_bundled_cuda_runtime_path((str(tmp_path),)) == target.resolve()
 
 
 def test_bundled_cuda_runtime_rejects_distribution_path_escape(monkeypatch, tmp_path):
-    monkeypatch.setattr(collector.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(gpu_nvidia.platform, "system", lambda: "Linux")
     root = tmp_path / "site-packages"
     outside = tmp_path / "outside" / "libcudart.so.13"
     outside.parent.mkdir(parents=True)
@@ -413,7 +417,7 @@ def test_bundled_cuda_runtime_rejects_distribution_path_escape(monkeypatch, tmp_
     )
     (distribution_dir / "RECORD").write_text("../outside/libcudart.so.13,,\n", encoding="utf-8")
 
-    assert collector._find_bundled_cuda_runtime_path((str(root),)) is None
+    assert gpu_nvidia._find_bundled_cuda_runtime_path((str(root),)) is None
 
 
 def test_probe_gpu_uses_bundled_runtime_only_after_loader_lookup_fails(monkeypatch):
@@ -422,8 +426,8 @@ def test_probe_gpu_uses_bundled_runtime_only_after_loader_lookup_fails(monkeypat
         return 0
 
     bundled_runtime = SimpleNamespace(cudaGetDeviceCount=_FakeFunction(get_count))
-    monkeypatch.setattr(collector, "_load_library", lambda candidates: None)
-    monkeypatch.setattr(collector, "_load_bundled_cuda_runtime", lambda: bundled_runtime)
+    monkeypatch.setattr(gpu_nvidia, "_load_library", lambda candidates: None)
+    monkeypatch.setattr(gpu_nvidia, "_load_bundled_cuda_runtime", lambda: bundled_runtime)
 
     assert probe_gpu() == {"groups": []}
 
@@ -435,8 +439,8 @@ def test_probe_gpu_uses_bundled_runtime_when_loader_runtime_cannot_enumerate(mon
 
     loader_runtime = SimpleNamespace(cudaGetDeviceCount=_FakeFunction(lambda _pointer: 100))
     bundled_runtime = SimpleNamespace(cudaGetDeviceCount=_FakeFunction(get_count))
-    monkeypatch.setattr(collector, "_load_library", lambda candidates: loader_runtime)
-    monkeypatch.setattr(collector, "_load_bundled_cuda_runtime", lambda: bundled_runtime)
+    monkeypatch.setattr(gpu_nvidia, "_load_library", lambda candidates: loader_runtime)
+    monkeypatch.setattr(gpu_nvidia, "_load_bundled_cuda_runtime", lambda: bundled_runtime)
 
     assert probe_gpu() == {"groups": []}
 
@@ -447,15 +451,15 @@ def test_successful_cuda_runtime_zero_is_authoritative(monkeypatch):
         return 0
 
     cudart = SimpleNamespace(cudaGetDeviceCount=_FakeFunction(get_count))
-    monkeypatch.setattr(collector, "_load_library", lambda candidates: cudart)
+    monkeypatch.setattr(gpu_nvidia, "_load_library", lambda candidates: cudart)
 
     assert probe_gpu() == {"groups": []}
 
 
 def test_cuda_no_device_error_is_unavailable_not_numeric_zero(monkeypatch):
     cudart = SimpleNamespace(cudaGetDeviceCount=_FakeFunction(lambda _pointer: 100))
-    monkeypatch.setattr(collector, "_load_library", lambda candidates: cudart)
-    monkeypatch.setattr(collector, "_load_bundled_cuda_runtime", lambda: None)
+    monkeypatch.setattr(gpu_nvidia, "_load_library", lambda candidates: cudart)
+    monkeypatch.setattr(gpu_nvidia, "_load_bundled_cuda_runtime", lambda: None)
 
     assert probe_gpu() is None
 
@@ -476,7 +480,7 @@ def test_positive_cuda_devices_are_grouped_only_after_driver_and_nvml_uuid_match
         return 0
 
     def get_uuid(pointer, device):
-        target = ctypes.cast(pointer, ctypes.POINTER(collector._CudaUuid)).contents
+        target = ctypes.cast(pointer, ctypes.POINTER(gpu_nvidia._CudaUuid)).contents
         for offset, value in enumerate(uuids[device]):
             target.bytes[offset] = value
         return 0
@@ -490,7 +494,7 @@ def test_positive_cuda_devices_are_grouped_only_after_driver_and_nvml_uuid_match
     )
     handles = {}
     for index, value in enumerate(uuids):
-        bare = collector._uuid_text(collector._CudaUuid((ctypes.c_ubyte * 16)(*value)))
+        bare = gpu_nvidia._uuid_text(gpu_nvidia._CudaUuid((ctypes.c_ubyte * 16)(*value)))
         prefix = "GPU-" if index == 0 else "MIG-"
         handles[(prefix + bare).encode()] = 100 + index
 
@@ -511,7 +515,7 @@ def test_positive_cuda_devices_are_grouped_only_after_driver_and_nvml_uuid_match
 
     def get_memory(handle, pointer):
         value = 80 * 2**30 if handle.value == 100 else 10 * 2**30
-        ctypes.cast(pointer, ctypes.POINTER(collector._NvmlMemory)).contents.total = value
+        ctypes.cast(pointer, ctypes.POINTER(gpu_nvidia._NvmlMemory)).contents.total = value
         return 0
 
     nvml = SimpleNamespace(
@@ -523,7 +527,7 @@ def test_positive_cuda_devices_are_grouped_only_after_driver_and_nvml_uuid_match
         nvmlDeviceGetMemoryInfo=_FakeFunction(get_memory),
     )
     libraries = iter((cudart, nvml, cuda_driver))
-    monkeypatch.setattr(collector, "_load_library", lambda candidates: next(libraries))
+    monkeypatch.setattr(gpu_nvidia, "_load_library", lambda candidates: next(libraries))
 
     assert probe_gpu() == {
         "groups": [
@@ -554,9 +558,9 @@ def test_cuda_driver_uuid_fallback_requires_matching_runtime_count(monkeypatch):
         cuDeviceGet=_FakeFunction(lambda _pointer, _ordinal: 0),
         cuDeviceGetUuid_v2=_FakeFunction(lambda _pointer, _device: 0),
     )
-    monkeypatch.setattr(collector, "_load_library", lambda candidates: cuda_driver)
+    monkeypatch.setattr(gpu_nvidia, "_load_library", lambda candidates: cuda_driver)
 
-    assert collector._cuda_uuid_reader(expected_count=1) is None
+    assert gpu_nvidia._cuda_uuid_reader(expected_count=1) is None
 
 
 def test_cuda_driver_uuid_reader_rejects_legacy_uuid_api(monkeypatch):
@@ -566,9 +570,9 @@ def test_cuda_driver_uuid_reader_rejects_legacy_uuid_api(monkeypatch):
         cuDeviceGet=_FakeFunction(lambda _pointer, _ordinal: 0),
         cuDeviceGetUuid=_FakeFunction(lambda _pointer, _device: 0),
     )
-    monkeypatch.setattr(collector, "_load_library", lambda candidates: cuda_driver)
+    monkeypatch.setattr(gpu_nvidia, "_load_library", lambda candidates: cuda_driver)
 
-    assert collector._cuda_uuid_reader(expected_count=1) is None
+    assert gpu_nvidia._cuda_uuid_reader(expected_count=1) is None
 
 
 def test_positive_cuda_count_without_nvml_is_not_reported(monkeypatch):
@@ -578,9 +582,60 @@ def test_positive_cuda_count_without_nvml_is_not_reported(monkeypatch):
 
     cudart = SimpleNamespace(cudaGetDeviceCount=_FakeFunction(get_count))
     libraries = iter((cudart, None))
-    monkeypatch.setattr(collector, "_load_library", lambda candidates: next(libraries))
+    monkeypatch.setattr(gpu_nvidia, "_load_library", lambda candidates: next(libraries))
 
     assert probe_gpu() is None
+
+
+def test_probe_gpu_reports_empty_groups_when_no_cuda_runtime_is_loadable_anywhere(monkeypatch):
+    # No CUDA Runtime library can be found via the system loader or an allowlisted
+    # bundled distribution -- the ordinary case for a CPU-only host, since NVFlare
+    # has no CUDA dependency of its own. This must be an authoritative empty GPU
+    # set, not an ambiguous/unavailable result, so a fully-measured CPU-only host
+    # can still reach resource_time status "reported".
+    monkeypatch.setattr(gpu_nvidia, "_load_library", lambda candidates: None)
+    monkeypatch.setattr(gpu_nvidia, "_load_bundled_cuda_runtime", lambda: None)
+
+    assert probe_gpu() == {"groups": []}
+
+
+def test_loaded_cuda_runtime_that_cannot_enumerate_is_still_unavailable(monkeypatch):
+    # Contrast case: a CUDA Runtime library *was* found (system or bundled), but
+    # the device-count call itself failed. That is genuinely ambiguous (driver
+    # issue, permissions, etc.), so it must stay None/unavailable rather than be
+    # treated as an authoritative empty GPU set.
+    cudart = SimpleNamespace(cudaGetDeviceCount=_FakeFunction(lambda _pointer: 100))
+    monkeypatch.setattr(gpu_nvidia, "_load_library", lambda candidates: cudart)
+    monkeypatch.setattr(gpu_nvidia, "_load_bundled_cuda_runtime", lambda: None)
+
+    assert probe_gpu() is None
+
+
+def test_gpu_less_host_reaches_reported_status_end_to_end(monkeypatch):
+    # Runs the real probe_capacity()/probe_gpu() (not a hand-mocked capacity dict)
+    # through ResourceTimeAccumulator to confirm a CPU-only host with no CUDA
+    # Runtime anywhere reaches status "reported", not "partial", once CPU and
+    # memory are also fully measured. Regression test for the GPU-omission bug
+    # that previously forced every CPU-only host to "partial" forever.
+    monkeypatch.setattr(gpu_nvidia, "_load_library", lambda candidates: None)
+    monkeypatch.setattr(gpu_nvidia, "_load_bundled_cuda_runtime", lambda: None)
+    monkeypatch.setattr(
+        collector,
+        "probe_cpu",
+        lambda: {"units": "4", "model": "AMD EPYC 9654", "architecture": "x86_64"},
+    )
+    monkeypatch.setattr(collector, "probe_memory", lambda: {"bytes": "1073741824"})
+
+    capacity = collector.probe_capacity()
+    assert capacity["gpu"] == {"groups": []}
+
+    ticks = iter([0, 1_000_000_000])
+    accumulator = ResourceTimeAccumulator(clock_ns=lambda: next(ticks))
+    accumulator.observe(capacity)
+    result = accumulator.finish()
+
+    assert result["status"] == "reported"
+    assert "issues" not in result
 
 
 def test_handoff_to_public_report_round_trip(tmp_path):

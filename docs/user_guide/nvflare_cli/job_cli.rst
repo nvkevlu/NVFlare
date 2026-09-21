@@ -35,6 +35,7 @@ Command Usage
      logs            retrieve job logs from the server-side log store
      log-config      change logging configuration for a running job
      stats           show running job statistics
+     resources       show recorded resource-time for one job or all retained jobs in a study
      download        download job result
      clone           clone an existing job
      delete          delete a job
@@ -586,6 +587,89 @@ Show running job statistics:
 ``--site`` to target a specific site or ``all``. The default site is ``all``,
 so specifying ``--site all`` explicitly is equivalent to omitting it.
 It also supports ``--schema``.
+
+**********************
+Resource Utilization
+**********************
+
+``nvflare job resources`` reports how much CPU, memory, and GPU time a
+finished job's participants used, tracked as capacity-time totals over the
+life of the job. This is a utilization-accounting view, not a live monitor:
+data is only available once a job has finished and each participant's final
+report has been finalized on the server. It is unrelated to ``nvflare job
+stats``, which shows a running job's live training statistics.
+
+Show resource utilization for one job:
+
+.. code-block:: shell
+
+   nvflare job resources --job <job_id>
+   nvflare job resources --job <job_id> --study cancer_research
+
+Add ``--site`` to also include one participant's own report, including
+hardware model details:
+
+.. code-block:: shell
+
+   nvflare job resources --job <job_id> --site site-1
+
+Show the rollup across every retained, finalized job in a study:
+
+.. code-block:: shell
+
+   nvflare job resources --study cancer_research
+
+``job resources`` accepts:
+
+- ``--job``: job ID to inspect. Uses the default study unless ``--study`` is
+  also given.
+- ``--study``: study containing the job (with ``--job``), or the study to roll
+  up (without ``--job``). If omitted with ``--job``, the default study is used.
+- ``--site``: also return one participant's own report and hardware model
+  detail. Requires ``--job``.
+- ``job resources`` also supports ``--schema``.
+
+Reported fields
+================
+
+- **CPU / memory / GPU time**: capacity-time totals (e.g. GPU-hours,
+  CPU-unit-hours, GiB-hours), not point-in-time usage. Each participant's
+  report also carries a status of ``REPORTED`` (fully measured), ``PARTIAL``
+  (at least one dimension could not be measured for part of the run), or
+  ``UNAVAILABLE`` (no participant report was received or it could not be
+  validated).
+- **Workspace filesystem capacity**: a one-time snapshot taken when the
+  participant's report was assembled, shown only with ``--site``.
+- **Saved content** and **F3 network traffic**: part of the schema, but not
+  yet populated in this release. They always report as unavailable and are
+  omitted from the table unless the underlying data becomes available in a
+  future release.
+
+Totals are **additive across participants**: if participants share physical
+hardware (for example, a proof-of-concept deployment running multiple sites on
+one machine), the sum can exceed that machine's actual capacity. This is
+expected utilization accounting, not a substitute for cluster capacity or
+billing data.
+
+A job's ``COMPLETE``/``PARTIAL`` coverage in the human-readable output
+reflects how many expected participants' reports were actually accepted (a
+participant that never reports still shows as ``missing``); it does not by
+itself indicate whether training succeeded.
+
+Study-level errors
+====================
+
+- If ``--site`` is given without ``--job``, the command fails with
+  ``INVALID_ARGUMENT``.
+- Requesting an unknown or not-yet-finalized job returns ``JOB_NOT_FOUND`` or
+  ``JOB_NOT_FINALIZED`` respectively; retry ``JOB_NOT_FINALIZED`` after the job
+  finishes.
+- Use ``--format json`` to retrieve the full structured envelope
+  (``resource_summary``, and ``participant_summary`` when ``--site`` is given,
+  or ``summary`` for a study rollup) for automation.
+
+The same data is available programmatically through the FLARE API; see
+:ref:`flare_api_resource_utilization`.
 
 ***************************
 Recipe-Based Job Creation

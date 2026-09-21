@@ -28,6 +28,7 @@ from nvflare.private.fed.resource_stats.coordinator import (
     RESOURCE_REPORT_CONFLICT,
     RESOURCE_REPORT_DUPLICATE,
     RESOURCE_REPORT_INVALID,
+    RESOURCE_REPORT_NOT_EXPECTED,
     RESOURCE_REPORT_SERVER_ERROR,
     RESOURCE_REPORT_TOO_LATE,
     RESOURCE_SUMMARY_FILE,
@@ -179,6 +180,61 @@ def test_start_job_rejects_resource_stats_symlink(tmp_path):
     assert list(outside.iterdir()) == []
 
 
+def test_disable_clients_marks_participant_disabled_and_rejects_later_reports(tmp_path):
+    run_dir = tmp_path / "run_job-1"
+    coordinator = ResourceStatsCoordinator()
+    coordinator.start_job("job-1", ["site-1", "site-2"], run_dir)
+
+    coordinator.disable_clients("job-1", ["site-2"])
+    assert (
+        coordinator.accept_resource_report("job-1", "site-2", {"participant_summary": b"anything"})
+        == RESOURCE_REPORT_NOT_EXPECTED
+    )
+
+    summary = coordinator.finalize_job("job-1")
+    statuses = {entry["participant_name"]: entry["status"] for entry in summary["participants"]}
+    assert statuses["site-2"] == "disabled"
+    assert statuses["site-1"] == "missing"
+
+
+def test_disable_clients_is_a_no_op_for_unknown_or_already_accepted_participants(tmp_path):
+    run_dir = tmp_path / "run_job-1"
+    coordinator = ResourceStatsCoordinator()
+    coordinator.start_job("job-1", ["site-1"], run_dir)
+    report = canonical_json_bytes(_participant())
+    assert (
+        coordinator.accept_resource_report("job-1", "site-1", {"participant_summary": report})
+        == RESOURCE_REPORT_ACCEPTED
+    )
+
+    # An already-accepted participant must not be retroactively disabled, and an
+    # unknown job_id / participant name must not raise.
+    coordinator.disable_clients("job-1", ["site-1"])
+    coordinator.disable_clients("no-such-job", ["site-9"])
+
+    summary = coordinator.finalize_job("job-1")
+    site = next(entry for entry in summary["participants"] if entry["participant_name"] == "site-1")
+    assert site["status"] == "accepted"
+
+
+def test_forget_job_removes_registration_and_is_a_no_op_for_unknown_job(tmp_path):
+    run_dir = tmp_path / "run_job-1"
+    coordinator = ResourceStatsCoordinator()
+    coordinator.start_job("job-1", ["site-1"], run_dir)
+    assert coordinator.has_job("job-1")
+
+    coordinator.forget_job("job-1")
+
+    assert not coordinator.has_job("job-1")
+    assert (
+        coordinator.accept_resource_report("job-1", "site-1", {"participant_summary": b"anything"})
+        == RESOURCE_REPORT_NOT_EXPECTED
+    )
+    # Forgetting a job that was never (or is no longer) registered must not raise.
+    coordinator.forget_job("job-1")
+    coordinator.forget_job("no-such-job")
+
+
 def test_restore_registration_purges_untrusted_pre_restart_reports(tmp_path):
     run_dir = tmp_path / "run_job-1"
     stale = run_dir / "resource_stats" / "participants" / "site-1.json"
@@ -247,6 +303,23 @@ def test_finalization_clamps_cutoff_and_finalized_time_when_clock_moves_backward
 
     assert summary["report_cutoff_at"] == "2026-09-17T12:00:01.000000Z"
     assert summary["finalized_at"] == "2026-09-17T12:00:01.000000Z"
+
+
+def test_finalize_job_is_idempotent_and_rereads_the_published_summary(tmp_path):
+    run_dir = tmp_path / "run_job-1"
+    coordinator = ResourceStatsCoordinator()
+    coordinator.start_job("job-1", ["site-1"], run_dir)
+    report = canonical_json_bytes(_participant())
+    coordinator.accept_resource_report("job-1", "site-1", {"participant_summary": report})
+
+    first = coordinator.finalize_job("job-1")
+    with patch.object(coordinator_module.ResourceStatsCoordinator, "_atomic_write_resource") as atomic_write_resource:
+        second = coordinator.finalize_job("job-1")
+
+    # The second call must take the already-finalized short-circuit: it re-reads
+    # the published summary from disk rather than re-running the write path.
+    atomic_write_resource.assert_not_called()
+    assert second == first
 
 
 def test_reader_rejects_unexpected_resource_member(tmp_path):

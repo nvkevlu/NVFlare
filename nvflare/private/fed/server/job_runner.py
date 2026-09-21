@@ -809,6 +809,12 @@ class JobRunner(FLComponent):
                                 fl_ctx=fl_ctx,
                                 expected_client_names=client_sites.keys(),
                             )
+                            if failed_clients:
+                                # These sites are still registered as expected resource-statistics
+                                # participants (so their utilization roster stays complete), but they
+                                # never launch a worker process, so mark them "disabled" instead of
+                                # letting them render as "missing" for a reason the server already knows.
+                                self.resource_stats.disable_clients(job_id, failed_clients)
                             with self.lock:
                                 self.running_jobs[job_id] = ready_job
                             job_manager.set_status(ready_job.job_id, RunStatus.RUNNING, fl_ctx)

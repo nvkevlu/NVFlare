@@ -90,6 +90,28 @@ can be run:
     new_job_id = sess.clone_job(job_id)
     print(new_job_id + " was submitted as a clone of " + job_id)
 
+.. _flare_api_resource_utilization:
+
+Resource Utilization
+^^^^^^^^^^^^^^^^^^^^^
+Use :meth:`get_job_resources<nvflare.fuel.flare_api.flare_api.Session.get_job_resources>` and
+:meth:`get_study_resources<nvflare.fuel.flare_api.flare_api.Session.get_study_resources>` to retrieve how much
+CPU, memory, and GPU time a finished job's participants used over time (not a live snapshot):
+
+.. code-block:: python
+
+    # one job, all participants' totals
+    resources = sess.get_job_resources(job_id)
+
+    # one job, including a single participant's own report
+    resources = sess.get_job_resources(job_id, site="site-1")
+
+    # rollup across every retained job in the active study
+    study_resources = sess.get_study_resources()
+
+See :ref:`job_cli` ("Resource Utilization" section) for the full field reference, including which fields are not
+yet populated in this release, and the equivalent ``nvflare job resources`` CLI command.
+
 .. _flare_api_monitor_job:
 
 Monitor Job

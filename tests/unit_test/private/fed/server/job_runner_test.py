@@ -1438,6 +1438,32 @@ def test_start_run_keeps_selected_but_not_deployable_client_missing(mock_get_boo
     )
 
 
+@patch("nvflare.private.fed.server.job_runner.check_client_replies", return_value=[])
+@patch("nvflare.private.fed.server.job_runner.ConfigService.get_bool_var", return_value=True)
+def test_deploy_failed_client_renders_disabled_not_missing(mock_get_bool, mock_check_replies, tmp_path):
+    # Mirrors the call sequence run() performs once a site fails to deploy: start
+    # the run with that site already excluded from client_sites but still in
+    # expected_client_names, then disable it so it is distinguishable from a site
+    # that was expected to report and simply never did.
+    runner, fl_ctx, engine, job, client_sites = _make_runner_inputs()
+    runner.resource_stats = type(runner.resource_stats)()
+    fl_ctx.get_workspace.return_value.get_run_dir.return_value = str(tmp_path / "run_job-1")
+    failed_clients = ["site-2"]
+
+    runner._start_run(
+        job_id=job.job_id,
+        job=job,
+        client_sites=client_sites,
+        fl_ctx=fl_ctx,
+        expected_client_names=["site-1", "site-2"],
+    )
+    runner.resource_stats.disable_clients(job.job_id, failed_clients)
+    summary = runner.resource_stats.finalize_job(job.job_id)
+
+    site2 = next(entry for entry in summary["participants"] if entry["participant_name"] == "site-2")
+    assert site2["status"] == "disabled"
+
+
 def test_server_handoff_is_bound_and_accepted_before_finalization(tmp_path):
     runner = JobRunner(workspace_root=str(tmp_path))
     run_dir = tmp_path / "run_job-1"

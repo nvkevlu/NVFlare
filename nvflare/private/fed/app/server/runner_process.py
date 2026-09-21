@@ -75,9 +75,10 @@ def main(args):
             workspace.get_run_dir(args.job_id),
             prior_observation_incomplete=bool(args.snapshot),
         )
-    except Exception:
+    except Exception as e:
         # Resource reporting is observational and must never change the job outcome.
-        pass
+        # Logging is not configured yet at this point in startup, so fall back to stderr.
+        print(f"Could not start resource statistics collection: {secure_format_exception(e)}")
     download_workspace(args, secure_train)
     activate_job_python_path((workspace.get_app_custom_dir(args.job_id), workspace.get_site_custom_dir()))
     set_stats_pool_config_for_job(workspace, args.job_id)

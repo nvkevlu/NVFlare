@@ -413,8 +413,31 @@ class Session(SessionSpec):
         return job_meta
 
     def get_job_resources(self, job_id: str, site: str = None) -> dict:
-        """Return finalized resource statistics from the job's archived WORKSPACE."""
+        """Return the finalized resource utilization report for one job.
 
+        Reports how much CPU, memory, and GPU time the job's participants used
+        (as capacity-time totals, not a live/point-in-time snapshot), plus a
+        one-time filesystem-capacity observation. Data is only available after
+        the job has finished and the server has finalized its resource report;
+        calling this before finalization raises :class:`JobNotDone`.
+
+        ``retained_content`` (result/output bytes) and ``f3`` (network traffic)
+        are part of the schema but are not yet populated in this release; they
+        always report status ``unavailable``. Totals are additive across
+        participants and are not a substitute for cluster capacity/utilization
+        accounting when participants share physical hardware.
+
+        Args:
+            job_id: ID of the job
+            site: optional participant name (e.g. a client site, or "server")
+                to also include that participant's own report in the result
+
+        Returns: a dict with key ``resource_summary`` (the job-level rollup),
+            plus ``participant_summary`` when ``site`` is given. See
+            :ref:`job_cli` ("Resource Utilization" section) for the full field
+            reference.
+
+        """
         self._validate_job_id(job_id)
         parts = [AdminCommandNames.GET_JOB_RESOURCES, job_id]
         if site is not None:
@@ -425,8 +448,19 @@ class Session(SessionSpec):
         return self._get_dict_data(reply)
 
     def get_study_resources(self) -> dict:
-        """Return the resource rollup for all retained jobs in the active study."""
+        """Return the resource utilization rollup across all retained jobs in the active study.
 
+        Scans every retained, finalized job in the session's active study (see
+        :ref:`flare_api_initialization` for how the active study is selected)
+        and sums their resource-utilization totals. Jobs that are not yet
+        finalized, or whose resource data is unavailable, are counted under
+        ``coverage`` but excluded from the numeric totals.
+
+        Returns: a dict describing the study-level rollup (``jobs``,
+            ``coverage``, and ``totals``). See :ref:`job_cli` ("Resource
+            Utilization" section) for the full field reference.
+
+        """
         reply = self._do_command(AdminCommandNames.GET_STUDY_RESOURCES, enforce_meta=False)
         return self._get_dict_data(reply)
 

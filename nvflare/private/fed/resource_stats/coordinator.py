@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import secrets
 import shutil
@@ -43,6 +44,8 @@ from .contract import (
     utc_timestamp,
     validate_record,
 )
+
+_logger = logging.getLogger(__name__)
 
 RESOURCE_REPORT_ACCEPTED = "accepted"
 RESOURCE_REPORT_DUPLICATE = "duplicate"
@@ -203,16 +206,40 @@ class ResourceStatsCoordinator:
         state = self._get_job_state(job_id)
         if state is None:
             return
+        disabled = []
         with state.lock:
             for name in client_names:
                 if state.expected.get(name) == "client" and name not in state.accepted:
                     state.disabled.add(name)
+                    disabled.append(name)
+        if disabled:
+            _logger.info(f"job {job_id}: excluded {disabled} from resource-statistics reporting")
 
     def accept_resource_report(
         self, job_id: str, participant_name: str, resource_report: Mapping[str, Any] | None
     ) -> str:
         """Validate and retain one report in the bounded parent-owned ledger."""
 
+        status = self._accept_resource_report(job_id, participant_name, resource_report)
+        self._log_report_status(job_id, participant_name, status)
+        return status
+
+    @staticmethod
+    def _log_report_status(job_id: str, participant_name: str, status: str) -> None:
+        # "conflict" and "server_error" are the two outcomes most likely to indicate
+        # a real bug or tampering rather than a benign retry/race; everything else
+        # is either expected (accepted/duplicate) or informational for an operator
+        # tracking why a participant's utilization did not make it into the summary.
+        if status in (RESOURCE_REPORT_CONFLICT, RESOURCE_REPORT_SERVER_ERROR):
+            _logger.warning(f"job {job_id}: resource report from '{participant_name}' rejected: {status}")
+        elif status in (RESOURCE_REPORT_ACCEPTED, RESOURCE_REPORT_DUPLICATE):
+            _logger.debug(f"job {job_id}: resource report from '{participant_name}': {status}")
+        else:
+            _logger.info(f"job {job_id}: resource report from '{participant_name}': {status}")
+
+    def _accept_resource_report(
+        self, job_id: str, participant_name: str, resource_report: Mapping[str, Any] | None
+    ) -> str:
         if resource_report is None:
             return RESOURCE_REPORT_NOT_PROVIDED
         if not isinstance(resource_report, Mapping) or set(resource_report) != {"participant_summary"}:
@@ -352,6 +379,10 @@ class ResourceStatsCoordinator:
             self._atomic_write_resource(state.run_dir, RESOURCE_SUMMARY_FILE, summary_data)
             self._verify_final_inventory(state.run_dir, set(state.accepted))
             state.finalized = True
+            status_counts: dict[str, int] = {}
+            for participant in participants:
+                status_counts[participant["status"]] = status_counts.get(participant["status"], 0) + 1
+            _logger.info(f"job {job_id}: resource statistics finalized, participants by status: {status_counts}")
             return summary
 
     def discard_job_artifacts(self, job_id: str) -> None:
