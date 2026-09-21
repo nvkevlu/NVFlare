@@ -1,45 +1,72 @@
-# Phase 1 integration with the current NVFlare code
+# Phase 1 integration with current NVFlare code
 
-Status: proposed production integration for review.
+Status: detailed design and code audit. A production subset now exists.
 
-This document connects the Phase 1 data contract to the code that exists
-today. It does not assume any particular future task runner or GPU-release
-design.
+For the authoritative description of what this branch implements, read
+[PRODUCTION_IMPLEMENTATION.md](PRODUCTION_IMPLEMENTATION.md). This longer file
+also preserves target designs for F3 counters, retained-content binding,
+delivery retries/tombstones, and the versioned completion-topic fallback.
+Those target sections are not claims about current production behavior.
 
-The proposed path is:
+This document names the current processes, code hooks, messages, files, and
+cutoffs. It makes no assumption about which GPU-release design will be chosen.
 
-1. The current client and server job processes each record one measurement
-   period.
-2. Each job process leaves one final site report in its existing job
-   workspace.
-3. The client parent sends the client report with the terminal job-outcome
-   request it already sends to the server parent.
-4. The server parent validates every report, calculates the totals, and writes
-   the final files into the existing server job workspace.
-5. The normal workspace archive stores those files in the existing
-   `WORKSPACE` job-store component.
-6. `nvflare job resources` reads the files from that archived workspace.
+The implemented path is:
 
-There is no `RESOURCE_STATS` component and no second copy of
-`resource_summary.json`.
+1. Each client and server job process starts one in-memory resource-time
+   accumulator. Parent and child F3 counters are not connected yet.
+2. From `_archive_results()`, the job process writes one private terminal
+   measurement handoff in its existing job workspace. This is not a
+   `participant_summary` and is never retained in the job-store archive.
+3. After the job handle finishes, the parent validates the child handoff,
+   binds its trusted participant name, creates the one canonical
+   `participant_summary`, and deletes staging. F3 and retained content are
+   currently typed `unavailable/not_bound`.
+4. The client parent attaches those exact final bytes to one completion
+   request on the existing `REPORT_JOB_FAILURE` topic. It makes one
+   application-level send; the versioned `REPORT_JOB_COMPLETION` transport is
+   a design fallback, not implemented code. The server parent passes its own
+   final bytes through the same local acceptance rules.
+5. The server parent authenticates and validates reports, then holds the first
+   accepted canonical bytes in its bounded in-memory ledger.
+6. At cutoff, the server parent adds accepted final totals and writes and
+   fsyncs participant files, then writes and fsyncs one job
+   `resource_summary` last in the parent-owned workspace as the publication
+   marker.
+7. Normal job archival stores those files in the existing `WORKSPACE`
+   component.
+8. Job and study CLI handlers read those archived workspace members.
+
+The live acceptance path compares canonical bytes directly for
+duplicate/conflict decisions while the root-parent state exists. The
+implementation does not restore that ledger after a root-parent restart and
+does not retain a post-finalization receipt tombstone. The expected client
+names are persisted in job metadata and restored, but accepted reports are
+not. Job and study handlers stage one retained
+`WORKSPACE` archive at a time on disk and read only fixed, bounded members;
+they do not materialize the whole archive as Python `bytes`.
+
+There is no second `RESOURCE_STATS` component. Nothing is written at
+participant startup. There are no public start/final pairs, attempts, raw
+periods, environment keys, end reasons, or stability checks.
 
 This design requires NVFlare code changes. It requires no new privilege,
-mount, sidecar, service, launcher option, environment variable, job setting,
+mount, sidecar, service, launcher argument, environment variable, job setting,
 or operator setting.
 
-## Process names used below
+## Process names
 
 | Short name | Current process | Relevant responsibility |
 | --- | --- | --- |
-| CP | Client parent | Launches and waits for a client job, then reports its terminal outcome. |
-| CJ | Client job process | Runs one client's job application. |
-| SP | Server parent | Launches the server job, receives client outcomes, finalizes the job, and archives the workspace. |
-| SJ | Server job process | Runs the server-side job application. |
+| CP | Client parent | Launches and waits for a client job, assembles its terminal report, releases the job's allocated compute resources, and then sends the report once. |
+| CJ | Client job process | Runs one client's job application and leaves one private terminal measurement handoff for CP. |
+| SP | Server parent | Launches the server job, assembles its local report, accepts reports, finalizes the rollup, and archives the server workspace. |
+| SJ | Server job process | Runs the server-side application and leaves one private terminal measurement handoff for SP. |
 
-These names describe the current code only. The record API below does not
-require the future implementation to keep these process boundaries.
+These labels describe the code today. The stored record does not depend on
+these processes continuing to exist in a future execution design.
 
-## End-to-end flow
+## End-to-end sequence
 
 ```mermaid
 sequenceDiagram
@@ -52,251 +79,388 @@ sequenceDiagram
 
     SP->>SJ: start server job
     CP->>CJ: start client job
-    Note over CJ,SJ: begin one current-process measurement period
-    SJ-->>SP: job ends; workspace is already local or returned
-    CJ-->>CP: job ends; workspace is already local or returned
-    CP->>SP: existing terminal-outcome request + optional report bytes
-    SP-->>CP: report status and digest
-    Note over SP: fixed cutoff; validate and reduce all expected participants
+    Note over CJ,SJ: start in-memory resource-time accumulators
+    Note over CJ,SJ: no startup file or message
+    SJ-->>SP: process ends; private handoff is local or returned
+    CJ-->>CP: process ends; private handoff is local or returned
+    Note over CP,SP: validate handoff; bind trusted name; assemble final bytes
+    Note over CP: free launcher-managed compute resources
+    CP->>SP: one REPORT_JOB_FAILURE completion request plus optional final report bytes
+    SP-->>CP: terminal result plus resource-report status
+    Note over SP: pass its final bytes through local acceptance; close cutoff and add accepted totals
     SP->>Store: archive existing server workspace as WORKSPACE
-    CLI->>SP: authenticated job-resources request
-    SP->>Store: open archived WORKSPACE
-    SP-->>CLI: validated summary and optional site detail
+    CLI->>SP: authenticated job or study resources request
+    SP->>Store: open retained WORKSPACE archive(s)
+    SP-->>CLI: validated job or study result
 ```
 
-The site report is `participant_summary`. The server rollup is
-`resource_summary`. The exact fields and formulas remain those in the
-[field catalog](schema/FIELD_CATALOG.md) and the
-[semantic contract](schema/contract_v1.py).
+## Exact current lifecycle
 
-## Exact lifecycle in the current code
+### 1. The server fixes expected participants
 
-### 1. The server fixes the expected clients
+`JobRunner._start_run()` in
+`nvflare/private/fed/server/job_runner.py` receives both the original selected
+client names and the deployable subset that remains after deployment failures.
+It starts the server and only that deployable client subset.
 
-`JobRunner._start_run()` receives the selected clients, starts the server job,
-starts each client job, and then narrows its existing
-`_pending_client_outcomes` set to clients that replied successfully.
+Before those start requests, the resource implementation records a separate
+participant list containing every originally selected client and the server.
+The list is fixed: neither a deployment failure nor a later start timeout
+removes an entry. A selected client that never starts successfully or never
+reports therefore remains visible as `missing`.
 
-Current call sites:
+The selected client names are written to job metadata as
+`JobMetaKey.RESOURCE_PARTICIPANTS`. If the root parent restarts while the job
+is live, restore uses that field to rebuild the expected set; an older job
+without the field falls back to the restored active clients. This preserves
+the denominator across restart, but it does not restore reports that were
+already accepted before the restart.
 
-- `nvflare/private/fed/server/job_runner.py:295-360`
+The expected entry uses the existing registered site name for a client and the
+fixed trusted name `server` for SP. The name is already available in trusted
+server state, so this feature
+does not derive an HMAC pseudonym, distribute a new `START_JOB` header, or add
+a launcher option, environment variable, or deployment setting.
 
-Before sending those start-job requests, the resource-statistics implementation
-must separately freeze the selected clients and add the server participant.
-It does not shrink this resource-report list when a start reply times out. A
-selected client that never starts therefore remains visible as `missing`
-instead of disappearing from coverage. It must not create the list from reports
-that happen to arrive; that would hide missing reports.
+The SP keeps the participant name and role in trusted per-job state. For an
+incoming client report, it derives the expected name from the authenticated
+sender and job context and requires the report to match. A name contained in
+JSON is not authentication. The server also validates the trusted name as a
+single safe archive path component before using
+`participants/<participant_name>.json`. No attempt ID or environment key is
+generated or delivered.
 
-The SP creates a random per-job HMAC key, then derives:
+### 2. Each job process starts an in-memory accumulator
 
-```text
-participant_key = "sha256-" + HMAC-SHA-256(
-    job_hmac_key, "participant\0" + role + "\0" + participant_id)
+The official launchers establish a platform-owned startup boundary before the
+hook:
 
-environment_key = "sha256-" + HMAC-SHA-256(
-    job_hmac_key, "environment\0" + role + "\0" + participant_id +
-                  "\0current-job-process")
+| Launcher | Worker startup behavior |
+| --- | --- |
+| Process | The command is `<sys.executable> -I <absolute platform job_process_bootstrap.py> {client\|server} <existing args>`. The copied environment removes known app and site custom paths from `PYTHONPATH`; the bootstrap adds only its own NVFlare package root before running the fixed worker. |
+| Docker | The command is `<configured python> -I -u -m nvflare.private.fed.app.job_process_bootstrap {client\|server} <existing args>`. Image `PYTHONPATH` remains in the environment but is ignored during startup and can be enabled after the snapshot. |
+| Kubernetes | It uses the same installed bootstrap-module command. Image/template or study dependency paths are ignored during startup and can be enabled after the snapshot. |
+| Slurm | Rank zero uses the same installed bootstrap-module command; its established dependency path remains in the environment but is ignored during startup. Launcher-owned nonzero-node commands receive their normal path. |
+
+Python isolated mode ignores `PYTHONPATH` during worker interpreter startup,
+so the effective startup search path is sanitized even when a dependency value
+is preserved in the environment for later activation. This behavior is
+internal to NVFlare and requires no job option, launcher argument, operator
+configuration, or extra privilege.
+
+All four launchers enter the same fixed bootstrap with a literal `client` or
+`server` selector. The historical executable-module value is exact-allowlisted
+only to select one of those two paths; it is never inserted into the command,
+and any other value fails before launch.
+
+The current CJ hook is immediately after its `Workspace` object exists and
+before workspace download and before NVFlare activates the job and site custom
+directories:
+
+- `nvflare/private/fed/app/client/worker_process.py::main()`
+
+The equivalent SJ hook is:
+
+- `nvflare/private/fed/app/server/runner_process.py::main()`
+
+The hook:
+
+1. probes CPU, memory, and CUDA-visible GPU capacity;
+2. records one monotonic clock anchor; and
+3. creates an identity-free in-memory accumulator.
+
+It does not write a start record, send a message, or persist recovery state.
+
+After the snapshot, the worker downloads the workspace and calls
+`activate_job_python_path()` to add the app and site custom directories to
+`sys.path` and the environment for normal execution.
+
+The accumulator integrates the initial capacity through the next explicit
+capacity-change call or finalization. Current NVFlare code has no such mid-run
+call, so this adapter assumes the initial capacity remains visible through the
+measured window. That window begins before workspace download,
+custom-directory activation, and application-runner setup, and ends in
+`_archive_results()` after the runner returns and before workspace upload. It
+includes idle waits in that window, but not the operating-system process's
+entire lifetime. Phase 1 reports visible capacity-time, not active-task time or
+hardware utilization.
+
+The current collection adapter nevertheless exposes a platform notification:
+
+```python
+resource_collector.observe_capacity_change(new_capacity)
 ```
 
-The server overwrites a reserved `JobMetaKey.RESOURCE_STATS_CONTEXT` entry in
-the job metadata before it starts either job process. Its current-code value is
-a map from participant ID to the two derived keys.
+Before installing `new_capacity`, the call adds the previous capacity times
+the elapsed monotonic duration. A future resource manager can use this method
+when one accumulator owner remains alive for the participant. If future work
+uses transient workers or runs tasks in CP/SP, it must instead move the
+accumulator to an existing platform component whose lifetime spans the logical
+participation. That is a replacement collection adapter, not a schema change,
+and it does not require a user option or added privilege.
 
-The two local delivery paths are not identical today:
+Each private interval product is rounded at most once to nine fractional
+digits using round-half-even before checked exact-decimal addition. No binary
+floating-point value enters the terminal JSON.
 
-- `ClientExecutor.start_app()` already receives `job.meta`, preserves the
-  deploy-time fields it treats as authoritative, and writes the result to the
-  client's deployed `job_meta.json` before launcher selection
-  (`nvflare/private/fed/client/client_executor.py:224-252`). Phase 1 adds the
-  reserved entry to that already-written map.
-- `ServerEngine._start_runner_process()` currently reads the deployed file and
-  builds an updated in-memory `job_meta`, but does **not** write that copy back
-  (`nvflare/private/fed/server/server_engine.py:236-254`). Phase 1 must add a
-  narrow server-side update before `get_job_launcher()`: copy only the
-  server-owned `RESOURCE_STATS_CONTEXT` into the deployed `job_meta.json`,
-  preserve the deploy-time `BYOC` decision, and replace the file atomically.
+An end-of-job snapshot must never be multiplied by the entire process
+duration. If a future allocator changes resources without notifying the
+accumulator, the report is incomplete and must not pretend otherwise.
 
-The CJ/SJ recorder then reads its own entry from that existing file using its
-platform-known site name. This changes a file in the existing run workspace;
-it does not mutate persisted submitted-job metadata or introduce a new
-launcher path.
+The current Slurm multi-node path needs the same honesty. It starts the NVFlare
+worker on rank 0 and can run launcher-owned commands on other nodes. A probe in
+the rank-0 process cannot observe those other nodes. Until a platform-owned
+multi-node collector exists, a job with more than one Slurm node discards the
+rank-zero numeric resource-time result and emits exactly
+`resource_time: {status: unavailable, issues: [unsupported]}`. It never
+presents rank-zero capacity as either a partial or complete multi-node total.
 
-The HMAC key itself never leaves the SP. The derived values are opaque
-correlation keys, not secrets or authentication credentials. The reserved
-metadata value is platform-owned: submitted job metadata cannot select or
-override it. This path adds no launcher argument, environment variable,
-allowlist entry, job option, or operator setting.
+CPU and memory probing also fails closed at an applicable cgroup constraint.
+If its value is unreadable or malformed, the affected dimension is omitted;
+the code does not fall back to a wider affinity, online-CPU, or physical-memory
+value. Other valid dimensions may remain, making the single compute result
+partial. If none remains, it is unavailable.
 
-The SP retains the derived expected map in its per-job finalization state. It
-still derives the sender identity from the authenticated connection and checks
-that the report's key matches the expected key. Current code has one reporter
-scope per job process; a future execution design may allocate more environment
-keys without changing the report format.
+When the server job process is restored from a snapshot, it starts a new
+collector for the interval this new process can actually observe. Its numeric
+post-restore values are retained, but the result is marked
+`partial/observation_incomplete`; it is never presented as the complete
+logical-job interval.
 
-### 2. A current job process opens one measurement period
+### 3. The application runs normally
 
-The CJ has an appropriate platform call site immediately after its workspace
-object is created and before NVFlare adds the job's custom directory to
-`sys.path`:
-
-- `nvflare/private/fed/app/client/worker_process.py:61-64`
-
-The equivalent SJ call site is:
-
-- `nvflare/private/fed/app/server/runner_process.py:68-71`
-
-At that point the recorder does the following, in order:
-
-1. It records `participant_start`, including the visible capacity of the
-   filesystem that contains `Workspace.get_run_dir(job_id)`.
-2. It generates a random 128-bit `attempt_id` inside NVFlare.
-3. It begins one measurement period and records CPU, memory, and GPU capacity.
-
-The ID is not passed through a launcher. The current implementation has one
-period for the lifetime of this job process, so it does not need a launcher
-change to correlate multiple periods.
-
-The recorder samples start capacity first and records `opened_at` immediately
-after that sample. At shutdown it takes the optional final capacity sample and
-then records `closed_at`. Both serialized timestamps come from one wall-clock
-anchor advanced with `time.monotonic_ns()`. A wall-clock adjustment during the
-job therefore cannot create a negative or inflated period.
-
-`Workspace.get_run_dir()` resolves the current job directory as
-`<workspace>/<job_id>`:
-
-- `nvflare/apis/workspace.py:232-235`
-
-The best available current call site is before NVFlare explicitly enables
-job custom imports. It cannot defend against Python code injected before
-`worker_process.main()` through a pre-existing `PYTHONPATH`, `sitecustomize`,
-or equivalent launcher environment. The report is therefore a platform-
-collected self-report, not proof against a malicious local job. Fixing that
-stronger threat model would require a separate launcher-hardening decision.
-It must not be hidden by calling the current snapshot "trusted evidence."
-
-This is a real current-code limitation, not a theoretical one. The process,
-Docker, Kubernetes, and Slurm launchers can put job or site custom paths in
-the child Python path before the module entry point runs:
-
-- process: `nvflare/app_common/job_launcher/process_launcher.py:66-81`
-- Docker: `nvflare/app_opt/job_launcher/docker_launcher.py:640-661`
-- Kubernetes: `nvflare/app_opt/job_launcher/k8s_launcher.py:1098-1115`
-- Slurm: `nvflare/app_opt/job_launcher/slurm/launcher.py:428-431,511-527`
-
-### 3. The job runs
-
-The CJ starts `ClientAppRunner` at
-`nvflare/private/fed/app/client/worker_process.py:121-126`.
-`ClientRunner` fires `START_RUN`, runs the workload, and fires
-`ABOUT_TO_END_RUN` and `END_RUN` during its normal finalization:
+The CJ starts `ClientAppRunner` from
+`nvflare/private/fed/app/client/worker_process.py::main()`.
+`ClientRunner` fires `START_RUN`, executes the workload, then fires
+`ABOUT_TO_END_RUN` and `END_RUN`:
 
 - `nvflare/private/fed/client/client_runner.py:689-702`
 - `nvflare/private/fed/client/client_runner.py:712-788`
 - `nvflare/private/fed/client/client_runner.py:812-835`
 
-The SJ follows the same broad pattern. It fires `START_RUN`, runs its
-workflows, sends the existing fire-and-forget `END_RUN` request to clients,
-and then fires its local `END_RUN`:
+The SJ follows the same broad lifecycle and sends the existing fire-and-forget
+`END_RUN` request before its local `END_RUN`:
 
 - `nvflare/private/fed/server/server_runner.py:185-237`
 
-### 4. The job process closes the period and writes its report
+No application event is the durable resource-report transport. Custom code
+has no supported API for supplying capacity, timestamps, totals, models, or
+traffic classes. This is not a tamper-proof boundary: a bring-your-own-
+container entrypoint can run before the launcher-supplied Python command, a
+global interpreter `sitecustomize` can still run under `-I`, and same-process
+job code can affect later visible sources or alter the private handoff.
 
-The closest current finalization hook is `_archive_results()` in each job
-process:
+### 4. `_archive_results()` freezes a private child handoff
 
-- CJ: `nvflare/private/fed/app/client/worker_process.py:131-146`
-- SJ: `nvflare/private/fed/app/server/runner_process.py:132-149`
+The final hook is `_archive_results()` in each job process:
 
-At a normal end, the recorder:
+- CJ: `nvflare/private/fed/app/client/worker_process.py::main()`
+- SJ: `nvflare/private/fed/app/server/runner_process.py::main()`
 
-1. takes the optional final CPU, memory, and GPU observation;
-2. closes the period with `released`, `failed`, or `terminated` as applicable;
-3. takes the final workspace-filesystem capacity observation;
-4. records the bounded saved-result byte total, when NVFlare knows such a set;
-5. closes the job-scoped F3 counters; and
-6. serializes one canonical `participant_summary`.
+After the runner has returned and before F3 streaming shutdown and workspace
+upload, the hook:
 
-The staging path is:
+1. advances the resource-time accumulator through the final monotonic time;
+2. finalizes one `resource_time` object with one overall status;
+3. observes the capacity of the filesystem containing the existing job
+   workspace;
+4. records retained content as `unavailable/not_bound`;
+5. records child F3 as `unavailable/not_bound`; and
+6. serializes one private terminal measurement handoff.
+
+It writes the handoff atomically at:
 
 ```text
-<workspace>/<job_id>/resource_stats/staging/participant_summary.json
+<workspace>/<job_id>/resource_stats/staging/terminal_handoff.json
 ```
 
-It is created with a temporary file followed by `os.replace`. The serialized
-bytes are frozen after that replacement. A retry never rebuilds the report.
+`terminal_handoff.json` has an internal, bounded format. It carries the child
+resource-time result, workspace-filesystem observation, retained-content
+result, and child-local F3 counters. It is not the public schema and is never
+renamed into `participants/`. The parent supplies the trusted job and
+participant name when it assembles the public record.
 
-The current shutdown helper closes command admission before it invokes
-`_archive_results()`, but it waits for already-admitted command callbacks only
-after streaming and the Cell have been stopped:
+```text
+internal_version = "1"
+kind = "nvflare.resource_stats.internal.terminal_handoff"
+resource_time
+workspace_filesystem
+retained_content
+child_f3
+```
 
-- `nvflare/private/fed/app/job_process_cleanup.py:24-66`
+Those six fields are exact; the private handoff contains no job or participant
+identity.
 
-That order is not yet sufficient for an exact F3 cutoff. A callback admitted
-before the gate could still finish while the counters are being frozen. The
-production change must drain the admitted job callbacks before freezing F3,
-or it must make the F3 counter's atomic freeze the authoritative cutoff and
-classify later callback completions as late. This is an internal ordering
-change, not a deployment setting.
+The parent reads only this fixed path. It requires a regular, non-symlink file,
+enforces the 1 MiB bound before decoding, and uses the same strict UTF-8 JSON,
+duplicate-key, finite-number, exact-number, and semantic-bound checks as the
+public validator. The internal version, kind, and four typed measurement
+objects are required; unknown fields are rejected.
 
-### 5. The report returns to the parent through the current workspace path
+After either parent has assembled final bytes, it removes the handoff and the
+empty `staging` directory. SP must also remove them after a failed local
+assembly or acceptance attempt. Finalization must confirm that no
+`resource_stats/staging` member can enter the normal workspace archive.
+For a separate-workspace launcher, the handoff may travel inside the existing
+transient result-workspace ZIP so the parent can read it; that transfer bundle
+is not the retained server `WORKSPACE` archive.
 
-For a launcher that shares the workspace with its parent, no transfer is
-needed. For a launcher with a separate workspace, the current shutdown path
-ZIPs the whole `<workspace>/<job_id>` directory and returns it before the job
-process exits:
+The process writes no public start or end observations. The parent-built final
+report contains accumulated totals, not the private capacity-change intervals
+used to calculate them.
 
-- archive construction: `nvflare/app_opt/job_launcher/workspace_cell_transfer.py:185-207`
-- upload: `nvflare/app_opt/job_launcher/workspace_cell_transfer.py:689-767`
-- shutdown wrapper: `nvflare/app_opt/job_launcher/workspace_cell_transfer.py:769-779`
-- parent extraction: `nvflare/app_opt/job_launcher/workspace_cell_transfer.py:399-445`
+If a normal Python exception reaches this `finally` path, the process still
+attempts to finish the accumulator and write the handoff. `SIGKILL`, pod loss,
+node loss, or another failure that bypasses the hook produces no child
+handoff. If the parent survives and reaches assembly, it still builds one
+public report with typed unavailable or partial results; it never invents
+missing child measurements. Loss of the parent/site can still leave the
+expected participant without a report.
 
-This means the same staging path works with the current launchers. Process,
-Docker, and Slurm expose the job directory through their existing workspace
-or mount. Kubernetes uses the existing workspace-transfer path shown above.
-The resource-statistics feature adds no launcher argument or transfer
-protocol.
+The `child_f3` member reserves the typed handoff shape, but production does not
+bind or freeze F3 counters yet. It is always `unavailable/not_bound` in the
+implemented path. The later F3 section describes target behavior.
 
-In today's client lifecycle, the CP does not call
-`resource_manager.free_resources()` until after the job handle has ended and
-the terminal request has been attempted
-(`nvflare/private/fed/client/client_executor.py:622-682`). The single current
-period therefore closes before that parent-side release. This observation is
-about today's code, not a requirement for the future resource-management
-design.
+### 5. The existing launcher workspace path returns the private handoff
 
-A hard process, pod, or node failure can bypass this `finally` path. In that
-case a remote parent may never receive the staging file. The design reports
-that participant as missing; it does not invent a zero or claim durability the
-current launcher does not provide.
+The parent does not need a new file-transfer mechanism:
 
-### 6. The client parent sends the report with the terminal outcome
+- process, Docker, and Slurm launchers already expose the job workspace at the
+  parent-visible run directory;
+- the Kubernetes launcher already uploads the result workspace ZIP and
+  extracts it before the job handle returns.
 
-The CP already waits for the job handle, reads its return code, sends a
-terminal request to the root server, then frees allocated resources:
+The CP reads the private handoff only after `job_handle.wait()`. The SJ handoff
+is already in, or has been returned to, the SP run workspace when
+`_job_complete_process()` observes that the server handle has finished.
 
-- `nvflare/private/fed/client/client_executor.py:622-688`
+Current client code waits for the handle, consumes the private handoff and
+builds the terminal request, and then frees the allocated resources in
+`nvflare/private/fed/client/client_executor.py::ClientExecutor._wait_child_process_finish()`.
 
-The request currently uses:
+At that point each parent performs one bounded assembly operation:
+
+1. read and strictly validate the bounded child handoff;
+2. create the canonical `participant_summary` from trusted parent identity and
+   child measurements, with F3 typed `unavailable/not_bound`; and
+3. delete the child handoff and empty staging directory.
+
+If the child handoff is absent or invalid, the parent still assembles one
+report. Child-derived resource time, workspace capacity, and retained content
+are typed unavailable (or partial only where valid child values actually
+exist). F3 is unavailable. The parent does not substitute elapsed wall time,
+an end snapshot, filenames, or generic process network totals.
+
+CP frees launcher-managed compute resources immediately after this assembly
+and handoff cleanup, then sends the canonical bytes once and waits for the
+CellNet reply. SP passes its canonical bytes directly through the local
+acceptance function. Neither parent retains the private handoff, and the
+handoff is never a final resource-namespace or retained job-store archive member.
+
+The current measurement closes before CP frees the allocated resources, but
+the completion request and its reply wait occur after that release. A slow or
+unavailable root server therefore does not keep a completed client's GPU, CPU,
+or memory allocation held. This is a description of current ordering, not an
+assumption that a future workflow must hold resources for the whole job.
+
+### 6. Target F3 owner and cutoff (not implemented)
+
+The following F3 ownership design remains future work. Current production
+reports F3 as `unavailable/not_bound`.
+
+The target SP would create its job-scoped parent F3 counter after the scheduler selects a job
+and before `JobRunner._deploy_job()`. This is early enough to count the
+included `job_application` sends and later SP forwarding for that job.
+
+The target CP would create its counter in `ClientExecutor.start_app()` after it has validated
+the authoritative `START_JOB` metadata against deployed metadata and before it
+selects the launcher or calls `launch_job()`. This is early enough for any
+included CP forwarding caused by the launched job. The earlier deployment
+payload is incoming and is counted once by its SP sender, not by CP. Merely
+seeing an untrusted low-level route or a job-supplied header must not create or
+bind a counter.
+
+The parent counter API is internal platform state keyed by the trusted job
+context. It adds no launcher argument, environment variable, job setting, or
+operator configuration. The resource-report request and workspace upload are
+excluded by traffic class and occur only after CP's counter has frozen.
+
+## Client-to-server completion transport
+
+The implemented transport is Option A: one application-level send on the
+existing `REPORT_JOB_FAILURE` request. It carries the job outcome and optional
+resource report together, uses the existing authenticated sender binding, and
+returns a flat report status. There is no report retry loop or receipt
+tombstone.
+
+Option B remains an unimplemented fallback if review rejects Option A's name or
+handler ownership. It would require mixed-version selection, but no operator,
+job, or launcher setting and no dual send.
+
+### Option A: extend the existing CellNet exchange
+
+The CP already sends a terminal request after every child exit, including exit
+code zero:
 
 | Item | Current value |
 | --- | --- |
-| target | `FQCN.ROOT_SERVER` |
-| channel | `CellChannel.SERVER_MAIN`, whose wire value is `task` |
-| topic | `CellChannelTopic.REPORT_JOB_FAILURE`, whose wire value is `report_job_failure` |
-| timeout | `job_query_timeout`, currently defaulting to 5 seconds |
+| Target | `FQCN.ROOT_SERVER` |
+| Channel | `CellChannel.SERVER_MAIN`, wire value `task` |
+| Topic | `CellChannelTopic.REPORT_JOB_FAILURE`, wire value `report_job_failure` |
+| Timeout | existing `job_query_timeout`, default five seconds |
+| Receiver | `FedServer.process_job_failure()` |
 
-The definitions are at `nvflare/private/defs.py:160-188`, and the timeout is
-set at `nvflare/private/fed/client/client_executor.py:194-196`.
+The channel and topic are defined in
+`nvflare/fuel/f3/cellnet/defs.py`; `JobFailureMsgKey` is in
+`nvflare/private/defs.py`. The current handler is registered by
+`FedServer._register_cell_callbacks()` and implemented by
+`FedServer.process_job_failure()` in
+`nvflare/private/fed/server/fed_server.py`.
 
-The topic name is historical and misleading: the current code sends this
-request after every child exit, including return code zero. Reusing this
-exchange is backward compatible and avoids a second completion race. A later
-cleanup may rename the Python constant, but it does not need a new wire topic.
+The topic name is historical: the request is already sent on success. Reusing
+it provides one existing session-bound completion exchange and one cutoff. In
+secure mode, the Cell incoming filter validates the signed token and binds it
+to the message origin before this handler runs. In insecure mode, the handler
+has only the existing registered-session-token check; resource statistics do
+not add attestation that the deployment did not already have.
 
-The extended request payload is:
+This is the implemented choice because it changes the fewest completion-path
+mechanics. Its drawbacks are the stale failure-oriented name and placing new
+resource-report work in the historically named failure handler.
+
+### Option B: use a new versioned completion exchange
+
+If reviewers reject modifying `REPORT_JOB_FAILURE` because of its name or
+handler ownership, CP can instead send the combined outcome and report on a
+new completion topic:
+
+| Item | Proposed value |
+| --- | --- |
+| Target | `FQCN.ROOT_SERVER` |
+| Channel | `CellChannel.SERVER_MAIN`, wire value `task` |
+| Topic | `CellChannelTopic.REPORT_JOB_COMPLETION`, wire value `report_job_completion` |
+| Protocol field | exact integer `protocol_version: 1` |
+| Timeout | existing `job_query_timeout`, default five seconds |
+| Receiver | new `FedServer.process_job_completion()` delegating to the shared completion and report-acceptance logic |
+
+If implemented, Option B would replace Option A for that completion; it would
+not be a second report message. It would use the same connection, completion
+cutoff, validation, and live acceptance rules. The protocol field would
+version the combined completion envelope; the embedded `participant_summary`
+would retain its independent `schema_version`.
+
+Option B fixes only the stale topic name and ownership objection. Validation,
+direct canonical-byte comparison, bounded in-memory ledger insertion, and
+reply handling still run in the critical job-completion path. Participant-file
+publication still occurs later at finalization under either option. If
+reviewers require lifecycle control and resource-data delivery to be separate,
+neither Option A nor Option B satisfies that requirement; a different two-path
+protocol would be needed.
+
+### Completion envelopes
+
+Option A extends the existing envelope:
 
 ```text
 {
@@ -304,597 +468,565 @@ The extended request payload is:
   "code": integer,
   "reason": string or null,
   "resource_report": {                 # optional
-    "sha256": 64 lowercase hex chars,
-    "participant_summary": bytes       # canonical UTF-8 JSON, at most 64 MiB
+    "participant_summary": bytes       # canonical UTF-8 JSON, at most 1 MiB
   }
 }
 ```
 
-The digest is over the exact `participant_summary` bytes. The CP reads those
-bytes only after the job handle has finished, so a separate-workspace launcher
-has already completed its result upload. The CP computes the digest itself;
-it does not trust a digest stored beside the child file.
-
-If the staging file is absent, unreadable, or larger than 64 MiB, the CP still
-sends the terminal outcome without `resource_report`. Resource reporting must
-never change the job return code.
-
-The Cell serializes the whole envelope before sending it. The current default
-Cell payload limit is just under 2 GiB, but a deployment may already use a
-smaller limit:
-
-- `nvflare/fuel/f3/comm_config.py:18-22,82-83`
-- `nvflare/fuel/f3/drivers/net_utils.py:39-42`
-
-Before the first send, the CP checks the serialized envelope against the
-Cell's effective limit. If it does not fit, the CP sends the terminal outcome
-once without the report and logs that resource statistics were omitted. It
-does not ask an operator to raise the limit, and it does not repeatedly send a
-message that the Cell will reject.
-
-`send_request_before_shutdown()` serializes the send with client logout, so
-the existing token is still usable:
-
-- `nvflare/private/fed/client/fed_client_base.py:423-443`
-
-#### Retry rule
-
-The CP makes at most three attempts. Each attempt uses the existing
-`job_query_timeout`. It waits one second between attempts. It sends the same
-frozen bytes and the same digest every time.
-
-It retries only when there is no reply or the transport reports a timeout or
-communication failure. It does not retry an explicit `accepted`, `duplicate`,
-`invalid`, `conflict`, `too_late`, `not_provided`, or `server_error` report
-status. Resource reporting is best effort. On the client, the network-wait
-budget is three `job_query_timeout` intervals plus the two one-second gaps.
-Reading, hashing, and serializing the local file happen before that budget, so
-this is not a hard wall-clock bound on resource release.
-
-On the server, the selected v1 handler validates and stores a candidate before
-it resolves that participant's pending terminal outcome. That work is on the
-existing outcome request's critical path. It can delay server finalization, but
-it cannot change the job result and it adds no second reporting window. The
-existing client-outcome deadline remains the normal waiting budget once the SJ
-has ended, not a strict wall-clock bound: a callback already in a filesystem
-commit can hold the shared acceptance lock past the nominal deadline. This
-latency tradeoff is explicit; moving validation off that path would require a
-separate in-flight-report and cutoff protocol.
-
-These constants are internal defaults; they do not add a user setting.
-
-The server reply uses an overall successful Cell return code once it has
-processed the terminal outcome. Resource-report validation is reported
-separately:
+Option B carries the identical outcome and resource-report members, with an
+explicit envelope version:
 
 ```text
 {
-  "resource_report": {
-    "status": "accepted" | "duplicate" | "invalid" | "conflict" |
-              "too_late" | "not_provided" | "server_error",
-    "summary_sha256": string or absent
+  "protocol_version": 1,
+  "job_id": string,
+  "code": integer,
+  "reason": string or null,
+  "resource_report": {                 # optional
+    "participant_summary": bytes       # canonical UTF-8 JSON, at most 1 MiB
   }
 }
 ```
 
-An invalid resource report does not turn a successful job into a failed job.
-Likewise, a failed job may still have a valid resource report.
+`reason` is part of the existing terminal job outcome. It is not a resource
+measurement end reason and is not copied into `participant_summary`.
 
-### 7. The server parent authenticates and accepts the report
+The CP sends the exact parent-assembled bytes once. The child does not provide
+the public bytes. A missing or invalid child handoff normally
+produces a valid parent-built report with typed unavailable or partial values.
+CP omits `resource_report` only if parent assembly itself
+fails, the final bytes exceed the bound, or they cannot fit the Cell's
+effective payload limit; it still sends the unchanged terminal outcome.
 
-The current SP registers the terminal-outcome callback at
-`nvflare/private/fed/server/fed_server.py:438-466` and handles it at
-`nvflare/private/fed/server/fed_server.py:906-957`.
+`send_request_before_shutdown()` serializes the selected send with logout so
+the existing client token remains usable:
 
-The CP's outgoing filter adds its client name, token, token signature, and
-SSID:
+- `nvflare/private/fed/client/fed_client_base.py:423-443`
+
+### Send and reply
+
+CP makes one application-level call with the existing `job_query_timeout`.
+SP keeps the first accepted canonical bytes in the live coordinator state and
+compares retries with them directly. It does not keep a post-finalization
+receipt tombstone or restore this accepted state across a root-parent restart. Restore
+rebuilds expected names from `RESOURCE_PARTICIPANTS`, clears the stale
+in-progress resource directory, and starts a new empty acceptance ledger. A
+pre-restart client report therefore becomes `missing` unless that client sends
+a new valid report after restore; current clients send only once.
+
+The reply is:
+
+```text
+{
+  "resource_report_status": "accepted" | "duplicate" | "invalid" |
+                            "conflict" | "too_late" | "not_provided" |
+                            "not_expected" | "server_error"
+}
+```
+
+This acceptance status describes validation and insertion into the live
+root-parent ledger; it is separate from the one measurement status inside
+`resource_time`. It does not mean that a participant file is already written
+or that the acknowledgement survives a root-parent restart.
+
+Under implemented Option A, validation, canonicalization, direct byte
+comparison, and bounded ledger insertion happen before the server resolves
+that participant's terminal
+outcome. This synchronous work can add latency to completion, but participant
+file writes and fsync occur only at finalization. The report cannot change the
+job result and does not add a second reporting window.
+
+## Server authentication and acceptance
+
+The outgoing filter adds the client name, token, token signature, and SSID:
 
 - `nvflare/private/fed/client/communicator.py:107-131`
 - `nvflare/fuel/sec/authn.py:68-92,114-150`
 
-In secure mode, the SP verifies the signed token and binds it to the message's
-CellNet origin before the callback runs:
+In secure mode the SP verifies the signed token and binds it to the CellNet
+origin before the callback:
 
 - `nvflare/private/fed/server/fed_server.py:522-550,1226-1237`
 - `nvflare/private/fed/authenticator.py:384-420`
 
-The callback then maps the token to the registered client and checks that the
-job expects that client. The payload's `participant_key` is never treated as
-authentication.
+In insecure mode that cryptographic filter is not installed. The callback
+still requires a token in the current registered-client map at
+`nvflare/private/fed/server/fed_server.py:910-918`. The design inherits that
+existing trust level; it does not describe an insecure deployment as signed or
+attested.
 
-The current callback drops a second terminal outcome when
-`is_client_outcome_pending()` is false. The resource-report check must be
-separate from that outcome check. An expected participant may retry the same
-report while report acceptance is still open, even when its job outcome was
-already resolved. This separation is what makes a lost acknowledgement
-idempotent.
+The callback maps that token to a registered client and checks that the
+participant list fixed before start requests contains the client. It then requires the
+JSON `participant_name` to equal that trusted registered name; the field never
+authenticates itself.
 
-In a non-secure deployment, the existing terminal handler still requires a
-token registered to a current client. The resource feature does not silently
-upgrade the trust guarantees of a non-secure deployment.
+The implemented handler first authenticates and binds the job/client, then handles
+the optional resource report idempotently, and only then processes the terminal
+outcome if that outcome is still pending. This ordering is implemented under
+Option A, so a repeated request can still reach live report acceptance without
+replaying a job failure/abort action. Option B is not implemented.
 
-The acceptance function performs these steps in this order:
+The resource acceptance function:
 
-1. Check the authenticated job and participant against the expected list.
-2. Check that `participant_summary` is bytes and no larger than 64 MiB.
-3. Compute SHA-256 and compare it with the envelope digest.
-4. Decode strict UTF-8 JSON, reject duplicate object keys and non-finite JSON
-   values, and run the schema and semantic validators.
-5. Check the report's `job_id`, `participant_key`, and every current-adapter
-   `environment_key` against the derived values in trusted server state.
-6. Recompute the participant totals. Do not accept totals from the site.
-7. Write the exact bytes to a unique temporary file in the server run
-   directory and flush that file. Do not hold the acceptance lock during JSON
-   parsing, semantic validation, or the temporary-file write.
-8. Acquire the per-job acceptance lock and inspect the accepted digest for this
-   participant. The same digest is `duplicate`, including after cutoff. If
-   acceptance is closed, any other digest is `too_late`. While it is open, a
-   different accepted digest is `conflict`. For an empty slot, atomically
-   replace `resource_stats/participants/<participant_key>.json` with the
-   temporary file, `fsync` the containing participant directory, and only then
-   record its digest in the accepted ledger before releasing the lock. If the
-   directory flush fails, do not add the ledger entry; attempt to remove the
-   unaccepted canonical file and return `server_error`.
-9. Return `accepted` only after the canonical participant file and ledger entry
-   exist. If validation or storage fails, return `invalid` or `server_error`
-   and do not mark the report accepted.
+1. checks the authenticated job and participant;
+2. checks the 1 MiB bound before decoding;
+3. performs strict UTF-8 JSON parsing, rejecting duplicate keys and non-finite
+   numbers;
+4. validates the schema, semantic bounds, job ID, expected participant name,
+   model grouping, one overall resource-time status, and exact number forms;
+5. requires the bytes to equal the deterministic canonical serialization of
+   that validated record;
+6. accepts `resource_time` as the parent-assembled participant total derived
+   from the child's private handoff;
+7. under the per-job lock, compares the canonical bytes directly with any
+   accepted bytes for that participant and retains the first valid canonical
+   bytes and receipt time in the root parent's live ledger; and
+8. acknowledges `accepted` after that in-memory insertion.
 
-Every branch that does not install the candidate removes its unique temporary
-file. Cleanup failure is logged but never makes that candidate part of the
-accepted ledger.
+Each report is capped at 1 MiB. Across one live job, accepted canonical report
+bytes are capped at 64 MiB. Acceptance performs no participant-file write or
+fsync. Those operations happen at finalization, so an `accepted`
+acknowledgement is not restart-durable.
 
-In a `finally` path after these steps, the handler processes and resolves the
-terminal job outcome regardless of the resource-report status. The overall
-Cell return code is successful once that terminal outcome has been handled;
-accounting validation or storage failure never changes the job return code.
-The synchronous work can add latency to this existing request, as noted above;
-it does not create a later report wait.
+The server cannot recompute CPU unit-seconds, memory byte-seconds, or GPU
+instance-seconds because the simplified report contains no raw periods. It can
+still reject malformed, impossible, negative, non-finite, inconsistent, or
+out-of-bound values. This is the principal trust tradeoff of the final-only
+design.
 
-The validator entry point already models steps 2 through 4:
+Replay behavior is deterministic only while live acceptance state exists:
 
-- `research/runtime_resource_proxy_prototype/schema/contract_v1.py:1295-1364`
+- first valid canonical byte sequence: `accepted`;
+- the same accepted bytes: `duplicate`, including after cutoff while the live
+  job state remains;
+- different valid canonical bytes before cutoff: `conflict`;
+- invalid candidate: `invalid`, without reserving the slot;
+- new bytes after cutoff: `too_late`.
 
-The replay rule is:
+The terminal outcome is resolved in a `finally` path regardless of resource
+status. Resource reporting never changes success, failure, or abort.
 
-- The first valid digest wins.
-- The same digest is `duplicate` and succeeds without another contribution.
-- A different digest after acceptance but before cutoff is `conflict`; it never
-  overwrites the accepted bytes.
-- An invalid candidate does not reserve the slot. A valid report may still be
-  accepted before cutoff.
-- After cutoff, a digest that was already accepted may still receive a
-  `duplicate` acknowledgement, but no stored result changes. Any new digest is
-  `too_late`.
+SP validates the SJ handoff and assembles canonical bytes with its trusted
+local identity; F3 remains `unavailable/not_bound`. It passes the bytes through
+the same validator and live-ledger function, which performs the same direct
+byte comparison. It does not send a fake loopback CellNet message. After either accepting or
+rejecting the final bytes, SP removes the private handoff and staging
+directory. Staging is not part of the final resource namespace and is not
+copied into the final job archive.
 
-The SP writes accepted bytes before acknowledging them so an acknowledgement
-does not get ahead of the existing filesystem. This is not a claim of
-immutability against an administrator or malicious code with the same OS
-permissions. The finalizer re-reads and revalidates the stored bytes before it
-builds the manifest.
+## Cutoff, reduction, and workspace archival
 
-The server's own report follows the same validation and storage function. It
-does not send a fake network request. After the SJ has ended and its workspace
-has been returned, the SP reads the SJ staging file and calls the acceptance
-function with the expected local server identity.
+### Existing cutoff
 
-## Cutoff, reduction, and archival
+When `_job_complete_process()` first observes that SJ has exited, the server
+job handle has already completed. SP builds the server participant report from
+the SJ handoff as described above, makes one local acceptance attempt, and
+removes the staging path whether the attempt succeeds or fails. Normal
+completion then reuses the existing client-outcome wait, whose current default
+is 900 seconds. The setting and cutoff are owned by `JobRunner.__init__()` and
+`JobRunner._job_complete_process()`.
 
-### Fixed report cutoff
+There is no separate resource-report wait. Once every pending outcome arrives
+or the existing deadline expires, SP closes acceptance and snapshots the
+expected list and accepted ledger under the same lock used by acceptance.
 
-When `_job_complete_process()` first observes that the SJ has exited, it makes
-one parent-local acceptance attempt for the server staging report before it
-starts or closes the client-outcome wait. A per-job flag makes this step
-idempotent across completion-loop iterations. There is no loopback message.
-After that attempt, the server participant is accepted, invalid, or missing
-before the common cutoff closes.
+Abort and server-process failure follow today's immediate finalization path:
+SP performs the same bounded parent assembly and local acceptance, does not
+wait for clients, and closes acceptance immediately. The existing 900-second
+client-outcome grace period is not applied after a server-process failure.
+Late reports cannot rewrite the result.
 
-Normal completion reuses the current client-outcome wait. The default wait is
-900 seconds:
+### Reduction
 
-- `nvflare/private/fed/server/job_runner.py:109-111`
-- `nvflare/private/fed/server/job_runner.py:441-481`
+For each expected participant, the finalizer records:
 
-The wait starts after the SJ process has ended. It ends early when every
-expected client terminal outcome has been resolved. The resource-report cutoff
-is the instant that this wait closes. If a client terminal outcome arrives
-without report bytes, that participant is resolved as missing; the server does
-not add a second reporting wait.
+- `accepted` plus the validated resource values;
+- `invalid` only when no report was accepted and at least one correctly bound,
+  pre-cutoff candidate failed report validation; its `received_at` is the first
+  such rejection and its issue is `malformed_source`;
+- `missing` when no report was accepted and the remaining outcomes were only
+  `not_provided`, `too_late`, authentication/binding rejection, or
+  `server_error`; and
+- `disabled` when collection was intentionally unavailable for that expected
+  participant.
 
-Cutoff and acceptance use the same per-job lock. Under that lock, the
-finalizer changes the acceptance state from `open` to `closed` and snapshots
-the accepted ledger. It then releases the lock and reduces only that snapshot.
-A callback may validate and prepare a temporary file before cutoff, but it is
-included only if its final locked commit happens first. A callback that reaches
-the lock after closure discards its temporary file and returns `too_late`.
-Consequently no participant file can race into the manifest after the accepted
-ledger has been frozen.
+An accepted report always wins the final classification. `duplicate` keeps it
+accepted, and `conflict` can occur only after that accepted slot exists. A
+server persistence or validation fault is therefore never relabeled as
+client-invalid.
 
-Abnormal server and abort paths skip the client-outcome wait to match the
-current code. They still make the one server-local acceptance attempt described
-above, then close acceptance without a client reporting window. Reports that
-arrive after that cutoff cannot change the result:
-
-- `nvflare/private/fed/server/job_runner.py:451-481`
-
-The UTC `report_cutoff_at` is recorded once when acceptance closes. The code
-must use a monotonic deadline for waiting and a wall-clock timestamp only for
-the serialized record.
-
-### Deterministic reduction
-
-Before `_save_workspace()` runs, the SP performs one reduction:
-
-1. Re-read each accepted participant file and check its digest and contract.
-2. Make the participant directory match the frozen ledger exactly: remove and
-   directory-flush any unaccepted file left by an interrupted or failed commit.
-   If exact cleanup or verification fails, do not write the completion manifest
-   or expose a resource bundle; the CLI will report statistics unavailable.
-3. Classify every expected participant as `accepted`, `missing`, `invalid`, or
-   `disabled`.
-4. Derive each accepted participant's totals from its periods.
-5. Sum only accepted numeric contributions into the job totals.
-6. Remove the SJ staging file after it has been accepted or classified. It is
-   not part of the final archive.
-7. Write canonical `resource_stats/resource_summary.json` atomically.
-8. Build a manifest that covers the summary and every accepted participant
-   file.
-9. Write `resource_stats/manifest.json` last. Its presence is the completion
-   marker for the bundle.
-
-The manifest does not include invalid candidate bytes. An invalid participant
-entry keeps only the allowed generic issue and trusted receipt time.
-
-The existing job-completion loop calls `_save_workspace()` before publishing
-the terminal job status:
-
-- `nvflare/private/fed/server/job_runner.py:493-538`
-
-`_save_workspace()` collects the run, result, log, and audit roots and passes
-them to the job manager:
-
-- `nvflare/private/fed/server/job_runner.py:587-631`
-
-`JobDefManager.save_workspace()` stores this archive as the existing
-`WORKSPACE` component:
-
-- `nvflare/apis/impl/job_def_manager.py:567-573`
-
-The filesystem store writes a temporary ZIP and atomically replaces the
-component. Directory contents are stored relative to each source directory:
-
-- `nvflare/app_common/storages/filesystem_storage.py:33-90,229-249`
-
-The resulting resource-statistics members inside `WORKSPACE` are exactly:
+For accepted entries the finalizer adds the final reported values:
 
 ```text
+job measured seconds       = sum(participant measured seconds)
+job CPU unit-seconds       = sum(participant CPU unit-seconds)
+job memory byte-seconds    = sum(participant memory byte-seconds)
+job GPU instance-seconds   = sum(participant GPU instance-seconds)
+job retained bytes         = sum(participant retained bytes)
+job F3 remote-accepted bytes/messages = sum(participant remote-accepted values)
+```
+
+`measured_seconds` is additive participant time. It can exceed the job's wall
+clock duration when several participants run at the same time.
+
+It validates these additions with checked arithmetic, but it does not recreate
+participant totals from hidden or guessed intervals.
+
+The finalizer never sums `workspace_filesystem.capacity_bytes`.
+
+It derives totals from the validated canonical bytes already held in the live
+coordinator, not by trusting a child-side re-read. Only at finalization does it
+write and fsync the exact accepted in-memory participant bytes through
+parent-owned, no-symlink descriptors. It then writes and fsyncs
+`resource_summary.json` atomically last in the local construction directory as
+the publication marker.
+
+The server serializes and size-checks the completed bundle before publication.
+If `resource_summary.json` exceeds 64 MiB, it removes the incomplete
+`resource_stats` construction directory and continues normal job archival. The
+job outcome is unchanged, but its resource view is unavailable.
+
+Before either write, finalization verifies that `resource_stats/staging` is
+absent. Archive tests enumerate every `resource_stats/` ZIP member and fail if
+a staging member or any file other than the summary and the participant files
+derived from its accepted entries is present.
+
+### One stored copy
+
+`JobRunner._save_workspace()` stores the server workspace in the existing
+`WORKSPACE` job-store component.
+
+The relevant members are exactly:
+
+```text
+resource_stats/participants/<participant_name>.json
 resource_stats/resource_summary.json
-resource_stats/manifest.json
-resource_stats/participants/<participant_key>.json
 ```
 
-There is no `RESOURCE_STATS` component. The job has one copy of each final
-file, inside its normal archived workspace.
+There is no `RESOURCE_STATS` component, database copy, or generic component
+prefix. If normal workspace archival ultimately fails, the job can still have
+a terminal status but its resource data is unavailable to the CLI.
 
-## CLI reads the existing `WORKSPACE` archive
+The local summary-last sequence happens before `_save_workspace()`. It does not
+constrain ZIP member order; the reader validates the summary-derived namespace
+without relying on archive entry position.
 
-The proposed commands remain:
+The existing workspace layout may flatten separate run, result, log, and audit
+roots into one ZIP namespace. Resource reporting does not build a second
+filtered workspace archive. On read, the fixed-member verifier treats the
+summary as the publication marker, derives the exact accepted participant
+filenames, and requires the complete `resource_stats/` ZIP inventory to equal
+that namespace. It rejects duplicate names, staging files, missing expected
+files, and every extra member. A collision introduced by another flattened
+root therefore makes the resource view unavailable rather than selecting one
+ambiguous copy.
+
+## CLI reads the existing workspace
+
+The CLI may run on another machine, so it cannot literally open the server's
+filesystem. An authenticated server command opens the already stored
+`WORKSPACE` on the CLI's behalf and returns only validated resource JSON.
+
+### One job
+
+```bash
+nvflare job resources --job JOB_ID
+nvflare job resources --job JOB_ID --study STUDY_NAME
+nvflare job resources --job JOB_ID --study STUDY_NAME --site SITE_NAME
+nvflare job resources --job JOB_ID --study STUDY_NAME --format json
+```
+
+`--job` alone uses the `default` study. Combining `--job` with `--study`
+selects that active study during CLI login; the study name is not trusted from
+the resource report.
+
+The command does not search across studies. Job visibility is bound to the
+authenticated session's active study, so a job outside that study intentionally
+appears not found, matching the other job commands.
+
+The new `GET_JOB_RESOURCES` handler uses existing job/study authorization and
+the current staging path:
 
 ```text
-nvflare job resources JOB_ID
-nvflare job resources JOB_ID --site SITE
-nvflare job resources JOB_ID --format json
+JobDefManager.get_storage_for_download(
+    jid=job_id,
+    download_dir=request_temp_dir,
+    component=WORKSPACE,
+    download_file=WORKSPACE_ZIP,
+    fl_ctx=fl_ctx,
+)
 ```
 
-The CLI may run on a different machine from the server, so it cannot literally
-open the server's filesystem path. "Read the workspace" means that an
-authenticated server command opens the job's existing archived `WORKSPACE`
-component and returns only the requested resource records.
+Relevant current patterns are `JobDefManager.get_storage_for_download()`, the
+filesystem backend's download-link path, and the existing archived-log and
+full-job download handlers in `nvflare/private/fed/server/job_cmds.py`.
 
-The implementation adds one narrow job command, `get_job_resources`. It uses
-the same job authorization as `get_job_meta`, `download_job`, and other job
-commands:
+The handler stages the archive as a request-scoped file and reads only the
+fixed summary name and, for `--site`, the one participant name derived from
+it. It rejects duplicate ZIP names, encrypted entries, unsafe paths,
+oversized records, truncation, duplicate JSON keys, an invalid summary, and
+any missing or extra resource member. A participant-detail read additionally
+rejects an invalid schema, identity mismatch, or copied-value reconciliation
+failure for that selected participant. It does not extract the archive into a
+general directory. It removes the request-scoped temporary directory in a
+`finally` path after the response has been assembled. The whole archive is
+never loaded into a Python `bytes` object.
 
-- command registration pattern: `nvflare/private/fed/server/job_cmds.py:159-264`
-- job authorization: `nvflare/private/fed/server/job_cmds.py:279-326`
-- session command and error mapping: `nvflare/fuel/flare_api/flare_api.py:230-328`
-- CLI session selection: `nvflare/tool/job/job_cli.py:1093-1096`
+Without `--site`, it returns the validated job summary. With `--site`, it
+validates the requested name against the trusted participant list and then
+opens the exactly derived `participants/<participant_name>.json` member.
 
-The handler does the following:
+Python's ZIP reader verifies the stored CRC while reading a member, which can
+detect accidental corruption of that member. That CRC is not a cryptographic
+integrity check or signature, and the feature makes no signing claim for these
+files.
 
-1. Require the job to have a terminal status. A running job returns the
-   existing `JOB_RUNNING` result, which the API maps to `JobNotDone`.
-2. Ask `JobDefManager.get_storage_for_download()` for the existing
-   `WORKSPACE` file. The filesystem implementation creates a local symlink,
-   so it does not load the whole archive into memory.
-3. Open the ZIP and read only the fixed members under `resource_stats/`.
-4. Reject duplicate member names, unsafe paths, symlinks, oversized
-   uncompressed members, truncated reads, and missing manifest entries.
-5. Validate the manifest and the digest of every record it will return. The
-   default view need not decompress every participant report; it checks the
-   manifest entry for `resource_summary.json`. A `--site` request also checks
-   the selected participant entry.
-6. Validate `resource_summary.json` against the v1 contract.
-7. Check that the manifest path set exactly matches the accepted participant
-   keys in the validated summary, without decompressing every participant
-   file.
-8. For `--site`, find the participant by `participant_id` in the validated
-   summary, then use its validated `participant_key` to read the exact
-   participant member. Its digest must match both the manifest and the
-   participant entry. Never put raw CLI input into a ZIP path.
-9. Return the validated data to the CLI, which produces either the human
-   table or the JSON envelope.
+The handler uses the current job-CLI terminal predicate: a status beginning
+with `FINISHED:`, or the exact legacy value `FINISHED_OK`,
+`FINISHED_EXCEPTION`, `ABORTED`, `ABANDONED`, or `FAILED`. For any other status
+it returns the existing `JOB_RUNNING`/not-done style error without trying to
+read a live workspace.
 
-The default and `--format json` responses contain one decoded
-`resource_summary`. A `--site` response contains a small server-derived job
-header, that site's trusted participant entry from the summary, and at most one
-decoded `participant_summary`; it does not repeat the complete job summary.
-After serialization, every response is checked against both a fixed 66 MiB
-command-response cap and the Cell's effective payload limit. If it does not
-fit, the command returns a resource-statistics error rather than a partial
-record. The CLI does not receive an archive path and cannot request arbitrary
-ZIP members.
+### All retained jobs in one study
 
-Relevant existing APIs and patterns are:
+```bash
+nvflare job resources --study STUDY_NAME
+nvflare job resources --study STUDY_NAME --format json
+```
 
-- staged storage access:
-  `nvflare/apis/impl/job_def_manager.py:575-593`
-- filesystem download link:
-  `nvflare/app_common/storages/filesystem_storage.py:377-392`
-- current archived-log extraction pattern:
-  `nvflare/private/fed/server/job_cmds.py:645-710`
-- current full job download, including `workspace.zip`:
-  `nvflare/private/fed/server/job_cmds.py:1683-1756`
+`--study` without `--job` selects all retained jobs in that study. The bare
+`nvflare job resources` command shows help, and `--site` requires `--job`.
+The study name selects the active study at login. The `GET_STUDY_RESOURCES`
+handler:
 
-The exact record limits are 4 MiB for the manifest and 64 MiB each for a
-participant or resource summary. The handler checks `ZipInfo.file_size` before
-reading and also enforces a bounded streaming read. It does not extract the ZIP
-to a general directory.
+1. applies the server's current active-study authorization;
+2. runs one existing job-store scan, materializes the returned job IDs and
+   statuses, and does not reclassify them while it reads archives;
+3. applies that same current job-CLI terminal predicate and excludes every
+   other status;
+4. stages one terminal job's `WORKSPACE` in a temporary directory, reads and
+   validates its `resource_summary.json` through the same fixed-member reader,
+   then removes that temporary directory before advancing to the next job;
+5. labels each terminal job `included` or `unavailable`;
+6. adds resource-time, retained-content, and F3 remote-accepted values for
+   included jobs; and
+7. never adds workspace-filesystem capacity.
 
-Expected CLI outcomes are:
+The server selects study membership from existing trusted job metadata, never
+from a value supplied by a participant report.
 
-| Condition | Result |
-| --- | --- |
-| Job is still running | `JobNotDone` |
-| Job does not exist or caller is not authorized | Existing job-command behavior |
-| Terminal job has no resource bundle | Resource statistics unavailable |
-| Manifest, digest, ZIP, or record is invalid | Resource statistics invalid; do not display unverified totals |
-| Valid summary, no `--site` | Show the all-participant rollup |
-| Valid `--site` for an accepted participant | Also show that participant's observations and hardware models |
-| Requested participant is missing, invalid, or disabled | Show its status; no detailed report exists |
+One unavailable terminal archive does not discard other valid jobs. The
+response includes included, unavailable, and nonterminal-excluded counts and a
+per-job status list.
 
-Downloading the full job already makes the workspace available locally, but
-making that a prerequisite for `job resources` would transfer the job
-definition, logs, and all results unnecessarily. The narrow command still
-reads the existing workspace and creates no duplicate stored object.
+This is one materialized scan, not an atomic job-store snapshot. A job observed
+as nonterminal by the scan remains nonterminal in that response even if it
+finishes while archives are being read. A terminal archive that is absent when
+read is unavailable. At most one complete workspace archive is staged for this
+loop at a time, and the reader loads only the bounded resource members into
+Python memory.
 
-## F3 network semantics and the current hook gap
+If the materialized scan contains more than 10,000 jobs, v1 fails the request
+before reading archives and returns no rows or totals. It does not page a total
+that could be mistaken for the whole study.
 
-Phase 1 uses sender-only counters. A receiver does not add the same payload to
+Before appending each job, the handler charges that prospective row's
+canonical JSON size against a cumulative 64 MiB row budget. It then serializes
+the complete study response and checks the same 64 MiB limit again. If either
+check fails, it returns `RESOURCE_VIEW_TOO_LARGE` with no partial rows or
+totals. It never truncates a study result or derives totals from a prefix.
+
+This view is calculated on demand. It creates no study-level stored component
+or duplicate job summary. It covers only retained jobs materialized by that
+scan; a deleted job has no archive to query. The output must not be described
+as an audit or billing ledger.
+
+For a filesystem backend, staging may use a local link. A remote backend may
+need to fetch each retained workspace archive. If that is too expensive at
+study scale, the later optimization is a narrow archive-member read or bounded
+server cache—not a second durable copy of the same statistics.
+
+## F3 counter bindings
+
+Phase 1 counts the sender only. The receiver does not add the same payload to
 the primary total.
 
-### Current route and binding table
+F3 pools are process-local, so one process cannot claim traffic observed by
+another. Phase 1 adds one job-scoped counter in each parent and one in each job
+process. The child freezes its local contribution into the private handoff.
+After the job handle finishes, the parent closes admission to its own counter,
+performs a bounded drain of already-classified sends, freezes that snapshot,
+and merges compatible child and parent fields with checked arithmetic before
+it creates `participant_summary`.
 
-The low-level route alone is not the authority. Platform code assigns the job
-and class at the call site below; job payloads and caller-supplied headers
-cannot opt traffic in or out.
+Any missing contribution or incomplete drain is represented honestly. If one
+bounded contribution remains usable, F3 is partial with the applicable issue;
+if none is usable, F3 is unavailable. A missing or invalid child handoff never
+causes the parent to substitute generic process totals. Likewise, an SJ-only
+counter can never claim complete `job_application` coverage: that send belongs
+to SP's parent counter.
 
-| Phase 1 class | Current route | Platform binding and rule |
+F3 counts distinct sender hops. A child send to its parent and the parent's
+real relay to another endpoint are two included hops and both contributions
+are added. Trusted correlation prevents the *same* hop from being recorded by
+duplicate instrumentation or again for a reliable-transport retransmission;
+it never deduplicates a genuine parent relay against the child send. If hop
+identity cannot be proved, the affected F3 result is partial or unavailable
+rather than guessed.
+
+The low-level route cannot decide by itself whether bytes belong to a job.
+Platform code assigns job and traffic class at these call sites:
+
+| Class | Current route | Binding rule |
 | --- | --- | --- |
-| `task_request` | `server_command/get_task` from `Communicator.pull_task()` (`client/communicator.py:373-410`) | The communicator has the trusted FLContext job ID. Hold the accepted request's byte count by request ID. Commit it only when the matching reply contains a real task; discard it for `__try_again__`, `__end_run__`, timeout, or error. This excludes polling without pretending the request route alone proves work. |
-| `task_response` | Reply to `server_command/get_task` | In `ServerCommandAgent`, after `GetTaskCommand.process()` returns and before reply encoding (`server_command_agent.py:65-110`), tag only a platform-produced reply whose `TASK_NAME` is neither `__try_again__` nor `__end_run__`. The SJ supplies the trusted job ID. |
-| `task_result` | `server_command/submit_update` from `Communicator.submit_update()` (`client/communicator.py:468-530`) | The communicator has the trusted FLContext job ID and assigns the fixed class. The server reply is an ACK and is excluded. |
-| `job_application` | Inner admin topic `train.deploy`, sent over outer `admin/admin` (`server/job_runner.py:137-147,243-248`) | `_make_deploy_message()` assigns the job ID and class before encoding. The shared outer `admin/admin` route is never sufficient; deploy replies are excluded. |
-| `job_stream_data` | DownloadService transaction followed by `sm__STREAM/sm__DATA` chunks | When an included parent payload creates its `ObjectDownloader`, register trusted `{job_id, class}` provenance for that transaction. Workspace-transfer callers register an exclusion. The chunk sender uses that registry, counts `CHUNK` and `FINAL` data once per destination and logical sequence, and does not count reliable retransmissions. |
+| `task_request` | `server_command/get_task` from `Communicator.pull_task()` | Hold request bytes by request ID and commit them only when the paired reply contains a real task. Discard empty polls, `__try_again__`, `__end_run__`, timeout, and error. |
+| `task_response` | Reply to `server_command/get_task` | `ServerCommandAgent` tags only a platform-produced real-task reply before encoding. |
+| `task_result` | `server_command/submit_update` from `Communicator.submit_update()` | The communicator supplies trusted job ID and fixed class. Exclude the ACK. |
+| `job_application` | Inner `train.deploy` over outer `admin/admin` | `_make_deploy_message()` supplies job ID and class. The shared outer route alone is not authority. |
+| `job_stream_data` | DownloadService then `sm__STREAM/sm__DATA` | Register trusted job/class provenance when an included parent payload creates the stream. Count logical data once per destination, not reliable retransmissions. |
 
-Relevant response constants are `__try_again__` and `__end_run__` in
-`private/defs.py:26-30`. DownloadService's shared route is
-`download_service__/download_service__download`
-(`fuel/f3/streaming/download_service.py:47-49`); it cannot distinguish tensors
-from workspace files without the transaction registry.
+Explicit exclusions include empty polling, all ACK/control traffic, workspace
+transfer, the terminal resource report, authentication, heartbeat, quit,
+shutdown, job heartbeat, logs, federated events, HCI, bulk envelopes, and every
+unrecognized or unbound route.
 
-The correlation above adds only internal observer state. It adds no wire
-option, job setting, or operator configuration.
+Count `len(message.payload)` after payload encoding and optional end-to-end
+encryption, but not Cell headers, driver/TLS framing, transport compression, or
+retransmissions. Increment remote bytes only after local transport acceptance;
+keep direct delivery and failed-before-acceptance separate.
 
-### Exact exclusions
-
-The classifier defaults to excluded. Its explicit exclusions are:
-
-- empty `get_task` polls and `__end_run__` replies, including their paired
-  requests;
-- replies to `submit_update` and `train.deploy`;
-- stream `sm__ACK` and `sm__ERROR`, plus `ACK`, `RESUME`, `RESUME_ACK`, and
-  `ERROR` data types;
-- DownloadService confirm/cancel traffic;
-- the `cellnet.channel/bulk` envelope, because its logical children are
-  classified separately;
-- `workspace_transfer/prepare_download` and
-  `workspace_transfer/publish_results`, including their stream transactions;
-- the terminal resource report on `task/report_job_failure` and its reply;
-- registration, challenge, heartbeat, quit, shutdown, and job-heartbeat
-  traffic;
-- metrics/logging, federated-event, and HCI traffic; and
-- every unrecognized channel/topic or unbound download transaction.
-
-Default exclusion is important: `admin/admin`, DownloadService, and streaming
-routes all carry both included and excluded traffic.
-
-The exact rules are:
-
-- Count `task_request`, `task_response`, `task_result`, `job_application`, and
-  `job_stream_data`.
-- Exclude `job_stream_control`, `bulk_envelope`, `workspace_transfer`,
-  `platform_control`, `log_export`, unknown classes, and resource-report
-  publication.
-- Measure `len(message.payload)` after payload encoding and optional
-  end-to-end encryption. Do not include Cell headers, driver or TLS framing,
-  transport compression, or retransmissions.
-- For a remote destination, increment `remote_accepted` only after
-  `Communicator.send()` returns successfully. This means accepted by the local
-  transport, not confirmed delivery by the receiver.
-- Put a direct in-process delivery in `local_delivered`, not
-  `remote_accepted`.
-- Put a remote send that fails before acceptance in
-  `remote_failed_before_acceptance`.
-- Count fan-out once per destination. A participant that forwards a message
-  counts its own sending hop.
-- Freeze all three counters atomically before serializing
-  `participant_final`. Later completions do not change the report.
-
-`CoreCell._send_to_endpoint()` already exposes the useful low-level boundary:
-it encodes and encrypts the payload, distinguishes direct delivery from
-`communicator.send()`, and records its generic sent-size pool after a
-successful call:
+`CoreCell._send_to_endpoint()` exposes the useful low-level boundary:
 
 - `nvflare/fuel/f3/cellnet/core_cell.py:1326-1358`
-- per-destination setup:
-  `nvflare/fuel/f3/cellnet/core_cell.py:1365-1407`
+- `nvflare/fuel/f3/cellnet/core_cell.py:1365-1407`
 
-That generic pool is not enough for Phase 1. It uses floating-point MiB,
-includes protocol traffic, has no reliable job traffic class, does not keep
-direct delivery separate, and does not provide the required failed-send or
-atomic-cutoff record. `JobStatsReporter` currently reads those broad process-
-level pools:
+The existing generic StatsPool is not sufficient because it combines protocol
+traffic, lacks reliable job/class ownership, uses floating-point MiB, and does
+not provide the required cutoff record. Until task pairing, stream provenance,
+parent/child merging, forwarding provenance, and same-hop
+duplicate/retransmission suppression are proved, affected F3 fields must be
+partial or unavailable rather than substituted from generic process totals.
 
-- `nvflare/app_common/widgets/job_stats_reporter.py:1380-1424`
+## Why use one completion message
 
-Production therefore needs a platform-owned observer in the F3 send path. The
-observer receives a platform-assigned job ID, class, and optional correlation
-token. The report sender uses the explicit exclusion above, so the report
-cannot count itself.
-
-Four implementation details still need proof:
-
-1. Pair an accepted `get_task` request with its reply before committing or
-   discarding the pending request bytes.
-2. Carry trusted provenance from an included large object into its
-   DownloadService/stream transaction while marking workspace transfer
-   excluded.
-3. Re-establish trusted class provenance at an intermediate forwarder without
-   accepting a job-supplied opt-in header.
-4. Deduplicate reliable stream retries by logical stream ID, sequence, and
-   destination.
-
-Until the relevant path is implemented and tested, its F3 fact is
-`unavailable/not_bound` or `partial/counter_gap`. The implementation must not
-substitute the current generic sent/received totals.
-
-## Why the other delivery mechanisms are not the default
-
-| Mechanism | Useful property | Why it is not the final-report path |
+| Mechanism | Useful property | Decision or limitation |
 | --- | --- | --- |
-| Extend the current CP-to-SP terminal outcome | Uses an authenticated parent connection after the job process ends; covers success and failure; server already waits for it. | Recommended for current code. The old topic name is confusing, and synchronous validation/workspace commit adds latency to this request, but it avoids a second delivery and cutoff protocol. |
-| Add a separate CP-to-SP CellNet topic | Clearer name and independent acknowledgement. | Adds another completion message and race without improving the trust or lifecycle boundary. |
-| CJ-to-SJ Aux request | Job-scoped request/reply API already exists. | The job cells are tearing down, sends use the run abort signal, and a crashed CJ cannot send. `AuxRunner` behavior is at `nvflare/private/aux_runner.py:297-423`. |
-| Federated event | Convenient application event interface and receiver-side duplicate IDs. | Outgoing delivery is fire-and-forget Aux traffic and shutdown is best effort. See `nvflare/widgets/fed_event.py:32-39,82-147,163-243`. An event can trigger local collection, but it is not the durable delivery acknowledgement. |
-| Attach the report to task or model-result metadata | Reuses an existing result message. | Some jobs have no final task result, results may be retried or filtered, and the server rejects late submissions after workflow teardown. Current `JobStatsReporter` attaches per-task telemetry before result filters at `nvflare/app_common/widgets/job_stats_reporter.py:901-934`; server submission admission closes at `nvflare/private/fed/server/server_runner.py:460-470`. |
-| Server pulls from each CJ at the end | Server controls timing and gets a reply. | It requires every job cell to remain alive, blocks server teardown, and couples the design to today's process topology. |
-| Workspace only, with no CP-to-SP message | No report message. | The server's normal workspace archive contains the server workspace, not every client's local workspace. The SP would not know that a client report is ready or authentic. |
-| Separate `RESOURCE_STATS` job-store component | Small direct query object. | It duplicates the summary already in `WORKSPACE` and creates a consistency problem. The narrow archive reader provides the same query without a second stored copy. |
+| Option A: extend `REPORT_JOB_FAILURE` | Reuses the current authenticated parent request after child exit; covers success and failure; server already waits. | Primary proposal. The old topic name and handler ownership are confusing, and synchronous report work adds completion latency. |
+| Option B: new versioned `REPORT_JOB_COMPLETION` | Gives the combined lifecycle outcome and report an accurate name and explicit envelope version. | Fallback for the naming/ownership objection. It replaces Option A rather than adding a message, but needs a mixed-version rollout decision and has the same completion-path cost. |
+| Separate resource-report CellNet topic | Separates lifecycle control from resource data. | Adds another message, acknowledgement, correlation path, and cutoff race. This is a different design and is required if reviewers insist on that separation; neither one-message option provides it. |
+| CJ-to-SJ Aux | Existing job-scoped request/reply. | Job cells are tearing down and a crashed CJ cannot send. |
+| Federated event | Convenient application event. | Outgoing delivery is best effort and is not durable acceptance. |
+| Task/model metadata | Reuses application messages. | Some jobs have no final result; messages can be filtered, retried, or rejected after workflow teardown. |
+| Server pull | Central timing. | Requires every job cell to stay alive and couples the format to current topology. |
+| Client workspace only | No explicit report message. | The server archive does not automatically contain each client workspace and has no authenticated readiness signal. |
+| Separate job-store component | Fast direct lookup. | Duplicates `WORKSPACE` data and creates consistency problems. |
 
-## Failure and crash behavior
+Current production uses Option A and sends exactly one completion request.
+If Option B is later implemented, it should change only the envelope/topic,
+not the public report, acceptance semantics, archive, cutoff, or CLI. There is
+no dual-send mode or operator configuration.
 
-Resource statistics never change the job's success, failure, or abort result.
+## Current failure behavior and explicit target cases
 
-| Event | Resource-statistics result |
+| Event | Result |
 | --- | --- |
-| One CPU, memory, GPU, storage, retained-content, or F3 probe fails | Encode the applicable `unavailable`, `error`, or `partial` typed value. Continue the job. |
-| Normal Python exception reaches the CJ/SJ `finally` block | Close the period as failed, write the report if possible, and use the normal workspace return. |
-| Final capacity check is missing | Keep the valid start-based contribution and mark that resource total partial. |
-| Process never reaches recorder start | No site report. The expected participant becomes missing. |
-| SIGKILL, pod loss, node loss, or another failure bypasses `finally` | A remote parent may receive no final staging file. The participant becomes missing. A leftover local fragment is not called a complete report. |
-| Workspace result upload fails | Parent sends the terminal outcome without a report; participant becomes missing unless a valid report was already accepted. |
-| CP-to-SP request or reply is lost | CP retries the same bytes up to the fixed limit. An acknowledgement loss becomes an idempotent duplicate. |
-| Report is malformed or its digest is wrong | Record an invalid candidate. Do not use its values. A later valid candidate may still win before cutoff. |
-| A second valid but different digest arrives | Keep the first valid report and return `conflict`. |
-| Client report arrives after a normal cutoff | Return `too_late`; do not rewrite the summary. |
-| SJ fails or the job is aborted | Make the one server-local acceptance attempt, skip the client-outcome wait, and close acceptance. Late client reports do not change the result. |
-| SP stops after accepting a report but before finalization | Reload the acceptance ledger from the existing participant files when job recovery resumes. If the underlying workspace did not survive, report the loss; do not reconstruct accepted values from memory. |
-| Workspace archival fails | Current code retries for up to 60 seconds and may publish terminal status without archived artifacts. In that case `job resources` reports unavailable. See `nvflare/private/fed/server/job_runner.py:501-524`. |
-| Archived ZIP, manifest, or digest is corrupt | CLI reports invalid data and prints no totals from it. |
+| One startup probe fails | Finish one report with partial or unavailable resource time; do not fail the job. |
+| An applicable cgroup CPU or memory value is unreadable or malformed | Fail that dimension closed; do not substitute a wider host or process-visible value. Keep other valid dimensions as partial, or report unavailable when none remains. |
+| Slurm uses more than one node | Resource time is `unavailable/unsupported`; publish no rank-zero numeric totals and do not infer other-node capacity. |
+| Server job process is restored from a snapshot | Measure the new process interval and mark it `partial/observation_incomplete`; do not claim that it covers the pre-restore interval. |
+| Normal application exception reaches child finalization | Freeze the private handoff if possible; the parent still owns final assembly. |
+| A child callback is still active at the child F3 freeze | **Target:** freeze once and preserve partial F3 with `counter_gap`. Current F3 is unavailable. |
+| A parent F3 drain times out | **Target:** freeze the bounded contribution and mark merged F3 partial. Current parent F3 is not implemented. |
+| Hard child or launcher-managed pod loss bypasses `_archive_results()`, but the parent survives | Parent builds one report with unavailable child-derived measurements; F3 is currently unavailable. |
+| Parent/site loss prevents parent assembly or delivery | No report reaches SP; the expected participant is missing. |
+| Separate-workspace upload fails | Parent treats the handoff as missing and builds the same typed partial/unavailable report. |
+| Selected CP completion request or reply is lost | Current CP does not retry. A lost request can leave a missing report; a lost reply can follow successful acceptance. |
+| Invalid JSON or schema | Reject candidate without reserving the participant slot. |
+| Different second valid report | Keep the first and return conflict. |
+| Report arrives after cutoff | Return too late and do not change archived bytes. |
+| Server job process fails | Skip the normal client-outcome grace period, perform the server's bounded local assembly, and close acceptance immediately. |
+| Root parent restarts after accepting client reports but before rollup | Restore rebuilds the original expected names, resets stale resource artifacts, and starts an empty ledger. Pre-restart reports are not restored and normally become `missing` because clients do not retry. |
+| Private staging cleanup cannot be completed | Do not publish `resource_summary.json`; discard the incomplete bundle so the handoff cannot be archived. |
+| Workspace archival fails | Resource data is unavailable to both job and study CLI. |
+| Stored ZIP or resource record is corrupt or inconsistent | Do not print unverified totals; mark that job unavailable in a study view. |
 
-Site-side staging files are self-reports. They are not immutable evidence. An
-accepted report becomes part of the server's normal job archive only after the
-SP has validated it and the existing workspace save succeeds.
+Child handoffs and their child-derived measurements are self-reports, not
+immutable evidence. The parent supplies trusted identity, but this still is
+not hardware attestation. Durability exists
+only after the normal server workspace save succeeds.
 
-## Future-neutral recorder API
+## Current adapter and future GPU release
 
-The schema already allows several measurement periods. The production API
-should expose period boundaries without mentioning a process, GPU lease,
-worker, or scheduler:
+The current adapter is deliberately small:
 
 ```python
-participant = recorder.begin_participant(job_id, participant_key, workspace)
-period = participant.begin_period(environment_scope)
+resource_collector = JobResourceCollector(run_dir)
 
-# Current code runs the job here.
+# Existing job process runs. Current code makes no capacity-change calls.
 
-participant.end_period(period, reason="released", take_final_observation=True)
-report_bytes = participant.finish(retained_content_source)
+handoff = resource_collector.finish()
 ```
 
-The API rules are:
+A future resource implementation may keep the current accumulator owner and
+call:
 
-- `begin_participant()` is called once for one site's job participation.
-- `begin_period()` generates its own `attempt_id` and probes the current
-  environment. It returns an opaque handle.
-- `end_period()` is idempotent for that handle. It records one end time and an
-  optional final observation.
-- `finish()` ends any still-open period conservatively, closes participant
-  facts and F3 counters, and freezes canonical report bytes. An implicitly
-  closed period uses `terminated` and has no final stability observation.
-- Job code cannot supply resource values, identity, status, traffic class, or
-  timestamps to these methods.
-- Probe failure is data, not an exception that fails the job.
+```python
+resource_collector.observe_capacity_change(current_capacity)
+```
 
-Today, the adapter makes exactly one `begin_period()` call near the start of
-`worker_process.main()` or `runner_process.main()` and one `end_period()` call
-at job-process finalization. A future resource-management implementation may
-call the same API several times around whatever boundaries it chooses. The
-record schema, reduction rules, archived layout, and CLI do not depend on the
-future process owner. The CP terminal-outcome transport is the concrete adapter
-for today's code; it remains usable only while an equivalent parent terminal
-path exists. If the roadmap removes that boundary, the delivery adapter and
-assembly owner must change, while the report and stored formats stay the same.
+at each boundary it owns. The accumulator first closes the elapsed private
+interval, then changes capacity. The private handoff and parent-built final
+report still contain only totals.
 
-The `environment_scope` is a platform-owned opaque value. For the current
-single-period adapter it identifies that one site job-process scope. A future
-multi-process or multi-node implementation must define scopes that prevent
-overlapping ranks from reporting the same visible environment twice.
+Nothing in this contract assumes a permanent supervisor, a GPU-free process,
+a successor worker, or held CPU/memory capacity. The *current adapter* does
+assume that one CJ/SJ process survives from initial probe through finalization.
+If future code replaces that lifetime with transient workers or CP/SP task
+execution, it must replace the child collection/handoff adapter with one that
+covers the actual execution intervals. The parent-assembly boundary is the
+stable seam: it accepts typed terminal measurements plus parent F3 and emits
+the same final participant format. The job rollup, archived workspace layout,
+and CLI contract do not change, and no user-facing configuration is
+introduced.
 
-## Production change map
+## Production code and remaining changes
 
-This is the expected implementation surface. It is not a request for new
-deployment files or configuration.
-
-| Current file or area | Phase 1 change |
+| Current file or area | Change |
 | --- | --- |
-| `nvflare/apis/fl_constant.py` | Add the reserved resource-context job-meta key and `GET_JOB_RESOURCES` admin command name. |
-| `nvflare/private/fed/server/job_runner.py` | Freeze expected participants and derived keys before start, accept the local server report, apply the existing outcome cutoff, reduce the job result, write the manifest last, then call the unchanged workspace save. |
-| `nvflare/private/fed/server/server_engine.py` | Before server launcher selection, atomically add only the platform-owned resource context to deployed `job_meta.json` while preserving the deploy-time BYOC decision. |
-| `nvflare/private/fed/app/client/worker_process.py` and `.../server/runner_process.py` | Call the collector at the exact start hook and in `_archive_results()`; write the frozen candidate report in the existing run workspace. |
-| New or nearby platform resource-statistics module | Own probes, one-clock timestamping, canonical fragment/report assembly, semantic validation, exact arithmetic, atomic writes, and the future-neutral recorder API. |
-| `nvflare/private/fed/client/client_executor.py` | After `job_handle.wait()`, read/bound/hash the candidate and extend the existing terminal request; keep terminal outcome delivery when no report exists. |
-| `nvflare/private/defs.py` | Add fixed request/reply key and resource-report status constants. No launcher or user-facing option is added. |
-| `nvflare/private/fed/server/fed_server.py` | Extend `process_job_failure()` with authenticated participant binding and the acceptance state machine; resolve the terminal outcome in `finally` regardless of report status. |
-| F3 platform call sites and `fuel/f3/cellnet/core_cell.py` | Assign trusted job/class/correlation state at platform call sites, then measure accepted bytes at `_send_to_endpoint()` and keep direct/failure buckets separate. |
-| `nvflare/private/fed/server/job_cmds.py` | Add the authorized job-resources handler and safe fixed-member workspace reader. Reuse `get_storage_for_download()`; add no job-store component. |
-| `nvflare/fuel/flare_api/flare_api.py` and `nvflare/tool/job/job_cli.py` | Add `Session.get_job_resources()` and the three proposed CLI forms, with existing job-command error mapping. |
-| `JobDefManager` and storage implementations | No new save/get resource API. Reuse the existing `WORKSPACE` save and staged-download interfaces. |
+| `nvflare/apis/fl_constant.py` | **Implemented:** `GET_JOB_RESOURCES` / `GET_STUDY_RESOURCES`; no resource-specific start identity. |
+| `private/fed/server/job_runner.py` | **Implemented:** persist all selected client names, launch only the deployable subset, restore the expected set, perform server local assembly, cutoff, rollup, local summary-last publication, and unchanged normal workspace save. **Remaining:** parent F3 and accepted-ledger/cutoff recovery. |
+| official Process/Docker/Kubernetes/Slurm launchers | **Implemented:** run the NVFlare worker with Python `-I` and keep app/site custom paths out of startup `PYTHONPATH`, without a user setting or extra privilege. BYOC entrypoints and global interpreter `sitecustomize` remain outside this boundary. |
+| client/server job-process entry points | **Implemented:** start the in-memory accumulator before workspace download and custom-path activation, then freeze one private terminal handoff in `_archive_results()`. |
+| `private/fed/app/job_process_cleanup.py` and command agents | **Remaining:** expose incomplete callbacks for authoritative child F3 cutoff. |
+| `private/fed/resource_stats/*` | **Implemented:** fail-closed probes, accumulation, private-handoff validation, canonical final assembly, public validation, exact arithmetic, bounded in-memory acceptance, finalization-time atomic/fsynced files, and a fail-closed path-backed archive reader. **Remaining:** parent/child F3 merge and retained-result provider. |
+| `private/fed/client/client_executor.py` | **Implemented:** after `job_handle.wait()`, validate the handoff, bind the trusted site name, delete staging, free allocated compute resources, and then send exact bytes once on Option A. **Remaining:** any approved retry/recovery behavior and parent F3. |
+| `fuel/f3/cellnet/defs.py` | **Implemented:** keep `REPORT_JOB_FAILURE`. **Fallback only:** Option B would add `REPORT_JOB_COMPLETION`. |
+| `private/defs.py` | **Implemented:** Option A report and flat status keys. **Fallback only:** Option B would add a versioned completion envelope. |
+| `private/fed/server/fed_server.py` | **Implemented:** Option A authenticates and processes the report before the once-only terminal outcome. **Remaining:** no receipt tombstone; Option B is not registered. |
+| F3 call sites and CoreCell | **Remaining:** trusted job/class/correlation, child and parent job-scoped counters, and close/drain/freeze snapshots. |
+| `private/fed/server/job_cmds.py` | **Implemented:** authorized job/study handlers that stage one normal workspace archive at a time and use the safe fixed-member reader without loading the full archive into memory. |
+| `fuel/flare_api/flare_api.py` and `tool/job/job_cli.py` | **Implemented:** session APIs and exact job/study CLI forms. |
+| JobDefManager/storage backends | No new resource component API. The private handoff uses the existing run workspace temporarily; only final resource members remain in the normal `WORKSPACE` archive. |
 
-## Remaining implementation gaps
+## Remaining code proofs
 
-| Gap | Decision or proof still needed | Safe behavior until resolved |
-| --- | --- | --- |
-| Pre-`main()` Python injection | Decide whether the supported launchers can sanitize platform startup without new user setup. | Describe current observations as self-reported; never claim tamper-proof evidence. |
-| Root-parent restart recovery | Prove how the derived expected-participant map, accepted digests, and cutoff state reload from the existing run workspace. | If state cannot be recovered, make the resource summary unavailable; never infer it from logs or unauthenticated files. |
-| F3 ownership and class mapping | Add the platform-only job/class mapping and prove how CP/CJ and SP/SJ counters combine without gaps or duplicates. | Report F3 unavailable or partial; do not reuse generic process totals. |
-| F3 callback ordering | Choose callback drain before freeze or prove that atomic freeze correctly classifies every later completion. | Mark a known gap as `partial/counter_gap`. |
-| Saved-result set | Identify the existing NVFlare-owned bounded result set for each supported workflow. | Use `unavailable/not_bound`; do not scan arbitrary files. |
-| Crash recovery | Add tests that reload accepted report files and the cutoff state after an SP restart. | Never acknowledge before the participant file is stored; report unrecoverable loss honestly. |
-| Mixed-version behavior | Confirm new SP/old CP and old SP/new CP behavior and the exact response payload version. | Omitted report means missing; unknown added request fields must not affect the terminal outcome. |
-| Initial platform support | Select and test the ordinary-user OS, cgroup, CUDA-runtime, Docker, Kubernetes, and Slurm matrix. | Unsupported probes use the canonical unavailable status. |
-| Archive reader hardening | Implement bounded ZIP reads, duplicate-name rejection, manifest verification, and authorization tests. | Do not fall back to unverified direct ZIP extraction in the CLI. |
+1. Broaden platform coverage and validate CUDA/NVML matching across supported
+   CUDA Runtime, NVML, full-GPU, and MIG versions.
+2. Complete F3 request/reply and stream provenance without trusting
+   job-supplied headers.
+3. Identify authoritative bounded retained-result sets.
+4. Decide whether root-parent restart must recover accepted report bytes,
+   invalid history, and cutoff state. Expected participant names are already
+   persisted and restored; accepted state is not.
+5. Test the fixed 10,000-job study bound and remote-store performance.
+6. Keep implemented Option A, or implement and prove mixed-version selection
+   for Option B without dual sending or a new operator setting.
+7. Select the initial OS, cgroup, container, Kubernetes, and Slurm support
+   matrix; keep Slurm multi-node resource time `unavailable/unsupported` until
+   a collector covers non-rank-0 nodes.
+8. Decide whether delivery retries/tombstones are required; if so, implement
+   and test them. Continue proving staging-member absence from every archive.
 
-The transport, cutoff, reduction order, archive location, and CLI storage
-source are no longer open in this proposal. The remaining items are bounded
-implementation details or support-matrix decisions.
+These gaps change coverage or the chosen one-message completion hook, not the
+one-report format, shared acceptance semantics, workspace-only storage, or
+study-rollup semantics.

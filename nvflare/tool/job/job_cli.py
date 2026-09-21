@@ -90,6 +90,7 @@ CMD_JOB_ABORT = "abort"
 CMD_JOB_CLONE = "clone"
 CMD_JOB_DOWNLOAD = "download"
 CMD_JOB_DELETE = "delete"
+CMD_JOB_RESOURCES = "resources"
 
 # Job observability commands
 CMD_JOB_STATS = "stats"
@@ -642,6 +643,7 @@ job_sub_cmd_handlers = {
     CMD_JOB_CLONE: None,
     CMD_JOB_DOWNLOAD: None,
     CMD_JOB_DELETE: None,
+    CMD_JOB_RESOURCES: None,
     CMD_JOB_STATS: None,
     CMD_JOB_LOGS: None,
     CMD_JOB_MONITOR: None,
@@ -660,6 +662,7 @@ job_sub_cmd_parser = {
     CMD_JOB_CLONE: None,
     CMD_JOB_DOWNLOAD: None,
     CMD_JOB_DELETE: None,
+    CMD_JOB_RESOURCES: None,
     CMD_JOB_STATS: None,
     CMD_JOB_LOGS: None,
     CMD_JOB_MONITOR: None,
@@ -703,6 +706,7 @@ def def_job_cli_parser(sub_cmd):
     define_download_job_parser(job_subparser)
     define_clone_job_parser(job_subparser)
     define_delete_job_parser(job_subparser)
+    define_job_resources_parser(job_subparser)
     define_list_templates_parser(job_subparser)
     define_create_job_parser(job_subparser)
     define_variables_parser(job_subparser)
@@ -1915,6 +1919,100 @@ def define_delete_job_parser(job_subparser):
     p.add_argument("--schema", action="store_true", help="print command schema as JSON and exit")
     job_sub_cmd_parser[CMD_JOB_DELETE] = p
     job_sub_cmd_handlers[CMD_JOB_DELETE] = cmd_job_delete
+
+
+def cmd_job_resources(cmd_args):
+    from nvflare.fuel.flare_api.api_spec import AuthenticationError, JobNotDone, JobNotFound, NoConnection
+    from nvflare.tool.cli_output import is_json_mode, output_error, output_ok, print_human
+    from nvflare.tool.cli_schema import handle_schema_flag
+    from nvflare.tool.job.job_resources import render_job_resources, render_study_resources
+
+    parser = job_sub_cmd_parser[CMD_JOB_RESOURCES]
+    handle_schema_flag(
+        parser,
+        "nvflare job resources",
+        [
+            "nvflare job resources --job JOB_ID",
+            "nvflare job resources --job JOB_ID --study STUDY_NAME --site SITE_NAME",
+            "nvflare job resources --study STUDY_NAME",
+        ],
+        sys.argv[1:],
+        output_modes=_JSON_OUTPUT_MODES,
+        streaming=False,
+        mutating=False,
+        idempotent=True,
+        retry_token=_NO_RETRY_TOKEN_SCHEMA,
+    )
+
+    job_id = getattr(cmd_args, "job_id", None)
+    requested_study = getattr(cmd_args, "study", None)
+    site = getattr(cmd_args, "site", None)
+    if not job_id and not requested_study:
+        parser.print_help()
+        return
+    if site and not job_id:
+        output_error("INVALID_ARGUMENT", exit_code=4, detail="--site requires --job")
+        return
+
+    study = requested_study or "default"
+    try:
+        with _job_session_for_args(cmd_args, study=study) as sess:
+            if job_id:
+                result = sess.get_job_resources(job_id, site=site)
+            else:
+                result = sess.get_study_resources()
+    except JobNotFound:
+        output_error(
+            "JOB_NOT_FOUND",
+            job_id=job_id,
+            detail=f"searched study '{study}'",
+            hint=_job_not_found_hint(study),
+        )
+        return
+    except JobNotDone:
+        output_error(
+            "JOB_NOT_FINALIZED", exit_code=4, job_id=job_id, detail="resource data is available after finalization"
+        )
+        return
+    except AuthenticationError:
+        raise
+    except NoConnection as e:
+        output_error("CONNECTION_FAILED", exit_code=2, detail=str(e))
+        return
+    except Exception as e:
+        output_error("RESOURCE_DATA_UNAVAILABLE", exit_code=4, job_id=job_id, detail=str(e))
+        return
+
+    if job_id:
+        summary = result.get("resource_summary")
+        participant = result.get("participant_summary")
+        data = {"selection": {"job_id": job_id, "site": site or "all"}, "summary": summary}
+        if participant is not None:
+            data["participant"] = participant
+        if is_json_mode():
+            output_ok(data)
+        else:
+            print_human(render_job_resources(summary, participant))
+    else:
+        data = {"selection": {"study": study}, "summary": result}
+        if is_json_mode():
+            output_ok(data)
+        else:
+            print_human(render_study_resources(result))
+
+
+def define_job_resources_parser(job_subparser):
+    p = job_subparser.add_parser(
+        CMD_JOB_RESOURCES,
+        help="show recorded resource-time for one job or all retained jobs in a study",
+    )
+    p.add_argument("--job", dest="job_id", type=str, help="job ID; uses the default study unless --study is set")
+    p.add_argument("--study", type=str, help="study containing the job, or the study to roll up")
+    p.add_argument("--site", type=str, help="show one participant's final hardware and filesystem observation")
+    add_startup_kit_selection_args(p)
+    p.add_argument("--schema", action="store_true", help="print command schema as JSON and exit")
+    job_sub_cmd_parser[CMD_JOB_RESOURCES] = p
+    job_sub_cmd_handlers[CMD_JOB_RESOURCES] = cmd_job_resources
 
 
 _TERMINAL_JOB_STATES = {

@@ -1,0 +1,16 @@
+Connecting to FLARE ...
+Recorded resource-time for job bb65f3e7-28bc-48d9-9ed4-656e596811fd.
+Job coverage: COMPLETE (3 accepted / 3 expected) | selected site: site-2
+
+SITE    ROLE    REPORT    COMPUTE  MEASURED TIME  FULL GPU h  CPU h   MEM GiB h  SAVED GiB  F3 REMOTE GiB
+site-2  client  accepted  PARTIAL  1m16s          N/A         0.6808  2.6734     N/A        N/A
+
+Notes:
+  PARTIAL means at least one expected report or observation was incomplete.
+  Totals add participant reports; overlapping resources can be counted more than once.
+
+Hardware detail for site-2
+Model metadata is optional and does not change numeric totals.
+
+CPU: AMD EPYC 7313P 16-Core Processor (x86_64); 0.6808 CPU h
+Visible workspace-filesystem capacity at reporting time: 1759.6855 GiB

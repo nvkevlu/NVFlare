@@ -1,0 +1,18 @@
+Connecting to FLARE ...
+Recorded resources for job bb65f3e7-28bc-48d9-9ed4-656e596811fd.
+Job coverage: COMPLETE (3 accepted / 3 expected) | selected site: site-2
+
+Recorded average visible capacity over each measured interval
+SITE    ROLE    REPORT    COMPUTE  MEASURED TIME  CPU UNITS  MEM GiB   FULL GPUs
+site-2  client  accepted  PARTIAL  1m16s          32.0000    125.6521  N/A
+
+Notes:
+  PARTIAL means at least one expected report or observation was incomplete.
+  Each average is resource-time divided by that row's measured interval.
+  Totals add participant reports; overlapping resources can be counted more than once.
+
+Hardware detail for site-2
+Model metadata is optional and does not change numeric totals.
+
+CPU: AMD EPYC 7313P 16-Core Processor (x86_64); 32.0000 average visible units
+Visible workspace-filesystem capacity at reporting time: 1759.6855 GiB

@@ -26,6 +26,7 @@ from nvflare.app_opt.job_launcher.slurm.batch import (
     _submission_argv,
 )
 from nvflare.app_opt.job_launcher.slurm.config import BindMount, JobResources, LaunchPlan, SlurmConfig
+from nvflare.utils.job_launcher_utils import CLIENT_JOB_PROCESS_MODULE, JOB_PROCESS_BOOTSTRAP_MODULE
 
 
 def _job_dir(tmp_path):
@@ -65,7 +66,7 @@ def _plan(
         job_id="job-1",
         site_name="site-1",
         run_dir=str(run_dir),
-        exe_module="worker.module",
+        exe_module=CLIENT_JOB_PROCESS_MODULE,
         module_args=("-n", "job-1"),
         resources=resources or JobResources(),
         directives={},
@@ -130,8 +131,11 @@ def test_renderer_delivers_credentials_through_environment(tmp_path, sandbox):
 
     for value in ("hidden", "secret-token", "secret-signature", "secret-ssid"):
         assert value not in script
-    assert "worker.module" in script
     command_line = next(line for line in script.splitlines() if line.startswith("_nvfl_command="))
+    assert JOB_PROCESS_BOOTSTRAP_MODULE in command_line
+    assert " client " in command_line
+    assert CLIENT_JOB_PROCESS_MODULE not in command_line
+    assert " -I " in command_line
     assert "-t" not in command_line
     assert "-ts" not in command_line
     assert "-d" not in command_line
@@ -139,6 +143,35 @@ def test_renderer_delivers_credentials_through_environment(tmp_path, sandbox):
     assert f"export {JobProcessEnv.AUTH_TOKEN}=secret-token" in secret_file
     assert f"export {JobProcessEnv.TOKEN_SIGNATURE}=secret-signature" in secret_file
     assert f"export {JobProcessEnv.SSID}=secret-ssid" in secret_file
+
+
+@pytest.mark.parametrize("sandbox", ["none", "apptainer", "pyxis"])
+def test_worker_bootstrap_uses_isolated_python_and_preserves_pythonpath_for_later(tmp_path, sandbox):
+    plan = _plan(tmp_path, sandbox=sandbox)
+
+    script, _ = _render_batch_script(plan, _job_dir(tmp_path), _config(tmp_path, sandbox))
+
+    assert "export PYTHONPATH=/custom" in script
+    command_line = next(line for line in script.splitlines() if line.startswith("_nvfl_command="))
+    assert " -I " in command_line
+
+
+def test_worker_bootstrap_rejects_arbitrary_job_process_module(tmp_path):
+    plan = replace(_plan(tmp_path), exe_module="job.custom")
+
+    with pytest.raises(ValueError, match="fixed NVFlare client worker or server runner"):
+        _render_batch_script(plan, _job_dir(tmp_path), _config(tmp_path))
+
+
+def test_nonzero_node_enables_custom_pythonpath_after_rank_selection(tmp_path):
+    plan = _multinode_plan(tmp_path)
+
+    node_script = _render_node_script(plan, _config(tmp_path))
+
+    rank0_pos = node_script.index('if [[ "${NVFL_NODE_RANK}" == "0" ]]')
+    custom_path_pos = node_script.index("export PYTHONPATH=/custom")
+    else_pos = node_script.index("else", rank0_pos)
+    assert custom_path_pos > else_pos
 
 
 @pytest.mark.parametrize("worker_exists", [True, False])
@@ -189,7 +222,7 @@ def test_multinode_batch_exports_node_group_contract_and_delegates_to_srun(tmp_p
     assert "--wait=0" in command_line
     assert "--label" in command_line
     assert f"{job_dir}/node.sh" in command_line
-    assert "worker.module" not in command_line
+    assert CLIENT_JOB_PROCESS_MODULE not in command_line
 
 
 def test_site_port_range_overrides_the_default_rendezvous_ports(tmp_path):
@@ -224,7 +257,8 @@ def test_apptainer_node_group_containerizes_each_rank_on_its_node(tmp_path):
     assert f"--pwd {plan.run_dir}" in node
     assert f"--pwd {plan.node_app_dir}" in node
     assert "cd " not in node
-    assert "worker.module" in node
+    assert JOB_PROCESS_BOOTSTRAP_MODULE in node
+    assert CLIENT_JOB_PROCESS_MODULE not in node
     assert "python3 -m trainer --epochs 2" in node
     assert "export CLIENT_API_TYPE=CELL_API" in node
     assert 'export APPTAINERENV_CLIENT_API_TYPE="${CLIENT_API_TYPE}"' in node
@@ -251,11 +285,12 @@ def test_pyxis_node_group_fans_out_containers_through_one_srun(tmp_path):
     assert "--kill-on-bad-exit=1" in batch_command
     assert "--container-image=/images/python.sif" in batch_command
     assert batch_command.rstrip(")").endswith(f"{job_dir}/node.sh")
-    assert "worker.module" not in batch_command
+    assert CLIENT_JOB_PROCESS_MODULE not in batch_command
 
     assert "apptainer" not in node
     assert f"cd {plan.node_app_dir}" in node
-    assert "worker.module" in node
+    assert JOB_PROCESS_BOOTSTRAP_MODULE in node
+    assert CLIENT_JOB_PROCESS_MODULE not in node
     assert "export CLIENT_API_TYPE=CELL_API" in node
     assert "export NVFLARE_CLIENT_API_BOOTSTRAP=client_api_bootstrap_1.json" in node
 

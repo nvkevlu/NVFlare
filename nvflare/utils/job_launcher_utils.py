@@ -16,6 +16,7 @@ import importlib
 import logging
 import os
 import re
+import shlex
 import sys
 
 from nvflare.apis.fl_constant import FLContextKey, SystemVarName
@@ -29,6 +30,31 @@ _CREDENTIAL_ARG_ENV_NAMES = {
     JobProcessArgs.TOKEN_SIGNATURE: JobProcessEnv.TOKEN_SIGNATURE,
     JobProcessArgs.SSID: JobProcessEnv.SSID,
 }
+
+_JOB_PROCESS_BOOTSTRAP_PATH = os.path.realpath(
+    os.path.join(os.path.dirname(__file__), "..", "private", "fed", "app", "job_process_bootstrap.py")
+)
+JOB_PROCESS_BOOTSTRAP_MODULE = "nvflare.private.fed.app.job_process_bootstrap"
+CLIENT_JOB_PROCESS_MODULE = "nvflare.private.fed.app.client.worker_process"
+SERVER_JOB_PROCESS_MODULE = "nvflare.private.fed.app.server.runner_process"
+_JOB_PROCESS_TYPES_BY_MODULE = {
+    CLIENT_JOB_PROCESS_MODULE: "client",
+    SERVER_JOB_PROCESS_MODULE: "server",
+}
+
+
+def get_job_process_bootstrap_args(exe_module: str) -> list[str]:
+    """Return isolated Python arguments for one fixed NVFlare job process.
+
+    ``EXE_MODULE`` is a historical field in the launcher contract.  Treat it
+    only as an allowlisted selector: never copy the value into the executable
+    command, where it could name arbitrary Python code.
+    """
+    try:
+        process_type = _JOB_PROCESS_TYPES_BY_MODULE[exe_module]
+    except (KeyError, TypeError) as e:
+        raise ValueError("job process module must be the fixed NVFlare client worker or server runner") from e
+    return ["-I", "-u", "-m", JOB_PROCESS_BOOTSTRAP_MODULE, process_type]
 
 
 def get_credential_env(job_args: dict) -> dict:
@@ -88,8 +114,8 @@ def generate_client_command(fl_ctx) -> str:
     if not job_args:
         raise RuntimeError(f"missing {FLContextKey.JOB_PROCESS_ARGS} in FLContext")
 
-    args_str = _job_args_str(job_args, get_client_job_args())
-    return f"{sys.executable} {args_str}"
+    args_str = _job_args_str(job_args, get_client_job_args(include_exe_module=False))
+    return _isolated_job_process_command("client", args_str)
 
 
 def get_server_job_args(include_exe_module=True, include_set_options=True):
@@ -122,8 +148,21 @@ def generate_server_command(fl_ctx) -> str:
     if not job_args:
         raise RuntimeError(f"missing {FLContextKey.JOB_PROCESS_ARGS} in FLContext!")
 
-    args_str = _job_args_str(job_args, get_server_job_args())
-    return f"{sys.executable} {args_str}"
+    args_str = _job_args_str(job_args, get_server_job_args(include_exe_module=False))
+    return _isolated_job_process_command("server", args_str)
+
+
+def _isolated_job_process_command(process_type: str, args_str: str) -> str:
+    """Build a process-launch command through the platform-owned isolated bootstrap."""
+    prefix = " ".join(
+        (
+            shlex.quote(sys.executable),
+            "-I",
+            shlex.quote(_JOB_PROCESS_BOOTSTRAP_PATH),
+            shlex.quote(process_type),
+        )
+    )
+    return f"{prefix} {args_str}" if args_str else prefix
 
 
 _LAUNCHER_MODE_KEYS = {"process", "docker", "k8s", "slurm"}
@@ -488,6 +527,71 @@ def add_custom_dir_to_path(app_custom_folder, new_env):
     sys_path = copy.copy(sys.path)
     sys_path.append(app_custom_folder)
     new_env[SystemVarName.PYTHONPATH] = os.pathsep.join(sys_path)
+
+
+def sanitize_job_python_path(new_env: dict, custom_paths) -> None:
+    """Keep job custom code out of Python's interpreter-startup search path.
+
+    Python imports ``sitecustomize`` and ``usercustomize`` before the requested
+    module runs.  A job custom directory in ``PYTHONPATH`` can therefore run
+    code before ``worker_process`` or ``runner_process`` has an opportunity to
+    take its initial resource snapshot.  Launchers call this function before
+    starting the job Python process; the job process calls
+    :func:`activate_job_python_path` after that snapshot.
+
+    Unrelated parent paths are preserved; only the known app and site custom
+    directories and empty current-directory entries are removed.
+    """
+
+    if not isinstance(new_env, dict):
+        raise TypeError("new_env must be a dict")
+
+    forbidden = set()
+    for path in custom_paths or ():
+        if path:
+            forbidden.add(os.path.normcase(os.path.realpath(os.path.abspath(path))))
+
+    retained = []
+    for path in str(new_env.get(SystemVarName.PYTHONPATH, "")).split(os.pathsep):
+        # Empty PYTHONPATH entries mean the current working directory.  They
+        # are unnecessary for the installed platform worker and are not safe
+        # in a job launcher environment.
+        if not path:
+            continue
+        normalized = os.path.normcase(os.path.realpath(os.path.abspath(path)))
+        if normalized not in forbidden and path not in retained:
+            retained.append(path)
+
+    # Keep the key present even when empty so Docker/Kubernetes override a
+    # PYTHONPATH baked into a job image.
+    new_env[SystemVarName.PYTHONPATH] = os.pathsep.join(retained)
+
+
+def activate_job_python_path(custom_paths) -> None:
+    """Enable sanitized inherited and job/site imports after the first snapshot.
+
+    Both ``sys.path`` and ``PYTHONPATH`` are updated.  The former enables
+    imports in the current worker; the latter preserves the existing behavior
+    for subprocesses started later by job code.
+    """
+
+    environment_paths = [path for path in os.environ.get(SystemVarName.PYTHONPATH, "").split(os.pathsep) if path]
+    changed = False
+    for path in (*environment_paths, *(custom_paths or ())):
+        if not path or not os.path.exists(path):
+            continue
+        if path not in sys.path:
+            sys.path.append(path)
+            changed = True
+        if path not in environment_paths:
+            environment_paths.append(path)
+
+    if environment_paths:
+        os.environ[SystemVarName.PYTHONPATH] = os.pathsep.join(environment_paths)
+    else:
+        os.environ.pop(SystemVarName.PYTHONPATH, None)
+    if changed:
+        importlib.invalidate_caches()
 
 
 def refresh_custom_dir_import_path(app_custom_folder):

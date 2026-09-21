@@ -6,175 +6,196 @@
   "finalized_at": "2026-09-09T14:37:04.1Z",
   "participants": [
     {
-      "participant_id": "site-1",
-      "participant_key": "sha256-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "participant_name": "site-1",
       "role": "client",
       "status": "accepted",
       "received_at": "2026-09-09T14:37:03.1Z",
-      "summary_sha256": "ce27c5f27f3b1411c431ba1e1fc71e7cf88b557db1cf0720cc6ec040ef3b77cd",
-      "resource_window_seconds": "2223",
-      "totals": {
+      "resource_time": {
+        "status": "reported",
+        "measured_seconds": "2223",
         "cpu": {
-          "status": "reported",
           "groups": [
             {
+              "unit_seconds": "71136",
               "model": "AMD EPYC 9654",
-              "architecture": "x86_64",
-              "unit_seconds": "71136"
+              "architecture": "x86_64"
             }
           ]
         },
         "memory": {
-          "status": "reported",
           "byte_seconds": "458290190352384"
         },
         "gpu": {
-          "status": "reported",
           "groups": [
             {
               "kind": "full_gpu",
+              "instance_seconds": "8892",
               "model": "NVIDIA A100 80GB",
-              "memory_bytes": "85899345920",
-              "instance_seconds": "8892"
+              "memory_bytes": "85899345920"
             }
           ]
+        }
+      },
+      "retained_content": {
+        "status": "reported",
+        "bytes": "0"
+      },
+      "f3": {
+        "status": "reported",
+        "remote_accepted": {
+          "payload_bytes": "147700336640",
+          "messages": "5"
         },
-        "retained_content": {
-          "status": "reported",
-          "bytes": "0"
+        "local_delivered": {
+          "payload_bytes": "0",
+          "messages": "0"
         },
-        "f3": {
-          "status": "reported",
-          "remote_accepted": {
-            "payload_bytes": "147700336640",
-            "messages": "5"
-          }
+        "remote_failed_before_acceptance": {
+          "payload_bytes": "0",
+          "messages": "0"
         }
       }
     },
     {
-      "participant_id": "site-2",
-      "participant_key": "sha256-eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "participant_name": "site-2",
       "role": "client",
       "status": "accepted",
       "received_at": "2026-09-09T14:37:03.2Z",
-      "summary_sha256": "739d6492134fe0fb2eaaf20574a62108318d02afd9a3724a3397f2c01f53bdd5",
-      "resource_window_seconds": "1923",
-      "totals": {
+      "resource_time": {
+        "status": "partial",
+        "issues": [
+          "observation_incomplete"
+        ],
+        "measured_seconds": "1923",
         "cpu": {
-          "status": "partial",
           "groups": [
             {
+              "unit_seconds": "56736",
               "model": "Intel Xeon Platinum 8480+",
-              "architecture": "x86_64",
-              "unit_seconds": "56736"
+              "architecture": "x86_64"
             }
           ]
         },
         "memory": {
-          "status": "partial",
           "byte_seconds": "375826818269184"
         },
         "gpu": {
-          "status": "partial",
           "groups": [
             {
               "kind": "full_gpu",
+              "instance_seconds": "7092",
               "model": "NVIDIA A100 80GB",
-              "memory_bytes": "85899345920",
-              "instance_seconds": "7092"
+              "memory_bytes": "85899345920"
             }
           ]
+        }
+      },
+      "retained_content": {
+        "status": "unavailable",
+        "issues": [
+          "not_bound"
+        ]
+      },
+      "f3": {
+        "status": "reported",
+        "remote_accepted": {
+          "payload_bytes": "147700336640",
+          "messages": "5"
         },
-        "retained_content": {
-          "status": "unavailable"
+        "local_delivered": {
+          "payload_bytes": "0",
+          "messages": "0"
         },
-        "f3": {
-          "status": "reported",
-          "remote_accepted": {
-            "payload_bytes": "147700336640",
-            "messages": "5"
-          }
+        "remote_failed_before_acceptance": {
+          "payload_bytes": "0",
+          "messages": "0"
         }
       }
     },
     {
-      "participant_id": "site-3",
-      "participant_key": "sha256-dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "participant_name": "site-3",
       "role": "client",
       "status": "missing"
     },
     {
-      "participant_id": "server",
-      "participant_key": "sha256-cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "participant_name": "server",
       "role": "server",
       "status": "accepted",
       "received_at": "2026-09-09T14:37:03.3Z",
-      "summary_sha256": "6681b52e29f6dccfdaffd455ff977728f3add7dcd701cf58828da1af0399b8d7",
-      "resource_window_seconds": "2223",
-      "totals": {
+      "resource_time": {
+        "status": "reported",
+        "measured_seconds": "2223",
         "cpu": {
-          "status": "reported",
           "groups": [
             {
+              "unit_seconds": "17784",
               "model": "AMD EPYC 9654",
-              "architecture": "x86_64",
-              "unit_seconds": "17784"
+              "architecture": "x86_64"
             }
           ]
         },
         "memory": {
-          "status": "reported",
           "byte_seconds": "152763396784128"
         },
         "gpu": {
-          "status": "reported",
           "groups": []
+        }
+      },
+      "retained_content": {
+        "status": "reported",
+        "bytes": "29540266113"
+      },
+      "f3": {
+        "status": "reported",
+        "remote_accepted": {
+          "payload_bytes": "295400673280",
+          "messages": "10"
         },
-        "retained_content": {
-          "status": "reported",
-          "bytes": "29540266113"
+        "local_delivered": {
+          "payload_bytes": "0",
+          "messages": "0"
         },
-        "f3": {
-          "status": "reported",
-          "remote_accepted": {
-            "payload_bytes": "295400673280",
-            "messages": "10"
-          }
+        "remote_failed_before_acceptance": {
+          "payload_bytes": "0",
+          "messages": "0"
         }
       }
     }
   ],
   "totals": {
-    "cpu": {
+    "resource_time": {
       "status": "partial",
-      "groups": [
-        {
-          "model": "AMD EPYC 9654",
-          "architecture": "x86_64",
-          "unit_seconds": "88920"
-        },
-        {
-          "model": "Intel Xeon Platinum 8480+",
-          "architecture": "x86_64",
-          "unit_seconds": "56736"
-        }
-      ]
-    },
-    "memory": {
-      "status": "partial",
-      "byte_seconds": "986880405405696"
-    },
-    "gpu": {
-      "status": "partial",
-      "groups": [
-        {
-          "kind": "full_gpu",
-          "model": "NVIDIA A100 80GB",
-          "memory_bytes": "85899345920",
-          "instance_seconds": "15984"
-        }
-      ]
+      "issues": [
+        "observation_incomplete"
+      ],
+      "measured_seconds": "6369",
+      "cpu": {
+        "groups": [
+          {
+            "model": "AMD EPYC 9654",
+            "architecture": "x86_64",
+            "unit_seconds": "88920"
+          },
+          {
+            "model": "Intel Xeon Platinum 8480+",
+            "architecture": "x86_64",
+            "unit_seconds": "56736"
+          }
+        ]
+      },
+      "memory": {
+        "byte_seconds": "986880405405696"
+      },
+      "gpu": {
+        "groups": [
+          {
+            "kind": "full_gpu",
+            "model": "NVIDIA A100 80GB",
+            "memory_bytes": "85899345920",
+            "instance_seconds": "15984"
+          }
+        ]
+      }
     },
     "retained_content": {
       "status": "partial",

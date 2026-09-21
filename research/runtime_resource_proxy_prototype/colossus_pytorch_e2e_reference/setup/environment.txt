@@ -1,0 +1,8 @@
+nvflare 2.10.0dev0+6.g140b607e0.dirty
+torch 2.14.0+cu130
+torchvision 0.29.0+cu130
+torch CUDA 13.0
+CUDA available True
+device count 1
+device NVIDIA L40
+CUDA matmul (2048, 2048) cuda:0

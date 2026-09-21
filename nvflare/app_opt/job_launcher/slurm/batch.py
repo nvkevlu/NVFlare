@@ -31,6 +31,7 @@ from nvflare.app_opt.job_launcher.slurm.config import (
 )
 from nvflare.client.api_spec import CLIENT_API_TYPE_KEY
 from nvflare.client.cell.bootstrap import BOOTSTRAP_FILE_ENV_VAR, CELL_API_TYPE, bootstrap_file_name
+from nvflare.utils.job_launcher_utils import get_job_process_bootstrap_args
 
 _ENV_NNODES = "NVFL_NNODES"
 _ENV_NODE_RANK = "NVFL_NODE_RANK"
@@ -88,7 +89,11 @@ def _render_shell_template(source: str, **values) -> str:
 
 
 def _build_worker_words(plan: LaunchPlan) -> list[str]:
-    return [shlex.quote(value) for value in (plan.python_path, "-u", "-m", plan.exe_module, *plan.module_args)]
+    try:
+        bootstrap_args = get_job_process_bootstrap_args(plan.exe_module)
+    except ValueError as e:
+        raise ValueError(f"invalid Slurm job process: {e}") from e
+    return [shlex.quote(value) for value in (plan.python_path, *bootstrap_args, *plan.module_args)]
 
 
 def _tool_assignment(variable: str, configured: str | None, default: str) -> str:
@@ -110,6 +115,9 @@ def _common_environment(plan: LaunchPlan, config: SlurmConfig) -> list[str]:
             'rm -f -- "${_nvfl_secret}"',
             # Bash reports status 0 to an EXIT trap when exec itself fails.
             "trap - EXIT",
+            # Isolated Python ignores this at interpreter startup.  Keep the
+            # established value so the worker can reactivate it after its
+            # initial resource snapshot.
             f"export PYTHONPATH={shlex.quote(plan.python_env)}",
             f"export {SLURM_CHILD_PROCESS_ENV}=1",
         ]
@@ -221,6 +229,7 @@ def _render_node_script(plan: LaunchPlan, config: SlurmConfig) -> str:
     credential_names = (JobProcessEnv.AUTH_TOKEN, JobProcessEnv.TOKEN_SIGNATURE, JobProcessEnv.SSID)
     nonzero_setup = [
         f"  unset {' '.join(credential_names)}",
+        f"  export PYTHONPATH={shlex.quote(plan.python_env)}",
         f"  export {CLIENT_API_TYPE_KEY}={CELL_API_TYPE}",
         f"  export {BOOTSTRAP_FILE_ENV_VAR}={shlex.quote(bootstrap_file_name(1))}",
     ]
@@ -234,6 +243,7 @@ def _render_node_script(plan: LaunchPlan, config: SlurmConfig) -> str:
         )
         rank0_command = _apptainer_exec_words(plan, plan.run_dir) + worker_words
         nonzero_setup.append(f"  unset {' '.join(f'APPTAINERENV_{name}' for name in credential_names)}")
+        nonzero_setup.append('  export APPTAINERENV_PYTHONPATH="${PYTHONPATH}"')
         nonzero_setup.append(f'  export APPTAINERENV_{CLIENT_API_TYPE_KEY}="${{{CLIENT_API_TYPE_KEY}}}"')
         nonzero_setup.append(f'  export APPTAINERENV_{BOOTSTRAP_FILE_ENV_VAR}="${{{BOOTSTRAP_FILE_ENV_VAR}}}"')
         nonzero_command = _apptainer_exec_words(plan, plan.node_app_dir) + node_words

@@ -20,7 +20,14 @@ from abc import ABC, abstractmethod
 
 from nvflare.apis.app_validation import AppValidationKey
 from nvflare.apis.event_type import EventType
-from nvflare.apis.fl_constant import AdminCommandNames, ConnPropKey, FLContextKey, RunProcessKey, SystemConfigs
+from nvflare.apis.fl_constant import (
+    AdminCommandNames,
+    ConnPropKey,
+    FLContextKey,
+    RunProcessKey,
+    SystemConfigs,
+    WorkspaceConstants,
+)
 from nvflare.apis.fl_context import FLContext
 from nvflare.apis.job_def import JobMetaKey
 from nvflare.apis.job_launcher_spec import JobHandleSpec, JobLauncherSpec, JobProcessArgs, JobReturnCode
@@ -33,6 +40,12 @@ from nvflare.fuel.f3.message import Message as CellMessage
 from nvflare.fuel.utils.config_service import ConfigService
 from nvflare.fuel.utils.log_utils import get_obj_logger
 from nvflare.private.defs import CellChannel, CellChannelTopic, JobFailureMsgKey, new_cell_message
+from nvflare.private.fed.resource_stats.collector import (
+    assemble_participant_summary,
+    canonical_json_bytes,
+    read_terminal_handoff,
+    remove_terminal_handoff,
+)
 from nvflare.private.fed.utils.fed_utils import get_job_launcher, get_return_code
 from nvflare.security.logging import secure_format_exception, secure_log_traceback
 
@@ -47,6 +60,59 @@ REPORTABLE_JOB_FAILURES = {
 }
 
 _ABORT_REQUESTED_KEY = "_abort_requested"
+
+
+def _log_resource_warning(logger, message: str) -> None:
+    try:
+        logger.warning(message)
+    except Exception:
+        pass
+
+
+def _build_participant_resource_report(job_id: str, participant_name: str, workspace: str, logger) -> bytes | None:
+    """Read the private child handoff and build the public report.
+
+    Identity comes from the authenticated client parent, never from the child
+    file.  Every failure is contained so resource reporting cannot affect the
+    terminal outcome or delay resource release.
+    """
+
+    run_dir = None
+    handoff = None
+    try:
+        # Use Workspace's path validation without requiring startup and site
+        # configuration directories to remain present after the child exits.
+        checked_job_id = Workspace._check_job_id(job_id)
+        run_dir = Workspace._join_under_root(workspace, WorkspaceConstants.WORKSPACE_PREFIX + checked_job_id)
+        handoff = read_terminal_handoff(run_dir)
+    except Exception as e:
+        _log_resource_warning(
+            logger,
+            f"could not read resource statistics for job {job_id}: {secure_format_exception(e)}",
+        )
+
+    try:
+        report = assemble_participant_summary(
+            job_id=str(job_id),
+            participant_name=participant_name,
+            child_handoff=handoff,
+        )
+        return canonical_json_bytes(report)
+    except Exception as e:
+        _log_resource_warning(
+            logger,
+            f"could not assemble resource statistics for job {job_id}: {secure_format_exception(e)}",
+        )
+        return None
+    finally:
+        if run_dir is not None:
+            try:
+                remove_terminal_handoff(run_dir)
+            except Exception as e:
+                _log_resource_warning(
+                    logger,
+                    f"could not remove resource-statistics handoff for job {job_id}: {secure_format_exception(e)}",
+                )
 
 
 class _PendingJobHandle(JobHandleSpec):
@@ -624,62 +690,98 @@ class JobExecutor(ClientExecutor):
     ):
         self.logger.info(f"run ({job_id}): waiting for child worker process to finish.")
         job_handle = self.run_processes.get(job_id, {}).get(RunProcessKey.JOB_HANDLE)
-        if job_handle:
-            job_handle.wait()
-
-            return_code = get_return_code(job_handle, job_id, workspace, self.logger)
-
-            with self.lock:
-                process = self.run_processes.get(job_id, {})
-                process_status = process.get(RunProcessKey.STATUS)
-                abort_requested = process.get(_ABORT_REQUESTED_KEY, False)
-            # A generic RC 1 is actionable only while a checked-in worker is still active.
-            # STARTING remains an infrastructure failure, while STOPPED teardown noise and
-            # launcher UNKNOWN retain their existing non-reportable behavior.
-            if return_code == JobReturnCode.EXECUTION_ERROR and not abort_requested:
-                if process_status == ClientStatus.STARTING:
-                    return_code = ProcessExitCode.INFRASTRUCTURE_ERROR
-                elif process_status == ClientStatus.STARTED:
-                    return_code = ProcessExitCode.EXCEPTION
-
-            self.logger.info(f"run ({job_id}): child worker process finished with RC {return_code}")
-
-            failure_reason = REPORTABLE_JOB_FAILURES.get(return_code)
+        request = None
+        try:
             try:
-                request = new_cell_message(
-                    headers={},
-                    payload={
+                if job_handle:
+                    job_handle.wait()
+
+                    return_code = get_return_code(job_handle, job_id, workspace, self.logger)
+
+                    with self.lock:
+                        process = self.run_processes.get(job_id, {})
+                        process_status = process.get(RunProcessKey.STATUS)
+                        abort_requested = process.get(_ABORT_REQUESTED_KEY, False)
+                    # A generic RC 1 is actionable only while a checked-in worker is still active.
+                    # STARTING remains an infrastructure failure, while STOPPED teardown noise and
+                    # launcher UNKNOWN retain their existing non-reportable behavior.
+                    if return_code == JobReturnCode.EXECUTION_ERROR and not abort_requested:
+                        if process_status == ClientStatus.STARTING:
+                            return_code = ProcessExitCode.INFRASTRUCTURE_ERROR
+                        elif process_status == ClientStatus.STARTED:
+                            return_code = ProcessExitCode.EXCEPTION
+
+                    self.logger.info(f"run ({job_id}): child worker process finished with RC {return_code}")
+
+                    failure_reason = REPORTABLE_JOB_FAILURES.get(return_code)
+                    participant_summary = None
+                    try:
+                        participant_summary = _build_participant_resource_report(
+                            job_id=job_id,
+                            participant_name=client.client_name,
+                            workspace=workspace,
+                            logger=self.logger,
+                        )
+                    except Exception as e:
+                        _log_resource_warning(
+                            self.logger,
+                            f"could not prepare resource statistics for job {job_id}: {secure_format_exception(e)}",
+                        )
+                    payload = {
                         JobFailureMsgKey.JOB_ID: job_id,
                         JobFailureMsgKey.CODE: return_code,
                         JobFailureMsgKey.REASON: failure_reason,
-                    },
-                )
-                reply = self.client.send_request_before_shutdown(
-                    target=FQCN.ROOT_SERVER,
-                    channel=CellChannel.SERVER_MAIN,
-                    topic=CellChannelTopic.REPORT_JOB_FAILURE,
-                    request=request,
-                    timeout=self.job_query_timeout,
-                    optional=True,
-                )
-                if reply is None:
-                    # Shutdown invalidates the site token. The server's client-quit/dead-client
-                    # path resolves any outcome still pending after communication stops.
-                    self.logger.info(
-                        f"not reporting terminal outcome of job {job_id}: client communication has stopped"
+                    }
+                    if participant_summary is not None:
+                        payload[JobFailureMsgKey.RESOURCE_REPORT] = {
+                            JobFailureMsgKey.PARTICIPANT_SUMMARY: participant_summary,
+                        }
+                    request = new_cell_message(
+                        headers={},
+                        payload=payload,
                     )
-                elif reply.get_header(MessageHeaderKey.RETURN_CODE) != ReturnCode.OK:
-                    self.logger.error(f"could not report terminal outcome of job {job_id}")
-            except Exception as e:
-                self.logger.error(f"could not report terminal outcome of job {job_id}: {secure_format_exception(e)}")
+            finally:
+                # The child has stopped and its terminal handoff, when present, has been
+                # consumed above.  Return compute resources before terminal reporting can
+                # block on CellNet or server-side validation.
+                if allocated_resource:
+                    resource_manager.free_resources(
+                        resources=allocated_resource, token=token, fl_ctx=client.engine.new_context()
+                    )
+                self.logger.debug(f"run ({job_id}): child worker resources freed.")
 
-        if allocated_resource:
-            resource_manager.free_resources(
-                resources=allocated_resource, token=token, fl_ctx=client.engine.new_context()
-            )
-        with self.lock:
-            self.run_processes.pop(job_id, None)
-        self.logger.debug(f"run ({job_id}): child worker resources freed.")
+            if request is not None:
+                try:
+                    reply = self.client.send_request_before_shutdown(
+                        target=FQCN.ROOT_SERVER,
+                        channel=CellChannel.SERVER_MAIN,
+                        topic=CellChannelTopic.REPORT_JOB_FAILURE,
+                        request=request,
+                        timeout=self.job_query_timeout,
+                        optional=True,
+                    )
+                    if reply is None:
+                        # Shutdown invalidates the site token. The server's client-quit/dead-client
+                        # path resolves any outcome still pending after communication stops.
+                        self.logger.info(
+                            f"not reporting terminal outcome of job {job_id}: client communication has stopped"
+                        )
+                    elif reply.get_header(MessageHeaderKey.RETURN_CODE) != ReturnCode.OK:
+                        self.logger.error(f"could not report terminal outcome of job {job_id}")
+                    elif isinstance(reply.payload, dict):
+                        report_status = reply.payload.get(JobFailureMsgKey.RESOURCE_REPORT_STATUS)
+                        if report_status and report_status not in ("accepted", "duplicate"):
+                            _log_resource_warning(
+                                self.logger,
+                                f"resource statistics for job {job_id} were not accepted: {report_status}",
+                            )
+                except Exception as e:
+                    self.logger.error(
+                        f"could not report terminal outcome of job {job_id}: {secure_format_exception(e)}"
+                    )
+        finally:
+            with self.lock:
+                self.run_processes.pop(job_id, None)
 
         engine = fl_ctx.get_engine()
         fl_ctx.set_prop(FLContextKey.CURRENT_JOB_ID, job_id, private=True, sticky=False)

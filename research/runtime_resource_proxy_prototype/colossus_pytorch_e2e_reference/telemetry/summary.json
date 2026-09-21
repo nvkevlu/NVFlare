@@ -1,0 +1,75 @@
+{
+  "kind": "nvflare.resource_stats.test_evidence_summary",
+  "schema_version": "1",
+  "gpu": {
+    "model": "NVIDIA L40",
+    "memory_total_mib": 46068
+  },
+  "capture": {
+    "first_timestamp": "2026/09/21 15:03:55.537",
+    "last_timestamp": "2026/09/21 15:10:28.631",
+    "gpu_samples": 394
+  },
+  "worker_process_window": {
+    "first_timestamp": "2026/09/21 15:04:27.650",
+    "last_timestamp": "2026/09/21 15:05:43.723",
+    "elapsed_seconds": "76.073",
+    "distinct_gpu_processes": 2,
+    "process_samples": 154,
+    "per_process_memory_used_mib_max": [
+      542,
+      542
+    ],
+    "gpu_samples": 76,
+    "nonzero_gpu_utilization_samples": 55,
+    "gpu_utilization_percent_average": "13.84210526315789473684210526",
+    "gpu_utilization_percent_max": "35",
+    "gpu_memory_used_mib_max": "1112",
+    "power_draw_w_average": "85.98328947368421052631578947",
+    "power_draw_w_max": "92.30"
+  },
+  "reconciliation": {
+    "accepted_participants": [
+      "server",
+      "site-1",
+      "site-2"
+    ],
+    "participant_count": 3,
+    "job_cli_summary_matches_archive": true,
+    "participant_cli_matches_archive": {
+      "server": true,
+      "site-1": true,
+      "site-2": true
+    },
+    "study_row_count_for_job": 1,
+    "study_totals_match_job_totals": true,
+    "job_totals": {
+      "resource_time": {
+        "status": "partial",
+        "issues": [
+          "observation_incomplete"
+        ],
+        "measured_seconds": "230.047475727",
+        "cpu": {
+          "groups": [
+            {
+              "model": "AMD EPYC 7313P 16-Core Processor",
+              "architecture": "x86_64",
+              "unit_seconds": "7361.519223264"
+            }
+          ]
+        },
+        "memory": {
+          "byte_seconds": "31037526631876.55890944"
+        }
+      },
+      "retained_content": {
+        "status": "unavailable"
+      },
+      "f3": {
+        "status": "unavailable"
+      }
+    }
+  },
+  "derivation_note": "GPU telemetry is external diagnostic evidence. It is not input to the resource-statistics records. Process identifiers and executable paths were intentionally omitted from this durable summary."
+}

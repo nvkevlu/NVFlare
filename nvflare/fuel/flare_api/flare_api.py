@@ -412,6 +412,24 @@ class Session(SessionSpec):
             raise InternalError("server failed to return job meta")
         return job_meta
 
+    def get_job_resources(self, job_id: str, site: str = None) -> dict:
+        """Return finalized resource statistics from the job's archived WORKSPACE."""
+
+        self._validate_job_id(job_id)
+        parts = [AdminCommandNames.GET_JOB_RESOURCES, job_id]
+        if site is not None:
+            if not isinstance(site, str) or not site:
+                raise InvalidArgumentError("site must be a non-empty string")
+            parts.extend(["--site", site])
+        reply = self._do_command(join_args(parts), enforce_meta=False)
+        return self._get_dict_data(reply)
+
+    def get_study_resources(self) -> dict:
+        """Return the resource rollup for all retained jobs in the active study."""
+
+        reply = self._do_command(AdminCommandNames.GET_STUDY_RESOURCES, enforce_meta=False)
+        return self._get_dict_data(reply)
+
     def list_jobs(
         self,
         detailed: bool = False,

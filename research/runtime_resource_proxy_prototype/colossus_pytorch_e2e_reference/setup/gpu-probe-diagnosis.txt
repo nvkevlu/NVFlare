@@ -1,0 +1,28 @@
+Observed on the real PyTorch test host
+
+System dynamic-loader view:
+- CUDA Driver library (libcuda): present
+- NVML library (libnvidia-ml): present
+- CUDA Runtime library (libcudart): not loader-resolvable
+
+Framework environment:
+- PyTorch 2.14.0+cu130
+- PyTorch CUDA version 13.0
+- torch.cuda.is_available(): true
+- visible CUDA device count: 1
+- visible device model: NVIDIA L40
+- CUDA matrix multiplication: succeeded
+- a CUDA Runtime 13 shared object was installed inside the framework's
+  nvidia/cu13 package directory, outside the system loader's default search
+  path
+
+Production pre-import capacity probe:
+- CPU: 32 visible AMD EPYC 7313P logical units
+- memory: 134917918720 visible bytes
+- GPU: omitted because cudaGetDeviceCount could not be reached through a
+  loader-resolvable CUDA Runtime
+
+No LD_LIBRARY_PATH change, system CUDA-toolkit installation, or other
+machine-specific configuration was added. The run therefore preserves the
+design requirement that resource statistics not need extra privileges or
+configuration.

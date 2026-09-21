@@ -1,0 +1,14 @@
+Resources recorded for finalized jobs in study cancer-research.
+3 jobs found | 2 finalized | 1 valid summaries | 1 unavailable | 1 still running (excluded)
+
+JOB               JOB STATUS          RESOURCE DATA  QUALITY   FULL GPU h  CPU unit h  MEM GiB h
+job-20260917-001  FINISHED:COMPLETED  included       COMPLETE  2.4706      24.7422     158.4089
+job-20260917-002  FINISHED:COMPLETED  unavailable    —         N/A         N/A         N/A
+job-20260917-003  RUNNING             nonterminal    —         N/A         N/A         N/A
+
+Study totals from 1 valid job summaries | coverage: PARTIAL
+  Additive participant resource-time: FULL GPUs 2.4706 instance h | CPU 24.7422 unit h | MEMORY 158.4089 GiB h
+
+Notes:
+  Totals include only finalized jobs with valid resource summaries.
+  This view includes only jobs still retained by the job store.

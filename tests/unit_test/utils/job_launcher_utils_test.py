@@ -14,6 +14,9 @@
 
 import importlib.util
 import logging
+import os
+import shlex
+import subprocess
 import sys
 from copy import deepcopy
 
@@ -25,17 +28,24 @@ from nvflare.apis.job_launcher_spec import JobProcessArgs, JobProcessEnv
 from nvflare.app_common.resource_managers.gpu_resource_manager import GPUResourceManager
 from nvflare.app_common.resource_managers.list_resource_manager import ListResourceManager
 from nvflare.utils.job_launcher_utils import (
+    _JOB_PROCESS_BOOTSTRAP_PATH,
+    CLIENT_JOB_PROCESS_MODULE,
+    JOB_PROCESS_BOOTSTRAP_MODULE,
+    SERVER_JOB_PROCESS_MODULE,
     _validate_launcher_spec,
+    activate_job_python_path,
     generate_client_command,
     generate_server_command,
     get_credential_env,
     get_job_launcher_spec,
+    get_job_process_bootstrap_args,
     get_portable_resource_spec,
     get_resource_manager_spec,
     portable_memory_to_bytes,
     portable_memory_to_mib,
     refresh_custom_dir_import_path,
     resolve_site_resource_spec,
+    sanitize_job_python_path,
     validate_docker_job_launcher_spec,
     validate_portable_resource_conflicts,
     validate_portable_resource_spec,
@@ -64,8 +74,11 @@ class TestCredentialEnv:
         job_args = {JobProcessArgs.AUTH_TOKEN: ("-t", ""), JobProcessArgs.SSID: ("-d", None)}
         assert get_credential_env(job_args) == {}
 
-    @pytest.mark.parametrize("generate", [generate_client_command, generate_server_command])
-    def test_generated_commands_exclude_credential_values(self, generate):
+    @pytest.mark.parametrize(
+        ("generate", "process_type"),
+        [(generate_client_command, "client"), (generate_server_command, "server")],
+    )
+    def test_generated_commands_use_isolated_fixed_bootstrap_and_exclude_credentials(self, generate, process_type):
         fl_ctx = FLContext()
         job_args = {
             JobProcessArgs.EXE_MODULE: ("-m", "some.module"),
@@ -74,8 +87,32 @@ class TestCredentialEnv:
         }
         fl_ctx.set_prop(FLContextKey.JOB_PROCESS_ARGS, job_args, private=True, sticky=False)
         command = generate(fl_ctx)
+        argv = shlex.split(command, comments=True)
+
         assert "secret-" not in command
-        assert "/ws" in command
+        assert argv[:4] == [sys.executable, "-I", _JOB_PROCESS_BOOTSTRAP_PATH, process_type]
+        assert "/ws" in argv
+        assert "some.module" not in argv
+
+
+class TestJobProcessBootstrapArgs:
+    @pytest.mark.parametrize(
+        ("exe_module", "process_type"),
+        [(CLIENT_JOB_PROCESS_MODULE, "client"), (SERVER_JOB_PROCESS_MODULE, "server")],
+    )
+    def test_maps_only_fixed_nvflare_modules_to_bootstrap_selector(self, exe_module, process_type):
+        assert get_job_process_bootstrap_args(exe_module) == [
+            "-I",
+            "-u",
+            "-m",
+            JOB_PROCESS_BOOTSTRAP_MODULE,
+            process_type,
+        ]
+
+    @pytest.mark.parametrize("exe_module", ["job.custom", "", None, [CLIENT_JOB_PROCESS_MODULE]])
+    def test_rejects_arbitrary_or_malformed_module(self, exe_module):
+        with pytest.raises(ValueError, match="fixed NVFlare client worker or server runner"):
+            get_job_process_bootstrap_args(exe_module)
 
 
 class TestValidateDockerJobLauncherSpec:
@@ -513,3 +550,66 @@ class TestRefreshCustomDirImportPath:
             if custom_path in sys.path:
                 sys.path.remove(custom_path)
             sys.path_importer_cache.pop(custom_path, None)
+
+
+class TestJobPythonPathBootstrap:
+    def test_sanitize_removes_custom_paths_and_empty_entries(self, tmp_path):
+        trusted = str(tmp_path / "trusted")
+        app_custom = str(tmp_path / "job" / "custom")
+        site_custom = str(tmp_path / "local" / "custom")
+        env = {"PYTHONPATH": os.pathsep.join((trusted, app_custom, "", site_custom, trusted))}
+
+        sanitize_job_python_path(env, (app_custom, site_custom))
+
+        assert env["PYTHONPATH"] == trusted
+
+    def test_sanitized_interpreter_does_not_run_job_sitecustomize(self, tmp_path):
+        custom_dir = tmp_path / "custom"
+        custom_dir.mkdir()
+        marker = tmp_path / "sitecustomize-ran"
+        (custom_dir / "sitecustomize.py").write_text(
+            "import os\nopen(os.environ['NVFL_TEST_MARKER'], 'w').close()\n", encoding="utf-8"
+        )
+        env = os.environ.copy()
+        env["PYTHONPATH"] = str(custom_dir)
+        env["NVFL_TEST_MARKER"] = str(marker)
+        sanitize_job_python_path(env, (str(custom_dir),))
+
+        completed = subprocess.run([sys.executable, "-c", "pass"], env=env, check=False)
+
+        assert completed.returncode == 0
+        assert not marker.exists()
+
+    def test_isolated_interpreter_does_not_import_sitecustomize_from_job_working_dir(self, tmp_path):
+        marker = tmp_path / "working-dir-sitecustomize-ran"
+        (tmp_path / "sitecustomize.py").write_text(
+            "import os\nopen(os.environ['NVFL_TEST_MARKER'], 'w').close()\n", encoding="utf-8"
+        )
+        env = os.environ.copy()
+        env["PYTHONPATH"] = ""
+        env["NVFL_TEST_MARKER"] = str(marker)
+
+        completed = subprocess.run([sys.executable, "-I", "-c", "pass"], cwd=tmp_path, env=env, check=False)
+
+        assert completed.returncode == 0
+        assert not marker.exists()
+
+    def test_activate_enables_current_and_child_process_imports(self, tmp_path, monkeypatch):
+        inherited_dir = tmp_path / "inherited"
+        inherited_dir.mkdir()
+        custom_dir = tmp_path / "custom"
+        custom_dir.mkdir()
+        custom_path = str(custom_dir)
+        inherited_path = str(inherited_dir)
+        monkeypatch.setenv("PYTHONPATH", inherited_path)
+
+        try:
+            activate_job_python_path((custom_path,))
+
+            assert inherited_path in sys.path
+            assert custom_path in sys.path
+            assert os.environ["PYTHONPATH"] == os.pathsep.join((inherited_path, custom_path))
+        finally:
+            for path in (inherited_path, custom_path):
+                if path in sys.path:
+                    sys.path.remove(path)

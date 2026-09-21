@@ -24,13 +24,17 @@ from nvflare.app_common.job_launcher.process_launcher import ProcessHandle, Proc
 
 
 class DummyWorkspace:
-    def __init__(self, custom_path: str = ""):
+    def __init__(self, custom_path: str = "", site_custom_path: str = ""):
         self.custom_path = custom_path
+        self.site_custom_path = site_custom_path
         self.calls = []
 
     def get_app_custom_dir(self, job_id):
         self.calls.append(job_id)
         return self.custom_path
+
+    def get_site_custom_dir(self):
+        return self.site_custom_path
 
 
 class DummyLauncher(ProcessJobLauncher):
@@ -122,6 +126,29 @@ def test_launch_job_falls_back_when_spawn_fails(monkeypatch):
     # Access via adapter
     assert handle.adapter.process is popen_instance
     assert handle.adapter.pid == popen_instance.pid
+
+
+def test_launch_job_removes_custom_dirs_from_pythonpath(monkeypatch, tmp_path):
+    app_custom = str(tmp_path / "job" / "custom")
+    site_custom = str(tmp_path / "local" / "custom")
+    trusted = str(tmp_path / "platform")
+    monkeypatch.setenv("PYTHONPATH", os.pathsep.join((trusted, app_custom, site_custom)))
+    workspace = DummyWorkspace(custom_path=app_custom, site_custom_path=site_custom)
+    launcher = DummyLauncher()
+    captured = {}
+    adapter = mock.Mock()
+    adapter.process = mock.Mock()
+    adapter.pid = 1234
+
+    def capture_spawn(argv, env):
+        captured["env"] = env
+        return adapter
+
+    monkeypatch.setattr("nvflare.app_common.job_launcher.process_launcher.spawn_process", capture_spawn)
+
+    launcher.launch_job({JobConstants.JOB_ID: "job-1"}, _build_fl_ctx(workspace))
+
+    assert captured["env"]["PYTHONPATH"] == trusted
 
 
 def test_process_handle_with_pid_wait_and_poll(monkeypatch):

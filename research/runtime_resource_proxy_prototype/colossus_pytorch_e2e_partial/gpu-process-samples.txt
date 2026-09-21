@@ -1,0 +1,11 @@
+# Captured rows from query fields: timestamp,gpu_name,pid,process_name,used_memory
+2026/09/18 21:08:11.001, NVIDIA L40G, 55012, /tmp/nvflare-resource-e2e-20260918/venv/bin/python3, 542
+2026/09/18 21:08:12.002, NVIDIA L40G, 55014, /tmp/nvflare-resource-e2e-20260918/venv/bin/python3, 542
+2026/09/18 21:08:12.002, NVIDIA L40G, 55012, /tmp/nvflare-resource-e2e-20260918/venv/bin/python3, 542
+2026/09/18 21:08:13.002, NVIDIA L40G, 55014, /tmp/nvflare-resource-e2e-20260918/venv/bin/python3, 542
+2026/09/18 21:08:13.002, NVIDIA L40G, 55012, /tmp/nvflare-resource-e2e-20260918/venv/bin/python3, 542
+2026/09/18 21:08:14.003, NVIDIA L40G, 55014, /tmp/nvflare-resource-e2e-20260918/venv/bin/python3, 542
+2026/09/18 21:08:14.003, NVIDIA L40G, 55012, /tmp/nvflare-resource-e2e-20260918/venv/bin/python3, 542
+2026/09/18 21:08:15.003, NVIDIA L40G, 55014, /tmp/nvflare-resource-e2e-20260918/venv/bin/python3, 542
+2026/09/18 21:08:15.003, NVIDIA L40G, 55012, /tmp/nvflare-resource-e2e-20260918/venv/bin/python3, 542
+2026/09/18 21:08:16.004, NVIDIA L40G, 55014, [No data], 542

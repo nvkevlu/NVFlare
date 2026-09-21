@@ -1,0 +1,6 @@
+Connecting to FLARE ...
+Waiting for job da63407a-8f1b-48c2-9742-f10dfc4cb727 in study default ...
+Job da63407a-8f1b-48c2-9742-f10dfc4cb727 status: COMPLETED (FINISHED:COMPLETED)
+  Duration: 87.0s
+  Name: hello-pt
+  Study: default

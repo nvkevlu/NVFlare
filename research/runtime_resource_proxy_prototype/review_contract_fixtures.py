@@ -15,38 +15,33 @@
 """Write deterministic, review-only artifacts for the prototype contracts.
 
 The normal generator deliberately captures only what the local process can
-actually observe.  These fixtures exercise proposed runtime boundaries that
+actually observe. These fixtures exercise proposed runtime boundaries that
 cannot be honestly installed in this standalone process yet: a CUDA runtime
-adapter, an NVFlare-only F3 sender hook, reporter selection, and archived
-workspace access.  Every file emitted here declares itself a synthetic contract
-fixture; none is a local resource observation or production evidence.
+adapter, an NVFlare-only F3 sender hook, changing resource observations, and
+archived workspace access. Every file declares itself a synthetic contract
+fixture; none is a local observation or production evidence.
 """
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 from zipfile import ZIP_STORED, ZipFile, ZipInfo
 
 from f3_finalization import F3FinalizationCounter, JobTrafficClass, JobTrafficEvent
 from prototype_contract import (
-    RESOURCE_MANIFEST_MEMBER,
     RESOURCE_SUMMARY_MEMBER,
-    ReporterLeaseConflict,
-    ReporterLeaseRegistry,
     WORKSPACE_COMPONENT,
-    WorkspaceAttemptStore,
+    ResourceTimeAccumulator,
     WorkspaceResourceStatsReader,
+    assemble_participant_summary,
 )
 from runtime_probe import probe_gpu_records
 
-
-_FIXTURE_ATTEMPT_ID = "1" * 32
-_TERMINATED_FIXTURE_ATTEMPT_ID = "2" * 32
-_FIXTURE_PARTICIPANT_KEY = "sha256-" + "a" * 64
+_FIXTURE_PARTICIPANT_NAME = "site-1"
 
 
 def _json_bytes(value: Any) -> bytes:
@@ -58,14 +53,6 @@ def _write_json(path: Path, value: Any) -> bytes:
     data = _json_bytes(value)
     path.write_bytes(data)
     return data
-
-
-def _relative_record(path: Path, root: Path) -> dict[str, str]:
-    data = path.read_bytes()
-    return {
-        "relative_path": path.resolve().relative_to(root.resolve()).as_posix(),
-        "sha256": hashlib.sha256(data).hexdigest(),
-    }
 
 
 class _FixtureCudaRuntime:
@@ -130,16 +117,19 @@ def _f3_fixture() -> dict[str, Any]:
     counter.send_resource_summary(JobTrafficEvent(JobTrafficClass.JOB_APPLICATION, 1024), lambda: None)
     counter.send_remote(JobTrafficEvent(JobTrafficClass.TASK_RESULT, 512), lambda: None)
     post_cutoff = counter.snapshot()
-    def canonical_counter(bucket: dict[str, int]) -> dict[str, int]:
-        return {"payload_bytes": bucket["payload_bytes"], "messages": bucket["message_count"]}
+
+    def canonical_counter(bucket: dict[str, int]) -> dict[str, str]:
+        return {"payload_bytes": str(bucket["payload_bytes"]), "messages": str(bucket["message_count"])}
 
     canonical_f3 = {
         "status": "reported",
         "remote_accepted": canonical_counter(frozen["outcomes"]["remote_transport_accepted"]),
         "local_delivered": canonical_counter(frozen["outcomes"]["local_delivery"]),
         "remote_failed_before_acceptance": {
-            "payload_bytes": frozen["diagnostics"]["before_transport_acceptance_failed"]["attempted_payload_bytes"],
-            "messages": frozen["diagnostics"]["before_transport_acceptance_failed"]["attempted_message_count"],
+            "payload_bytes": str(
+                frozen["diagnostics"]["before_transport_acceptance_failed"]["attempted_payload_bytes"]
+            ),
+            "messages": str(frozen["diagnostics"]["before_transport_acceptance_failed"]["attempted_message_count"]),
         },
     }
     return {
@@ -168,74 +158,71 @@ def _f3_fixture() -> dict[str, Any]:
     }
 
 
-def _lease_fixture(job_id: str) -> dict[str, Any]:
-    registry = ReporterLeaseRegistry()
-    owner = registry.acquire(job_id, "fixture-environment-1", "rank-0")
-    duplicate_suppressed = False
-    try:
-        registry.acquire(job_id, "fixture-environment-1", "rank-1")
-    except ReporterLeaseConflict:
-        duplicate_suppressed = True
-    other_job = registry.acquire(f"{job_id}-other", "fixture-environment-1", "rank-0")
-    return {
-        "schema_version": "prototype-0.3",
-        "kind": "nvflare.resource_stats.reporter_lease_fixture",
-        "provenance": "synthetic_contract_fixture",
-        "owner": owner.as_record(),
-        "same_job_same_environment_second_rank_suppressed": duplicate_suppressed,
-        "different_job_same_environment": other_job.as_record(),
-    }
-
-
-def _fragment_fixture(root: Path, job_id: str) -> dict[str, Any]:
-    workspace_root = root / "job_workspace"
-    store = WorkspaceAttemptStore(workspace_root)
-    start = store.persist_observation(
-        job_id,
-        _FIXTURE_ATTEMPT_ID,
-        "start.json",
+def _accumulator_fixture(job_id: str) -> tuple[dict[str, Any], dict[str, Any]]:
+    accumulator = ResourceTimeAccumulator()
+    accumulator.observe(
+        0,
         {
-            "schema_version": "prototype-0.3",
-            "kind": "nvflare.resource_stats.attempt_start",
-            "job_id": job_id,
-            "attempt_id": _FIXTURE_ATTEMPT_ID,
-            "snapshot": {
-                "provenance": "synthetic_contract_fixture",
-                "resource_types": ["cpu", "memory", "gpu"],
+            "cpu": {"units": "16", "model": "AMD EPYC 9654", "architecture": "x86_64"},
+            "memory": {"bytes": "137438953472"},
+            "gpu": {"groups": []},
+        },
+    )
+    accumulator.observe(
+        300,
+        {
+            "cpu": {"units": "16", "model": "AMD EPYC 9654", "architecture": "x86_64"},
+            "memory": {"bytes": "137438953472"},
+            "gpu": {
+                "groups": [
+                    {
+                        "kind": "full_gpu",
+                        "count": "2",
+                        "model": "NVIDIA A100-SXM4-80GB",
+                        "memory_bytes": "85899345920",
+                    }
+                ]
             },
         },
     )
-    final = store.persist_observation(
-        job_id,
-        _FIXTURE_ATTEMPT_ID,
-        "final.json",
-        {
-            "schema_version": "prototype-0.3",
-            "kind": "nvflare.resource_stats.attempt_final",
-            "job_id": job_id,
-            "attempt_id": _FIXTURE_ATTEMPT_ID,
-            "finalization": {"state": "finished_ok"},
+    handoff = accumulator.finish_measurements(
+        900,
+        workspace_filesystem={"status": "reported", "capacity_bytes": "1099511627776"},
+        retained_content={"status": "reported", "bytes": "0"},
+        child_f3={
+            "status": "reported",
+            "remote_accepted": {"payload_bytes": "0", "messages": "0"},
+            "local_delivered": {"payload_bytes": "0", "messages": "0"},
+            "remote_failed_before_acceptance": {"payload_bytes": "0", "messages": "0"},
         },
     )
-    terminated = store.record_attempt_end_without_final(
-        job_id,
-        _TERMINATED_FIXTURE_ATTEMPT_ID,
-        "2026-09-04T11:59:00Z",
-        "2026-09-04T12:00:00Z",
-        "terminated",
+    report = assemble_participant_summary(
+        job_id=job_id,
+        participant_name=_FIXTURE_PARTICIPANT_NAME,
+        reported_at="2026-09-04T12:15:00Z",
+        child_handoff=handoff,
+        parent_f3={
+            "status": "reported",
+            "remote_accepted": {"payload_bytes": "0", "messages": "0"},
+            "local_delivered": {"payload_bytes": "0", "messages": "0"},
+            "remote_failed_before_acceptance": {"payload_bytes": "0", "messages": "0"},
+        },
     )
-    records = [_relative_record(receipt.path, root) for receipt in (start, final, terminated)]
-    return {
-        "schema_version": "prototype-0.3",
-        "kind": "nvflare.resource_stats.workspace_fragment_fixture",
-        "provenance": "synthetic_contract_fixture",
-        "workspace_root": "job_workspace",
-        "records": records,
-        "trust_note": (
-            "These files are self-reported and best-effort until the server receives the final site report. "
-            "The prototype requires no extra mount, service, privilege, or configuration."
-        ),
-    }
+    return (
+        {
+            "schema_version": "prototype-0.3",
+            "kind": "nvflare.resource_stats.resource_time_accumulator_fixture",
+            "provenance": "synthetic_contract_fixture",
+            "observation_events": 2,
+            "private_terminal_handoffs": 1,
+            "persisted_terminal_reports": 1,
+            "public_interval_records": 0,
+            "terminal_handoff_file": "terminal_handoff.json",
+            "participant_summary": report,
+            "rule": "observe changes internally and persist or transmit only the terminal participant summary",
+        },
+        handoff,
+    )
 
 
 def _write_archive(path: Path, members: dict[str, bytes]) -> None:
@@ -243,53 +230,36 @@ def _write_archive(path: Path, members: dict[str, bytes]) -> None:
 
     path.parent.mkdir(parents=True, exist_ok=True)
     with ZipFile(path, "w", compression=ZIP_STORED) as archive:
-        for name, data in sorted(members.items()):
+        ordered = sorted(members.items(), key=lambda item: (item[0] == RESOURCE_SUMMARY_MEMBER, item[0]))
+        for name, data in ordered:
             info = ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
             info.compress_type = ZIP_STORED
             info.external_attr = 0o600 << 16
             archive.writestr(info, data)
 
 
-def _workspace_archive_fixture(root: Path, job_id: str, resource_summary_bytes: bytes) -> dict[str, Any]:
-    participant_relative_path = f"participants/{_FIXTURE_PARTICIPANT_KEY}.json"
-    participant_member = f"resource_stats/{participant_relative_path}"
-    participant_bytes = _json_bytes(
-        {
-            "schema_version": "prototype-0.3",
-            "kind": "nvflare.resource_stats.participant_summary",
-            "job_id": job_id,
-            "participant_key": _FIXTURE_PARTICIPANT_KEY,
-            "provenance": "synthetic_contract_fixture",
-        }
-    )
-    manifest_bytes = _json_bytes(
-        {
-            "schema_version": "prototype-0.3",
-            "kind": "nvflare.resource_stats.manifest",
-            "entries": [
-                {
-                    "relative_path": "resource_summary.json",
-                    "byte_count": len(resource_summary_bytes),
-                    "sha256": hashlib.sha256(resource_summary_bytes).hexdigest(),
-                },
-                {
-                    "relative_path": participant_relative_path,
-                    "byte_count": len(participant_bytes),
-                    "sha256": hashlib.sha256(participant_bytes).hexdigest(),
-                },
-            ],
-        }
-    )
+def _workspace_archive_fixture(
+    root: Path,
+    job_id: str,
+    resource_summary_bytes: bytes,
+    participant_summary_bytes_by_name: Mapping[str, bytes],
+) -> dict[str, Any]:
+    archive_members: dict[str, bytes] = {}
+    participant_members: list[str] = []
+    for participant_name, participant_bytes in sorted(participant_summary_bytes_by_name.items()):
+        participant_relative_path = f"participants/{participant_name}.json"
+        participant_member = f"resource_stats/{participant_relative_path}"
+        participant_members.append(participant_member)
+        archive_members[participant_member] = participant_bytes
+    archive_members[RESOURCE_SUMMARY_MEMBER] = resource_summary_bytes
     archive_path = root / "server_job_store" / "jobs" / job_id / WORKSPACE_COMPONENT
-    _write_archive(
-        archive_path,
-        {
-            RESOURCE_SUMMARY_MEMBER: resource_summary_bytes,
-            RESOURCE_MANIFEST_MEMBER: manifest_bytes,
-            participant_member: participant_bytes,
-        },
-    )
+    _write_archive(archive_path, archive_members)
     reader = WorkspaceResourceStatsReader(archive_path)
+    summary_matches = reader.read_resource_summary_bytes() == resource_summary_bytes
+    participants_match = all(
+        reader.read_participant_summary_bytes(participant_name) == participant_bytes
+        for participant_name, participant_bytes in sorted(participant_summary_bytes_by_name.items())
+    )
     return {
         "schema_version": "prototype-0.3",
         "kind": "nvflare.resource_stats.workspace_archive_reader_fixture",
@@ -297,46 +267,55 @@ def _workspace_archive_fixture(root: Path, job_id: str, resource_summary_bytes: 
         "component": WORKSPACE_COMPONENT,
         "relative_path": archive_path.resolve().relative_to(root.resolve()).as_posix(),
         "summary_member": RESOURCE_SUMMARY_MEMBER,
-        "manifest_member": RESOURCE_MANIFEST_MEMBER,
-        "participant_member": participant_member,
-        "archive_sha256": hashlib.sha256(archive_path.read_bytes()).hexdigest(),
-        "summary_matches_canonical": reader.read_resource_summary_bytes() == resource_summary_bytes,
-        "manifest_readable": reader.read_manifest_bytes() == manifest_bytes,
-        "participant_matches": reader.read_participant_summary_bytes(_FIXTURE_PARTICIPANT_KEY) == participant_bytes,
+        "participant_members": participant_members,
+        "summary_matches_canonical": summary_matches,
+        "participants_match": participants_match,
         "separate_query_component_created": False,
     }
 
 
-def write_review_contract_fixtures(output_dir: Path, job_id: str, resource_summary_bytes: bytes) -> dict[str, Any]:
-    """Write review fixtures and return a path-free manifest for the generator receipt."""
+def write_review_contract_fixtures(
+    output_dir: Path,
+    job_id: str,
+    resource_summary_bytes: bytes,
+    participant_summary_bytes_by_name: Mapping[str, bytes],
+) -> dict[str, Any]:
+    """Write review fixtures and return their path-only receipt index."""
 
     if not isinstance(resource_summary_bytes, bytes):
         raise TypeError("resource_summary_bytes must be bytes")
+    if not isinstance(participant_summary_bytes_by_name, Mapping):
+        raise TypeError("participant_summary_bytes_by_name must be a mapping")
+    participant_summary_bytes_by_name = dict(participant_summary_bytes_by_name)
+    for participant_name, participant_bytes in participant_summary_bytes_by_name.items():
+        if not isinstance(participant_name, str):
+            raise TypeError("participant summary names must be strings")
+        if not isinstance(participant_bytes, bytes):
+            raise TypeError("participant summary values must be bytes")
     root = Path(output_dir) / "review_contracts"
     root.mkdir(parents=True, exist_ok=True)
+    accumulator_fixture, terminal_handoff = _accumulator_fixture(job_id)
     files = {
         "gpu_cuda_runtime_validated.json": _gpu_fixture(),
         "f3_finalization.json": _f3_fixture(),
-        "reporter_lease.json": _lease_fixture(job_id),
+        "resource_time_accumulator.json": accumulator_fixture,
+        "terminal_handoff.json": terminal_handoff,
     }
     for name, contents in files.items():
         _write_json(root / name, contents)
-    _write_json(root / "workspace_fragments.json", _fragment_fixture(root, job_id))
     _write_json(
         root / "workspace_archive_reader.json",
-        _workspace_archive_fixture(root, job_id, resource_summary_bytes),
+        _workspace_archive_fixture(
+            root,
+            job_id,
+            resource_summary_bytes,
+            participant_summary_bytes_by_name,
+        ),
     )
-    manifest_entries = [_relative_record(path, root) for path in sorted(root.glob("*.json"))]
-    manifest = {
-        "schema_version": "prototype-0.3",
-        "kind": "nvflare.resource_stats.review_contract_fixture_manifest",
-        "provenance": "synthetic_contract_fixture",
-        "entries": manifest_entries,
-    }
-    _write_json(root / "manifest.json", manifest)
+    entries = [f"review_contracts/{path.name}" for path in sorted(root.glob("*.json"))]
     return {
-        "kind": manifest["kind"],
-        "provenance": manifest["provenance"],
-        "entry_count": len(manifest_entries),
-        "manifest": "review_contracts/manifest.json",
+        "kind": "nvflare.resource_stats.review_contract_fixtures",
+        "provenance": "synthetic_contract_fixture",
+        "entry_count": len(entries),
+        "entries": entries,
     }

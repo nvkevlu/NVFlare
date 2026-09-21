@@ -27,8 +27,11 @@ import os
 import platform
 import re
 from collections.abc import Iterable, Mapping
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, Optional, Protocol
+
+from schema.contract_v1 import normalize_quota_units
 
 
 def _utc_now() -> str:
@@ -141,7 +144,21 @@ def _ancestors(cgroup_dir: Path, mount_point: Path) -> list[Path]:
     return dirs
 
 
-def _finite_v2_cpu_quota() -> tuple[Optional[float], list[dict[str, int]]]:
+def _minimum_normalized_quota(quotas: list[dict[str, int]]) -> Optional[str]:
+    """Return the smallest v1-normalized quota without binary floating point."""
+
+    normalized = []
+    for item in quotas:
+        try:
+            normalized.append(normalize_quota_units(item["quota_us"], item["period_us"]))
+        except ValueError:
+            # A positive kernel value can still be outside the schema's bounds
+            # or below its nine-decimal precision. It cannot be a v1 value.
+            continue
+    return min(normalized, key=Decimal) if normalized else None
+
+
+def _finite_v2_cpu_quota() -> tuple[Optional[str], list[dict[str, int]]]:
     mount_point, cgroup_dir = _cgroup_v2_location()
     if cgroup_dir is None or mount_point is None:
         return None, []
@@ -158,10 +175,10 @@ def _finite_v2_cpu_quota() -> tuple[Optional[float], list[dict[str, int]]]:
             quotas.append({"quota_us": quota_us, "period_us": period_us})
     if not quotas:
         return None, []
-    return min(item["quota_us"] / item["period_us"] for item in quotas), quotas
+    return _minimum_normalized_quota(quotas), quotas
 
 
-def _finite_v1_cpu_quota() -> tuple[Optional[float], list[dict[str, int]]]:
+def _finite_v1_cpu_quota() -> tuple[Optional[str], list[dict[str, int]]]:
     mount_point, cgroup_dir = _cgroup_v1_location("cpu")
     if cgroup_dir is None or mount_point is None:
         return None, []
@@ -178,7 +195,7 @@ def _finite_v1_cpu_quota() -> tuple[Optional[float], list[dict[str, int]]]:
             quotas.append({"quota_us": quota_us, "period_us": period_us})
     if not quotas:
         return None, []
-    return min(item["quota_us"] / item["period_us"] for item in quotas), quotas
+    return _minimum_normalized_quota(quotas), quotas
 
 
 def _parse_cpuset_count(value: Optional[str]) -> Optional[int]:
@@ -375,7 +392,7 @@ def _physical_memory_bytes() -> Optional[int]:
 
 def _metric(
     name: str,
-    value: Optional[float | int],
+    value: Optional[str | float | int],
     unit: str,
     source: str,
     *,
@@ -454,9 +471,9 @@ def probe_cpu(allow_host_fallback: bool = False) -> dict[str, Any]:
     if quota is None and cgroup_version == "v1":
         quota, quota_inputs = _finite_v1_cpu_quota()
 
-    candidates = [value for value in (affinity_count, cpuset_count, quota) if value is not None]
+    candidates = [Decimal(str(value)) for value in (affinity_count, cpuset_count, quota) if value is not None]
     if not candidates and online_count is not None:
-        candidates.append(online_count)
+        candidates.append(Decimal(online_count))
     if not candidates:
         return _metric(
             "visible_cpu_units",
@@ -477,9 +494,11 @@ def probe_cpu(allow_host_fallback: bool = False) -> dict[str, Any]:
         source_parts.append(f"cgroup_{cgroup_version}.cpu_quota")
     if not source_parts:
         source_parts.append("SC_NPROCESSORS_ONLN")
+    selected = min(candidates)
+    selected_text = str(int(selected)) if selected == selected.to_integral() else format(selected, "f")
     return _metric(
         "visible_cpu_units",
-        round(min(candidates), 6),
+        selected_text,
         "cpu_units",
         "+".join(source_parts),
         coverage="partial" if affinity_count is None else "complete",
@@ -562,7 +581,7 @@ def probe_storage(workspace: Path) -> dict[str, Any]:
                 caveats=["WORKSPACE_PATH_NOT_DIRECTORY"],
             )
         stats = os.statvfs(workspace)
-        block_size = stats.f_frsize or stats.f_bsize
+        block_size = stats.f_frsize
         total = block_size * stats.f_blocks
     except OSError:
         return _metric(

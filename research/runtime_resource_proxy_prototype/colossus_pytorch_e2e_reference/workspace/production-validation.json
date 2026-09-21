@@ -1,0 +1,112 @@
+{
+  "accepted_participants": [
+    "server",
+    "site-1",
+    "site-2"
+  ],
+  "bundle_valid": true,
+  "expected_participants": 3,
+  "job_id": "bb65f3e7-28bc-48d9-9ed4-656e596811fd",
+  "participants": {
+    "server": {
+      "cpu": [
+        {
+          "architecture": "x86_64",
+          "model": "AMD EPYC 7313P 16-Core Processor",
+          "unit_seconds": "2444.292635904",
+          "units_per_second": "32"
+        }
+      ],
+      "f3": {
+        "issues": [
+          "not_bound"
+        ],
+        "status": "unavailable"
+      },
+      "gpu": [],
+      "measured_seconds": "76.384144872",
+      "memory_bytes_per_second": "1.3491791872E+11",
+      "resource_issues": [
+        "observation_incomplete"
+      ],
+      "resource_status": "partial",
+      "retained_content": {
+        "issues": [
+          "not_bound"
+        ],
+        "status": "unavailable"
+      },
+      "workspace_filesystem": {
+        "capacity_bytes": "1889447919616",
+        "status": "reported"
+      }
+    },
+    "site-1": {
+      "cpu": [
+        {
+          "architecture": "x86_64",
+          "model": "AMD EPYC 7313P 16-Core Processor",
+          "unit_seconds": "2466.206664384",
+          "units_per_second": "32"
+        }
+      ],
+      "f3": {
+        "issues": [
+          "not_bound"
+        ],
+        "status": "unavailable"
+      },
+      "gpu": [],
+      "measured_seconds": "77.068958262",
+      "memory_bytes_per_second": "1.3491791872E+11",
+      "resource_issues": [
+        "observation_incomplete"
+      ],
+      "resource_status": "partial",
+      "retained_content": {
+        "issues": [
+          "not_bound"
+        ],
+        "status": "unavailable"
+      },
+      "workspace_filesystem": {
+        "capacity_bytes": "1889447919616",
+        "status": "reported"
+      }
+    },
+    "site-2": {
+      "cpu": [
+        {
+          "architecture": "x86_64",
+          "model": "AMD EPYC 7313P 16-Core Processor",
+          "unit_seconds": "2451.019922976",
+          "units_per_second": "32"
+        }
+      ],
+      "f3": {
+        "issues": [
+          "not_bound"
+        ],
+        "status": "unavailable"
+      },
+      "gpu": [],
+      "measured_seconds": "76.594372593",
+      "memory_bytes_per_second": "1.3491791872E+11",
+      "resource_issues": [
+        "observation_incomplete"
+      ],
+      "resource_status": "partial",
+      "retained_content": {
+        "issues": [
+          "not_bound"
+        ],
+        "status": "unavailable"
+      },
+      "workspace_filesystem": {
+        "capacity_bytes": "1889447919616",
+        "status": "reported"
+      }
+    }
+  },
+  "totals_match_derived": true
+}

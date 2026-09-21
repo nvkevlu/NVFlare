@@ -1,18 +1,22 @@
-Resources visible to the job while it ran.
-Job job-20260909-001 | selected site: site-2 | job coverage: PARTIAL (3 accepted / 4 expected)
+Recorded resources for job job-20260909-001.
+Job coverage: PARTIAL (3 accepted / 4 expected) | selected site: site-2
 
-SITE     ROLE    STATUS    QUALITY     MEASURED TIME  FULL GPU h  CPU h   MEM GiB h  SAVED RESULT GiB  F3 REMOTE ACCEPTED GiB
-site-2   client  accepted  PARTIAL             32m3s      1.9700 15.7600     97.2267              N/A               137.5567
+Recorded average visible capacity over each measured interval
+SITE    ROLE    REPORT    COMPUTE  MEASURED TIME  CPU UNITS  MEM GiB   FULL GPUs
+site-2  client  accepted  PARTIAL  32m3s          29.5039    182.0156  3.6880
 
-Notices:
-  MEASURED TIME is the sum of the measurement periods in each received report.
-  JOB COVERAGE PARTIAL means not every expected report was accepted.
-  Site QUALITY PARTIAL means that site's measurement evidence is incomplete.
-  Reports may describe overlapping physical resources. Job totals are not physical capacity.
-  Site observations are self-reported. The server protects only the received report bytes.
+Other recorded participant totals
+SITE    F3 REMOTE ACCEPTED GiB
+site-2  137.5567
+
+Notes:
+  PARTIAL means at least one expected report or observation was incomplete.
+  Each average is resource-time divided by that row's measured interval.
+  Totals add participant reports; overlapping resources can be counted more than once.
 
 Hardware detail for site-2
-Model metadata is optional. Its absence does not change numeric results.
+Model metadata is optional and does not change numeric totals.
 
-CPU: Intel Xeon Platinum 8480+ (x86_64); 15.7600 CPU h
-GPU (full GPU): NVIDIA A100 80GB, 80 GiB per instance; 1.9700 instance h
+CPU: Intel Xeon Platinum 8480+ (x86_64); 29.5039 average visible units
+GPU (full GPU): NVIDIA A100 80GB, 80 GiB per instance; 3.6880 average visible instances
+Visible workspace-filesystem capacity at reporting time: 2048.0000 GiB

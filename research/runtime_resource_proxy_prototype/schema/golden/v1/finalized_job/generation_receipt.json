@@ -2,22 +2,17 @@
   "generator": "build_review_artifacts.py",
   "schema_version": "1.0",
   "job_id": "job-20260909-001",
-  "participant_summary_sha256": {
-    "site-1": "ce27c5f27f3b1411c431ba1e1fc71e7cf88b557db1cf0720cc6ec040ef3b77cd",
-    "site-2": "739d6492134fe0fb2eaaf20574a62108318d02afd9a3724a3397f2c01f53bdd5",
-    "server": "6681b52e29f6dccfdaffd455ff977728f3add7dcd701cf58828da1af0399b8d7"
-  },
-  "resource_summary_sha256": "da712b7be319655068e996a56c845b5a5f0fa3971bd0b9bf92965f095b079ce8",
-  "manifest_sha256": "956fb7e54b16dc1bf2d75bcfb9c8c45f9e47f5dcf51fd34537dc52e76b1a0cdd",
+  "study": "cancer-research",
+  "public_participant_reports": 3,
+  "public_start_or_final_fragments": 0,
   "workspace_component": "workspace",
-  "workspace_sha256": "5d8d2794275b8f465e271a49174f40546ff19e9015970b00b3194004e4e08b2c",
   "workspace_resource_summary_member": "resource_stats/resource_summary.json",
   "workspace_resource_summary_matches": true,
-  "workspace_manifest_matches": true,
+  "study_job_workspace_resource_summary_matches": true,
   "scenario_basis": {
-    "description": "Illustrative values scaled to a completed two-client Qwen2.5-14B qualification.",
+    "description": "Illustrative values scaled to completed Qwen2.5-14B qualification jobs.",
     "reference_label": "Five-round 14B full-model qualification, 2026-07-31",
-    "scope_note": "The A100 model, four-GPU baseline, runtime scale, model-state size, and saved-result size are evidence-based; CPU, memory, visible workspace-filesystem capacity, and site-2 period/resource changes are illustrative.",
+    "scope_note": "The A100 model, four-GPU baseline, runtime scale, model-state size, and saved-result size are evidence-based; CPU, memory, workspace-filesystem capacity, and observation changes are illustrative.",
     "reference_runtime_seconds": "2223",
     "reference_model_state_bytes": "29540067328",
     "reference_logical_state_directions": "20",
@@ -26,12 +21,14 @@
     "f3_note": "The historical run recorded model-state size; its logical volume was derived, and it did not measure the proposed post-encoding F3 counter."
   },
   "derived_examples": {
-    "site_1_resource_window_seconds": "2223",
-    "site_2_resource_window_seconds": "1923",
-    "server_resource_window_seconds": "2223",
-    "accepted_resource_window_seconds": "6369",
+    "site_1_measured_seconds": "2223",
+    "site_2_measured_seconds": "1923",
+    "server_measured_seconds": "2223",
+    "accepted_measured_seconds": "6369",
     "job_cpu_unit_seconds": "145656",
     "job_gpu_instance_seconds": "15984",
+    "study_cpu_unit_seconds": "1988856",
+    "study_gpu_instance_seconds": "131184",
     "large_memory_byte_seconds": "9010000000000901"
   }
 }

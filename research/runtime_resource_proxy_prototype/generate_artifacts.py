@@ -12,948 +12,523 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Generate realistic, self-contained pre-v1 probe artifacts.
+"""Capture real local observations and emit the proposed terminal artifacts.
 
-The generator intentionally records what it can actually observe on the local
-machine and marks unbound NVFlare-only signals (currently F3 traffic) as
-unavailable.  It never fabricates a GPU, server process, or network counter.
-
-Its exploratory record shapes predate the canonical v1
-contract and deliberately remain historical probe evidence.  Use
-``schema/build_review_artifacts.py`` for normative records and CLI output.
-The retained-content probe measures only the one file this script creates and
-does not claim to discover a complete NVFlare result set.
+This remains a research prototype, not an NVFlare integration. It uses the
+same public shape as schema v1: one participant summary, one job summary, and
+one transient study response. Resource observations remain internal to the
+accumulator and are never written as public start or final fragments.
 """
 
 from __future__ import annotations
 
 import argparse
-import copy
-import datetime as dt
-import hashlib
+import datetime
 import json
-import os
-import stat
 import time
-import uuid
+from copy import deepcopy
+from decimal import Decimal
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 from zipfile import ZIP_STORED, ZipFile, ZipInfo
 
-from prototype_contract import WORKSPACE_COMPONENT, WorkspaceResourceStatsReader
+from prototype_contract import ResourceTimeAccumulator, assemble_participant_summary
 from review_contract_fixtures import write_review_contract_fixtures
-from runtime_probe import probe_cpu, probe_gpu, probe_memory, probe_storage
+from runtime_probe import probe_cpu, probe_gpu_records, probe_memory, probe_storage
 
+from nvflare.tool.job.job_resources import render_job_resources, render_study_resources
 
-RESOURCE_SCHEMA_VERSION = "prototype-local-0.3"
-CLI_SCHEMA_VERSION = "1"
-PROTOTYPE_KIND = "runtime_resource_proxy_prototype"
+PARTICIPANT_KIND = "nvflare.resource_stats.participant_summary"
+RESOURCE_SUMMARY_KIND = "nvflare.resource_stats.resource_summary"
+STUDY_SUMMARY_KIND = "nvflare.resource_stats.study_summary"
 
 
 def _utc_now() -> str:
-    return dt.datetime.now(dt.timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
+    return datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 def _json_bytes(value: Any) -> bytes:
-    return (json.dumps(value, indent=2, sort_keys=True, ensure_ascii=False, allow_nan=False) + "\n").encode("utf-8")
+    return (json.dumps(value, indent=2, ensure_ascii=False, allow_nan=False) + "\n").encode("utf-8")
 
 
-def _sha256(data: bytes) -> str:
-    return hashlib.sha256(data).hexdigest()
-
-
-def _sha256_file(path: Path) -> str:
-    hasher = hashlib.sha256()
-    with path.open("rb") as stream:
-        for chunk in iter(lambda: stream.read(64 * 1024), b""):
-            hasher.update(chunk)
-    return hasher.hexdigest()
-
-
-def _write_bytes_atomic(path: Path, data: bytes) -> None:
+def _write(path: Path, data: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    temp_path = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
-    try:
-        with temp_path.open("wb") as stream:
-            stream.write(data)
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temp_path, path)
-    finally:
-        try:
-            temp_path.unlink()
-        except FileNotFoundError:
-            pass
+    path.write_bytes(data)
 
 
-def _write_json(path: Path, value: Any) -> bytes:
-    data = _json_bytes(value)
-    _write_bytes_atomic(path, data)
-    return data
+def _probe_has_usable_value(metric: dict[str, Any]) -> bool:
+    return metric.get("value") is not None and metric.get("status") in {"reported", "partial"}
 
 
-def _metric(
-    name: str,
-    value: int | float | None,
-    unit: str,
-    source: str,
-    *,
-    basis: str,
-    scope: str,
-    status: str,
-    coverage: str,
-    observed_at: str,
-    caveat_codes: list[str],
-    sharing: str = "unknown",
-    reason_code: str | None = None,
-    dimensions: dict[str, Any] | None = None,
-    evidence: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    result: dict[str, Any] = {
-        "name": name,
-        "value": value,
-        "unit": unit,
-        "source": source,
-        "basis": basis,
-        "scope": scope,
-        "sharing": sharing,
-        "status": status,
-        "observed_at": observed_at,
-        "coverage": coverage,
-        "caveat_codes": caveat_codes,
+def _probe_is_complete(metric: dict[str, Any]) -> bool:
+    return metric.get("status") == "reported" and metric.get("coverage") == "complete"
+
+
+def _capacity_from_real_probes() -> tuple[dict[str, Any], dict[str, Any]]:
+    cpu_metric = probe_cpu()
+    memory_metric = probe_memory()
+    gpu_metrics = probe_gpu_records()
+
+    capacity: dict[str, Any] = {}
+    if _probe_has_usable_value(cpu_metric):
+        cpu = {"units": str(cpu_metric["value"])}
+        dimensions = cpu_metric.get("dimensions", {})
+        if dimensions.get("model"):
+            cpu["model"] = dimensions["model"]
+        if dimensions.get("architecture"):
+            cpu["architecture"] = dimensions["architecture"]
+        capacity["cpu"] = cpu
+    if _probe_has_usable_value(memory_metric):
+        capacity["memory"] = {"bytes": str(memory_metric["value"])}
+
+    if gpu_metrics and all(_probe_has_usable_value(metric) for metric in gpu_metrics):
+        groups = []
+        for metric in gpu_metrics:
+            value = Decimal(str(metric["value"]))
+            if value == 0:
+                continue
+            dimensions = metric.get("dimensions", {})
+            group = {
+                "kind": dimensions["device_kind"],
+                "count": str(metric["value"]),
+            }
+            for key in ("model", "memory_bytes", "mig_profile"):
+                if dimensions.get(key) is not None:
+                    group[key] = str(dimensions[key])
+            groups.append(group)
+        capacity["gpu"] = {"groups": groups}
+
+    evidence = {
+        "cpu_probe": cpu_metric,
+        "memory_probe": memory_metric,
+        "gpu_probes": gpu_metrics,
     }
-    if reason_code:
-        result["reason_code"] = reason_code
-    if dimensions:
-        result["dimensions"] = dimensions
-    if evidence:
-        result["evidence"] = evidence
-    return result
+    return capacity, evidence
 
 
-def _record_status(metrics: Iterable[dict[str, Any]]) -> str:
-    metric_statuses = {metric["status"] for metric in metrics}
-    if not metric_statuses:
-        return "unavailable"
-    if metric_statuses == {"reported"}:
-        return "reported"
-    if metric_statuses == {"unavailable"}:
-        return "unavailable"
-    return "partial"
-
-
-def _canonical_probe_metric(metric: dict[str, Any], observed_at: str) -> dict[str, Any]:
-    """Normalize probe output into the persisted contract without changing values."""
-
-    result = copy.deepcopy(metric)
-    result["observed_at"] = observed_at
-    if "inputs" in result:
-        result["evidence"] = result.pop("inputs")
-    return result
-
-
-def _collect_capacity_snapshot(run_dir: Path, observed_at: str) -> dict[str, Any]:
-    metrics = [
-        probe_cpu(allow_host_fallback=True),
-        probe_memory(allow_host_fallback=True),
-        probe_storage(run_dir),
-        probe_gpu(),
-    ]
-    return {
-        "observed_at": observed_at,
-        "metrics": [_canonical_probe_metric(metric, observed_at) for metric in metrics],
-    }
-
-
-def _metric_by_name(metrics: Iterable[dict[str, Any]], name: str) -> dict[str, Any]:
-    for metric in metrics:
-        if metric["name"] == name:
-            return metric
-    raise KeyError(name)
-
-
-def _capacity_changed(start: dict[str, Any], final: dict[str, Any]) -> bool:
-    final_by_name = {metric["name"]: metric for metric in final["metrics"]}
-    for metric in start["metrics"]:
-        if metric["name"] == "visible_storage_capacity_bytes":
-            continue
-        final_metric = final_by_name.get(metric["name"])
-        if final_metric is None or final_metric["value"] != metric["value"]:
-            return True
-    return False
-
-
-def _proxy_rollup(
-    start_metric: dict[str, Any],
-    duration_seconds: float,
-    *,
-    name: str,
-    unit: str,
-    observed_at: str,
-) -> dict[str, Any]:
-    if start_metric["status"] not in {"reported", "partial"} or start_metric["value"] is None:
-        return _metric(
-            name,
-            None,
-            unit,
-            f"startup.{start_metric['name']}*interval.duration_seconds",
-            basis="runtime_visible_capacity_proxy",
-            scope=start_metric["scope"],
-            sharing=start_metric["sharing"],
-            status="unavailable",
-            coverage=start_metric["coverage"],
-            observed_at=observed_at,
-            caveat_codes=list(start_metric["caveat_codes"]),
-            reason_code="STARTUP_CAPACITY_UNAVAILABLE",
-        )
-    result = _metric(
-        name,
-        start_metric["value"] * duration_seconds,
-        unit,
-        f"startup.{start_metric['name']}*interval.duration_seconds",
-        basis="runtime_visible_capacity_proxy",
-        scope=start_metric["scope"],
-        sharing=start_metric["sharing"],
-        status=start_metric["status"],
-        coverage=start_metric["coverage"],
-        observed_at=observed_at,
-        caveat_codes=list(start_metric["caveat_codes"]),
-    )
-    if "dimensions" in start_metric:
-        result["dimensions"] = copy.deepcopy(start_metric["dimensions"])
-    return result
-
-
-def _retained_content_metric(result_file: Path, observed_at: str) -> dict[str, Any]:
-    if result_file.is_symlink() or not result_file.is_file():
-        raise RuntimeError("prototype artifact registry must contain regular files only")
-    with result_file.open("rb") as stream:
-        result_stat = os.fstat(stream.fileno())
-    if not stat.S_ISREG(result_stat.st_mode):
-        raise RuntimeError("prototype artifact registry must contain regular files only")
-    metric = _metric(
-        "retained_content_bytes",
-        result_stat.st_size,
-        "bytes",
-        "prototype_owned_file+fstat.st_size",
-        basis="retained_content_bytes",
-        scope="prototype_owned_file_only",
-        sharing="unknown",
-        status="partial",
-        coverage="partial",
-        observed_at=observed_at,
-        caveat_codes=["PROTOTYPE_OWNED_FILE_ONLY", "NOT_COMPLETE_NVFLARE_RESULT_SET"],
-    )
-    return metric
-
-
-def _unbound_network(observed_at: str) -> dict[str, Any]:
-    unavailable_metric = _metric(
-        "f3_payload_bytes_sent",
-        None,
-        "bytes",
-        "cellnet.sender_boundary.after_optional_cell_encryption",
-        basis="application_payload_counter",
-        scope="outbound_sender_hop",
-        sharing="unknown",
-        status="unavailable",
-        coverage="none",
-        observed_at=observed_at,
-        caveat_codes=["F3_COUNTER_NOT_BOUND_IN_PROTOTYPE"],
-        reason_code="F3_COUNTER_NOT_BOUND",
-    )
-    message_metric = copy.deepcopy(unavailable_metric)
-    message_metric.update({"name": "f3_message_count_sent", "unit": "messages"})
-    return {
-        "counter_epoch": uuid.uuid4().hex,
-        "observed_at": observed_at,
-        "frozen_before_summary_publication": True,
-        "outcomes": {
-            "remote_transport_accepted": {
-                "payload_bytes": None,
-                "message_count": None,
-                "status": "unavailable",
-                "coverage": "none",
-                "reason_code": "F3_COUNTER_NOT_BOUND",
-            },
-            "local_delivery": {
-                "payload_bytes": None,
-                "message_count": None,
-                "status": "unavailable",
-                "coverage": "none",
-                "reason_code": "F3_COUNTER_NOT_BOUND",
-            },
-            "pre_transport_failure": {
-                "payload_bytes": None,
-                "message_count": None,
-                "status": "unavailable",
-                "coverage": "none",
-                "reason_code": "F3_COUNTER_NOT_BOUND",
-            },
-        },
-        "metrics": [unavailable_metric, message_metric],
-    }
-
-
-def _summarize_attempt(attempt_final: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "attempt_id": attempt_final["attempt_id"],
-        "execution_scope": copy.deepcopy(attempt_final["execution_scope"]),
-        "interval": copy.deepcopy(attempt_final["interval"]),
-        "startup_snapshot": copy.deepcopy(attempt_final["startup_snapshot"]),
-        "final_snapshot": copy.deepcopy(attempt_final["final_snapshot"]),
-        "retained_content": copy.deepcopy(attempt_final["retained_content"]),
-        "network": copy.deepcopy(attempt_final["network"]),
-        "rollups": copy.deepcopy(attempt_final["rollups"]),
-    }
-
-
-def _qualified_totals(
-    participant_summary: dict[str, Any],
-    observed_at: str,
-    expected_participant_count: int,
-    missing_participant_ids: list[str],
-) -> dict[str, Any]:
-    attempts = participant_summary["attempts"]
-    rollups = [metric for attempt in attempts for metric in attempt["rollups"]]
-    retained = [metric for attempt in attempts for metric in attempt["retained_content"]["metrics"]]
-    network = [metric for attempt in attempts for metric in attempt["network"]["metrics"]]
-    metrics: list[dict[str, Any]] = []
-    for name in (
-        "visible_gpu_seconds",
-        "visible_cpu_unit_seconds",
-        "visible_memory_byte_seconds",
-        "retained_content_bytes",
-        "f3_payload_bytes_sent",
-        "f3_message_count_sent",
-    ):
-        candidates = [metric for metric in rollups + retained + network if metric["name"] == name]
-        if not candidates:
-            continue
-        statuses = {metric["status"] for metric in candidates}
-        values = [metric["value"] for metric in candidates if metric["value"] is not None]
-        exemplar = candidates[0]
-        contribution_is_complete = len(values) == len(candidates)
-        contributing_participant_count = 1 if contribution_is_complete else 0
-        missing_participant_count = expected_participant_count - contributing_participant_count
-        noncontributing_participant_ids = list(missing_participant_ids)
-        if not contribution_is_complete:
-            noncontributing_participant_ids.insert(0, participant_summary["participant_id"])
-        if not contribution_is_complete:
-            status = "unavailable"
-            coverage = "none"
-        elif missing_participant_count:
-            status = "partial"
-            coverage = "partial"
-        elif statuses == {"reported"}:
-            status = "reported"
-            coverage = "complete"
-        else:
-            status = "partial"
-            coverage = "partial"
-        metric = _metric(
-            name,
-            sum(values) if contribution_is_complete else None,
-            exemplar["unit"],
-            "sum(participant_attempt_metrics)",
-            basis=exemplar["basis"],
-            scope="all_reported_participants",
-            sharing="unknown",
-            status=status,
-            coverage=coverage,
-            observed_at=observed_at,
-            caveat_codes=[
-                "PARTICIPANT_VISIBLE_PROXY_SUM",
-                "SHARED_PHYSICAL_CAPACITY_MAY_BE_REPRESENTED_MORE_THAN_ONCE",
-            ],
-        )
-        metric["contribution_coverage"] = {
-            "expected_participant_count": expected_participant_count,
-            "contributing_participant_count": contributing_participant_count,
-            "missing_participant_count": missing_participant_count,
-            "missing_participant_ids": noncontributing_participant_ids if missing_participant_count else [],
-        }
-        metrics.append(metric)
-    return {
-        "scope": "all_reported_participants",
-        "qualification_codes": [
-            "PARTICIPANT_VISIBLE_PROXY_SUM",
-            "SHARED_PHYSICAL_CAPACITY_MAY_BE_REPRESENTED_MORE_THAN_ONCE",
-        ],
-        "metrics": metrics,
-    }
-
-
-def _human_bytes(value: int | float | None) -> str:
-    if value is None:
-        return "N/A"
-    units = ("B", "KiB", "MiB", "GiB", "TiB")
-    amount = float(value)
-    for unit in units:
-        if abs(amount) < 1024 or unit == units[-1]:
-            return f"{amount:.2f} {unit}"
-        amount /= 1024
-    raise AssertionError("unreachable")
-
-
-def _human_hours(value: int | float | None, divisor: float = 3600.0) -> str:
-    return "N/A" if value is None else f"{float(value) / divisor:.4f}"
-
-
-def _human_duration(value: float) -> str:
-    if value < 60:
-        return f"{value:.3f}s"
-    minutes, seconds = divmod(round(value), 60)
-    return f"{minutes}m{seconds:02d}s"
-
-
-def _find_metric(metrics: Iterable[dict[str, Any]], name: str) -> dict[str, Any] | None:
-    return next((metric for metric in metrics if metric["name"] == name), None)
-
-
-def _human_row(participant: dict[str, Any]) -> str:
-    report_status = participant.get("report_status", participant.get("status"))
-    if report_status in {"missing", "invalid", "disabled"}:
-        coverage = "missing" if report_status == "missing" else report_status
-        return (
-            f"{participant['participant_id']:<24} {participant['role']:<7} {report_status:<11} {'—':>10} "
-            f"{'N/A':>7} {'N/A':>7} {'N/A':>11} {'N/A':>12} {'N/A':>12} {coverage}"
-        )
-    attempt = participant["attempts"][0]
-    rollups = attempt["rollups"]
-    retained = _find_metric(attempt["retained_content"]["metrics"], "retained_content_bytes")
-    network = _find_metric(attempt["network"]["metrics"], "f3_payload_bytes_sent")
-    gpu = _find_metric(rollups, "visible_gpu_seconds")
-    cpu = _find_metric(rollups, "visible_cpu_unit_seconds")
-    memory = _find_metric(rollups, "visible_memory_byte_seconds")
-    coverage = _record_status(rollups + [retained, network])
+def _compute_probe_coverage_complete(evidence: dict[str, Any]) -> bool:
+    gpu_metrics = evidence["gpu_probes"]
     return (
-        f"{participant['participant_id']:<24} {participant['role']:<7} "
-        f"{participant.get('collection_status', participant['status']):<11} "
-        f"{_human_duration(attempt['interval']['duration_seconds']):>10} "
-        f"{_human_hours(gpu['value'] if gpu else None):>7} "
-        f"{_human_hours(cpu['value'] if cpu else None):>7} "
-        f"{_human_hours(memory['value'] if memory else None, 1024**3 * 3600):>11} "
-        f"{_human_bytes(retained['value'] if retained else None):>12} "
-        f"{_human_bytes(network['value'] if network else None):>12} {coverage}"
+        _probe_is_complete(evidence["cpu_probe"])
+        and _probe_is_complete(evidence["memory_probe"])
+        and bool(gpu_metrics)
+        and all(_probe_is_complete(metric) for metric in gpu_metrics)
     )
 
 
-def _human_all_sites(summary: dict[str, Any]) -> str:
-    coverage = summary["coverage"]
+def _zero_counter() -> dict[str, str]:
+    return {"payload_bytes": "0", "messages": "0"}
+
+
+def _finish_local_report(
+    job_id: str,
+    participant_name: str,
+    workspace: Path,
+    observation_seconds: float,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    if observation_seconds < 0:
+        raise ValueError("observation_seconds must be non-negative")
+    capacity, evidence = _capacity_from_real_probes()
+    accumulator = ResourceTimeAccumulator()
+    start = Decimal(time.monotonic_ns()) / Decimal(1_000_000_000)
+    if capacity:
+        accumulator.observe(start, capacity)
+    else:
+        accumulator.mark_gap(start)
+    if observation_seconds:
+        time.sleep(observation_seconds)
+    finished = Decimal(time.monotonic_ns()) / Decimal(1_000_000_000)
+    storage_metric = probe_storage(workspace)
+    evidence["workspace_filesystem_probe"] = storage_metric
+    if not _probe_has_usable_value(storage_metric) or not _probe_is_complete(storage_metric):
+        workspace_filesystem = {
+            "status": "unavailable",
+            "issues": ["observation_incomplete"],
+        }
+    else:
+        workspace_filesystem = {
+            "status": "reported",
+            "capacity_bytes": str(storage_metric["value"]),
+        }
+    handoff = accumulator.finish_measurements(
+        finished,
+        workspace_filesystem=workspace_filesystem,
+        retained_content={"status": "unavailable", "issues": ["not_bound"]},
+        child_f3={
+            "status": "unavailable",
+            "issues": ["observation_incomplete"],
+        },
+    )
+    resource_time = handoff["resource_time"]
+    if resource_time["status"] == "reported" and not _compute_probe_coverage_complete(evidence):
+        # Keep useful numeric totals from partial probes, but do not promote
+        # their coverage to a fully reported terminal measurement.
+        resource_time["status"] = "partial"
+        resource_time["issues"] = ["observation_incomplete"]
+    report = assemble_participant_summary(
+        job_id=job_id,
+        participant_name=participant_name,
+        reported_at=_utc_now(),
+        child_handoff=handoff,
+        parent_f3={
+            "status": "unavailable",
+            "issues": ["observation_incomplete"],
+        },
+    )
+    return report, evidence, handoff
+
+
+def _accepted_entry(
+    participant_name: str,
+    role: str,
+    report: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "participant_name": participant_name,
+        "role": role,
+        "status": "accepted",
+        "received_at": report["reported_at"],
+        "resource_time": deepcopy(report["resource_time"]),
+        "retained_content": deepcopy(report["retained_content"]),
+        "f3": deepcopy(report["f3"]),
+    }
+
+
+def _resource_summary(
+    job_id: str,
+    accepted_entry: dict[str, Any],
+    finalized_at: str,
+) -> dict[str, Any]:
+    retained = accepted_entry["retained_content"]
+    retained_total = (
+        {"status": retained["status"], "bytes": retained["bytes"]}
+        if retained["status"] in {"reported", "partial"}
+        else {"status": "unavailable"}
+    )
+    f3 = accepted_entry["f3"]
+    f3_total = (
+        {
+            "status": f3["status"],
+            "remote_accepted": deepcopy(f3["remote_accepted"]),
+        }
+        if f3["status"] in {"reported", "partial"}
+        else {"status": "unavailable"}
+    )
+    return {
+        "schema_version": "1.0",
+        "kind": RESOURCE_SUMMARY_KIND,
+        "job_id": job_id,
+        "report_cutoff_at": finalized_at,
+        "finalized_at": finalized_at,
+        "participants": [accepted_entry],
+        "totals": {
+            "resource_time": deepcopy(accepted_entry["resource_time"]),
+            "retained_content": retained_total,
+            "f3": f3_total,
+        },
+    }
+
+
+def _write_workspace_archive(path: Path, members: dict[str, bytes]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with ZipFile(path, "w", compression=ZIP_STORED) as archive:
+        ordered = sorted(members.items(), key=lambda item: (item[0].endswith("/resource_summary.json"), item[0]))
+        for name, data in ordered:
+            info = ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
+            info.compress_type = ZIP_STORED
+            info.external_attr = 0o600 << 16
+            archive.writestr(info, data)
+
+
+def _sum_groups(resource_time: dict[str, Any], resource: str, field: str, kind: str | None = None) -> Decimal | None:
+    if resource not in resource_time:
+        return None
+    groups = resource_time[resource]["groups"]
+    return sum(
+        (Decimal(group[field]) for group in groups if kind is None or group.get("kind") == kind),
+        Decimal(0),
+    )
+
+
+def _hours(value: Decimal | None, divisor: Decimal = Decimal(3600)) -> str:
+    return "N/A" if value is None else f"{value / divisor:.4f}"
+
+
+def _memory_time(resource_time: dict[str, Any]) -> Decimal | None:
+    return Decimal(resource_time["memory"]["byte_seconds"]) if "memory" in resource_time else None
+
+
+def _retained_bytes(value: dict[str, Any]) -> Decimal | None:
+    return Decimal(value["bytes"]) if "bytes" in value else None
+
+
+def _f3_bytes(value: dict[str, Any]) -> Decimal | None:
+    return Decimal(value["remote_accepted"]["payload_bytes"]) if "remote_accepted" in value else None
+
+
+def _human_job(summary: dict[str, Any]) -> str:
+    entry = summary["participants"][0]
+    totals = entry["resource_time"]
+    cpu = _sum_groups(totals, "cpu", "unit_seconds")
+    gpu = _sum_groups(totals, "gpu", "instance_seconds", "full_gpu")
+    memory = Decimal(totals["memory"]["byte_seconds"]) if "memory" in totals else None
+    retained = (
+        Decimal(entry["retained_content"]["bytes"]) if entry["retained_content"]["status"] != "unavailable" else None
+    )
+    f3 = Decimal(entry["f3"]["remote_accepted"]["payload_bytes"]) if entry["f3"]["status"] != "unavailable" else None
+    return "\n".join(
+        [
+            f"Resources recorded for job {summary['job_id']}.",
+            "The participant sent one terminal report; resource-time was accumulated while it ran.",
+            "",
+            "SITE                    STATUS    QUALITY       FULL GPU h   CPU h   "
+            "MEM GiB h   SAVED GiB   F3 REMOTE GiB",
+            (
+                f"{entry['participant_name']:<23} {entry['status']:<9} {totals['status'].upper():<13} "
+                f"{_hours(gpu):>10} {_hours(cpu):>8} "
+                f"{_hours(memory, Decimal(2**30 * 3600)):>11} "
+                f"{_hours(retained, Decimal(2**30)):>11} "
+                f"{_hours(f3, Decimal(2**30)):>8}"
+            ),
+            "",
+        ]
+    )
+
+
+def _study_summary(study: str, job_summary: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "schema_version": "1.0",
+        "kind": STUDY_SUMMARY_KIND,
+        "selection": {"study_name": study},
+        "generated_at": _utc_now(),
+        "coverage": {
+            "selected_jobs": "1",
+            "included_jobs": "1",
+            "unavailable_jobs": "0",
+            "nonterminal_jobs": "0",
+        },
+        "jobs": [
+            {
+                "job_id": job_summary["job_id"],
+                "job_status": "FINISHED:COMPLETED",
+                "resource_data": "included",
+                "totals": deepcopy(job_summary["totals"]),
+            }
+        ],
+        "totals": deepcopy(job_summary["totals"]),
+    }
+
+
+def _aggregate_quality(totals: dict[str, Any]) -> str:
+    statuses = {
+        totals["resource_time"]["status"],
+        totals["retained_content"]["status"],
+        totals["f3"]["status"],
+    }
+    if statuses == {"reported"}:
+        return "COMPLETE"
+    if statuses == {"unavailable"}:
+        return "UNAVAILABLE"
+    return "PARTIAL"
+
+
+def _human_study(study_summary: dict[str, Any]) -> str:
+    coverage = study_summary["coverage"]
+    show_mig = any(
+        row["resource_data"] == "included"
+        and (
+            _sum_groups(
+                row["totals"]["resource_time"],
+                "gpu",
+                "instance_seconds",
+                "mig_compute_instance",
+            )
+            or Decimal(0)
+        )
+        > Decimal(0)
+        for row in study_summary["jobs"]
+    )
+    header = "JOB                  JOB STATUS           RESOURCE DATA  QUALITY       FULL GPU h"
+    if show_mig:
+        header += "  MIG CI h"
+    header += "      CPU h      MEM GiB h  SAVED GiB  F3 REMOTE GiB"
     lines = [
-        "Runtime-visible capacity proxies; not allocations, reservations, guarantees, or billable usage.",
+        f"Resources recorded for finalized jobs in study {study_summary['selection']['study_name']}.",
         (
-            f"Job {summary['job']['id']} | study {summary['job']['study']} | "
-            f"resource summary: {coverage['state'].upper()} "
-            f"({coverage['reported_participant_count']} reported / {coverage['expected_participant_count']} expected)"
+            f"{coverage['selected_jobs']} jobs found | "
+            f"{int(coverage['included_jobs']) + int(coverage['unavailable_jobs'])} finalized | "
+            f"{coverage['included_jobs']} valid summaries | "
+            f"{coverage['unavailable_jobs']} unavailable | "
+            f"{coverage['nonterminal_jobs']} still running (excluded)"
         ),
         "",
-        (
-            "SITE                     ROLE    STATUS        DURATION   GPU h   CPU h   MEM GiB h "
-            "    RETAINED     F3 BYTES COVERAGE"
-        ),
+        header,
     ]
-    lines.extend(_human_row(participant) for participant in summary["participants"])
-    totals = {metric["name"]: metric for metric in summary["qualified_totals"]["metrics"]}
-    memory_hours = _human_hours(totals.get("visible_memory_byte_seconds", {}).get("value"), 1024**3 * 3600)
+    for row in study_summary["jobs"]:
+        if row["resource_data"] != "included":
+            mig = f"{'N/A':>8} " if show_mig else ""
+            lines.append(
+                f"{row['job_id']:<20} {row['job_status']:<20} {row['resource_data']:<14} "
+                f"{'—':<13} {'N/A':>10} {mig}{'N/A':>10} {'N/A':>12} {'N/A':>10} {'N/A':>7}"
+            )
+            continue
+        totals = row["totals"]
+        resource_time = totals["resource_time"]
+        retained = totals["retained_content"]
+        f3 = totals["f3"]
+        quality = _aggregate_quality(totals)
+        mig = (
+            f"{_hours(_sum_groups(resource_time, 'gpu', 'instance_seconds', 'mig_compute_instance')):>8} "
+            if show_mig
+            else ""
+        )
+        lines.append(
+            f"{row['job_id']:<20} {row['job_status']:<20} {row['resource_data']:<14} "
+            f"{quality:<13} "
+            f"{_hours(_sum_groups(resource_time, 'gpu', 'instance_seconds', 'full_gpu')):>10} {mig}"
+            f"{_hours(_sum_groups(resource_time, 'cpu', 'unit_seconds')):>10} "
+            f"{_hours(_memory_time(resource_time), Decimal(2**30 * 3600)):>12} "
+            f"{_hours(_retained_bytes(retained), Decimal(2**30)):>10} "
+            f"{_hours(_f3_bytes(f3), Decimal(2**30)):>7}"
+        )
+    totals = study_summary["totals"]
+    resource_time = totals["resource_time"]
+    retained = totals["retained_content"]
+    f3 = totals["f3"]
+    total_quality = _aggregate_quality(totals)
+    if total_quality == "UNAVAILABLE":
+        coverage_label = "UNAVAILABLE"
+    elif coverage["unavailable_jobs"] == "0" and coverage["nonterminal_jobs"] == "0" and total_quality == "COMPLETE":
+        coverage_label = "COMPLETE"
+    else:
+        coverage_label = "PARTIAL"
     lines.extend(
         [
             "",
-            "Qualified all-site totals (reported participants only):",
+            f"Study totals from {coverage['included_jobs']} valid job summaries | coverage: {coverage_label}",
             (
-                f"  GPU {_human_hours(totals.get('visible_gpu_seconds', {}).get('value'))} h | "
-                f"CPU {_human_hours(totals.get('visible_cpu_unit_seconds', {}).get('value'))} h | "
-                f"Memory {memory_hours} GiB h"
+                f"  FULL GPU {_hours(_sum_groups(resource_time, 'gpu', 'instance_seconds', 'full_gpu'))} h | "
+                + (
+                    "MIG CI "
+                    f"{_hours(_sum_groups(resource_time, 'gpu', 'instance_seconds', 'mig_compute_instance'))} h | "
+                    if show_mig
+                    else ""
+                )
+                + f"CPU {_hours(_sum_groups(resource_time, 'cpu', 'unit_seconds'))} h | "
+                f"MEM {_hours(_memory_time(resource_time), Decimal(2**30 * 3600))} GiB h | "
+                f"SAVED {_hours(_retained_bytes(retained), Decimal(2**30))} GiB | "
+                f"F3 REMOTE {_hours(_f3_bytes(f3), Decimal(2**30))} GiB"
             ),
-            (
-                f"  Retained {_human_bytes(totals.get('retained_content_bytes', {}).get('value'))} | "
-                f"F3 {_human_bytes(totals.get('f3_payload_bytes_sent', {}).get('value'))}"
-            ),
+            "",
+            "Notes:",
+            "  Totals include only finalized jobs with valid resource summaries.",
+            "  This view includes only jobs still retained by the job store.",
+            "",
         ]
     )
-    lines.extend(f"Warning: {warning}" for warning in summary["warnings"])
-    return "\n".join(lines) + "\n"
+    return "\n".join(lines)
 
 
-def _cli_ok(data: dict[str, Any]) -> dict[str, Any]:
-    return {"schema_version": CLI_SCHEMA_VERSION, "status": "ok", "exit_code": 0, "data": data}
-
-
-def _cli_error(
-    error_code: str,
-    message: str,
-    hint: str,
-    *,
-    exit_code: int = 1,
-    data: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    result: dict[str, Any] = {
-        "schema_version": CLI_SCHEMA_VERSION,
-        "status": "error",
-        "exit_code": exit_code,
-        "error_code": error_code,
-        "message": message,
-        "hint": hint,
-    }
-    if data is not None:
-        result["data"] = data
-    return result
-
-
-def _human_error(envelope: dict[str, Any]) -> str:
-    return f"ERROR [{envelope['error_code']}]: {envelope['message']}\nHint: {envelope['hint']}\n"
-
-
-def _cli_all_data(summary: dict[str, Any]) -> dict[str, Any]:
-    participant_ids = [participant["participant_id"] for participant in summary["participants"]]
+def _cli_envelope(selection: dict[str, Any], summary: dict[str, Any]) -> dict[str, Any]:
     return {
-        "kind": "nvflare.job_resources",
-        "job_id": summary["job"]["id"],
-        "study": summary["job"]["study"],
-        "resource_summary_schema_version": summary["schema_version"],
-        "selection": {"site": "all", "participant_ids": participant_ids, "is_job_total": True},
-        "finalization": copy.deepcopy(summary["finalization"]),
-        "collection": copy.deepcopy(summary["collection"]),
-        "coverage": copy.deepcopy(summary["coverage"]),
-        "participants": copy.deepcopy(summary["participants"]),
-        "qualified_totals": copy.deepcopy(summary["qualified_totals"]),
-        "warnings": copy.deepcopy(summary["warnings"]),
+        "schema_version": "1",
+        "status": "ok",
+        "exit_code": 0,
+        "data": {"selection": selection, "summary": summary},
     }
-
-
-def _cli_selected_data(summary: dict[str, Any], participant_id: str) -> dict[str, Any]:
-    participant = next(item for item in summary["participants"] if item["participant_id"] == participant_id)
-    if participant.get("report_status") != "accepted":
-        rollup = {"metrics": []}
-    else:
-        attempt = participant["attempts"][0]
-        rollup = {
-            "metrics": copy.deepcopy(
-                attempt["rollups"] + attempt["retained_content"]["metrics"] + attempt["network"]["metrics"]
-            )
-        }
-    return {
-        "kind": "nvflare.job_resources",
-        "job_id": summary["job"]["id"],
-        "study": summary["job"]["study"],
-        "resource_summary_schema_version": summary["schema_version"],
-        "selection": {"site": participant_id, "participant_ids": [participant_id], "is_job_total": False},
-        "finalization": copy.deepcopy(summary["finalization"]),
-        "collection": copy.deepcopy(summary["collection"]),
-        "status": participant.get("collection_status", participant.get("status")),
-        "coverage": {
-            "state": "complete" if participant.get("report_status") == "accepted" else "partial",
-            "expected_participant_count": 1,
-            "reported_participant_count": 1 if participant.get("report_status") == "accepted" else 0,
-            "missing": [] if participant.get("report_status") == "accepted" else [{"participant_id": participant_id}],
-            "invalid": [],
-            "disabled": [],
-        },
-        "participant": copy.deepcopy(participant),
-        "selected_participant_totals": rollup,
-        "warnings": ["Selected-site rollup is not a job total."],
-    }
-
-
-def _write_manifest(resource_dir: Path) -> dict[str, Any]:
-    files = sorted(path for path in resource_dir.rglob("*.json") if path.name != "manifest.json")
-    entries = []
-    for path in files:
-        relative_path = path.relative_to(resource_dir).as_posix()
-        entries.append(
-            {"relative_path": relative_path, "byte_count": path.stat().st_size, "sha256": _sha256_file(path)}
-        )
-    return {
-        "schema_version": RESOURCE_SCHEMA_VERSION,
-        "kind": "nvflare.resource_stats.manifest",
-        "record_type": "resource_stats_manifest",
-        "entries": entries,
-    }
-
-
-def _write_workspace_archive(path: Path, resource_dir: Path) -> None:
-    """Package resource records in the existing archived workspace component."""
-
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with ZipFile(path, "w", compression=ZIP_STORED) as archive:
-        for source in sorted(candidate for candidate in resource_dir.rglob("*") if candidate.is_file()):
-            member_name = f"resource_stats/{source.relative_to(resource_dir).as_posix()}"
-            info = ZipInfo(member_name, date_time=(1980, 1, 1, 0, 0, 0))
-            info.compress_type = ZIP_STORED
-            info.external_attr = 0o600 << 16
-            archive.writestr(info, source.read_bytes())
 
 
 def generate(output_dir: Path, job_id: str, study: str, observation_seconds: float) -> dict[str, Any]:
-    if observation_seconds < 0:
-        raise ValueError("observation_seconds must be non-negative")
+    output_dir = Path(output_dir)
+    participant_name = "local-prototype-client"
+    child_staging_dir = output_dir / "client_child" / "resource_stats" / "staging"
+    parent_resource_dir = output_dir / "client_parent" / "resource_stats"
+    child_staging_dir.mkdir(parents=True, exist_ok=True)
+    parent_resource_dir.mkdir(parents=True, exist_ok=True)
+    participant, evidence, handoff = _finish_local_report(
+        job_id,
+        participant_name,
+        parent_resource_dir.parent,
+        observation_seconds,
+    )
+    participant_bytes = _json_bytes(participant)
+    _write(child_staging_dir / "terminal_handoff.json", _json_bytes(handoff))
+    _write(output_dir / "prototype_diagnostics" / "probe_evidence.json", _json_bytes(evidence))
+    _write(parent_resource_dir / "participant_summary.json", participant_bytes)
 
-    client_resource_dir = output_dir / "client_run" / "resource_stats"
+    accepted = _accepted_entry(participant_name, "client", participant)
+    finalized_at = _utc_now()
+    summary = _resource_summary(job_id, accepted, finalized_at)
+    summary_bytes = _json_bytes(summary)
+
     server_resource_dir = output_dir / "server_run" / "resource_stats"
-    result_dir = output_dir / "result_artifacts"
+    server_participant_path = server_resource_dir / "participants" / f"{participant_name}.json"
+    _write(server_participant_path, participant_bytes)
+    _write(server_resource_dir / "resource_summary.json", summary_bytes)
+
+    workspace_archive = output_dir / "job_store" / "jobs" / job_id / "workspace"
+    members = {
+        f"resource_stats/participants/{participant_name}.json": participant_bytes,
+        "resource_stats/resource_summary.json": summary_bytes,
+    }
+    _write_workspace_archive(workspace_archive, members)
+
     cli_dir = output_dir / "cli"
-    job_store_dir = output_dir / "job_store"
-    client_resource_dir.mkdir(parents=True, exist_ok=True)
-    server_resource_dir.mkdir(parents=True, exist_ok=True)
-    result_dir.mkdir(parents=True, exist_ok=True)
-    cli_dir.mkdir(parents=True, exist_ok=True)
-    job_store_dir.mkdir(parents=True, exist_ok=True)
-
-    participant_id = "local-prototype-client"
-    role = "client"
-    attempt_id = uuid.uuid4().hex
-    summary_id = str(uuid.uuid4())
-    scope_id = f"scope-{uuid.uuid4().hex[:16]}"
-    participant_key = f"sha256:{_sha256(f'{role}:{participant_id}'.encode())}"
-
-    started_at = _utc_now()
-    started_monotonic = time.monotonic()
-    start_snapshot = _collect_capacity_snapshot(client_resource_dir.parent, started_at)
-    start_record = {
-        "schema_version": RESOURCE_SCHEMA_VERSION,
-        "kind": "nvflare.resource_stats.attempt_start",
-        "record_type": "resource_attempt_start",
-        "job_id": job_id,
-        "participant_id": participant_id,
-        "role": role,
-        "attempt_id": attempt_id,
-        "execution_scope": {"id": scope_id, "coverage": "current_environment_only"},
-        "snapshot": start_snapshot,
-        "collection": {"implementation": PROTOTYPE_KIND, "mode": "host_fallback_prototype"},
-    }
-    start_path = client_resource_dir / "attempts" / attempt_id / "start.json"
-    start_bytes = _write_json(start_path, start_record)
-
-    result_payload = {
-        "kind": "prototype_owned_result",
-        "job_id": job_id,
-        "attempt_id": attempt_id,
-        "captured_at": started_at,
-        "startup_metric_names": [metric["name"] for metric in start_snapshot["metrics"]],
-    }
-    result_path = result_dir / "probe_payload.json"
-    _write_json(result_path, result_payload)
-
-    if observation_seconds:
-        time.sleep(observation_seconds)
-    ended_at = _utc_now()
-    duration_seconds = max(0.0, time.monotonic() - started_monotonic)
-    final_snapshot = _collect_capacity_snapshot(client_resource_dir.parent, ended_at)
-    retained_metric = _retained_content_metric(result_path, ended_at)
-    network = _unbound_network(ended_at)
-    rollups = [
-        _proxy_rollup(
-            _metric_by_name(start_snapshot["metrics"], "visible_gpu_count"),
-            duration_seconds,
-            name="visible_gpu_seconds",
-            unit="gpu_seconds",
-            observed_at=ended_at,
-        ),
-        _proxy_rollup(
-            _metric_by_name(start_snapshot["metrics"], "visible_cpu_units"),
-            duration_seconds,
-            name="visible_cpu_unit_seconds",
-            unit="cpu_unit_seconds",
-            observed_at=ended_at,
-        ),
-        _proxy_rollup(
-            _metric_by_name(start_snapshot["metrics"], "visible_memory_bytes"),
-            duration_seconds,
-            name="visible_memory_byte_seconds",
-            unit="byte_seconds",
-            observed_at=ended_at,
-        ),
-    ]
-    final_compute_metrics = [
-        metric for metric in final_snapshot["metrics"] if metric["name"] != "visible_storage_capacity_bytes"
-    ]
-    attempt_status = _record_status(final_compute_metrics + rollups + [retained_metric] + network["metrics"])
-    final_record = {
-        "schema_version": RESOURCE_SCHEMA_VERSION,
-        "kind": "nvflare.resource_stats.attempt_final",
-        "record_type": "resource_attempt_final",
-        "job_id": job_id,
-        "participant_id": participant_id,
-        "role": role,
-        "attempt_id": attempt_id,
-        "execution_scope": {"id": scope_id, "coverage": "current_environment_only"},
-        "interval": {
-            "started_at": started_at,
-            "ended_at": ended_at,
-            "duration_seconds": duration_seconds,
-            "completion_state": "finished_ok",
-            "end_basis": "process_reported",
-        },
-        "startup_snapshot": start_snapshot,
-        "final_snapshot": {
-            **final_snapshot,
-            "capacity_changed": _capacity_changed(start_snapshot, final_snapshot),
-        },
-        "retained_content": {
-            "coverage": "prototype_owned_file_only",
-            "frozen_at": ended_at,
-            "metrics": [retained_metric],
-        },
-        "network": network,
-        "rollups": rollups,
-        "status": attempt_status,
-        "warnings": [
-            "Host fallback values are prototype-only on non-Linux platforms.",
-            "No NVFlare CellNet counter was bound, so F3 metrics remain unavailable.",
-        ],
-    }
-    final_path = client_resource_dir / "attempts" / attempt_id / "final.json"
-    final_bytes = _write_json(final_path, final_record)
-    parent_exit = {
-        "schema_version": RESOURCE_SCHEMA_VERSION,
-        "kind": "nvflare.resource_stats.attempt_parent_exit",
-        "record_type": "resource_attempt_parent_exit",
-        "job_id": job_id,
-        "participant_id": participant_id,
-        "role": role,
-        "attempt_id": attempt_id,
-        "parent_observed_at": ended_at,
-        "process_exit_code": 0,
-        "process_status": "exited",
-        "final_fragment_present": True,
-        "final_fragment_sha256": _sha256(final_bytes),
-    }
-    parent_exit_path = client_resource_dir / "attempts" / attempt_id / "parent_exit.json"
-    parent_exit_bytes = _write_json(parent_exit_path, parent_exit)
-
-    participant_summary = {
-        "schema_version": RESOURCE_SCHEMA_VERSION,
-        "kind": "nvflare.resource_stats.participant_summary",
-        "record_type": "participant_resource_summary",
-        "job_id": job_id,
-        "participant_id": participant_id,
-        "role": role,
-        "participant_key": participant_key,
-        "summary_id": summary_id,
-        "summary_revision": 1,
-        "created_at": ended_at,
-        "report_status": "accepted",
-        "collection_status": attempt_status,
-        "coverage": {"state": "partial" if attempt_status != "reported" else "complete"},
-        "status": attempt_status,
-        "attempts": [_summarize_attempt(final_record)],
-        "fragments": {
-            "attempts/%s/start.json" % attempt_id: _sha256(start_bytes),
-            "attempts/%s/final.json" % attempt_id: _sha256(final_bytes),
-            "attempts/%s/parent_exit.json" % attempt_id: _sha256(parent_exit_bytes),
-        },
-    }
-    participant_summary_path = client_resource_dir / "participant_summary.json"
-    participant_summary_bytes = _write_json(participant_summary_path, participant_summary)
-
-    server_participant_path = server_resource_dir / "participants" / f"sha256-{participant_key.split(':', 1)[1]}.json"
-    _write_bytes_atomic(server_participant_path, participant_summary_bytes)
-    server_missing_participant = {
-        "participant_id": "server",
-        "role": "server",
-        "report_status": "missing",
-        "collection_status": "not_observed",
-        "reason_codes": ["PROTOTYPE_NO_SEPARATE_SERVER_PROCESS"],
-    }
-    qualified_totals = _qualified_totals(
-        participant_summary,
-        ended_at,
-        expected_participant_count=2,
-        missing_participant_ids=["server"],
+    _write(
+        cli_dir / "resources-all.json",
+        _json_bytes(_cli_envelope({"job_id": job_id, "site": "all"}, summary)),
     )
-    resource_summary = {
-        "schema_version": RESOURCE_SCHEMA_VERSION,
-        "kind": "nvflare.resource_stats.resource_summary",
-        "record_type": "job_resource_summary",
-        "job": {"id": job_id, "study": study, "finalized_at": ended_at},
-        "finalization": {"state": "finalized", "finalized_at": ended_at},
-        "collection": {"state": "enabled", "implementation": PROTOTYPE_KIND},
-        "coverage": {
-            "state": "partial",
-            "expected_participant_count": 2,
-            "reported_participant_count": 1,
-            "missing": [server_missing_participant],
-            "invalid": [],
-            "disabled": [],
-        },
-        "participants": [participant_summary, server_missing_participant],
-        "qualified_totals": qualified_totals,
-        "warnings": [
-            "The server role was not executed by this one-process local prototype.",
-            "GPU and F3 values are unavailable rather than fabricated.",
-            "Non-Linux host fallback values are partial and are not a Phase 1 platform-support claim.",
-        ],
-    }
-    resource_summary_path = server_resource_dir / "resource_summary.json"
-    resource_summary_bytes = _write_json(resource_summary_path, resource_summary)
-    manifest = _write_manifest(server_resource_dir)
-    manifest_path = server_resource_dir / "manifest.json"
-    manifest_bytes = _write_json(manifest_path, manifest)
-
-    workspace_archive_path = job_store_dir / "jobs" / job_id / WORKSPACE_COMPONENT
-    _write_workspace_archive(workspace_archive_path, server_resource_dir)
-    workspace_reader = WorkspaceResourceStatsReader(workspace_archive_path)
-    archive_participant_key = participant_key.replace("sha256:", "sha256-")
-    descriptor = {
-        "schema_version": RESOURCE_SCHEMA_VERSION,
-        "kind": "nvflare.resource_stats.job_metadata_descriptor",
-        "record_type": "resource_stats_job_metadata_descriptor",
-        "state": "finalized_partial",
-        "finalized_at": ended_at,
-        "resource_summary_sha256": _sha256(resource_summary_bytes),
-        "manifest_sha256": _sha256(manifest_bytes),
-        "expected_participant_count": 2,
-        "reported_participant_count": 1,
-        "missing_participant_count": 1,
-    }
-    descriptor_path = job_store_dir / "job_metadata_descriptor.json"
-    _write_json(descriptor_path, descriptor)
-
-    all_data = _cli_all_data(resource_summary)
-    selected_data = _cli_selected_data(resource_summary, participant_id)
-    _write_json(cli_dir / "resources-all.json", _cli_ok(all_data))
-    _write_bytes_atomic(cli_dir / "resources-all.txt", _human_all_sites(resource_summary).encode("utf-8"))
-    _write_json(cli_dir / f"resources-{participant_id}.json", _cli_ok(selected_data))
-    selected_text = (
-        "Runtime-visible capacity proxies; this is a selected-site rollup, not a job total.\n"
-        f"Site: {participant_id}\n\n" + _human_row(participant_summary) + "\n"
+    _write(cli_dir / "resources-all.txt", (render_job_resources(summary) + "\n").encode("utf-8"))
+    study_summary = _study_summary(study, summary)
+    _write(
+        cli_dir / "resources-study.json",
+        _json_bytes(_cli_envelope({"study": study}, study_summary)),
     )
-    _write_bytes_atomic(cli_dir / f"resources-{participant_id}.txt", selected_text.encode("utf-8"))
-    error_fixtures = {
-        "resources-not-ready": _cli_error(
-            "RESOURCE_SUMMARY_NOT_READY",
-            f"Resource summary for job '{job_id}-running' is not ready.",
-            f"Wait for the job to reach a terminal state and retry 'nvflare job resources {job_id}-running'.",
-            data={
-                "job_id": f"{job_id}-running",
-                "study": study,
-                "job_status": "RUNNING",
-                "resource_summary_state": "collecting",
-                "retryable": True,
-            },
-        ),
-        "resources-not-available": _cli_error(
-            "RESOURCE_SUMMARY_NOT_AVAILABLE",
-            f"Resource summary is not available for job '{job_id}-legacy'.",
-            "The job may predate resource collection or no terminal summary was recorded.",
-            data={
-                "job_id": f"{job_id}-legacy",
-                "study": study,
-                "job_status": "FINISHED:COMPLETED",
-                "resource_summary_state": "absent",
-                "retryable": False,
-            },
-        ),
-        "resources-corrupt": _cli_error(
-            "RESOURCE_SUMMARY_CORRUPT",
-            f"Resource summary for job '{job_id}-corrupt' failed integrity validation.",
-            "Do not treat the resource values as valid; retain the job artifacts for investigation.",
-            exit_code=5,
-            data={
-                "job_id": f"{job_id}-corrupt",
-                "study": study,
-                "resource_summary_state": "invalid",
-                "validation_code": "MANIFEST_DIGEST_MISMATCH",
-                "retryable": False,
-            },
-        ),
-        "resources-site-not-found": _cli_error(
-            "SITE_NOT_FOUND",
-            "Site 'not-a-participant' is not in this job's expected participant set.",
-            "Use --site all to inspect expected and reported participants.",
-            data={"job_id": job_id, "study": study, "site": "not-a-participant", "retryable": False},
-        ),
-    }
-    for fixture_name, envelope in error_fixtures.items():
-        _write_json(cli_dir / f"{fixture_name}.json", envelope)
-        _write_bytes_atomic(cli_dir / f"{fixture_name}.stderr.txt", _human_error(envelope).encode("utf-8"))
-    disabled_data = {
-        "kind": "nvflare.job_resources",
-        "job_id": job_id,
-        "study": study,
-        "resource_summary_schema_version": RESOURCE_SCHEMA_VERSION,
-        "selection": {"site": "all", "participant_ids": [], "is_job_total": True},
-        "finalization": {"state": "finalized"},
-        "collection": {"state": "disabled", "reason_code": "RESOURCE_COLLECTION_DISABLED"},
-        "coverage": {
-            "state": "not_collected",
-            "expected_participant_count": 0,
-            "reported_participant_count": 0,
-            "missing": [],
-            "invalid": [],
-            "disabled": [{"reason_code": "RESOURCE_COLLECTION_DISABLED"}],
-        },
-        "participants": [],
-        "qualified_totals": {"scope": "all_reported_participants", "metrics": []},
-        "warnings": ["This is a behavioral fixture; collection was disabled before job launch."],
-    }
-    _write_json(cli_dir / "resources-disabled.json", _cli_ok(disabled_data))
-    _write_bytes_atomic(
-        cli_dir / "resources-disabled.txt",
-        (
-            "Runtime-visible capacity proxies; not allocations, reservations, guarantees, or billable usage.\n"
-            "Collection: DISABLED (RESOURCE_COLLECTION_DISABLED). No resource summary was collected for this job.\n"
-        ).encode("utf-8"),
-    )
-    review_contract_fixtures = write_review_contract_fixtures(output_dir, job_id, resource_summary_bytes)
+    _write(cli_dir / "resources-study.txt", (render_study_resources(study_summary) + "\n").encode("utf-8"))
 
+    fixtures = write_review_contract_fixtures(
+        output_dir,
+        job_id,
+        summary_bytes,
+        {participant_name: participant_bytes},
+    )
+    with ZipFile(workspace_archive, "r") as archive:
+        workspace_summary_matches = archive.read("resource_stats/resource_summary.json") == summary_bytes
+        workspace_participant_matches = (
+            archive.read(f"resource_stats/participants/{participant_name}.json") == participant_bytes
+        )
     receipt = {
-        "schema_version": "prototype-0.3",
-        "record_type": "artifact_generation_receipt",
-        "generated_at": _utc_now(),
+        "schema_version": "prototype-0.4",
         "job_id": job_id,
         "study": study,
-        "actual_local_observations": [
-            "CPU/memory host fallback (partial on non-Linux)",
-            "filesystem capacity for client_run",
-            "exact byte size of result_artifacts/probe_payload.json",
-            "actual measured generator observation interval",
-        ],
-        "intentionally_unavailable": [
-            "CUDA runtime GPU inventory unless present and bound",
-            "F3/CellNet sender counters",
-            "separate server-role process summary",
-        ],
+        "public_participant_reports": 1,
+        "public_start_or_final_fragments": 0,
+        "private_terminal_handoffs": 1,
+        "private_terminal_handoff_path": "client_child/resource_stats/staging/terminal_handoff.json",
         "integrity": {
-            "resource_summary_sha256": _sha256(resource_summary_bytes),
-            "workspace_component": workspace_archive_path.name,
-            "workspace_sha256": _sha256(workspace_archive_path.read_bytes()),
-            "workspace_resource_summary_member": "resource_stats/resource_summary.json",
-            "workspace_resource_summary_matches": (
-                workspace_reader.read_resource_summary_bytes() == resource_summary_bytes
-            ),
-            "workspace_manifest_matches": workspace_reader.read_manifest_bytes() == manifest_bytes,
-            "workspace_participant_matches": (
-                workspace_reader.read_participant_summary_bytes(archive_participant_key)
-                == participant_summary_bytes
-            ),
+            "workspace_component": "workspace",
+            "workspace_resource_summary_matches": workspace_summary_matches,
+            "workspace_participant_matches": workspace_participant_matches,
         },
-        "review_contract_fixtures": review_contract_fixtures,
+        "review_contract_fixtures": fixtures,
     }
-    _write_json(output_dir / "generation_receipt.json", receipt)
+    _write(output_dir / "generation_receipt.json", _json_bytes(receipt))
     return receipt
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--output",
-        type=Path,
-        default=Path(__file__).parent / "generated" / "actual_local",
-        help="directory to receive generated artifacts",
-    )
-    parser.add_argument("--job-id", default="prototype-local-resource-proxy", help="safe synthetic job identifier")
-    parser.add_argument("--study", default="prototype", help="safe synthetic study identifier")
+    parser.add_argument("--output", "--output-dir", dest="output_dir", type=Path, default=Path("generated"))
+    parser.add_argument("--job-id", default="prototype-job")
+    parser.add_argument("--study", default="prototype-study")
     parser.add_argument(
         "--observation-seconds",
         type=float,
-        default=0.25,
-        help="real local observation interval to measure before finalization",
+        default=0.1,
+        help="time for which the first real resource observation remains active",
     )
     args = parser.parse_args()
-    receipt = generate(args.output, args.job_id, args.study, args.observation_seconds)
-    print(json.dumps(receipt, indent=2, sort_keys=True, allow_nan=False))
+    print(json.dumps(generate(args.output_dir, args.job_id, args.study, args.observation_seconds), indent=2))
 
 
 if __name__ == "__main__":

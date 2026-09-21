@@ -90,6 +90,7 @@ from nvflare.app_opt.job_launcher.docker_launcher import (
     _safe_workspace_child_path,
     _sanitize_container_name,
 )
+from nvflare.utils.job_launcher_utils import JOB_PROCESS_BOOTSTRAP_MODULE
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -609,7 +610,9 @@ class TestDockerJobLauncherLaunchJob:
 
         assert handle is not None
         assert isinstance(handle, DockerJobHandle)
-        assert dc.containers.run.call_args[1]["auto_remove"] is True
+        launch_args = dc.containers.run.call_args[1]
+        assert launch_args["auto_remove"] is True
+        assert "PYTHONPATH" not in launch_args["environment"]
 
     def test_launch_overrides_parent_url(self):
         """Launcher must derive parent_url from site name + port; localhost must not reach job container."""
@@ -678,6 +681,15 @@ class TestDockerJobLauncherLaunchJob:
         fl_ctx.get_identity_name.return_value = "site-1"
         with pytest.raises(RuntimeError):
             launcher.launch_job(_make_job_meta(), fl_ctx)
+
+    def test_launch_rejects_arbitrary_job_process_module(self):
+        launcher = _make_launcher()
+        fl_ctx, _ = _make_fl_ctx(exe_module="job.custom")
+
+        with pytest.raises(RuntimeError, match="fixed NVFlare client worker or server runner"):
+            launcher.launch_job(_make_job_meta(), fl_ctx)
+
+        launcher._docker_client.containers.run.assert_not_called()
 
     def test_launch_preserves_and_mounts_shared_file_parent_url(self):
         launcher = _make_launcher(workspace="/host/workspace")
@@ -789,9 +801,11 @@ class TestDockerJobLauncherLaunchJob:
         call_kwargs = dc.containers.run.call_args[1]
         assert call_kwargs["command"] == [
             "/usr/local/bin/python",
+            "-I",
             "-u",
             "-m",
-            "nvflare.private.fed.app.client.worker_process",
+            JOB_PROCESS_BOOTSTRAP_MODULE,
+            "client",
             "-w",
             "/ws",
             "-s",
@@ -1089,12 +1103,14 @@ class TestDockerJobLauncherLaunchJob:
 
         call_kwargs = dc.containers.run.call_args[1]
         assert call_kwargs["entrypoint"] == ["/bin/sh", "-c"]
-        assert call_kwargs["command"][0:4] == [
+        assert call_kwargs["command"][0:5] == [
             "/usr/local/bin/python",
+            "-I",
             "-u",
             "-m",
-            "nvflare.private.fed.app.client.worker_process",
+            JOB_PROCESS_BOOTSTRAP_MODULE,
         ]
+        assert call_kwargs["command"][5] == "client"
 
     def test_launch_num_of_gpus_overrides_default_device_requests(self):
         """Job-level num_of_gpus must override site-level default device_requests."""

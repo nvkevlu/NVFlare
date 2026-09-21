@@ -1,0 +1,99 @@
+{
+  "schema_version": "1.0",
+  "kind": "nvflare.resource_stats.resource_summary",
+  "job_id": "job-20260910-002",
+  "report_cutoff_at": "2026-09-10T18:00:01Z",
+  "finalized_at": "2026-09-10T18:00:01.1Z",
+  "participants": [
+    {
+      "participant_name": "site-4",
+      "role": "client",
+      "status": "accepted",
+      "received_at": "2026-09-10T18:00:00.1Z",
+      "resource_time": {
+        "status": "reported",
+        "measured_seconds": "14400",
+        "cpu": {
+          "groups": [
+            {
+              "unit_seconds": "1843200",
+              "model": "AMD EPYC 9654",
+              "architecture": "x86_64"
+            }
+          ]
+        },
+        "memory": {
+          "byte_seconds": "7916483719987200"
+        },
+        "gpu": {
+          "groups": [
+            {
+              "kind": "full_gpu",
+              "instance_seconds": "115200",
+              "model": "NVIDIA H100 80GB HBM3",
+              "memory_bytes": "85899345920"
+            }
+          ]
+        }
+      },
+      "retained_content": {
+        "status": "reported",
+        "bytes": "59080532226"
+      },
+      "f3": {
+        "status": "reported",
+        "remote_accepted": {
+          "payload_bytes": "2363205386240",
+          "messages": "40"
+        },
+        "local_delivered": {
+          "payload_bytes": "0",
+          "messages": "0"
+        },
+        "remote_failed_before_acceptance": {
+          "payload_bytes": "0",
+          "messages": "0"
+        }
+      }
+    }
+  ],
+  "totals": {
+    "resource_time": {
+      "status": "reported",
+      "measured_seconds": "14400",
+      "cpu": {
+        "groups": [
+          {
+            "model": "AMD EPYC 9654",
+            "architecture": "x86_64",
+            "unit_seconds": "1843200"
+          }
+        ]
+      },
+      "memory": {
+        "byte_seconds": "7916483719987200"
+      },
+      "gpu": {
+        "groups": [
+          {
+            "kind": "full_gpu",
+            "model": "NVIDIA H100 80GB HBM3",
+            "memory_bytes": "85899345920",
+            "instance_seconds": "115200"
+          }
+        ]
+      }
+    },
+    "retained_content": {
+      "status": "reported",
+      "bytes": "59080532226"
+    },
+    "f3": {
+      "status": "reported",
+      "remote_accepted": {
+        "payload_bytes": "2363205386240",
+        "messages": "40"
+      }
+    }
+  }
+}

@@ -12,24 +12,25 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import hashlib
 import json
 import os
+import sys
 import tempfile
 import unittest
+from decimal import Decimal
 from pathlib import Path
 from unittest.mock import patch
-
-import sys
+from zipfile import ZipFile
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from generate_artifacts import generate  # noqa: E402
+from generate_artifacts import _finish_local_report, generate  # noqa: E402
 from prototype_contract import WorkspaceResourceStatsReader  # noqa: E402
 from runtime_probe import (  # noqa: E402
     _decode_mountinfo,
     _effective_cpuset_count,
+    _finite_v2_cpu_quota,
     _linux_cpu_identity,
     _parse_cpuset_count,
     _path_under_mount,
@@ -118,7 +119,7 @@ model name : Intel Xeon Platinum 8480+
             patch("runtime_probe._effective_cpuset_count", return_value=(2, "v2")),
             patch(
                 "runtime_probe._finite_v2_cpu_quota",
-                return_value=(3.5, [{"quota_us": 350000, "period_us": 100000}]),
+                return_value=("3.5", [{"quota_us": 350000, "period_us": 100000}]),
             ),
             patch("runtime_probe._cgroup_v2_location", return_value=(Path("/not-emitted"), Path("/not-emitted/job"))),
             patch(
@@ -128,12 +129,25 @@ model name : Intel Xeon Platinum 8480+
         ):
             metric = probe_cpu()
 
-        self.assertEqual(2, metric["value"])
+        self.assertEqual("2", metric["value"])
         self.assertEqual(2, metric["inputs"]["effective_cpuset_logical_cpu_count"])
         self.assertEqual({"architecture": "x86_64", "model": "AMD EPYC 9654"}, metric["dimensions"])
         emitted = json.dumps(metric)
         self.assertNotIn("/not-emitted", emitted)
         self.assertNotIn("cpuset.cpus.effective", emitted)
+
+    def test_cpu_quota_is_exactly_floored_to_nine_decimal_places(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            mount = Path(temp_dir)
+            leaf = mount / "leaf"
+            leaf.mkdir()
+            (leaf / "cpu.max").write_text("2 3", encoding="utf-8")
+
+            with patch("runtime_probe._cgroup_v2_location", return_value=(mount, leaf)):
+                quota, inputs = _finite_v2_cpu_quota()
+
+        self.assertEqual("0.666666666", quota)
+        self.assertEqual([{"quota_us": 2, "period_us": 3}], inputs)
 
     def test_gpu_mask_is_not_treated_as_a_device_count(self):
         for mask in ("", "0,0", "-1", "MIG-GPU-irrelevant/1/2"):
@@ -247,75 +261,159 @@ model name : Intel Xeon Platinum 8480+
 
 
 class TestGeneratedArtifacts(unittest.TestCase):
-    def test_generator_writes_consistent_artifact_tree(self):
+    def test_numeric_partial_probe_produces_partial_resource_time(self):
+        cpu = {
+            "value": "0.666666666",
+            "status": "partial",
+            "coverage": "partial",
+            "dimensions": {"architecture": "x86_64"},
+        }
+        memory = {
+            "value": 1024,
+            "status": "reported",
+            "coverage": "complete",
+        }
+        gpu = [
+            {
+                "value": 1,
+                "status": "reported",
+                "coverage": "complete",
+                "dimensions": {"device_kind": "full_gpu"},
+            },
+            {
+                "value": 0,
+                "status": "reported",
+                "coverage": "complete",
+                "dimensions": {"device_kind": "mig_compute_instance"},
+            },
+        ]
+        storage = {
+            "value": 4096,
+            "status": "reported",
+            "coverage": "complete",
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with (
+                patch("generate_artifacts.probe_cpu", return_value=cpu),
+                patch("generate_artifacts.probe_memory", return_value=memory),
+                patch("generate_artifacts.probe_gpu_records", return_value=gpu),
+                patch("generate_artifacts.probe_storage", return_value=storage),
+                patch("generate_artifacts.time.monotonic_ns", side_effect=[10_000_000_000, 12_000_000_000]),
+            ):
+                report, _evidence, handoff = _finish_local_report(
+                    "test-job",
+                    "test-client",
+                    Path(temp_dir),
+                    0.0,
+                )
+
+        resource_time = report["resource_time"]
+        self.assertEqual("partial", resource_time["status"])
+        self.assertEqual(["observation_incomplete"], resource_time["issues"])
+        self.assertEqual("2", resource_time["measured_seconds"])
+        self.assertEqual("1.333333332", resource_time["cpu"]["groups"][0]["unit_seconds"])
+        self.assertEqual("nvflare.resource_stats.internal.terminal_handoff", handoff["kind"])
+        self.assertNotIn("job_id", handoff)
+        self.assertNotIn("participant_name", handoff)
+
+    def test_generator_writes_one_terminal_report_and_study_view(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             output_dir = Path(temp_dir) / "artifacts"
             receipt = generate(output_dir, "test-job", "test-study", 0.0)
 
-            client_dir = output_dir / "client_run" / "resource_stats"
+            child_staging_dir = output_dir / "client_child" / "resource_stats" / "staging"
+            parent_dir = output_dir / "client_parent" / "resource_stats"
             server_dir = output_dir / "server_run" / "resource_stats"
             resource_summary_path = server_dir / "resource_summary.json"
             workspace_archive_path = output_dir / "job_store" / "jobs" / "test-job" / "workspace"
-            self.assertTrue((client_dir / "participant_summary.json").is_file())
-            participant_summary = json.loads((client_dir / "participant_summary.json").read_text())
-            retained = participant_summary["attempts"][0]["retained_content"]
-            self.assertEqual("prototype_owned_file_only", retained["coverage"])
-            self.assertNotIn("entries", retained)
-            self.assertNotIn("relative_path", json.dumps(retained))
+            self.assertTrue((child_staging_dir / "terminal_handoff.json").is_file())
+            handoff = json.loads((child_staging_dir / "terminal_handoff.json").read_text())
+            self.assertEqual("1", handoff["internal_version"])
+            self.assertEqual("nvflare.resource_stats.internal.terminal_handoff", handoff["kind"])
+            self.assertFalse((child_staging_dir / "probe_evidence.json").exists())
+            self.assertTrue((output_dir / "prototype_diagnostics" / "probe_evidence.json").is_file())
+            self.assertTrue((parent_dir / "participant_summary.json").is_file())
+            participant_summary = json.loads((parent_dir / "participant_summary.json").read_text())
+            self.assertEqual(
+                "nvflare.resource_stats.participant_summary",
+                participant_summary["kind"],
+            )
+            self.assertNotIn("attempts", participant_summary)
+            self.assertNotIn("start", participant_summary)
+            self.assertNotIn("final", participant_summary)
+            self.assertIn(
+                participant_summary["resource_time"]["status"],
+                {"reported", "partial", "unavailable"},
+            )
+            self.assertEqual("unavailable", participant_summary["retained_content"]["status"])
+            self.assertEqual(["not_bound"], participant_summary["retained_content"]["issues"])
+            self.assertIn("workspace_filesystem", participant_summary)
             self.assertTrue(resource_summary_path.is_file())
             workspace_reader = WorkspaceResourceStatsReader(workspace_archive_path)
             self.assertEqual(resource_summary_path.read_bytes(), workspace_reader.read_resource_summary_bytes())
-            self.assertEqual((server_dir / "manifest.json").read_bytes(), workspace_reader.read_manifest_bytes())
-            archive_participant_key = participant_summary["participant_key"].replace("sha256:", "sha256-")
+            archive_participant_name = participant_summary["participant_name"]
             self.assertEqual(
-                (server_dir / "participants" / f"{archive_participant_key}.json").read_bytes(),
-                workspace_reader.read_participant_summary_bytes(archive_participant_key),
+                (server_dir / "participants" / f"{archive_participant_name}.json").read_bytes(),
+                workspace_reader.read_participant_summary_bytes(archive_participant_name),
             )
             self.assertTrue(receipt["integrity"]["workspace_resource_summary_matches"])
-            self.assertTrue(receipt["integrity"]["workspace_manifest_matches"])
             self.assertTrue(receipt["integrity"]["workspace_participant_matches"])
             self.assertEqual("workspace", receipt["integrity"]["workspace_component"])
+            self.assertEqual(1, receipt["public_participant_reports"])
+            self.assertEqual(0, receipt["public_start_or_final_fragments"])
+            self.assertEqual(1, receipt["private_terminal_handoffs"])
+            self.assertEqual(
+                "client_child/resource_stats/staging/terminal_handoff.json",
+                receipt["private_terminal_handoff_path"],
+            )
 
             summary = json.loads(resource_summary_path.read_text())
-            self.assertEqual("test-job", summary["job"]["id"])
-            self.assertEqual(2, summary["coverage"]["expected_participant_count"])
-            self.assertEqual(1, summary["coverage"]["reported_participant_count"])
-            self.assertNotIn(str(output_dir), json.dumps(summary))
-            metric_names = {metric["name"] for metric in summary["qualified_totals"]["metrics"]}
-            self.assertNotIn("visible_storage_capacity_byte_seconds", metric_names)
-            rollup_names = {
-                metric["name"] for metric in participant_summary["attempts"][0]["rollups"]
-            }
-            self.assertNotIn("visible_storage_capacity_byte_seconds", rollup_names)
-            startup_names = {
-                metric["name"] for metric in participant_summary["attempts"][0]["startup_snapshot"]["metrics"]
-            }
-            self.assertIn("visible_storage_capacity_bytes", startup_names)
-            gpu_total = next(
-                metric for metric in summary["qualified_totals"]["metrics"] if metric["name"] == "visible_gpu_seconds"
-            )
-            self.assertEqual("unavailable", gpu_total["status"])
+            self.assertEqual("test-job", summary["job_id"])
+            self.assertEqual(1, len(summary["participants"]))
+            self.assertEqual("accepted", summary["participants"][0]["status"])
             self.assertEqual(
-                {"local-prototype-client", "server"},
-                set(gpu_total["contribution_coverage"]["missing_participant_ids"]),
+                participant_summary["resource_time"],
+                summary["totals"]["resource_time"],
             )
+            self.assertNotIn("workspace_filesystem", summary["totals"])
+            self.assertNotIn(str(output_dir), json.dumps(summary))
 
-            manifest = json.loads((server_dir / "manifest.json").read_text())
-            for entry in manifest["entries"]:
-                path = server_dir / entry["relative_path"]
-                self.assertEqual(entry["byte_count"], path.stat().st_size)
-                self.assertEqual(entry["sha256"], hashlib.sha256(path.read_bytes()).hexdigest())
+            with ZipFile(workspace_archive_path, "r") as workspace:
+                self.assertFalse(any("terminal_handoff.json" in name for name in workspace.namelist()))
+                self.assertFalse(any("probe_evidence.json" in name for name in workspace.namelist()))
+                self.assertEqual(
+                    {
+                        "resource_stats/resource_summary.json",
+                        f"resource_stats/participants/{archive_participant_name}.json",
+                    },
+                    {name for name in workspace.namelist() if name.startswith("resource_stats/")},
+                )
 
             all_cli = json.loads((output_dir / "cli" / "resources-all.json").read_text())
-            selected_cli = json.loads((output_dir / "cli" / "resources-local-prototype-client.json").read_text())
-            self.assertTrue(all_cli["data"]["selection"]["is_job_total"])
-            self.assertFalse(selected_cli["data"]["selection"]["is_job_total"])
-            self.assertTrue((output_dir / "cli" / "resources-not-ready.json").is_file())
-            corrupt = json.loads((output_dir / "cli" / "resources-corrupt.json").read_text())
-            self.assertEqual(5, corrupt["exit_code"])
-            self.assertTrue((output_dir / "cli" / "resources-corrupt.stderr.txt").is_file())
-            self.assertTrue((output_dir / "review_contracts" / "manifest.json").is_file())
+            self.assertEqual("test-job", all_cli["data"]["selection"]["job_id"])
+            study_cli = json.loads((output_dir / "cli" / "resources-study.json").read_text())
+            self.assertEqual({"study": "test-study"}, study_cli["data"]["selection"])
+            study_summary = study_cli["data"]["summary"]
+            self.assertEqual("test-study", study_summary["selection"]["study_name"])
+            self.assertEqual("1", study_summary["coverage"]["included_jobs"])
+            self.assertEqual("included", study_summary["jobs"][0]["resource_data"])
+            study_text = (output_dir / "cli" / "resources-study.txt").read_text()
+            self.assertIn("JOB STATUS", study_text)
+            self.assertIn("FULL GPU h", study_text)
+            self.assertIn("coverage:", study_text)
+            self.assertIn("still running (excluded)", study_text)
+            self.assertNotIn("RESOURCE DATA  GPU h", study_text)
+            self.assertNotIn("billing data", study_text)
+            has_positive_mig = any(
+                group["kind"] == "mig_compute_instance" and Decimal(group["instance_seconds"]) > 0
+                for group in study_summary["totals"]["resource_time"].get("gpu", {}).get("groups", [])
+            )
+            self.assertEqual(has_positive_mig, "MIG h" in study_text)
             self.assertEqual("synthetic_contract_fixture", receipt["review_contract_fixtures"]["provenance"])
+            self.assertEqual(
+                sorted(f"review_contracts/{path.name}" for path in (output_dir / "review_contracts").glob("*.json")),
+                receipt["review_contract_fixtures"]["entries"],
+            )
 
 
 if __name__ == "__main__":

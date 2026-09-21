@@ -1,0 +1,17 @@
+Connecting to FLARE ...
+Connecting to FLARE ...
+Connecting to FLARE ...
+Waiting for clients: site-1 (1/2 ready)
+Connecting to FLARE ...
+Clients ready: 2/2 (site-2, site-1)
+
+Ready to go.
+
+POC system started. Server: grpc://localhost:8002
+  Server address: localhost:8002
+  Admin address: localhost:8003
+  Clients: site-1, site-2
+  Service console logs: /tmp/nvflare-resource-pytorch-e2e-20260921/poc_workspace/example_project/prod_00/<participant>/poc_console.log
+  Admin console is optional. You can submit and manage jobs with nvflare commands.
+  To open the console, run in another terminal: nvflare poc start -p admin@nvidia.com
+  Submit jobs with: nvflare job submit -j <job_folder>

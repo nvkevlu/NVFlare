@@ -1,0 +1,49 @@
+{
+  "schema_version": "1.0",
+  "kind": "nvflare.resource_stats.participant_summary",
+  "job_id": "84722338-787a-41b0-8132-6de19bb89c92",
+  "participant_name": "site-2",
+  "reported_at": "2026-09-18T18:58:10.511665Z",
+  "resource_time": {
+    "status": "reported",
+    "measured_seconds": "7.832454084",
+    "cpu": {
+      "groups": [
+        {
+          "unit_seconds": "250.638530688",
+          "model": "AMD EPYC 7313P 16-Core Processor",
+          "architecture": "x86_64"
+        }
+      ]
+    },
+    "memory": {
+      "byte_seconds": "1037809090866.800738304"
+    },
+    "gpu": {
+      "groups": [
+        {
+          "kind": "full_gpu",
+          "instance_seconds": "7.832454084",
+          "model": "NVIDIA L40G",
+          "memory_bytes": "24146608128"
+        }
+      ]
+    }
+  },
+  "workspace_filesystem": {
+    "status": "reported",
+    "capacity_bytes": "66250571776"
+  },
+  "retained_content": {
+    "status": "unavailable",
+    "issues": [
+      "not_bound"
+    ]
+  },
+  "f3": {
+    "status": "unavailable",
+    "issues": [
+      "not_bound"
+    ]
+  }
+}

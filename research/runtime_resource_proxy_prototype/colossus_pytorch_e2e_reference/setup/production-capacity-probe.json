@@ -1,0 +1,14 @@
+{
+  "cpu": {
+    "groups": [
+      {
+        "architecture": "x86_64",
+        "model": "AMD EPYC 7313P 16-Core Processor",
+        "units": "32"
+      }
+    ]
+  },
+  "memory": {
+    "bytes": "134917918720"
+  }
+}

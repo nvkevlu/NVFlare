@@ -908,6 +908,48 @@ class TestFederatedServer:
             assert result.get_header(MessageHeaderKey.RETURN_CODE) == F3ReturnCode.OK
             server.engine.job_runner.resolve_client_outcome.assert_called_once_with("job-1", "site-1")
 
+    def test_process_job_failure_binds_resource_report_to_authenticated_client(self):
+        with patch("nvflare.private.fed.server.fed_server.ServerEngine"):
+            server = FederatedServer(
+                project_name="project_name",
+                min_num_clients=1,
+                max_num_clients=10,
+                cmd_modules=None,
+                heart_beat_timeout=600,
+                args=MagicMock(),
+                secure_train=False,
+                snapshot_persistor=MagicMock(),
+            )
+            server.client_manager.is_from_authorized_client = MagicMock(return_value=True)
+            client = MagicMock()
+            client.name = "site-1"
+            server.client_manager.clients = {"token-1": client}
+            server.engine.job_runner.is_client_outcome_pending.return_value = True
+            server.engine.job_runner.accept_client_resource_report.return_value = "accepted"
+            report = {JobFailureMsgKey.PARTICIPANT_SUMMARY: b"{}"}
+            request = new_cell_message(
+                {CellMessageHeaderKeys.TOKEN: "token-1", MessageHeaderKey.ORIGIN: "spoofed-name"},
+                {
+                    JobFailureMsgKey.JOB_ID: "job-1",
+                    JobFailureMsgKey.CODE: 0,
+                    JobFailureMsgKey.REASON: "",
+                    JobFailureMsgKey.RESOURCE_REPORT: report,
+                },
+            )
+
+            reply = server.process_job_failure(request)
+
+            server.engine.job_runner.accept_client_resource_report.assert_called_once_with("job-1", "site-1", report)
+            assert reply.payload == {JobFailureMsgKey.RESOURCE_REPORT_STATUS: "accepted"}
+
+            server.engine.job_runner.resolve_client_outcome.reset_mock()
+            server.engine.job_runner.accept_client_resource_report.side_effect = RuntimeError("write failed")
+            reply = server.process_job_failure(request)
+
+            assert reply.get_header(MessageHeaderKey.RETURN_CODE) == F3ReturnCode.OK
+            assert reply.payload == {JobFailureMsgKey.RESOURCE_REPORT_STATUS: "server_error"}
+            server.engine.job_runner.resolve_client_outcome.assert_called_once_with("job-1", "site-1")
+
     def test_notify_dead_client_fails_barrier_only_job(self):
         server = object.__new__(FederatedServer)
         server.logger = MagicMock()

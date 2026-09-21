@@ -35,7 +35,6 @@ from nvflare.apis.fl_constant import ConnectionSecurity, FLContextKey, JobConsta
 from nvflare.apis.fl_context import FLContext
 from nvflare.apis.job_def import JobMetaKey
 from nvflare.apis.job_launcher_spec import JobHandleSpec, JobLauncherSpec, JobProcessArgs, JobReturnCode, add_launcher
-from nvflare.apis.workspace import Workspace
 from nvflare.app_opt.job_launcher.study_data import (
     load_study_data_file,
     resolve_study_dataset_mounts,
@@ -55,6 +54,7 @@ from nvflare.utils.job_launcher_utils import (
     get_client_job_args,
     get_credential_env,
     get_job_launcher_spec,
+    get_job_process_bootstrap_args,
     get_portable_resource_spec,
     get_server_job_args,
     portable_memory_to_bytes,
@@ -620,7 +620,11 @@ class DockerJobLauncher(JobLauncherSpec):
         if set_list:
             module_args_list.extend(["--set"] + set_list)
 
-        command = [python_path, "-u", "-m", exe_module] + module_args_list
+        try:
+            bootstrap_args = get_job_process_bootstrap_args(exe_module)
+        except ValueError as e:
+            raise RuntimeError(str(e)) from e
+        command = [python_path, *bootstrap_args, *module_args_list]
 
         site_env = {}
         if study_runtime is not None:
@@ -634,8 +638,6 @@ class DockerJobLauncher(JobLauncherSpec):
                     )
                 site_env[secret_env_ref.name] = secret_value
 
-        # PYTHONPATH: translate app_custom_folder host path to container-internal path
-        # so custom Python code in the job app is importable inside the container.
         # USER: some libraries (e.g. torch._dynamo) call getpass.getuser() which falls back to
         # pwd.getpwuid(os.getuid()). When the container runs as a host UID not in /etc/passwd,
         # this raises KeyError. Setting USER satisfies the env-var fast path in getpass.getuser().
@@ -648,17 +650,9 @@ class DockerJobLauncher(JobLauncherSpec):
             "HOME": os.environ.get("HOME", "/tmp"),
         }
         environment.update(get_credential_env(job_args))
-        workspace_obj: Workspace = fl_ctx.get_prop(FLContextKey.WORKSPACE_OBJECT)
-        if workspace_obj is not None:
-            python_paths = []
-            app_custom_folder = workspace_obj.get_app_custom_dir(job_id)
-            if app_custom_folder:
-                python_paths.append(app_custom_folder.replace(workspace, self.WORKSPACE_MOUNT, 1))
-            site_custom_folder = workspace_obj.get_site_custom_dir()
-            if site_custom_folder and os.path.isdir(site_custom_folder):
-                python_paths.append(site_custom_folder.replace(workspace, self.WORKSPACE_MOUNT, 1))
-            if python_paths:
-                environment["PYTHONPATH"] = os.pathsep.join(python_paths)
+        # Python isolated mode ignores an image-provided PYTHONPATH during
+        # interpreter startup.  Do not override it here: the worker can safely
+        # make image dependency paths available after its initial snapshot.
 
         # Docker launcher spec: allowlisted per-job Docker settings (image, shm_size, ...) live in
         # launcher_spec[site][docker]. Falls back to nested resource_spec[site][docker] for

@@ -44,6 +44,7 @@ from nvflare.app_opt.job_launcher.slurm.manager import SlurmJobManager, _ensure_
 from nvflare.app_opt.job_launcher.slurm.scheduler_client import _SlurmCliAdapter
 from nvflare.fuel.common.exit_codes import ProcessExitCode
 from nvflare.private.fed.server.fed_server import FederatedServer
+from nvflare.utils.job_launcher_utils import CLIENT_JOB_PROCESS_MODULE
 
 
 def _command(returncode=0, stdout="42\n", stderr="", timed_out=False):
@@ -142,7 +143,7 @@ def _plan(tmp_path, pending_timeout=5, setup="", sandbox="none", image=None):
         job_id="job-1",
         site_name="site-1",
         run_dir=str(run_dir),
-        exe_module="worker.module",
+        exe_module=CLIENT_JOB_PROCESS_MODULE,
         module_args=("-n", "job-1"),
         resources=JobResources(pending_timeout=pending_timeout),
         directives={},

@@ -1,78 +1,56 @@
 # Resource statistics schema v1
 
-This directory contains the proposed Phase 1 wire contract.
-
-The contract says what a site reports and how the server calculates totals. It
-does not choose whether CP, a job process, a child process, or another NVFlare
-component collects the data.
+This directory contains the proposed Phase 1 contract. It defines one terminal
+participant report, the server's job reduction, and the derived study-query
+response. It does not expose collector lifecycle records.
 
 ## Files
 
 | File | Purpose |
 | --- | --- |
 | [resource_stats_v1.schema.json](resource_stats_v1.schema.json) | Closed Draft 2020-12 JSON Schema. |
-| [contract_v1.py](contract_v1.py) | Cross-record checks and exact arithmetic. |
+| [contract_v1.py](contract_v1.py) | Cross-record checks, exact arithmetic, and reductions. |
 | [FIELD_CATALOG.md](FIELD_CATALOG.md) | Every field, type, unit, and limit. |
-| [CODE_CATALOG.md](CODE_CATALOG.md) | Every status, issue, and end reason. |
-| [golden/v1](golden/v1) | Valid example records and final CLI output. |
+| [CODE_CATALOG.md](CODE_CATALOG.md) | Every status, issue, participant state, and F3 class. |
+| [golden/v1](golden/v1) | Valid example records and CLI output. |
 | [build_review_artifacts.py](build_review_artifacts.py) | Deterministic generator for the goldens. |
 
-Unknown fields are rejected. New meanings require a new schema version.
+Unknown fields are rejected. JSON `null` is not a substitute for an omitted
+field. New meanings require a new schema version.
 
-## Plain terms and JSON names
+## Record flow
 
-| Plain term | JSON name |
-| --- | --- |
-| Site report | participant_summary |
-| Measurement period | attempt |
-| Expected participant list | participants |
-| Saved-result byte total | retained_content |
-| Measurement-scope key | environment_key |
+Each participant produces exactly one `participant_summary` when its part of
+the job ends. The report contains:
 
-An attempt is a measurement period. It does not imply a process launch,
-scheduler attempt, resource lease, or any particular roadmap architecture.
+- one `resource_time` object for accumulated CPU, memory, and GPU time;
+- one final `workspace_filesystem` capacity observation;
+- one `retained_content` observation; and
+- one final F3 observation.
 
-## Record types
-
-The schema accepts exactly eight record kinds:
+The root server authenticates and validates reports, reconciles them against
+the participants expected for the job, and writes one `resource_summary`. It
+writes that summary last as the live run-directory publication marker. These
+are the only persistent resource-statistics records:
 
 | Kind suffix | Purpose |
 | --- | --- |
-| participant_start | Start of one site's job run and its visible workspace-filesystem capacity observation. |
-| attempt_start | Start time and resources for one measurement period. |
-| attempt_final | Optional final resource observation for that period. |
-| attempt_end | End time and reason for that period. |
-| participant_final | Final visible workspace-filesystem capacity observation, one saved-result byte total, and F3 counters. |
-| participant_summary | One final site report. |
-| resource_summary | Final server result for the job. |
-| manifest | Hashes of the stored server files. |
+| participant_summary | One terminal participant report. |
+| resource_summary | Final server result for one job. |
 
-The small start, final, and end records are logical collection fragments. The
-schema does not require them to be separate files. participant_summary is the
-final site-level record. resource_summary is the result read by the CLI and
-Phase 2.
+There are no public participant-start, participant-final, attempt-start,
+attempt-final, or attempt-end records. There are no attempt IDs, environment
+keys, end reasons, raw periods, or start/final stability comparisons.
 
-The files under `golden/v1/finalized_job` form one complete example. Its
-resource summary combines a stable client, a client with two measured periods
-separated by an unmeasured gap, an expected client whose report is missing,
-and an accepted server report. The stable client has a known empty result set;
-the second client uses `unavailable/not_bound` because it has no complete known
-set; and the server has the complete saved-result byte total. Other JSON files
-directly under `golden/v1` include standalone boundary cases and are not all
-part of that job.
-
-Within that review fixture, `server_run` is the inspectable pre-archive source
-and `job_store/.../workspace` is the generated minimal `WORKSPACE` ZIP. A real
-workspace archive also contains the job's other run, result, log, and audit
-files. Keeping the unpacked source beside the ZIP makes generation reviewable;
-it does not propose two persisted production copies.
+The JSON form of a study query is a derived response, not another archived
+record. It is calculated from retained job summaries on demand and disappears
+with the response. See the generated [study summary](golden/v1/study_summary.json)
+and [study CLI output](golden/v1/finalized_job/cli/resources-study.txt).
 
 ## Architecture and deployment constraints
 
-The schema contains no launcher name, process-coordination token, process ID,
-storage path, or resource-manager field.
-
-It requires no new:
+The public contract contains no launcher name, process ID, storage path,
+process-coordination token, or resource-manager field. It requires no new:
 
 - privilege;
 - container capability;
@@ -80,321 +58,301 @@ It requires no new:
 - mount;
 - launcher argument;
 - environment variable; or
-- user or operator configuration.
+- user/operator configuration.
 
-The implementation uses normal NVFlare code and existing workspace and message
-paths. The current-code adapter calls the collector at explicit client-job and
-server-job process hooks, stages the final report in the existing workspace,
-and uses the existing terminal-outcome path. See
-[Current-code integration](../CURRENT_CODE_INTEGRATION.md).
+The current adapter initializes a private in-memory accumulator in the current
+client/server job process after workspace construction. After runner `END_RUN`
+processing, the child freezes one bounded, versioned private handoff in the
+existing job workspace. CP or SP validates that handoff, merges child and
+parent F3 counters, builds the sole public participant report, removes the
+handoff, and then uses the selected one-message completion transport or local
+acceptance. See [Current-code integration](../CURRENT_CODE_INTEGRATION.md).
+
+The participant schema is independent of the completion topic. Option A adds
+the optional report to `REPORT_JOB_FAILURE` / `report_job_failure`. Option B
+replaces that request with `REPORT_JOB_COMPLETION` /
+`report_job_completion`, whose combined envelope has exact integer
+`protocol_version: 1`. Both carry the same outcome and exact
+`participant_summary` bytes into the same acceptance logic. Exactly one
+is sent; retries do not switch topics, and capability/rollout selection adds
+no operator setting. The envelope protocol version is not the report's
+`schema_version`.
+
+Option B addresses the historical topic name and handler ownership only. It
+retains the same validation, filesystem-write, acknowledgement, and retry work
+in the critical completion path. If lifecycle control and resource
+data must be delivered separately, neither one-message option suffices.
+
+The private accumulator is not part of the schema. Today's adapter assumes one
+CJ or SJ process remains alive and that selected visible capacity persists
+until finalization unless the platform reports a change. A future design that
+replaces workers or moves task execution must move or carry forward the
+accumulated state in a component spanning the participant's logical work. The
+terminal record does not change, and this design does not choose that future
+owner or handoff. No implementation may take one end-of-run snapshot and
+multiply it by the whole duration.
 
 ## Identity
 
-**attempt_id** is a random 128-bit ID written as 32 lowercase hexadecimal
-characters. It is an internal record ID. In the current adapter, one job process
-creates and closes one attempt, so the ID does not cross a process boundary.
+`participant_name` is the existing configured product identity: the
+registered site name for a client and the configured server participant name
+for SP. It appears in the participant report, expected-participant row, and
+readable archive member
+`resource_stats/participants/<participant_name>.json`.
 
-**environment_key** is a job-scoped HMAC value. In prose, it is the
-measurement-scope key. It prevents simultaneous reports for the same
-measurement scope.
-
-The root server creates a random per-job HMAC key and derives one participant
-key and one current-process environment key for each expected participant. It
-puts only the derived keys in a reserved server-owned field in the existing job
-metadata; the HMAC key never leaves the root parent. The current adapter needs
-one environment key for each client-job or server-job process scope. The exact
-domain-separated HMAC inputs are in the
-[field catalog](FIELD_CATALOG.md#common-identity-and-time).
-
-Periods with the same key may be sequential but may not overlap. Different
-keys may overlap. Reports from different jobs may describe the same physical
-hardware and are intentionally not deduplicated.
-
-**participant_key** is a job-scoped HMAC used for server file names. The public
-participant ID and role appear only in the server's expected participant list.
+The feature does not derive an HMAC pseudonym or add a resource-specific
+`START_JOB` field. Shape validation is not authentication: for a client, the
+server binds the incoming report to the existing authenticated sender and job
+context, finds that name in the expected participant list, and requires the
+JSON name to match. SP uses its already trusted local name. Before constructing
+an archive path, the server separately requires the trusted name to satisfy the
+bounded participant-name grammar and be one safe path component.
 
 ## Trust model
 
-Resource observations are self-reported by the NVFlare site environment.
+Resource values are authenticated self-reports, not tamper-resistant
+attestation. Job custom code can execute before the in-process collector hook,
+and it may be able to alter or remove the private handoff before the parent
+validates it. A missing or invalid handoff becomes typed unavailable/partial
+data in a parent-built report. Loss of the parent or delivery path can still
+leave no accepted report.
 
-If the implementation writes site fragments, it may use the existing job
-workspace. Job code may be able to change or remove them, and a crash may lose
-them. A local write-once API prevents accidental conflicting writes through
-that API, but it is not immutable evidence.
+“Authenticated” here means the existing Cell sender checks: signed token and
+origin in secure mode, or the current registered-client token in insecure
+mode. The resource feature adds no stronger identity or hardware attestation.
 
-After the server receives a final site report, it validates the report and
-stores the exact accepted bytes. The manifest hashes those server-side bytes.
-A matching digest proves byte identity, not the truth of the original
-observation.
+After receipt, the server validates and stores the exact accepted bytes. The
+archive does not add a signature, attestation, or other proof that the
+participant's original observations were truthful. The normal ZIP CRC can
+detect accidental member corruption, but it is not a cryptographic trust
+boundary.
 
-No separate protected site directory is required by this contract.
+## One compute status
 
-## CPU
+`resource_time.status` applies to measured time, CPU, memory, and GPU together:
 
-A reported CPU object contains:
+- `reported` requires `measured_seconds`, CPU, memory, and GPU values;
+- `partial` requires issues and at least one usable numeric member; and
+- `unavailable` requires issues and carries no numeric members.
 
-- visible_units;
-- at least one strong evidence value: affinity_count, cpuset_count, or
-  quota_units; or
-- online_count only when none of those strong values is available.
+CPU, memory, and GPU do not have nested statuses or issue arrays. This makes
+the completeness statement intentionally coarse but removes contradictory
+per-resource/start/final status combinations.
 
-visible_units is the minimum of the applicable strong values. If none is
-available, it equals online_count.
+`workspace_filesystem`, `retained_content`, and `f3` keep separate statuses.
+They use independent sources and can fail even when compute resource time is
+complete.
 
-quota_units is exact quota divided by period, rounded down to at most nine
-fractional decimal places. For example:
+## Internal resource-time accounting
 
-~~~text
-150000 / 100000 = 1.5
-1 / 3 = 0.333333333
-~~~
-
-Raw quota and period values are not stored.
-
-Model and architecture are optional. A CPU model is present only when all
-affinity-visible CPUs normalize to one model.
-
-## Memory
-
-A reported memory object contains visible_bytes and its evidence.
-
-visible_bytes is the smaller finite value from:
-
-- the process-visible memory limit; and
-- process-visible physical memory.
-
-An unlimited memory value is omitted. Swap is excluded.
-
-## GPU
-
-A reported numeric GPU inventory requires successful CUDA-runtime enumeration.
-
-The presence of CUDA_VISIBLE_DEVICES may be stored only as the boolean
-cuda_mask_present. The raw string is never stored and never provides a numeric
-count.
-
-A successful empty CUDA inventory is reported with an empty groups array. An
-unavailable CUDA runtime produces an unavailable or error object, not a zero.
-
-NVML may add metadata only to devices already found by CUDA. It cannot add a
-device or change a count.
-
-Full GPUs and MIG instances use separate groups. memory_bytes is memory per
-visible entity in that group. Different memory values create different groups.
-
-Model, memory, and MIG profile are optional. MIG fields are absent for ordinary
-full-GPU data and when no MIG instance is present.
-
-## Visible workspace-filesystem capacity and saved results
-
-At participant start and final, NVFlare observes the total visible capacity of
-the filesystem containing the existing job workspace. It queries only that
-filesystem and does not enumerate or sum other mounted filesystems.
-
-Each `capacity_bytes` value is an independent point observation. The two values
-need not match, and neither proves availability between observations. This is
-visible workspace-filesystem capacity—not usage, allocation, billable storage,
-or storage owned by the job. It is not converted to byte-seconds and does not
-appear in participant or job totals.
-
-The saved-result observation contains only status and a byte count. It does not
-expose filenames or hash model content. The collector uses a complete, bounded
-file list already known to NVFlare. If no such list exists, the value is
-unavailable with `not_bound`. The feature adds no registry or job setting and
-does not scan unrelated directories. A partial byte value is only the exact
-subtotal for the successfully observed portion; it is not presented as the
-complete retained size.
-
-## Measurement periods
-
-A participant_summary contains zero or more attempts. Each attempt has:
-
-- attempt_id;
-- environment_key;
-- opened_at;
-- optional start resource observation;
-- optional final resource observation; and
-- an end object with closed_at and reason.
-
-opened_at and closed_at must use one NVFlare clock. The period is the half-open
-interval from opened_at to closed_at.
-
-A launch_failed period has no start or final observation. Other periods require
-a start observation. A final observation is optional.
-
-End reasons are:
-
-- released;
-- reconfigured;
-- failed;
-- terminated; and
-- launch_failed.
-
-These reasons describe why the measurement ended. They do not change the
-formula. reconfigured does not require or imply another measurement period.
-
-A completed accepted report with no attempts means zero observed compute time
-only when NVFlare knows that the attempt list is complete. Otherwise the site
-must be missing or invalid.
-
-## Resource-time formulas
-
-For each period:
+The participant stores only accumulated results. Conceptually, whenever the
+platform knows the selected capacity for an internal interval:
 
 ~~~text
-duration_seconds = closed_at - opened_at
-cpu_unit_seconds = visible_cpu_units × duration_seconds
-memory_byte_seconds = visible_memory_bytes × duration_seconds
-gpu_instance_seconds = visible_gpu_count × duration_seconds
+CPU time    += visible CPU units × elapsed seconds
+memory time += visible memory bytes × elapsed seconds
+GPU time    += visible GPU instances × elapsed seconds
 ~~~
 
-Each product is rounded to nine decimal places with round-half-even before
-summing.
+Products use exact decimal arithmetic and are rounded at most once to nine
+fractional digits using round-half-even before summation. Private intervals
+and resource-change events are not serialized. `measured_seconds` is the time
+covered by the accumulator; it need not equal wall-clock job duration when
+coverage is incomplete.
 
-The start observation supplies capacity. The optional final observation checks
-whether that value remained stable. A missing or numerically different final
-makes the affected total partial.
+Schema v1 does not retain the capacity snapshots used for those private
+intervals. For a complete participant, dividing a resource-time total by
+`measured_seconds` yields a time-weighted average; it does not recover the
+interval sequence. A future periodic snapshot series belongs to a separate
+Phase 2 contract and does not add fields to this schema.
 
-A period with known times but no start observation contributes to measured time
-but not a numeric resource total. The resource total is partial or unavailable.
+### CPU
 
-The saved-result byte total and F3 counters contribute once per site report.
+The selected CPU capacity is the minimum applicable ordinary-user value from:
+
+- process affinity;
+- effective cgroup cpuset; and
+- finite cgroup CPU quota.
+
+Online CPU count is the fallback only when none of those sources is usable.
+The terminal report stores `unit_seconds` groups, not raw selector evidence,
+quota, or period values. Optional model and architecture labels describe the
+group. A heterogeneous visible CPU set omits the model rather than choosing a
+representative string.
+
+### Memory
+
+The selected memory capacity is the minimum finite value from the effective
+cgroup memory limit and process-visible physical memory. Unlimited limits are
+ignored and swap is excluded. The terminal value is `byte_seconds`.
+
+### GPU
+
+A numeric GPU contribution requires successful CUDA Runtime enumeration. A
+raw `CUDA_VISIBLE_DEVICES` string is diagnostic only and is never stored or
+used as a count. An unavailable CUDA runtime is not an observed zero.
+
+NVML may enrich devices already validated by CUDA, but it cannot add a device
+or change count authority. Full GPUs and MIG compute instances stay in
+separate `instance_seconds` groups. Optional model, per-entity memory, and MIG
+profile metadata do not change the numeric authority. MIG fields are omitted
+when inapplicable. An empty reported GPU group list is authoritative zero.
+
+## Terminal workspace-filesystem observation
+
+During terminal finalization, NVFlare observes the total capacity of only the
+filesystem containing the existing job workspace. It does not enumerate or
+sum other mounted filesystems.
+
+`workspace_filesystem` contains its own status and, when reported,
+`capacity_bytes`. It is a single point observation, not usage, allocation,
+billable storage, storage owned by the job, or evidence about capacity earlier
+in the run. It is not converted to byte-seconds and is never aggregated across
+participants or jobs.
+
+## Retained content
+
+`retained_content` has its own status and optional byte value. `reported` is
+the exact sum of a complete bounded result-file set already known to NVFlare;
+reported zero means that known set is empty. A partial value is only the exact
+subtotal for the observed part of an intended bounded set. If no authoritative
+set exists, use `unavailable/not_bound`.
+
+The collector does not scan the workspace, guess model filenames, or expose
+per-file paths or hashes.
 
 ## F3 counters
 
-The final site record has three counters:
+The terminal F3 object has one status and three counter pairs:
 
-- remote_accepted;
-- local_delivered; and
-- remote_failed_before_acceptance.
+- `remote_accepted`;
+- `local_delivered`; and
+- `remote_failed_before_acceptance`.
 
-Each counter contains payload_bytes and messages.
+Each pair contains payload bytes and messages. Counters freeze in one atomic
+operation before the report is serialized. A callback contributes only if it
+linearizes before that cutoff; later callbacks cannot change canonical values.
+If the platform cannot stop new included traffic and drain already admitted
+callbacks before freezing, F3 reports `partial/counter_gap`, not `reported`.
 
-Remote accepted bytes are measured after payload encoding and optional
-end-to-end encryption, immediately before the normal send. The remote counter
-increments only after send acceptance.
-
-Count task request, task response, task result, job application, and job stream
-data. Exclude control traffic, workspace transfer, log export, unknown classes,
-and resource-summary publication.
-
-Fan-out counts once per destination. Forwarding counts once per sender hop.
-Lower-level framing, TLS, compression, and retransmission are outside the
+Included application classes are task request, task response, task result,
+job application, and attributable job-stream data. Empty polling, control
+traffic, workspace transfer, logs, unknown classes, and resource-report
+traffic are excluded. Remote bytes count only after send acceptance. Fan-out
+counts once per destination and forwarding once per sender hop. Headers,
+framing, TLS, transport compression, and retransmissions are outside the
 metric.
 
-Before serializing participant_final, NVFlare closes all counters in one
-operation. Later callbacks do not change canonical totals.
+## Expected participants and job reduction
 
-## Expected participant list
+The server builds `participants` from authenticated deployment/selection
+state, not incoming reports. At cutoff, each expected participant is exactly
+one of:
 
-The `participants` array contains every client and server expected for the job,
-not just the ones that reported. The server already knows this list and must not
-infer it from received resource reports.
+- `accepted`;
+- `missing`;
+- `invalid`; or
+- `disabled`.
 
-At the report cutoff, every expected participant is one of:
+An accepted entry includes the trusted participant name and role, receipt
+time, and the validated terminal `resource_time`, `retained_content`, and `f3`
+objects. Workspace-filesystem capacity remains only in the archived
+participant report. A retry with identical bytes is idempotent; different
+bytes cannot replace the first accepted report. The server compares the exact
+accepted bytes directly; the accepted summary row does not add a receipt token.
 
-- accepted;
-- missing;
-- invalid; or
-- disabled.
-
-Only accepted reports contribute numeric values. Missing or invalid reports
-make affected job totals partial.
-
-Visible workspace-filesystem capacity is not a job total. It remains only in
-each accepted participant report archived beside the reconciled summary.
-
-An accepted report can still contain partial measurements. In the canonical
-example, `site-2` has one period without a final resource observation, a gap,
-and a later complete period. The gap contributes no compute time. This records
-an interruption and later resumption of measurement; it does not identify a
-network disconnect, process architecture, or resource-release event.
-
-A retry with identical bytes is accepted as the same report. Different bytes
-for an already accepted participant are rejected.
+Job `totals` contain only `resource_time`, `retained_content`, and the primary
+F3 `remote_accepted` pair. The server adds numeric contributions from accepted
+reports and derives aggregate status from expected-participant coverage and
+typed status. It never creates a workspace-capacity total. Missing data is not
+zero.
 
 ## Server files
 
-The stored tree is:
+The server writes:
 
 ~~~text
 resource_stats/
+  participants/<participant_name>.json
   resource_summary.json
-  manifest.json
-  participants/
-    <participant_key>.json
 ~~~
 
-Current NVFlare archives this tree inside the job's existing `workspace`
-component. Its fixed ZIP member names are:
+The server atomically writes each accepted participant file and then writes
+`resource_summary.json` last in the live run directory. That summary is the
+publication marker. Normal completion archives this directory inside the
+existing job `WORKSPACE` component; archive member order is not contractual.
+There is no `RESOURCE_STATS` component or other query copy.
+
+The CLI asks the authenticated server to read fixed members from that archived
+workspace. Callers cannot select arbitrary paths. The reader first validates
+the summary, derives the exact participant filenames from its accepted
+`participant_name` rows, and rejects missing or extra files in the
+`resource_stats/` namespace. It also checks duplicate ZIP members, size bounds,
+strict JSON, record kinds, job and participant identity, and copied
+participant values before returning data. This schema/identity/value
+reconciliation is semantic validation, not signing.
+
+## Job and study CLI
+
+One-job queries use:
 
 ~~~text
-resource_stats/resource_summary.json
-resource_stats/manifest.json
-resource_stats/participants/<participant_key>.json
+nvflare job resources --job JOB_ID
+nvflare job resources --job JOB_ID --study NAME
+nvflare job resources --job JOB_ID --study NAME --site SITE_NAME
 ~~~
 
-The manifest contains the SHA-256 digest of `resource_summary.json` and every
-accepted participant file. A server-side reader checks the digest before
-returning a record. It reads only these fixed names, bounds each returned
-member, rejects duplicate names, and never extracts an arbitrary archive path.
+`--job` alone reads the job from the `default` study. Combining `--job` and
+`--study` reads one job from the named study, which supplies the existing
+authorization/selection context. `--site` requires `--job`.
 
-There is no second resource-statistics component. Queries use the existing
-workspace archive and therefore inherit the job's existing authorization,
-retention, and deletion behavior.
+The command does not search across studies. NVFlare binds job visibility to
+the authenticated session's study, so a job in another study intentionally
+appears not found, matching the other job commands.
 
-## Large numbers
+An on-demand study rollup uses:
 
-Canonical numeric quantities are strings.
+~~~text
+nvflare job resources --study NAME
+nvflare job resources --study NAME --format json
+~~~
 
-Integer quantities are unsigned decimal strings. Fractional quantities are
-plain decimal strings with at most nine fractional digits. Exponents, NaN, and
-Infinity are rejected.
+`--study` without `--job` selects all retained jobs in the named study. The
+bare `nvflare job resources` command shows help.
 
-Strings preserve values such as byte-seconds that are larger than JavaScript's
-safe integer range.
+For a study query, the server authorizes the active study and materializes job
+IDs and statuses from one scan of matching jobs still retained by the normal
+job store. It keeps that list fixed while reading archives and classifies each
+row as:
+
+- `included`: terminal job with a valid resource summary;
+- `unavailable`: terminal job whose valid resource summary cannot be read; or
+- `nonterminal`: still running or otherwise not terminal, and excluded from
+  additive totals.
+
+The v1 response reuses the existing job-CLI terminal predicate: statuses
+beginning `FINISHED:`, plus retained legacy values `FINISHED_OK`,
+`FINISHED_EXCEPTION`, `ABORTED`, `ABANDONED`, and `FAILED`. It keeps the
+bounded status read during the one scan even if the job changes state while
+archives are being read.
+
+The response keeps coverage counts and per-job state so missing summaries are
+not mistaken for zero. It adds only resource time, retained-content bytes, and
+the primary F3 `remote_accepted` pair. Workspace-filesystem capacity is never
+included. Only `included` rows contribute numbers; any unavailable or
+nonterminal row makes an otherwise numeric aggregate partial. The response is
+not stored, does not include jobs already removed by retention, and is not a
+permanent audit, billing, or historical record.
 
 ## Privacy
 
-Never store:
+Allowed content is restricted to authenticated product identity, normalized
+hardware display metadata, the fixed summary-derived archive namespace,
+numeric facts, statuses, and issue codes. Optional CPU/GPU model metadata may
+be omitted without changing numeric status. This feature adds no privacy or
+publication setting.
 
-- host names or network addresses;
-- process IDs;
-- GPU UUIDs or PCI addresses;
-- raw CUDA masks;
-- raw cpuinfo, CPU flags, or topology;
-- hardware serial numbers;
-- absolute workspace paths; or
-- raw command output or exception text.
-
-Normalized CPU and GPU models are optional and may be omitted. This feature
-does not add a model-publication setting. Omission does not change a valid
-numeric status.
-
-## Validation
-
-Run:
-
-~~~bash
-python3 -m unittest discover \
-  -s research/runtime_resource_proxy_prototype/tests \
-  -p 'test_*.py'
-~~~
-
-The Python validator checks relationships that JSON Schema cannot express
-cleanly, including:
-
-- CPU selector reconciliation;
-- time ordering;
-- non-overlapping periods for one measurement-scope key;
-- final/start stability;
-- exact totals;
-- expected participant status;
-- manifest hashes; and
-- privacy restrictions.
-
-Regenerate examples with:
-
-~~~bash
-python3 research/runtime_resource_proxy_prototype/schema/build_review_artifacts.py
-~~~
+Forbidden content includes environment/argument dumps, raw CUDA masks, GPU
+UUID/PCI identity, CPU serials/flags/topology, host/IP/PID/container/pod/
+scheduler identity, absolute cgroup/workspace paths, credentials, tokens,
+message contents, raw exceptions, and tracebacks.

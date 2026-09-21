@@ -12,14 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import hashlib
 import json
 import sys
 import threading
 import unittest
 from pathlib import Path
 from typing import Any, Mapping
-
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -31,6 +29,7 @@ from terminal_report_transport import (  # noqa: E402
     RESOURCE_REPORT_DUPLICATE,
     RESOURCE_REPORT_INVALID,
     RESOURCE_REPORT_NOT_PROVIDED,
+    RESOURCE_REPORT_SERVER_ERROR,
     RESOURCE_REPORT_TOO_LATE,
     TERMINAL_OUTCOME_ACCEPTED,
     TERMINAL_OUTCOME_DUPLICATE,
@@ -41,30 +40,40 @@ from terminal_report_transport import (  # noqa: E402
     build_terminal_outcome_envelope,
 )
 
-
 JOB_ID = "job-20260909-001"
-PARTICIPANT_KEY = "sha256-" + "a" * 64
-OTHER_PARTICIPANT_KEY = "sha256-" + "b" * 64
-ENVIRONMENT_KEY = "sha256-" + "c" * 64
-OTHER_ENVIRONMENT_KEY = "sha256-" + "d" * 64
+PARTICIPANT_NAME = "site-1"
+OTHER_PARTICIPANT_NAME = "site-2"
 
 
 def summary_bytes(
     *,
     job_id: str = JOB_ID,
-    participant_key: str = PARTICIPANT_KEY,
-    revision: int = 1,
-    environment_key: str | None = None,
+    participant_name: str = PARTICIPANT_NAME,
+    reported_at: str = "2026-09-09T14:37:03Z",
 ) -> bytes:
     record = {
         "schema_version": "1.0",
         "kind": "nvflare.resource_stats.participant_summary",
         "job_id": job_id,
-        "participant_key": participant_key,
-        "revision": revision,
+        "participant_name": participant_name,
+        "reported_at": reported_at,
+        "resource_time": {
+            "status": "unavailable",
+            "issues": ["observation_incomplete"],
+        },
+        "workspace_filesystem": {
+            "status": "unavailable",
+            "issues": ["observation_incomplete"],
+        },
+        "retained_content": {
+            "status": "unavailable",
+            "issues": ["observation_incomplete"],
+        },
+        "f3": {
+            "status": "unavailable",
+            "issues": ["observation_incomplete"],
+        },
     }
-    if environment_key is not None:
-        record["attempts"] = [{"environment_key": environment_key}]
     return (
         json.dumps(
             record,
@@ -85,9 +94,9 @@ def semantic_validator(record: Mapping[str, Any], serialized_size: int) -> None:
 
 
 def new_receiver(*, second_participant: bool = False, max_bytes: int = MAX_PARTICIPANT_SUMMARY_BYTES):
-    expected = [ExpectedParticipant(JOB_ID, "site-1", PARTICIPANT_KEY)]
+    expected = [ExpectedParticipant(JOB_ID, "site-1", PARTICIPANT_NAME)]
     if second_participant:
-        expected.append(ExpectedParticipant(JOB_ID, "site-2", OTHER_PARTICIPANT_KEY))
+        expected.append(ExpectedParticipant(JOB_ID, "site-2", OTHER_PARTICIPANT_NAME))
     return TerminalReportReceiver(
         expected,
         semantic_validator,
@@ -96,19 +105,19 @@ def new_receiver(*, second_participant: bool = False, max_bytes: int = MAX_PARTI
 
 
 class TestTerminalReportTransport(unittest.TestCase):
-    def test_builder_matches_the_proposed_envelope_and_missing_report_keeps_outcome(self):
+    def test_builder_matches_common_completion_body_and_missing_report_keeps_outcome(self):
         report = summary_bytes()
         envelope = build_terminal_outcome_envelope(JOB_ID, 0, None, report)
         self.assertEqual({"job_id", "code", "reason", "resource_report"}, set(envelope))
         self.assertEqual(report, envelope["resource_report"]["participant_summary"])
-        self.assertEqual(hashlib.sha256(report).hexdigest(), envelope["resource_report"]["sha256"])
+        self.assertEqual({"participant_summary"}, set(envelope["resource_report"]))
 
         receiver = new_receiver()
         result = receiver.accept(build_terminal_outcome_envelope(JOB_ID, 0, None), "site-1")
         self.assertEqual(TERMINAL_OUTCOME_ACCEPTED, result.terminal_outcome_status)
         self.assertEqual(RESOURCE_REPORT_NOT_PROVIDED, result.resource_report_status)
         self.assertEqual((0, None), receiver.get_terminal_outcome(JOB_ID, "site-1"))
-        self.assertIsNone(receiver.get_accepted_report(JOB_ID, PARTICIPANT_KEY))
+        self.assertIsNone(receiver.get_accepted_report(JOB_ID, PARTICIPANT_NAME))
 
     def test_first_valid_report_wins_and_exact_retry_is_idempotent(self):
         receiver = new_receiver()
@@ -122,28 +131,32 @@ class TestTerminalReportTransport(unittest.TestCase):
         self.assertEqual(RESOURCE_REPORT_ACCEPTED, accepted.resource_report_status)
         self.assertEqual(TERMINAL_OUTCOME_DUPLICATE, duplicate.terminal_outcome_status)
         self.assertEqual(RESOURCE_REPORT_DUPLICATE, duplicate.resource_report_status)
-        stored = receiver.get_accepted_report(JOB_ID, PARTICIPANT_KEY)
+        stored = receiver.get_accepted_report(JOB_ID, PARTICIPANT_NAME)
         self.assertIsNotNone(stored)
         self.assertEqual(report, stored.participant_summary)
-        self.assertEqual(hashlib.sha256(report).hexdigest(), stored.sha256)
 
         conflict = receiver.accept(
-            build_terminal_outcome_envelope(JOB_ID, 0, None, summary_bytes(revision=2)),
+            build_terminal_outcome_envelope(
+                JOB_ID,
+                0,
+                None,
+                summary_bytes(reported_at="2026-09-09T14:37:04Z"),
+            ),
             "site-1",
         )
         self.assertEqual(RESOURCE_REPORT_CONFLICT, conflict.resource_report_status)
-        self.assertEqual(report, receiver.get_accepted_report(JOB_ID, PARTICIPANT_KEY).participant_summary)
+        self.assertEqual(report, receiver.get_accepted_report(JOB_ID, PARTICIPANT_NAME).participant_summary)
 
     def test_invalid_candidate_does_not_reserve_the_slot(self):
         receiver = new_receiver()
         valid = summary_bytes()
         invalid = build_terminal_outcome_envelope(JOB_ID, 0, None, valid)
-        invalid["resource_report"]["sha256"] = "0" * 64
+        invalid["resource_report"]["participant_summary"] = "not bytes"
 
         rejected = receiver.accept(invalid, "site-1")
         self.assertEqual(TERMINAL_OUTCOME_ACCEPTED, rejected.terminal_outcome_status)
         self.assertEqual(RESOURCE_REPORT_INVALID, rejected.resource_report_status)
-        self.assertIsNone(receiver.get_accepted_report(JOB_ID, PARTICIPANT_KEY))
+        self.assertIsNone(receiver.get_accepted_report(JOB_ID, PARTICIPANT_NAME))
 
         accepted = receiver.accept(
             build_terminal_outcome_envelope(JOB_ID, 0, None, valid),
@@ -162,7 +175,7 @@ class TestTerminalReportTransport(unittest.TestCase):
         )
         self.assertEqual(RESOURCE_REPORT_INVALID, rejected.resource_report_status)
         self.assertIn("unsupported schema version", rejected.detail)
-        self.assertIsNone(receiver.get_accepted_report(JOB_ID, PARTICIPANT_KEY))
+        self.assertIsNone(receiver.get_accepted_report(JOB_ID, PARTICIPANT_NAME))
 
         accepted = receiver.accept(
             build_terminal_outcome_envelope(JOB_ID, 0, None, summary_bytes()),
@@ -170,12 +183,30 @@ class TestTerminalReportTransport(unittest.TestCase):
         )
         self.assertEqual(RESOURCE_REPORT_ACCEPTED, accepted.resource_report_status)
 
+    def test_unexpected_validator_fault_is_server_error_not_invalid_client_data(self):
+        def broken_validator(record: Mapping[str, Any], serialized_size: int) -> None:
+            raise RuntimeError("database unavailable")
+
+        receiver = TerminalReportReceiver(
+            [ExpectedParticipant(JOB_ID, "site-1", PARTICIPANT_NAME)],
+            broken_validator,
+        )
+        result = receiver.accept(
+            build_terminal_outcome_envelope(JOB_ID, 0, None, summary_bytes()),
+            "site-1",
+        )
+
+        self.assertEqual(TERMINAL_OUTCOME_ACCEPTED, result.terminal_outcome_status)
+        self.assertEqual(RESOURCE_REPORT_SERVER_ERROR, result.resource_report_status)
+        self.assertEqual("server could not validate the resource report", result.detail)
+        self.assertIsNone(receiver.get_accepted_report(JOB_ID, PARTICIPANT_NAME))
+
     def test_duplicate_keys_and_trusted_identity_mismatch_are_invalid(self):
         duplicate_key_report = (
             '{"schema_version":"1.0",'
             '"kind":"nvflare.resource_stats.participant_summary",'
             f'"job_id":"{JOB_ID}","job_id":"{JOB_ID}",'
-            f'"participant_key":"{PARTICIPANT_KEY}"}}\n'
+            f'"participant_name":"{PARTICIPANT_NAME}"}}\n'
         ).encode()
         duplicate_receiver = new_receiver()
         duplicate_result = duplicate_receiver.accept(
@@ -184,7 +215,16 @@ class TestTerminalReportTransport(unittest.TestCase):
         )
         self.assertEqual(RESOURCE_REPORT_INVALID, duplicate_result.resource_report_status)
         self.assertIn("duplicate JSON object key", duplicate_result.detail)
-        self.assertIsNone(duplicate_receiver.get_accepted_report(JOB_ID, PARTICIPANT_KEY))
+        self.assertIsNone(duplicate_receiver.get_accepted_report(JOB_ID, PARTICIPANT_NAME))
+
+        deeply_nested_receiver = new_receiver()
+        deeply_nested_report = ("[" * 2000 + "0" + "]" * 2000).encode("utf-8")
+        deeply_nested_result = deeply_nested_receiver.accept(
+            build_terminal_outcome_envelope(JOB_ID, 0, None, deeply_nested_report),
+            "site-1",
+        )
+        self.assertEqual(RESOURCE_REPORT_INVALID, deeply_nested_result.resource_report_status)
+        self.assertIsNone(deeply_nested_receiver.get_accepted_report(JOB_ID, PARTICIPANT_NAME))
 
         mismatch_receiver = new_receiver()
         mismatch_result = mismatch_receiver.accept(
@@ -192,48 +232,13 @@ class TestTerminalReportTransport(unittest.TestCase):
                 JOB_ID,
                 0,
                 None,
-                summary_bytes(participant_key=OTHER_PARTICIPANT_KEY),
+                summary_bytes(participant_name=OTHER_PARTICIPANT_NAME),
             ),
             "site-1",
         )
         self.assertEqual(RESOURCE_REPORT_INVALID, mismatch_result.resource_report_status)
-        self.assertIn("participant_key does not match trusted state", mismatch_result.detail)
-        self.assertIsNone(mismatch_receiver.get_accepted_report(JOB_ID, PARTICIPANT_KEY))
-
-    def test_environment_key_must_match_server_issued_context(self):
-        receiver = TerminalReportReceiver(
-            [
-                ExpectedParticipant(
-                    JOB_ID,
-                    "site-1",
-                    PARTICIPANT_KEY,
-                    allowed_environment_keys=(ENVIRONMENT_KEY,),
-                )
-            ],
-            semantic_validator,
-        )
-        rejected = receiver.accept(
-            build_terminal_outcome_envelope(
-                JOB_ID,
-                0,
-                None,
-                summary_bytes(environment_key=OTHER_ENVIRONMENT_KEY),
-            ),
-            "site-1",
-        )
-        self.assertEqual(RESOURCE_REPORT_INVALID, rejected.resource_report_status)
-        self.assertIn("environment_key does not match trusted state", rejected.detail)
-
-        accepted = receiver.accept(
-            build_terminal_outcome_envelope(
-                JOB_ID,
-                0,
-                None,
-                summary_bytes(environment_key=ENVIRONMENT_KEY),
-            ),
-            "site-1",
-        )
-        self.assertEqual(RESOURCE_REPORT_ACCEPTED, accepted.resource_report_status)
+        self.assertIn("participant_name does not match trusted state", mismatch_result.detail)
+        self.assertIsNone(mismatch_receiver.get_accepted_report(JOB_ID, PARTICIPANT_NAME))
 
     def test_size_is_enforced_before_json_decode_or_semantic_validation(self):
         validator_calls = 0
@@ -243,7 +248,7 @@ class TestTerminalReportTransport(unittest.TestCase):
             validator_calls += 1
 
         receiver = TerminalReportReceiver(
-            [ExpectedParticipant(JOB_ID, "site-1", PARTICIPANT_KEY)],
+            [ExpectedParticipant(JOB_ID, "site-1", PARTICIPANT_NAME)],
             counting_validator,
             max_participant_summary_bytes=32,
         )
@@ -252,7 +257,7 @@ class TestTerminalReportTransport(unittest.TestCase):
             build_terminal_outcome_envelope(JOB_ID, 0, None, oversized),
             "site-1",
         )
-        self.assertEqual(64 * 1024 * 1024, MAX_PARTICIPANT_SUMMARY_BYTES)
+        self.assertEqual(1 * 1024 * 1024, MAX_PARTICIPANT_SUMMARY_BYTES)
         self.assertEqual(RESOURCE_REPORT_INVALID, result.resource_report_status)
         self.assertIn("32-byte limit", result.detail)
         self.assertEqual(0, validator_calls)
@@ -267,7 +272,7 @@ class TestTerminalReportTransport(unittest.TestCase):
         self.assertEqual(TERMINAL_OUTCOME_ACCEPTED, result.terminal_outcome_status)
         self.assertEqual(RESOURCE_REPORT_INVALID, result.resource_report_status)
         self.assertIn("requires only", result.detail)
-        self.assertIsNone(receiver.get_accepted_report(JOB_ID, PARTICIPANT_KEY))
+        self.assertIsNone(receiver.get_accepted_report(JOB_ID, PARTICIPANT_NAME))
 
     def test_cutoff_allows_only_an_already_accepted_exact_retry(self):
         receiver = new_receiver(second_participant=True)
@@ -281,7 +286,7 @@ class TestTerminalReportTransport(unittest.TestCase):
                 JOB_ID,
                 0,
                 None,
-                summary_bytes(participant_key=OTHER_PARTICIPANT_KEY),
+                summary_bytes(participant_name=OTHER_PARTICIPANT_NAME),
             ),
             "site-2",
         )
@@ -290,7 +295,7 @@ class TestTerminalReportTransport(unittest.TestCase):
         self.assertEqual(TERMINAL_OUTCOME_DUPLICATE, duplicate.terminal_outcome_status)
         self.assertEqual(RESOURCE_REPORT_TOO_LATE, late.resource_report_status)
         self.assertEqual(TERMINAL_OUTCOME_TOO_LATE, late.terminal_outcome_status)
-        self.assertIsNone(receiver.get_accepted_report(JOB_ID, OTHER_PARTICIPANT_KEY))
+        self.assertIsNone(receiver.get_accepted_report(JOB_ID, OTHER_PARTICIPANT_NAME))
 
     def test_cutoff_wins_atomically_over_a_candidate_still_in_validation(self):
         validation_started = threading.Event()
@@ -303,7 +308,7 @@ class TestTerminalReportTransport(unittest.TestCase):
                 raise RuntimeError("test did not release validation")
 
         receiver = TerminalReportReceiver(
-            [ExpectedParticipant(JOB_ID, "site-1", PARTICIPANT_KEY)],
+            [ExpectedParticipant(JOB_ID, "site-1", PARTICIPANT_NAME)],
             blocking_validator,
         )
         envelope = build_terminal_outcome_envelope(JOB_ID, 0, None, summary_bytes())
@@ -324,9 +329,9 @@ class TestTerminalReportTransport(unittest.TestCase):
         self.assertEqual(1, len(result_holder))
         self.assertEqual(RESOURCE_REPORT_TOO_LATE, result_holder[0].resource_report_status)
         self.assertEqual(TERMINAL_OUTCOME_TOO_LATE, result_holder[0].terminal_outcome_status)
-        self.assertIsNone(receiver.get_accepted_report(JOB_ID, PARTICIPANT_KEY))
+        self.assertIsNone(receiver.get_accepted_report(JOB_ID, PARTICIPANT_NAME))
 
-    def test_authenticated_sender_must_match_frozen_expected_state(self):
+    def test_authenticated_sender_must_match_server_expected_participants(self):
         receiver = new_receiver()
         envelope = build_terminal_outcome_envelope(JOB_ID, 0, None, summary_bytes())
 
@@ -334,7 +339,7 @@ class TestTerminalReportTransport(unittest.TestCase):
             receiver.accept(envelope, "site-that-was-not-selected")
 
         self.assertIsNone(receiver.get_terminal_outcome(JOB_ID, "site-1"))
-        self.assertIsNone(receiver.get_accepted_report(JOB_ID, PARTICIPANT_KEY))
+        self.assertIsNone(receiver.get_accepted_report(JOB_ID, PARTICIPANT_NAME))
 
 
 if __name__ == "__main__":

@@ -1,0 +1,3 @@
+trying to connect to the server
+Connecting to FLARE ...
+job_id: 534b4073-9f7b-41ef-99fd-c4a0abd4229b

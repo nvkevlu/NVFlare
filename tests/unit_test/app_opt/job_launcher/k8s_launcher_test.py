@@ -72,6 +72,7 @@ from nvflare.app_opt.job_launcher.k8s_launcher import (
 )
 from nvflare.app_opt.job_launcher.workspace_cell_transfer import ENV_WORKSPACE_OWNER_FQCN, ENV_WORKSPACE_TRANSFER_TOKEN
 from nvflare.fuel.common.exit_codes import ProcessExitCode
+from nvflare.utils.job_launcher_utils import JOB_PROCESS_BOOTSTRAP_MODULE
 
 _DEFAULT_DATA_VOLUME_NAME = study_dataset_volume_name("study-a", "training")
 
@@ -307,6 +308,11 @@ class TestK8sJobHandle:
         with pytest.raises(ValueError, match="command"):
             K8sJobHandle("job-1", _make_api_instance(), cfg)
 
+    def test_init_rejects_arbitrary_job_process_module(self):
+        cfg = _make_job_config(command="job.custom")
+        with pytest.raises(ValueError, match="fixed NVFlare client worker or server runner"):
+            K8sJobHandle("job-1", _make_api_instance(), cfg)
+
     def test_stuck_count_starts_at_zero(self):
         cfg = _make_job_config()
         handle = K8sJobHandle("job-1", _make_api_instance(), cfg, timeout=30)
@@ -385,7 +391,7 @@ class TestK8sJobHandle:
         assert containers[1]["name"] == "nvflare_job"
         assert containers[1]["image"] == "nvflare/nvflare:test"
         assert containers[1]["command"] == ["/usr/local/bin/python"]
-        assert "nvflare.private.fed.app.client.worker_process" in containers[1]["args"]
+        assert containers[1]["args"][:5] == ["-I", "-u", "-m", JOB_PROCESS_BOOTSTRAP_MODULE, "client"]
 
     def test_manifest_restart_policy(self):
         cfg = _make_job_config()
@@ -420,9 +426,10 @@ class TestK8sJobHandle:
         cfg = _make_job_config()
         handle = K8sJobHandle("job-1", _make_api_instance(), cfg)
         args = handle.get_manifest()["spec"]["containers"][0]["args"]
+        assert "-I" in args
         assert "-u" in args
         assert "-m" in args
-        assert "nvflare.private.fed.app.client.worker_process" in args
+        assert args[:5] == ["-I", "-u", "-m", JOB_PROCESS_BOOTSTRAP_MODULE, "client"]
 
     def test_manifest_args_contain_module_args(self):
         cfg = _make_job_config()
@@ -512,11 +519,11 @@ class TestK8sJobHandle:
         env_map = {e["name"]: e["value"] for e in container["env"]}
         assert isinstance(env_map["PYTHONPATH"], str)
 
-    def test_manifest_no_env_when_app_custom_folder_empty_string(self):
+    def test_manifest_omits_empty_pythonpath_and_preserves_image_env(self):
         cfg = _make_job_config(env={"PYTHONPATH": ""})
         handle = K8sJobHandle("job-1", _make_api_instance(), cfg)
         container = handle.get_manifest()["spec"]["containers"][0]
-        assert "env" not in container
+        assert "PYTHONPATH" not in {e["name"]: e["value"] for e in container.get("env", [])}
 
     def test_manifest_no_env_when_no_env_key(self):
         cfg = _make_job_config()
@@ -2124,7 +2131,8 @@ spec:
             assert job_container["image"] == "repo/nvflare-job:v2"
             assert job_container["command"] == ["/usr/bin/python3"]
             assert job_container["imagePullPolicy"] == "IfNotPresent"
-            assert _WORKER_MODULE in job_container["args"]
+            assert job_container["args"][:5] == ["-I", "-u", "-m", JOB_PROCESS_BOOTSTRAP_MODULE, "client"]
+            assert _WORKER_MODULE not in job_container["args"]
             assert manifest["spec"]["containers"][1] == {"name": "sidecar", "image": "sidecar:v1"}
 
             mount_map = {m["name"]: m for m in job_container["volumeMounts"]}
@@ -2718,9 +2726,11 @@ spec:
             launcher.launch_job(_make_launch_job_meta(), _make_launch_fl_ctx())
             manifest = mock_api.create_namespaced_pod.call_args.kwargs["body"]
             args = manifest["spec"]["containers"][0]["args"]
+            assert "-I" in args
             assert "-u" in args
             assert "-m" in args
-            assert _WORKER_MODULE in args
+            assert args[:5] == ["-I", "-u", "-m", JOB_PROCESS_BOOTSTRAP_MODULE, "client"]
+            assert _WORKER_MODULE not in args
         finally:
             _exit_patches(patches)
 
@@ -2791,7 +2801,7 @@ spec:
                 "mountPath": f"{workspace_mount_path}/startup",
                 "readOnly": True,
             }
-            assert env_map["PYTHONPATH"] == f"{workspace_mount_path}/{_JOB_UUID}/app_site-1/custom"
+            assert "PYTHONPATH" not in env_map
             assert container["args"][container["args"].index("-w") + 1] == workspace_mount_path
         finally:
             _exit_patches(patches)
@@ -3236,7 +3246,7 @@ spec:
 
     # -- pod manifest: PYTHONPATH env var -------------------------------------
 
-    def test_pod_manifest_pythonpath_env_set_when_custom_folder_present(self):
+    def test_pod_manifest_does_not_override_image_pythonpath(self):
         patches = _make_k8s_launcher_patches()
         launcher, mock_api = self._setup(patches)
         self._prime_running(mock_api)
@@ -3246,24 +3256,28 @@ spec:
             launcher.launch_job(_make_launch_job_meta(), fl_ctx)
             manifest = mock_api.create_namespaced_pod.call_args.kwargs["body"]
             container = manifest["spec"]["containers"][0]
-            assert "env" in container
             env_map = {e["name"]: e.get("value") for e in container["env"]}
-            assert env_map["PYTHONPATH"] == f"{WORKSPACE_MOUNT_PATH}/{_JOB_UUID}/app_site-1/custom"
+            assert "PYTHONPATH" not in env_map
         finally:
             _exit_patches(patches)
 
-    def test_pod_manifest_rejects_custom_folder_outside_workspace(self):
+    def test_pod_manifest_does_not_expose_custom_folder_before_snapshot(self):
         patches = _make_k8s_launcher_patches()
         launcher, _mock_api = self._setup(patches)
         self._prime_running(_mock_api)
         try:
-            fl_ctx = _make_launch_fl_ctx(app_custom_folder=f"/tmp/fake/workspace/{_JOB_UUID}/app_site-1/custom")
-            with pytest.raises(RuntimeError, match="custom folder .* is not under workspace"):
-                launcher.launch_job(_make_launch_job_meta(), fl_ctx)
+            custom_folder = f"/tmp/fake/workspace/{_JOB_UUID}/app_site-1/custom"
+            fl_ctx = _make_launch_fl_ctx(app_custom_folder=custom_folder)
+            launcher.launch_job(_make_launch_job_meta(), fl_ctx)
+            manifest = _mock_api.create_namespaced_pod.call_args.kwargs["body"]
+            container = manifest["spec"]["containers"][0]
+            env_map = {e["name"]: e.get("value") for e in container["env"]}
+            assert "PYTHONPATH" not in env_map
+            assert custom_folder not in str(container["env"])
         finally:
             _exit_patches(patches)
 
-    def test_pod_manifest_no_pythonpath_when_no_custom_folder(self):
+    def test_pod_manifest_omits_pythonpath_when_no_custom_folder(self):
         patches = _make_k8s_launcher_patches()
         launcher, mock_api = self._setup(patches)
         self._prime_running(mock_api)

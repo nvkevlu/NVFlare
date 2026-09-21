@@ -1,0 +1,38 @@
+{
+  "schema_version": "1",
+  "status": "metrics_reported",
+  "final_round": 2,
+  "final_aggregated_metrics": [
+    {
+      "name": "accuracy",
+      "value": 65.0
+    }
+  ],
+  "round_metrics_file": "round_metrics.jsonl",
+  "notes": [
+    "Aggregated metrics are weighted averages of client-reported metric values.",
+    "Nonlinear metrics are not recomputed from pooled predictions."
+  ],
+  "job_name": "hello-pt",
+  "metric_source": "client_reported_flmodel_metrics",
+  "key_metric": {
+    "name": "accuracy",
+    "mode": "max",
+    "mode_source": "IntimeModelSelector.negate_key_metric"
+  },
+  "best_round": 2,
+  "best_metrics": [
+    {
+      "name": "accuracy",
+      "value": 65.0
+    }
+  ],
+  "best_metric_source": "IntimeModelSelector",
+  "best_metric_detail_source": "initial_metrics",
+  "aggregation": {
+    "method": "weighted_average",
+    "weight_key": "effective_fedavg_metric_weight",
+    "metric_policy": "finite_numeric_metrics_only_per_key_denominator",
+    "weight_formula": "aggregation_weight * NUM_STEPS_CURRENT_ROUND"
+  }
+}

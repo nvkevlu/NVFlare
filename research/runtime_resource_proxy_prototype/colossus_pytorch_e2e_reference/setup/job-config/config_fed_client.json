@@ -1,0 +1,32 @@
+{
+    "format_version": 2,
+    "executors": [
+        {
+            "tasks": [
+                "*"
+            ],
+            "executor": {
+                "path": "nvflare.app_common.executors.client_api_executor.ClientAPIExecutor",
+                "args": {
+                    "execution_mode": "in_process",
+                    "task_script_path": "client.py",
+                    "task_script_args": "--batch_size 64 --epochs 4 --num_workers 2",
+                    "params_exchange_format": "pytorch"
+                }
+            }
+        }
+    ],
+    "components": [
+        {
+            "id": "event_to_fed",
+            "path": "nvflare.app_common.widgets.convert_to_fed_event.ConvertToFedEvent",
+            "args": {
+                "events_to_convert": [
+                    "analytix_log_stats"
+                ]
+            }
+        }
+    ],
+    "task_data_filters": [],
+    "task_result_filters": []
+}

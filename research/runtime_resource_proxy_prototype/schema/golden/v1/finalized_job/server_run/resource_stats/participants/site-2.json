@@ -1,0 +1,61 @@
+{
+  "schema_version": "1.0",
+  "kind": "nvflare.resource_stats.participant_summary",
+  "job_id": "job-20260909-001",
+  "participant_name": "site-2",
+  "reported_at": "2026-09-09T14:37:03Z",
+  "resource_time": {
+    "status": "partial",
+    "issues": [
+      "observation_incomplete"
+    ],
+    "measured_seconds": "1923",
+    "cpu": {
+      "groups": [
+        {
+          "unit_seconds": "56736",
+          "model": "Intel Xeon Platinum 8480+",
+          "architecture": "x86_64"
+        }
+      ]
+    },
+    "memory": {
+      "byte_seconds": "375826818269184"
+    },
+    "gpu": {
+      "groups": [
+        {
+          "kind": "full_gpu",
+          "instance_seconds": "7092",
+          "model": "NVIDIA A100 80GB",
+          "memory_bytes": "85899345920"
+        }
+      ]
+    }
+  },
+  "workspace_filesystem": {
+    "status": "reported",
+    "capacity_bytes": "2199023255552"
+  },
+  "retained_content": {
+    "status": "unavailable",
+    "issues": [
+      "not_bound"
+    ]
+  },
+  "f3": {
+    "status": "reported",
+    "remote_accepted": {
+      "payload_bytes": "147700336640",
+      "messages": "5"
+    },
+    "local_delivered": {
+      "payload_bytes": "0",
+      "messages": "0"
+    },
+    "remote_failed_before_acceptance": {
+      "payload_bytes": "0",
+      "messages": "0"
+    }
+  }
+}

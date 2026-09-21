@@ -205,6 +205,16 @@ class SessionSpec(ABC):
         """
         pass
 
+    def get_job_resources(self, job_id: str, site: str = None) -> dict:
+        """Return the finalized resource summary and optional participant detail for one job."""
+
+        raise NotImplementedError
+
+    def get_study_resources(self) -> dict:
+        """Return the transient resource rollup for the session's active study."""
+
+        raise NotImplementedError
+
     @abstractmethod
     def list_jobs(
         self,

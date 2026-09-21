@@ -33,6 +33,7 @@ from nvflare.private.defs import AUTH_CLIENT_NAME_FOR_SJ, AppFolderConstants
 from nvflare.private.fed.app.fl_conf import FLServerStarterConfiger
 from nvflare.private.fed.app.job_process_cleanup import shutdown_job_process_runtime
 from nvflare.private.fed.app.utils import monitor_parent_process
+from nvflare.private.fed.resource_stats.collector import JobResourceCollector, write_terminal_handoff
 from nvflare.private.fed.server.server_app_runner import ServerAppRunner
 from nvflare.private.fed.server.server_state import HotState
 from nvflare.private.fed.utils.fed_utils import (
@@ -43,7 +44,7 @@ from nvflare.private.fed.utils.fed_utils import (
     set_stats_pool_config_for_job,
 )
 from nvflare.security.logging import secure_format_exception, secure_log_traceback
-from nvflare.utils.job_launcher_utils import refresh_custom_dir_import_path
+from nvflare.utils.job_launcher_utils import activate_job_python_path
 
 
 def main(args):
@@ -65,9 +66,20 @@ def main(args):
     parent_pid = os.getppid()
     stop_event = threading.Event()
     secure_train = kv_list.get("secure_train", False)
-    download_workspace(args, secure_train)
     workspace = Workspace(root_dir=args.workspace, site_name=SiteType.SERVER)
-    refresh_custom_dir_import_path(workspace.get_app_custom_dir(args.job_id))
+    resource_collector = None
+    try:
+        # Launchers keep job custom directories out of PYTHONPATH until this
+        # platform-owned snapshot has completed.
+        resource_collector = JobResourceCollector(
+            workspace.get_run_dir(args.job_id),
+            prior_observation_incomplete=bool(args.snapshot),
+        )
+    except Exception:
+        # Resource reporting is observational and must never change the job outcome.
+        pass
+    download_workspace(args, secure_train)
+    activate_job_python_path((workspace.get_app_custom_dir(args.job_id), workspace.get_site_custom_dir()))
     set_stats_pool_config_for_job(workspace, args.job_id)
 
     server = None
@@ -134,6 +146,18 @@ def main(args):
             cell = getattr(server, "cell", None)
 
             def _archive_results():
+                if resource_collector:
+                    try:
+                        write_terminal_handoff(
+                            workspace.get_run_dir(args.job_id),
+                            resource_collector.finish(),
+                        )
+                    except Exception as e:
+                        if logger:
+                            try:
+                                logger.warning(f"Could not write resource statistics: {secure_format_exception(e)}")
+                            except Exception:
+                                pass
                 err = create_stats_pool_files_for_job(workspace, args.job_id)
                 if err and logger:
                     logger.warning(err)

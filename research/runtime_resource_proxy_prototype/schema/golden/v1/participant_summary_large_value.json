@@ -2,97 +2,48 @@
   "schema_version": "1.0",
   "kind": "nvflare.resource_stats.participant_summary",
   "job_id": "job-large-exactness",
-  "participant_key": "sha256-ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
-  "start": {
-    "observed_at": "2026-09-09T00:00:00Z",
-    "storage": {
-      "status": "reported",
-      "capacity_bytes": "10000000000001"
+  "participant_name": "site-large",
+  "reported_at": "2026-09-09T00:15:01Z",
+  "resource_time": {
+    "status": "reported",
+    "measured_seconds": "901",
+    "cpu": {
+      "groups": [
+        {
+          "unit_seconds": "901",
+          "model": "AMD EPYC 9654",
+          "architecture": "x86_64"
+        }
+      ]
+    },
+    "memory": {
+      "byte_seconds": "9010000000000901"
+    },
+    "gpu": {
+      "groups": []
     }
   },
-  "final": {
-    "observed_at": "2026-09-09T00:15:01Z",
-    "storage": {
-      "status": "reported",
-      "capacity_bytes": "10000000000001"
-    },
-    "retained_content": {
-      "status": "reported",
-      "bytes": "0"
-    },
-    "f3": {
-      "status": "reported",
-      "remote_accepted": {
-        "payload_bytes": "0",
-        "messages": "0"
-      },
-      "local_delivered": {
-        "payload_bytes": "0",
-        "messages": "0"
-      },
-      "remote_failed_before_acceptance": {
-        "payload_bytes": "0",
-        "messages": "0"
-      }
-    }
+  "workspace_filesystem": {
+    "status": "reported",
+    "capacity_bytes": "10000000000001"
   },
-  "attempts": [
-    {
-      "attempt_id": "99999999999999999999999999999999",
-      "environment_key": "sha256-9999999999999999999999999999999999999999999999999999999999999999",
-      "opened_at": "2026-09-09T00:00:00Z",
-      "start": {
-        "capacity": {
-          "cpu": {
-            "status": "reported",
-            "visible_units": "1",
-            "architecture": "x86_64",
-            "evidence": {
-              "online_count": "1"
-            }
-          },
-          "memory": {
-            "status": "reported",
-            "visible_bytes": "10000000000001",
-            "evidence": {
-              "physical_bytes": "10000000000001"
-            }
-          },
-          "gpu": {
-            "status": "reported",
-            "cuda_mask_present": true,
-            "groups": []
-          }
-        }
-      },
-      "final": {
-        "capacity": {
-          "cpu": {
-            "status": "reported",
-            "visible_units": "1",
-            "architecture": "x86_64",
-            "evidence": {
-              "online_count": "1"
-            }
-          },
-          "memory": {
-            "status": "reported",
-            "visible_bytes": "10000000000001",
-            "evidence": {
-              "physical_bytes": "10000000000001"
-            }
-          },
-          "gpu": {
-            "status": "reported",
-            "cuda_mask_present": true,
-            "groups": []
-          }
-        }
-      },
-      "end": {
-        "closed_at": "2026-09-09T00:15:01Z",
-        "reason": "released"
-      }
+  "retained_content": {
+    "status": "reported",
+    "bytes": "0"
+  },
+  "f3": {
+    "status": "reported",
+    "remote_accepted": {
+      "payload_bytes": "0",
+      "messages": "0"
+    },
+    "local_delivered": {
+      "payload_bytes": "0",
+      "messages": "0"
+    },
+    "remote_failed_before_acceptance": {
+      "payload_bytes": "0",
+      "messages": "0"
     }
-  ]
+  }
 }

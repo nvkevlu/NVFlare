@@ -1,49 +1,41 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://nvflare.nvidia.com/schemas/resource_stats/v1/resource_stats.json",
-  "title": "NVFlare typed resource-statistics record v1",
-  "description": "Closed records for per-site observations and finalized job resource statistics.",
+  "title": "NVFlare final resource-statistics record v1",
+  "description": "Closed records for one terminal participant report, a finalized job summary, and a transient study summary.",
   "oneOf": [
-    {"$ref": "#/$defs/attempt_start"},
-    {"$ref": "#/$defs/attempt_final"},
-    {"$ref": "#/$defs/attempt_end"},
-    {"$ref": "#/$defs/participant_start_record"},
-    {"$ref": "#/$defs/participant_final_record"},
     {"$ref": "#/$defs/participant_summary"},
     {"$ref": "#/$defs/resource_summary"},
-    {"$ref": "#/$defs/manifest"}
+    {"$ref": "#/$defs/study_summary"}
   ],
   "x-nvflare-units": {
-    "visible_units": "CPU units",
-    "count": "runtime-enumerated device instances",
-    "capacity_bytes": "bytes",
-    "visible_bytes": "bytes",
+    "measured_seconds": "seconds",
     "unit_seconds": "CPU-unit seconds",
     "instance_seconds": "GPU- or MIG-instance seconds",
     "byte_seconds": "byte-seconds",
+    "capacity_bytes": "bytes",
+    "bytes": "bytes",
     "payload_bytes": "serialized application payload bytes",
     "messages": "messages"
   },
   "x-nvflare-cross-record-invariants": [
-    "reported GPU capacity is emitted only after successful CUDA-runtime enumeration; cuda_mask_present is diagnostic and never count authority",
-    "full GPUs and MIG compute instances remain separate groups; a missing MIG group in a reported inventory means observed zero",
-    "CPU quota_units is exact quota_us/period_us Decimal division conservatively floored to nine fractional digits; CPU visible_units is the minimum of present affinity_count, cpuset_count, and quota_units, or online_count only when none is available",
-    "model and architecture are optional normalized metadata; their absence never changes numeric status",
-    "an attempt is one measurement period and does not imply a process or resource-management architecture",
-    "CPU, memory, and GPU time is attempt-start capacity multiplied by the half-open opened_at-to-closed_at interval; both times use one NVFlare clock, and each product is rounded half-even to nine fractional digits",
-    "attempt start and final contain capacity only; missing final data or numeric capacity change makes the affected participant total partial",
-    "reconfigured means that NVFlare ended a measurement period after observing a capacity change; it does not require or imply another period",
-    "storage.capacity_bytes is an independent point-in-time observation of the total visible capacity of exactly the filesystem containing the existing NVFlare job workspace; other mounted filesystems are not enumerated or summed, and storage is not included in participant or job totals",
-    "the saved-result byte total and F3 counters contribute once per site report",
-    "periods may reuse an environment_key only when they do not overlap",
-    "NVFlare closes all three F3 counters before writing participant_final; later callbacks do not change the totals, and job code cannot exclude summary traffic",
-    "the server gets its expected participant list independently of resource-report arrivals and classifies every member at the cutoff",
-    "job totals are deterministic sums of accepted site totals; participant status and resource status explain partial or unavailable totals",
-    "manifest digests cover the exact stored server bytes"
+    "each participant emits one terminal participant_summary; v1 has no separate start, final, attempt, or environment records",
+    "resource_time is the reporter's final measured total; the server validates and aggregates it but does not reconstruct it from timestamps or point-in-time capacity",
+    "resource_time has one status covering CPU, memory, and GPU together",
+    "a reported resource_time contains measured_seconds and all three numeric resources; a partial resource_time contains issues and at least one numeric member; an unavailable resource_time contains issues and no numeric members",
+    "raw CUDA_VISIBLE_DEVICES text is never numeric authority; GPU instance-seconds require successful CUDA-runtime enumeration by the collector",
+    "full GPUs and MIG compute instances remain separate groups; an empty groups array means observed zero",
+    "workspace_filesystem is a point-in-time observation of the total visible capacity of exactly the filesystem containing the existing NVFlare job workspace; it is not usage, allocation, billable storage, or storage owned by the job",
+    "accepted participant entries copy resource_time, retained_content, and f3 exactly from the accepted participant_summary",
+    "the server obtains its expected participant list independently of report arrival and classifies every participant at the cutoff",
+    "job totals are deterministic sums of accepted terminal reports; resource_time is partial whenever any expected participant report or resource_time is incomplete",
+    "a study_summary is a transient view; job_status is the underlying NVFlare lifecycle value while resource_data says whether that job contributes totals",
+    "study totals are deterministic sums of rows whose resource_data is included",
+    "a finalized archive contains resource_summary.json and one participant record named by participant_name for every accepted participant; resource_summary.json is written last"
   ],
   "x-nvflare-privacy": [
-    "hardware models are optional and may be omitted; this feature introduces no model-publication setting",
-    "CPU model is emitted only when all affinity-visible CPUs normalize to one model",
+    "hardware models are optional and may be omitted",
+    "CPU groups are separated when normalized model or architecture labels differ",
     "forbidden: raw cpuinfo, flags, topology, serials, UUIDs, PCI addresses, host identifiers, and raw CUDA mask values"
   ],
   "x-nvflare-deployment-constraints": [
@@ -53,21 +45,8 @@
   ],
   "$defs": {
     "schema_version": {"const": "1.0"},
-    "job_id": {
-      "type": "string",
-      "minLength": 1,
-      "maxLength": 128,
-      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
-    },
-    "participant_id": {
-      "type": "string",
-      "minLength": 1,
-      "maxLength": 128,
-      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$"
-    },
-    "attempt_id": {"type": "string", "pattern": "^[0-9a-f]{32}$"},
-    "hash_key": {"type": "string", "pattern": "^sha256-[0-9a-f]{64}$"},
-    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "job_id": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"},
+    "participant_name": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9_-][A-Za-z0-9_.-]{0,127}$"},
     "timestamp": {
       "type": "string",
       "format": "date-time",
@@ -76,14 +55,8 @@
     },
     "unsigned": {"type": "string", "pattern": "^(?:0|[1-9][0-9]{0,38})$"},
     "positive_unsigned": {"type": "string", "pattern": "^[1-9][0-9]{0,38}$"},
-    "decimal": {
-      "type": "string",
-      "pattern": "^(?:0|[1-9][0-9]{0,38})(?:\\.[0-9]{0,8}[1-9])?$"
-    },
-    "positive_decimal": {
-      "type": "string",
-      "pattern": "^(?:0\\.[0-9]{0,8}[1-9]|[1-9][0-9]{0,38}(?:\\.[0-9]{0,8}[1-9])?)$"
-    },
+    "decimal": {"type": "string", "pattern": "^(?:0|[1-9][0-9]{0,38})(?:\\.[0-9]{0,8}[1-9])?$"},
+    "positive_decimal": {"type": "string", "pattern": "^(?:0\\.[0-9]{0,8}[1-9]|[1-9][0-9]{0,38}(?:\\.[0-9]{0,8}[1-9])?)$"},
     "model": {
       "type": "string",
       "minLength": 1,
@@ -95,253 +68,173 @@
         {"not": {"pattern": "[Ss][Ee][Rr][Ii][Aa][Ll]|[Uu][Uu][Ii][Dd]|[Cc][Uu][Dd][Aa]_[Vv][Ii][Ss][Ii][Bb][Ll][Ee]_[Dd][Ee][Vv][Ii][Cc][Ee][Ss]|[Pp][Cc][Ii]_[Bb][Uu][Ss]_[Ii][Dd]|[Hh][Oo][Ss][Tt][Nn][Aa][Mm][Ee]"}}
       ]
     },
-    "architecture": {
+    "architecture": {"type": "string", "minLength": 1, "maxLength": 32, "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,31}$"},
+    "mig_profile": {"type": "string", "maxLength": 32, "pattern": "^[1-9][0-9]*g\\.[1-9][0-9]*gb(?:\\+me)?$"},
+    "study_name": {
       "type": "string",
       "minLength": 1,
-      "maxLength": 32,
-      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,31}$"
+      "maxLength": 63,
+      "pattern": "^[a-z0-9](?:[a-z0-9_-]{0,61}[a-z0-9])?$"
     },
-    "mig_profile": {
+    "job_status": {
       "type": "string",
-      "maxLength": 32,
-      "pattern": "^[1-9][0-9]*g\\.[1-9][0-9]*gb(?:\\+me)?$"
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9 ._:/+-]{0,63}$",
+      "description": "Bounded underlying NVFlare job-lifecycle value; distinct from resource_data."
     },
-    "capacity_unavailable_issue": {
-      "enum": ["attribution_incomplete", "dependency_missing", "observation_incomplete", "unsupported"]
-    },
-    "source_unavailable_issue": {
-      "enum": ["attribution_incomplete", "dependency_missing", "not_bound", "observation_incomplete", "unsupported"]
-    },
+    "capacity_unavailable_issue": {"enum": ["attribution_incomplete", "dependency_missing", "observation_incomplete", "unsupported"]},
+    "source_unavailable_issue": {"enum": ["attribution_incomplete", "dependency_missing", "not_bound", "observation_incomplete", "unsupported"]},
     "source_error_issue": {"enum": ["malformed_source", "permission_denied"]},
     "partial_issue": {"enum": ["attribution_incomplete", "counter_gap", "observation_incomplete"]},
+    "resource_time_partial_issue": {"enum": ["attribution_incomplete", "observation_incomplete"]},
+    "resource_time_unavailable_issue": {
+      "enum": ["attribution_incomplete", "dependency_missing", "malformed_source", "not_bound", "observation_incomplete", "permission_denied", "unsupported"]
+    },
     "capacity_unavailable": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["status", "issues"],
+      "type": "object", "additionalProperties": false, "required": ["status", "issues"],
       "properties": {
         "status": {"const": "unavailable"},
-        "issues": {
-          "type": "array", "minItems": 1, "maxItems": 4, "uniqueItems": true,
-          "items": {"$ref": "#/$defs/capacity_unavailable_issue"}
-        }
-      }
-    },
-    "capacity_error": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["status", "issues"],
-      "properties": {
-        "status": {"const": "error"},
-        "issues": {
-          "type": "array", "minItems": 1, "maxItems": 4, "uniqueItems": true,
-          "items": {"$ref": "#/$defs/source_error_issue"}
-        }
-      }
-    },
-    "cpu_evidence": {
-      "oneOf": [
-        {
-          "type": "object",
-          "additionalProperties": false,
-          "minProperties": 1,
-          "properties": {
-            "affinity_count": {"$ref": "#/$defs/positive_unsigned"},
-            "cpuset_count": {"$ref": "#/$defs/positive_unsigned"},
-            "quota_units": {
-              "$ref": "#/$defs/positive_decimal",
-              "description": "Exact quota_us/period_us Decimal ratio, conservatively floored to nine fractional digits."
-            }
-          }
-        },
-        {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["online_count"],
-          "properties": {"online_count": {"$ref": "#/$defs/positive_unsigned"}}
-        }
-      ]
-    },
-    "cpu_reported": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["status", "visible_units", "evidence"],
-      "properties": {
-        "status": {"const": "reported"},
-        "visible_units": {"$ref": "#/$defs/positive_decimal"},
-        "model": {"$ref": "#/$defs/model"},
-        "architecture": {"$ref": "#/$defs/architecture"},
-        "evidence": {"$ref": "#/$defs/cpu_evidence"}
-      }
-    },
-    "cpu": {
-      "oneOf": [
-        {"$ref": "#/$defs/cpu_reported"},
-        {"$ref": "#/$defs/capacity_unavailable"},
-        {"$ref": "#/$defs/capacity_error"}
-      ]
-    },
-    "memory_evidence": {
-      "type": "object",
-      "additionalProperties": false,
-      "minProperties": 1,
-      "properties": {
-        "physical_bytes": {"$ref": "#/$defs/positive_unsigned"},
-        "cgroup_limit_bytes": {"$ref": "#/$defs/positive_unsigned"}
-      }
-    },
-    "memory_reported": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["status", "visible_bytes", "evidence"],
-      "properties": {
-        "status": {"const": "reported"},
-        "visible_bytes": {"$ref": "#/$defs/positive_unsigned"},
-        "evidence": {"$ref": "#/$defs/memory_evidence"}
-      }
-    },
-    "memory": {
-      "oneOf": [
-        {"$ref": "#/$defs/memory_reported"},
-        {"$ref": "#/$defs/capacity_unavailable"},
-        {"$ref": "#/$defs/capacity_error"}
-      ]
-    },
-    "storage_reported": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["status", "capacity_bytes"],
-      "properties": {
-        "status": {"const": "reported"},
-        "capacity_bytes": {
-          "$ref": "#/$defs/positive_unsigned",
-          "description": "Point-in-time total visible capacity of the filesystem containing the existing NVFlare job workspace; not usage, allocation, billable storage, or storage owned by the job."
-        }
-      }
-    },
-    "storage": {
-      "oneOf": [
-        {"$ref": "#/$defs/storage_reported"},
-        {"$ref": "#/$defs/capacity_unavailable"},
-        {"$ref": "#/$defs/capacity_error"}
-      ]
-    },
-    "full_gpu_group": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["kind", "count"],
-      "properties": {
-        "kind": {"const": "full_gpu"},
-        "count": {"$ref": "#/$defs/positive_unsigned"},
-        "model": {"$ref": "#/$defs/model"},
-        "memory_bytes": {
-          "$ref": "#/$defs/positive_unsigned",
-          "description": "Runtime-reported bytes per visible full-GPU entity; every entity consolidated into this group shares the value."
-        }
-      }
-    },
-    "mig_gpu_group": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["kind", "count"],
-      "properties": {
-        "kind": {"const": "mig_compute_instance"},
-        "count": {"$ref": "#/$defs/positive_unsigned"},
-        "model": {"$ref": "#/$defs/model"},
-        "memory_bytes": {
-          "$ref": "#/$defs/positive_unsigned",
-          "description": "Runtime-reported bytes per visible MIG compute-instance entity; every entity consolidated into this group shares the value."
-        },
-        "mig_profile": {"$ref": "#/$defs/mig_profile"}
-      }
-    },
-    "gpu_reported": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["status", "cuda_mask_present", "groups"],
-      "properties": {
-        "status": {"const": "reported"},
-        "cuda_mask_present": {"type": "boolean"},
-        "groups": {
-          "type": "array", "maxItems": 4096,
-          "items": {"oneOf": [{"$ref": "#/$defs/full_gpu_group"}, {"$ref": "#/$defs/mig_gpu_group"}]}
-        }
-      }
-    },
-    "gpu_nonreported": {
-      "oneOf": [
-        {
-          "type": "object", "additionalProperties": false,
-          "required": ["status", "cuda_mask_present", "issues"],
-          "properties": {
-            "status": {"const": "unavailable"},
-            "cuda_mask_present": {"type": "boolean"},
-            "issues": {"type": "array", "minItems": 1, "maxItems": 4, "uniqueItems": true, "items": {"$ref": "#/$defs/capacity_unavailable_issue"}}
-          }
-        },
-        {
-          "type": "object", "additionalProperties": false,
-          "required": ["status", "cuda_mask_present", "issues"],
-          "properties": {
-            "status": {"const": "error"},
-            "cuda_mask_present": {"type": "boolean"},
-            "issues": {"type": "array", "minItems": 1, "maxItems": 4, "uniqueItems": true, "items": {"$ref": "#/$defs/source_error_issue"}}
-          }
-        }
-      ]
-    },
-    "gpu": {"oneOf": [{"$ref": "#/$defs/gpu_reported"}, {"$ref": "#/$defs/gpu_nonreported"}]},
-    "compute_capacity": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["cpu", "memory", "gpu"],
-      "properties": {
-        "cpu": {"$ref": "#/$defs/cpu"},
-        "memory": {"$ref": "#/$defs/memory"},
-        "gpu": {"$ref": "#/$defs/gpu"}
-      }
-    },
-    "retained_numeric": {
-      "type": "object", "additionalProperties": false,
-      "required": ["status", "bytes"],
-      "properties": {
-        "status": {"const": "reported"},
-        "bytes": {"$ref": "#/$defs/unsigned"}
-      }
-    },
-    "retained_partial": {
-      "type": "object", "additionalProperties": false,
-      "required": ["status", "issues", "bytes"],
-      "properties": {
-        "status": {"const": "partial"},
-        "issues": {"type": "array", "minItems": 1, "maxItems": 4, "uniqueItems": true, "items": {"enum": ["attribution_incomplete", "observation_incomplete"]}},
-        "bytes": {"$ref": "#/$defs/unsigned"}
+        "issues": {"type": "array", "minItems": 1, "maxItems": 4, "uniqueItems": true, "items": {"$ref": "#/$defs/capacity_unavailable_issue"}}
       }
     },
     "source_unavailable": {
-      "type": "object", "additionalProperties": false,
-      "required": ["status", "issues"],
+      "type": "object", "additionalProperties": false, "required": ["status", "issues"],
       "properties": {
         "status": {"const": "unavailable"},
         "issues": {"type": "array", "minItems": 1, "maxItems": 4, "uniqueItems": true, "items": {"$ref": "#/$defs/source_unavailable_issue"}}
       }
     },
     "source_error": {
-      "type": "object", "additionalProperties": false,
-      "required": ["status", "issues"],
+      "type": "object", "additionalProperties": false, "required": ["status", "issues"],
       "properties": {
         "status": {"const": "error"},
         "issues": {"type": "array", "minItems": 1, "maxItems": 4, "uniqueItems": true, "items": {"$ref": "#/$defs/source_error_issue"}}
       }
     },
+    "workspace_filesystem_reported": {
+      "type": "object", "additionalProperties": false, "required": ["status", "capacity_bytes"],
+      "properties": {
+        "status": {"const": "reported"},
+        "capacity_bytes": {"$ref": "#/$defs/positive_unsigned", "description": "Final visible capacity of the filesystem containing the existing NVFlare job workspace."}
+      }
+    },
+    "workspace_filesystem": {
+      "oneOf": [
+        {"$ref": "#/$defs/workspace_filesystem_reported"},
+        {"$ref": "#/$defs/capacity_unavailable"},
+        {"$ref": "#/$defs/source_error"}
+      ]
+    },
+    "cpu_time_group": {
+      "type": "object", "additionalProperties": false, "required": ["unit_seconds"],
+      "properties": {
+        "unit_seconds": {"$ref": "#/$defs/decimal"},
+        "model": {"$ref": "#/$defs/model"},
+        "architecture": {"$ref": "#/$defs/architecture"}
+      }
+    },
+    "cpu_time": {
+      "type": "object", "additionalProperties": false, "required": ["groups"],
+      "properties": {"groups": {"type": "array", "minItems": 1, "maxItems": 4096, "items": {"$ref": "#/$defs/cpu_time_group"}}}
+    },
+    "memory_time": {
+      "type": "object", "additionalProperties": false, "required": ["byte_seconds"],
+      "properties": {"byte_seconds": {"$ref": "#/$defs/decimal"}}
+    },
+    "full_gpu_time_group": {
+      "type": "object", "additionalProperties": false, "required": ["kind", "instance_seconds"],
+      "properties": {
+        "kind": {"const": "full_gpu"},
+        "instance_seconds": {"$ref": "#/$defs/positive_decimal"},
+        "model": {"$ref": "#/$defs/model"},
+        "memory_bytes": {"$ref": "#/$defs/positive_unsigned"}
+      }
+    },
+    "mig_gpu_time_group": {
+      "type": "object", "additionalProperties": false, "required": ["kind", "instance_seconds"],
+      "properties": {
+        "kind": {"const": "mig_compute_instance"},
+        "instance_seconds": {"$ref": "#/$defs/positive_decimal"},
+        "model": {"$ref": "#/$defs/model"},
+        "memory_bytes": {"$ref": "#/$defs/positive_unsigned"},
+        "mig_profile": {"$ref": "#/$defs/mig_profile"}
+      }
+    },
+    "gpu_time": {
+      "type": "object", "additionalProperties": false, "required": ["groups"],
+      "properties": {
+        "groups": {
+          "type": "array",
+          "maxItems": 4096,
+          "items": {"oneOf": [{"$ref": "#/$defs/full_gpu_time_group"}, {"$ref": "#/$defs/mig_gpu_time_group"}]},
+          "description": "An empty array is the authoritative observed-zero-GPU value."
+        }
+      }
+    },
+    "resource_time_reported": {
+      "type": "object", "additionalProperties": false, "required": ["status", "measured_seconds", "cpu", "memory", "gpu"],
+      "properties": {
+        "status": {"const": "reported"},
+        "measured_seconds": {"$ref": "#/$defs/decimal"},
+        "cpu": {"$ref": "#/$defs/cpu_time"},
+        "memory": {"$ref": "#/$defs/memory_time"},
+        "gpu": {"$ref": "#/$defs/gpu_time"}
+      }
+    },
+    "resource_time_partial": {
+      "type": "object", "additionalProperties": false, "required": ["status", "issues"],
+      "properties": {
+        "status": {"const": "partial"},
+        "issues": {"type": "array", "minItems": 1, "maxItems": 4, "uniqueItems": true, "items": {"$ref": "#/$defs/resource_time_partial_issue"}},
+        "measured_seconds": {"$ref": "#/$defs/decimal"},
+        "cpu": {"$ref": "#/$defs/cpu_time"},
+        "memory": {"$ref": "#/$defs/memory_time"},
+        "gpu": {"$ref": "#/$defs/gpu_time"}
+      },
+      "anyOf": [
+        {"required": ["measured_seconds"]},
+        {"required": ["cpu"]},
+        {"required": ["memory"]},
+        {"required": ["gpu"]}
+      ]
+    },
+    "resource_time_unavailable": {
+      "type": "object", "additionalProperties": false, "required": ["status", "issues"],
+      "properties": {
+        "status": {"const": "unavailable"},
+        "issues": {"type": "array", "minItems": 1, "maxItems": 4, "uniqueItems": true, "items": {"$ref": "#/$defs/resource_time_unavailable_issue"}}
+      }
+    },
+    "resource_time": {
+      "oneOf": [
+        {"$ref": "#/$defs/resource_time_reported"},
+        {"$ref": "#/$defs/resource_time_partial"},
+        {"$ref": "#/$defs/resource_time_unavailable"}
+      ]
+    },
+    "retained_numeric": {
+      "type": "object", "additionalProperties": false, "required": ["status", "bytes"],
+      "properties": {"status": {"const": "reported"}, "bytes": {"$ref": "#/$defs/unsigned"}}
+    },
+    "retained_partial": {
+      "type": "object", "additionalProperties": false, "required": ["status", "issues", "bytes"],
+      "properties": {
+        "status": {"const": "partial"},
+        "issues": {"type": "array", "minItems": 1, "maxItems": 4, "uniqueItems": true, "items": {"enum": ["attribution_incomplete", "observation_incomplete"]}},
+        "bytes": {"$ref": "#/$defs/unsigned"}
+      }
+    },
     "retained_content": {
       "oneOf": [
-        {"$ref": "#/$defs/retained_numeric"}, {"$ref": "#/$defs/retained_partial"},
-        {"$ref": "#/$defs/source_unavailable"}, {"$ref": "#/$defs/source_error"}
+        {"$ref": "#/$defs/retained_numeric"},
+        {"$ref": "#/$defs/retained_partial"},
+        {"$ref": "#/$defs/source_unavailable"},
+        {"$ref": "#/$defs/source_error"}
       ]
     },
     "counter": {
-      "type": "object", "additionalProperties": false,
-      "required": ["payload_bytes", "messages"],
+      "type": "object", "additionalProperties": false, "required": ["payload_bytes", "messages"],
       "properties": {"payload_bytes": {"$ref": "#/$defs/unsigned"}, "messages": {"$ref": "#/$defs/unsigned"}}
     },
     "f3_reported": {
@@ -367,127 +260,16 @@
     },
     "f3": {
       "oneOf": [
-        {"$ref": "#/$defs/f3_reported"}, {"$ref": "#/$defs/f3_partial"},
-        {"$ref": "#/$defs/source_unavailable"}, {"$ref": "#/$defs/source_error"}
-      ]
-    },
-    "attempt_start_body": {
-      "type": "object", "additionalProperties": false,
-      "required": ["capacity"],
-      "properties": {
-        "capacity": {"$ref": "#/$defs/compute_capacity"}
-      }
-    },
-    "attempt_final_body": {
-      "type": "object", "additionalProperties": false,
-      "required": ["capacity"],
-      "properties": {
-        "capacity": {"$ref": "#/$defs/compute_capacity"}
-      }
-    },
-    "participant_start_body": {
-      "type": "object", "additionalProperties": false,
-      "required": ["observed_at", "storage"],
-      "properties": {
-        "observed_at": {"$ref": "#/$defs/timestamp"},
-        "storage": {"$ref": "#/$defs/storage"}
-      }
-    },
-    "participant_final_body": {
-      "type": "object", "additionalProperties": false,
-      "required": ["observed_at", "storage", "retained_content", "f3"],
-      "properties": {
-        "observed_at": {"$ref": "#/$defs/timestamp"},
-        "storage": {"$ref": "#/$defs/storage"},
-        "retained_content": {"$ref": "#/$defs/retained_content"},
-        "f3": {"$ref": "#/$defs/f3"}
-      }
-    },
-    "attempt_end_body": {
-      "type": "object", "additionalProperties": false,
-      "required": ["closed_at", "reason"],
-      "properties": {
-        "closed_at": {"$ref": "#/$defs/timestamp"},
-        "reason": {"enum": ["released", "failed", "terminated", "launch_failed", "reconfigured"]}
-      }
-    },
-    "cpu_time_group": {
-      "type": "object", "additionalProperties": false,
-      "required": ["unit_seconds"],
-      "properties": {
-        "unit_seconds": {"$ref": "#/$defs/decimal"},
-        "model": {"$ref": "#/$defs/model"},
-        "architecture": {"$ref": "#/$defs/architecture"}
-      }
-    },
-    "full_gpu_time_group": {
-      "type": "object", "additionalProperties": false,
-      "required": ["kind", "instance_seconds"],
-      "properties": {
-        "kind": {"const": "full_gpu"},
-        "instance_seconds": {"$ref": "#/$defs/decimal"},
-        "model": {"$ref": "#/$defs/model"},
-        "memory_bytes": {
-          "$ref": "#/$defs/positive_unsigned",
-          "description": "Per-entity runtime-reported memory metadata copied from the matching capacity group."
-        }
-      }
-    },
-    "mig_gpu_time_group": {
-      "type": "object", "additionalProperties": false,
-      "required": ["kind", "instance_seconds"],
-      "properties": {
-        "kind": {"const": "mig_compute_instance"},
-        "instance_seconds": {"$ref": "#/$defs/decimal"},
-        "model": {"$ref": "#/$defs/model"},
-        "memory_bytes": {
-          "$ref": "#/$defs/positive_unsigned",
-          "description": "Per-entity runtime-reported memory metadata copied from the matching capacity group."
-        },
-        "mig_profile": {"$ref": "#/$defs/mig_profile"}
-      }
-    },
-    "cpu_total": {
-      "oneOf": [
-        {
-          "type": "object", "additionalProperties": false,
-          "required": ["status", "groups"],
-          "properties": {
-            "status": {"enum": ["reported", "partial"]},
-            "groups": {"type": "array", "maxItems": 4096, "items": {"$ref": "#/$defs/cpu_time_group"}}
-          }
-        },
-        {"type": "object", "additionalProperties": false, "required": ["status"], "properties": {"status": {"const": "unavailable"}}}
-      ]
-    },
-    "gpu_total": {
-      "oneOf": [
-        {
-          "type": "object", "additionalProperties": false,
-          "required": ["status", "groups"],
-          "properties": {
-            "status": {"enum": ["reported", "partial"]},
-            "groups": {"type": "array", "maxItems": 4096, "items": {"oneOf": [{"$ref": "#/$defs/full_gpu_time_group"}, {"$ref": "#/$defs/mig_gpu_time_group"}]}}
-          }
-        },
-        {"type": "object", "additionalProperties": false, "required": ["status"], "properties": {"status": {"const": "unavailable"}}}
-      ]
-    },
-    "byte_seconds_total": {
-      "oneOf": [
-        {
-          "type": "object", "additionalProperties": false,
-          "required": ["status", "byte_seconds"],
-          "properties": {"status": {"enum": ["reported", "partial"]}, "byte_seconds": {"$ref": "#/$defs/decimal"}}
-        },
-        {"type": "object", "additionalProperties": false, "required": ["status"], "properties": {"status": {"const": "unavailable"}}}
+        {"$ref": "#/$defs/f3_reported"},
+        {"$ref": "#/$defs/f3_partial"},
+        {"$ref": "#/$defs/source_unavailable"},
+        {"$ref": "#/$defs/source_error"}
       ]
     },
     "retained_total": {
       "oneOf": [
         {
-          "type": "object", "additionalProperties": false,
-          "required": ["status", "bytes"],
+          "type": "object", "additionalProperties": false, "required": ["status", "bytes"],
           "properties": {"status": {"enum": ["reported", "partial"]}, "bytes": {"$ref": "#/$defs/unsigned"}}
         },
         {"type": "object", "additionalProperties": false, "required": ["status"], "properties": {"status": {"const": "unavailable"}}}
@@ -496,168 +278,159 @@
     "f3_total": {
       "oneOf": [
         {
-          "type": "object", "additionalProperties": false,
-          "required": ["status", "remote_accepted"],
+          "type": "object", "additionalProperties": false, "required": ["status", "remote_accepted"],
           "properties": {"status": {"enum": ["reported", "partial"]}, "remote_accepted": {"$ref": "#/$defs/counter"}}
         },
         {"type": "object", "additionalProperties": false, "required": ["status"], "properties": {"status": {"const": "unavailable"}}}
       ]
     },
     "totals": {
-      "type": "object", "additionalProperties": false,
-      "required": ["cpu", "memory", "gpu", "retained_content", "f3"],
+      "type": "object", "additionalProperties": false, "required": ["resource_time", "retained_content", "f3"],
       "properties": {
-        "cpu": {"$ref": "#/$defs/cpu_total"},
-        "memory": {"$ref": "#/$defs/byte_seconds_total"},
-        "gpu": {"$ref": "#/$defs/gpu_total"},
+        "resource_time": {"$ref": "#/$defs/resource_time"},
         "retained_content": {"$ref": "#/$defs/retained_total"},
         "f3": {"$ref": "#/$defs/f3_total"}
       }
     },
-    "participant_attempt": {
-      "type": "object", "additionalProperties": false,
-      "required": ["attempt_id", "environment_key", "opened_at", "end"],
-      "properties": {
-        "attempt_id": {"$ref": "#/$defs/attempt_id"},
-        "environment_key": {"$ref": "#/$defs/hash_key"},
-        "opened_at": {"$ref": "#/$defs/timestamp"},
-        "start": {"$ref": "#/$defs/attempt_start_body"},
-        "final": {"$ref": "#/$defs/attempt_final_body"},
-        "end": {"$ref": "#/$defs/attempt_end_body"}
-      },
-      "allOf": [
-        {"if": {"required": ["final"]}, "then": {"required": ["start"]}},
-        {
-          "if": {"properties": {"end": {"properties": {"reason": {"const": "launch_failed"}}}}},
-          "then": {"not": {"anyOf": [{"required": ["start"]}, {"required": ["final"]}]}},
-          "else": {"required": ["start"]}
-        }
-      ]
-    },
     "accepted_participant_entry": {
       "type": "object", "additionalProperties": false,
-      "required": ["participant_id", "participant_key", "role", "status", "received_at", "summary_sha256", "resource_window_seconds", "totals"],
+      "required": ["participant_name", "role", "status", "received_at", "resource_time", "retained_content", "f3"],
       "properties": {
-        "participant_id": {"$ref": "#/$defs/participant_id"},
-        "participant_key": {"$ref": "#/$defs/hash_key"},
+        "participant_name": {"$ref": "#/$defs/participant_name"},
         "role": {"enum": ["client", "server"]},
         "status": {"const": "accepted"},
         "received_at": {"$ref": "#/$defs/timestamp"},
-        "summary_sha256": {"$ref": "#/$defs/sha256"},
-        "resource_window_seconds": {"$ref": "#/$defs/decimal"},
-        "totals": {"$ref": "#/$defs/totals"}
+        "resource_time": {"$ref": "#/$defs/resource_time"},
+        "retained_content": {"$ref": "#/$defs/retained_content"},
+        "f3": {"$ref": "#/$defs/f3"}
       }
     },
     "invalid_participant_entry": {
       "type": "object", "additionalProperties": false,
-      "required": ["participant_id", "participant_key", "role", "status", "received_at", "issues"],
+      "required": ["participant_name", "role", "status", "received_at", "issues"],
       "properties": {
-        "participant_id": {"$ref": "#/$defs/participant_id"},
-        "participant_key": {"$ref": "#/$defs/hash_key"},
+        "participant_name": {"$ref": "#/$defs/participant_name"},
         "role": {"enum": ["client", "server"]},
         "status": {"const": "invalid"},
         "received_at": {"$ref": "#/$defs/timestamp"},
-        "issues": {"type": "array", "minItems": 1, "maxItems": 4, "uniqueItems": true, "items": {"enum": ["malformed_source", "permission_denied"]}}
+        "issues": {"type": "array", "minItems": 1, "maxItems": 1, "uniqueItems": true, "items": {"const": "malformed_source"}}
       }
     },
     "absent_participant_entry": {
-      "type": "object", "additionalProperties": false,
-      "required": ["participant_id", "participant_key", "role", "status"],
+      "type": "object", "additionalProperties": false, "required": ["participant_name", "role", "status"],
       "properties": {
-        "participant_id": {"$ref": "#/$defs/participant_id"},
-        "participant_key": {"$ref": "#/$defs/hash_key"},
+        "participant_name": {"$ref": "#/$defs/participant_name"},
         "role": {"enum": ["client", "server"]},
         "status": {"enum": ["missing", "disabled"]}
       }
     },
-    "participant_entry": {"oneOf": [{"$ref": "#/$defs/accepted_participant_entry"}, {"$ref": "#/$defs/invalid_participant_entry"}, {"$ref": "#/$defs/absent_participant_entry"}]},
-    "manifest_entry": {
+    "participant_entry": {
+      "oneOf": [
+        {"$ref": "#/$defs/accepted_participant_entry"},
+        {"$ref": "#/$defs/invalid_participant_entry"},
+        {"$ref": "#/$defs/absent_participant_entry"}
+      ]
+    },
+    "study_selection": {
+      "type": "object", "additionalProperties": false, "required": ["study_name"],
+      "properties": {"study_name": {"$ref": "#/$defs/study_name"}}
+    },
+    "study_coverage": {
       "type": "object", "additionalProperties": false,
-      "required": ["relative_path", "sha256"],
+      "required": ["selected_jobs", "included_jobs", "unavailable_jobs", "nonterminal_jobs"],
       "properties": {
-        "relative_path": {"type": "string", "minLength": 1, "maxLength": 512, "pattern": "^(?:resource_summary\\.json|participants/sha256-[0-9a-f]{64}\\.json)$"},
-        "sha256": {"$ref": "#/$defs/sha256"}
+        "selected_jobs": {"$ref": "#/$defs/unsigned"},
+        "included_jobs": {"$ref": "#/$defs/unsigned"},
+        "unavailable_jobs": {"$ref": "#/$defs/unsigned"},
+        "nonterminal_jobs": {"$ref": "#/$defs/unsigned"}
       }
     },
-    "attempt_start": {
+    "included_job_row": {
       "type": "object", "additionalProperties": false,
-      "required": ["schema_version", "kind", "job_id", "participant_id", "attempt_id", "environment_key", "opened_at", "capacity"],
+      "required": ["job_id", "job_status", "resource_data", "totals"],
       "properties": {
-        "schema_version": {"$ref": "#/$defs/schema_version"}, "kind": {"const": "nvflare.resource_stats.attempt_start"},
-        "job_id": {"$ref": "#/$defs/job_id"}, "participant_id": {"$ref": "#/$defs/participant_id"},
-        "attempt_id": {"$ref": "#/$defs/attempt_id"}, "environment_key": {"$ref": "#/$defs/hash_key"},
-        "opened_at": {"$ref": "#/$defs/timestamp"}, "capacity": {"$ref": "#/$defs/compute_capacity"}
+        "job_id": {"$ref": "#/$defs/job_id"},
+        "job_status": {
+          "allOf": [{"$ref": "#/$defs/job_status"}],
+          "pattern": "^(?:FINISHED:.*|FINISHED_OK|FINISHED_EXCEPTION|ABORTED|ABANDONED|FAILED)$",
+          "description": "Included resource data requires a terminal NVFlare job status."
+        },
+        "resource_data": {"const": "included", "description": "This finalized job contributes to study totals."},
+        "totals": {"$ref": "#/$defs/totals"}
       }
     },
-    "attempt_final": {
-      "type": "object", "additionalProperties": false,
-      "required": ["schema_version", "kind", "job_id", "participant_id", "attempt_id", "environment_key", "capacity"],
+    "excluded_job_row": {
+      "type": "object", "additionalProperties": false, "required": ["job_id", "job_status", "resource_data"],
       "properties": {
-        "schema_version": {"$ref": "#/$defs/schema_version"}, "kind": {"const": "nvflare.resource_stats.attempt_final"},
-        "job_id": {"$ref": "#/$defs/job_id"}, "participant_id": {"$ref": "#/$defs/participant_id"},
-        "attempt_id": {"$ref": "#/$defs/attempt_id"}, "environment_key": {"$ref": "#/$defs/hash_key"},
-        "capacity": {"$ref": "#/$defs/compute_capacity"}
-      }
+        "job_id": {"$ref": "#/$defs/job_id"},
+        "job_status": {"$ref": "#/$defs/job_status"},
+        "resource_data": {
+          "enum": ["unavailable", "nonterminal"],
+          "description": "Why the selected job contributes no totals; distinct from job_status."
+        }
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"resource_data": {"const": "unavailable"}}},
+          "then": {
+            "properties": {
+              "job_status": {
+                "pattern": "^(?:FINISHED:.*|FINISHED_OK|FINISHED_EXCEPTION|ABORTED|ABANDONED|FAILED)$"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "job_status": {
+                "not": {
+                  "pattern": "^(?:FINISHED:.*|FINISHED_OK|FINISHED_EXCEPTION|ABORTED|ABANDONED|FAILED)$"
+                }
+              }
+            }
+          }
+        }
+      ]
     },
-    "attempt_end": {
-      "type": "object", "additionalProperties": false,
-      "required": ["schema_version", "kind", "job_id", "participant_id", "attempt_id", "environment_key", "opened_at", "closed_at", "reason"],
-      "properties": {
-        "schema_version": {"$ref": "#/$defs/schema_version"}, "kind": {"const": "nvflare.resource_stats.attempt_end"},
-        "job_id": {"$ref": "#/$defs/job_id"}, "participant_id": {"$ref": "#/$defs/participant_id"},
-        "attempt_id": {"$ref": "#/$defs/attempt_id"}, "environment_key": {"$ref": "#/$defs/hash_key"},
-        "opened_at": {"$ref": "#/$defs/timestamp"}, "closed_at": {"$ref": "#/$defs/timestamp"},
-        "reason": {"enum": ["released", "failed", "terminated", "launch_failed", "reconfigured"]}
-      }
-    },
-    "participant_start_record": {
-      "type": "object", "additionalProperties": false,
-      "required": ["schema_version", "kind", "job_id", "participant_id", "observed_at", "storage"],
-      "properties": {
-        "schema_version": {"$ref": "#/$defs/schema_version"}, "kind": {"const": "nvflare.resource_stats.participant_start"},
-        "job_id": {"$ref": "#/$defs/job_id"}, "participant_id": {"$ref": "#/$defs/participant_id"},
-        "observed_at": {"$ref": "#/$defs/timestamp"}, "storage": {"$ref": "#/$defs/storage"}
-      }
-    },
-    "participant_final_record": {
-      "type": "object", "additionalProperties": false,
-      "required": ["schema_version", "kind", "job_id", "participant_id", "observed_at", "storage", "retained_content", "f3"],
-      "properties": {
-        "schema_version": {"$ref": "#/$defs/schema_version"}, "kind": {"const": "nvflare.resource_stats.participant_final"},
-        "job_id": {"$ref": "#/$defs/job_id"}, "participant_id": {"$ref": "#/$defs/participant_id"},
-        "observed_at": {"$ref": "#/$defs/timestamp"}, "storage": {"$ref": "#/$defs/storage"},
-        "retained_content": {"$ref": "#/$defs/retained_content"}, "f3": {"$ref": "#/$defs/f3"}
-      }
-    },
+    "study_job_row": {"oneOf": [{"$ref": "#/$defs/included_job_row"}, {"$ref": "#/$defs/excluded_job_row"}]},
     "participant_summary": {
       "type": "object", "additionalProperties": false,
-      "required": ["schema_version", "kind", "job_id", "participant_key", "start", "final", "attempts"],
+      "required": ["schema_version", "kind", "job_id", "participant_name", "reported_at", "resource_time", "workspace_filesystem", "retained_content", "f3"],
       "properties": {
-        "schema_version": {"$ref": "#/$defs/schema_version"}, "kind": {"const": "nvflare.resource_stats.participant_summary"},
-        "job_id": {"$ref": "#/$defs/job_id"}, "participant_key": {"$ref": "#/$defs/hash_key"},
-        "start": {"$ref": "#/$defs/participant_start_body"},
-        "final": {"$ref": "#/$defs/participant_final_body"},
-        "attempts": {"type": "array", "maxItems": 4096, "items": {"$ref": "#/$defs/participant_attempt"}}
+        "schema_version": {"$ref": "#/$defs/schema_version"},
+        "kind": {"const": "nvflare.resource_stats.participant_summary"},
+        "job_id": {"$ref": "#/$defs/job_id"},
+        "participant_name": {"$ref": "#/$defs/participant_name"},
+        "reported_at": {"$ref": "#/$defs/timestamp"},
+        "resource_time": {"$ref": "#/$defs/resource_time"},
+        "workspace_filesystem": {"$ref": "#/$defs/workspace_filesystem"},
+        "retained_content": {"$ref": "#/$defs/retained_content"},
+        "f3": {"$ref": "#/$defs/f3"}
       }
     },
     "resource_summary": {
       "type": "object", "additionalProperties": false,
       "required": ["schema_version", "kind", "job_id", "report_cutoff_at", "finalized_at", "participants", "totals"],
       "properties": {
-        "schema_version": {"$ref": "#/$defs/schema_version"}, "kind": {"const": "nvflare.resource_stats.resource_summary"},
-        "job_id": {"$ref": "#/$defs/job_id"}, "report_cutoff_at": {"$ref": "#/$defs/timestamp"},
+        "schema_version": {"$ref": "#/$defs/schema_version"},
+        "kind": {"const": "nvflare.resource_stats.resource_summary"},
+        "job_id": {"$ref": "#/$defs/job_id"},
+        "report_cutoff_at": {"$ref": "#/$defs/timestamp"},
         "finalized_at": {"$ref": "#/$defs/timestamp"},
         "participants": {"type": "array", "minItems": 1, "maxItems": 10000, "items": {"$ref": "#/$defs/participant_entry"}},
         "totals": {"$ref": "#/$defs/totals"}
       }
     },
-    "manifest": {
+    "study_summary": {
       "type": "object", "additionalProperties": false,
-      "required": ["schema_version", "kind", "job_id", "entries"],
+      "required": ["schema_version", "kind", "selection", "generated_at", "coverage", "jobs", "totals"],
       "properties": {
-        "schema_version": {"$ref": "#/$defs/schema_version"}, "kind": {"const": "nvflare.resource_stats.manifest"},
-        "job_id": {"$ref": "#/$defs/job_id"},
-        "entries": {"type": "array", "minItems": 1, "maxItems": 10001, "items": {"$ref": "#/$defs/manifest_entry"}}
+        "schema_version": {"$ref": "#/$defs/schema_version"},
+        "kind": {"const": "nvflare.resource_stats.study_summary"},
+        "selection": {"$ref": "#/$defs/study_selection"},
+        "generated_at": {"$ref": "#/$defs/timestamp"},
+        "coverage": {"$ref": "#/$defs/study_coverage"},
+        "jobs": {"type": "array", "maxItems": 10000, "items": {"$ref": "#/$defs/study_job_row"}},
+        "totals": {"$ref": "#/$defs/totals"}
       }
     }
   }

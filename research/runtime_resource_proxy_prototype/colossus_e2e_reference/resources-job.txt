@@ -1,0 +1,16 @@
+Connecting to FLARE ...
+Recorded resource-time for job 84722338-787a-41b0-8132-6de19bb89c92.
+Job coverage: COMPLETE (3 accepted / 3 expected)
+
+SITE    ROLE    REPORT    COMPUTE   MEASURED TIME  FULL GPU h  CPU h   MEM GiB h  SAVED GiB  F3 REMOTE GiB
+site-1  client  accepted  REPORTED  8s             0.0023      0.0742  0.2860     N/A        N/A
+site-2  client  accepted  REPORTED  7s             0.0022      0.0696  0.2685     N/A        N/A
+server  server  accepted  REPORTED  6s             0.0017      0.0559  0.2157     N/A        N/A
+
+Totals from accepted reports | compute: REPORTED
+  MEASURED TIME 22s | FULL GPU 0.0062 h | CPU 0.1997 h | MEM 0.7701 GiB h | SAVED N/A GiB | F3 REMOTE N/A GiB
+
+Notes:
+  PARTIAL means at least one expected report or observation was incomplete.
+  Totals add participant reports; overlapping resources can be counted more than once.
+  Use --site SITE or --format json to see hardware model details.

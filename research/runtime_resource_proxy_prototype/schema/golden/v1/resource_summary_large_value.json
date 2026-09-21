@@ -6,62 +6,69 @@
   "finalized_at": "2026-09-09T00:15:02.1Z",
   "participants": [
     {
-      "participant_id": "site-large",
-      "participant_key": "sha256-ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "participant_name": "site-large",
       "role": "client",
       "status": "accepted",
       "received_at": "2026-09-09T00:15:01.2Z",
-      "summary_sha256": "ae56e12d5f8a28fe52b0e7d4f124d35f7934abf9325ebd1b7ad66a955b9b2bd5",
-      "resource_window_seconds": "901",
-      "totals": {
+      "resource_time": {
+        "status": "reported",
+        "measured_seconds": "901",
         "cpu": {
-          "status": "reported",
           "groups": [
             {
-              "architecture": "x86_64",
-              "unit_seconds": "901"
+              "unit_seconds": "901",
+              "model": "AMD EPYC 9654",
+              "architecture": "x86_64"
             }
           ]
         },
         "memory": {
-          "status": "reported",
           "byte_seconds": "9010000000000901"
         },
         "gpu": {
-          "status": "reported",
           "groups": []
+        }
+      },
+      "retained_content": {
+        "status": "reported",
+        "bytes": "0"
+      },
+      "f3": {
+        "status": "reported",
+        "remote_accepted": {
+          "payload_bytes": "0",
+          "messages": "0"
         },
-        "retained_content": {
-          "status": "reported",
-          "bytes": "0"
+        "local_delivered": {
+          "payload_bytes": "0",
+          "messages": "0"
         },
-        "f3": {
-          "status": "reported",
-          "remote_accepted": {
-            "payload_bytes": "0",
-            "messages": "0"
-          }
+        "remote_failed_before_acceptance": {
+          "payload_bytes": "0",
+          "messages": "0"
         }
       }
     }
   ],
   "totals": {
-    "cpu": {
+    "resource_time": {
       "status": "reported",
-      "groups": [
-        {
-          "architecture": "x86_64",
-          "unit_seconds": "901"
-        }
-      ]
-    },
-    "memory": {
-      "status": "reported",
-      "byte_seconds": "9010000000000901"
-    },
-    "gpu": {
-      "status": "reported",
-      "groups": []
+      "measured_seconds": "901",
+      "cpu": {
+        "groups": [
+          {
+            "model": "AMD EPYC 9654",
+            "architecture": "x86_64",
+            "unit_seconds": "901"
+          }
+        ]
+      },
+      "memory": {
+        "byte_seconds": "9010000000000901"
+      },
+      "gpu": {
+        "groups": []
+      }
     },
     "retained_content": {
       "status": "reported",

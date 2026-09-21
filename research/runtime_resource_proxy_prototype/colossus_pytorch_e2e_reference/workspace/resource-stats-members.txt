@@ -1,0 +1,4 @@
+resource_stats/resource_summary.json
+resource_stats/participants/server.json
+resource_stats/participants/site-1.json
+resource_stats/participants/site-2.json

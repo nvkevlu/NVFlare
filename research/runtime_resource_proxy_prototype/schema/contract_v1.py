@@ -12,51 +12,38 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Executable validation for the compact, typed resource-statistics v1 contract.
+"""Executable validation for the final-only resource-statistics v1 contract.
 
-The JSON Schema closes every record and fixes the wire types.  This module adds
-semantic checks that JSON Schema cannot express cleanly: selector
-reconciliation, status/issue relationships, deterministic ordering, time
-relationships, aggregate sums, and privacy constraints.
-
-Canonical quantities are strings.  Integer quantities use base-10 unsigned
-integers.  Fractional quantities use a non-exponent decimal with at most nine
+Canonical quantities are strings. Integer quantities use base-10 unsigned
+integers. Fractional quantities use non-exponent decimals with at most nine
 fractional digits and no insignificant trailing zeroes.
+
+A participant report contains one terminal resource-time total. The server
+validates and copies that value; it does not recreate it from start/end
+observations. Only job and transient study sums are derived here.
 """
 
 from __future__ import annotations
 
 import calendar
-import hashlib
 import json
 import re
 from collections import defaultdict
+from copy import deepcopy
 from datetime import datetime
-from decimal import ROUND_FLOOR, ROUND_HALF_EVEN, Decimal, InvalidOperation, localcontext
-from pathlib import PurePosixPath
+from decimal import ROUND_FLOOR, Decimal, InvalidOperation, localcontext
 from typing import Any, Mapping, Sequence
-
 
 SCHEMA_VERSION = "1.0"
 
-KIND_ATTEMPT_START = "nvflare.resource_stats.attempt_start"
-KIND_ATTEMPT_FINAL = "nvflare.resource_stats.attempt_final"
-KIND_ATTEMPT_END = "nvflare.resource_stats.attempt_end"
-KIND_PARTICIPANT_START = "nvflare.resource_stats.participant_start"
-KIND_PARTICIPANT_FINAL = "nvflare.resource_stats.participant_final"
 KIND_PARTICIPANT_SUMMARY = "nvflare.resource_stats.participant_summary"
 KIND_RESOURCE_SUMMARY = "nvflare.resource_stats.resource_summary"
-KIND_MANIFEST = "nvflare.resource_stats.manifest"
+KIND_STUDY_SUMMARY = "nvflare.resource_stats.study_summary"
 RECORD_KINDS = frozenset(
     {
-        KIND_ATTEMPT_START,
-        KIND_ATTEMPT_FINAL,
-        KIND_ATTEMPT_END,
-        KIND_PARTICIPANT_START,
-        KIND_PARTICIPANT_FINAL,
         KIND_PARTICIPANT_SUMMARY,
         KIND_RESOURCE_SUMMARY,
-        KIND_MANIFEST,
+        KIND_STUDY_SUMMARY,
     }
 )
 
@@ -72,66 +59,44 @@ ISSUE_CODES = frozenset(
         "malformed_source",
     }
 )
+RESOURCE_TIME_PARTIAL_ISSUES = frozenset({"attribution_incomplete", "observation_incomplete"})
+RESOURCE_TIME_UNAVAILABLE_ISSUES = frozenset(
+    {
+        "attribution_incomplete",
+        "dependency_missing",
+        "malformed_source",
+        "not_bound",
+        "observation_incomplete",
+        "permission_denied",
+        "unsupported",
+    }
+)
+SOURCE_UNAVAILABLE_ISSUES = frozenset(
+    {"attribution_incomplete", "dependency_missing", "not_bound", "observation_incomplete", "unsupported"}
+)
+SOURCE_ERROR_ISSUES = frozenset({"malformed_source", "permission_denied"})
+INVALID_REPORT_ISSUES = frozenset({"malformed_source"})
+CAPACITY_UNAVAILABLE_ISSUES = SOURCE_UNAVAILABLE_ISSUES - {"not_bound"}
+PARTIAL_ISSUES = frozenset({"attribution_incomplete", "counter_gap", "observation_incomplete"})
 
-POINT_STATUSES = frozenset({"reported", "unavailable", "error"})
+RESOURCE_TIME_STATUSES = frozenset({"reported", "partial", "unavailable"})
 MEASUREMENT_STATUSES = frozenset({"reported", "partial", "unavailable", "error"})
 TOTAL_STATUSES = frozenset({"reported", "partial", "unavailable"})
 PARTICIPANT_STATUSES = frozenset({"accepted", "missing", "invalid", "disabled"})
 ROLES = frozenset({"client", "server"})
-ATTEMPT_END_REASONS = frozenset({"released", "failed", "terminated", "launch_failed", "reconfigured"})
 GPU_KINDS = frozenset({"full_gpu", "mig_compute_instance"})
-
-# The containing resource supplies the subject of an issue.  A status further
-# narrows its meaning, eliminating CPU-, GPU-, F3-, and artifact-specific codes.
-STATUS_ISSUES = {
-    "reported": frozenset(),
-    "partial": frozenset({"counter_gap", "observation_incomplete", "attribution_incomplete"}),
-    "unavailable": frozenset(
-        {
-            "not_bound",
-            "observation_incomplete",
-            "attribution_incomplete",
-            "unsupported",
-            "dependency_missing",
-        }
-    ),
-    "error": frozenset({"permission_denied", "malformed_source"}),
-}
-
-_CAPACITY_ISSUES = frozenset(
-    {
-        "observation_incomplete",
-        "attribution_incomplete",
-        "unsupported",
-        "permission_denied",
-        "dependency_missing",
-        "malformed_source",
-    }
-)
-RESOURCE_ISSUES = {
-    "cpu": _CAPACITY_ISSUES,
-    "memory": _CAPACITY_ISSUES,
-    "storage": _CAPACITY_ISSUES,
-    "gpu": _CAPACITY_ISSUES,
-    "retained_content": ISSUE_CODES - {"counter_gap"},
-    "f3": ISSUE_CODES,
-}
+RESOURCE_DATA_STATES = frozenset({"included", "unavailable", "nonterminal"})
+LEGACY_TERMINAL_JOB_STATES = frozenset({"FINISHED_OK", "FINISHED_EXCEPTION", "ABORTED", "ABANDONED", "FAILED"})
 
 MAX_ISSUES = 4
-MAX_ATTEMPTS = 4_096
 MAX_PARTICIPANTS = 10_000
+MAX_STUDY_JOBS = 10_000
 MAX_GPU_GROUPS = 4_096
-MAX_RELATIVE_PATH_BYTES = 512
 MAX_JSON_DEPTH = 32
 MAX_RECORD_BYTES = {
-    KIND_ATTEMPT_START: 1024 * 1024,
-    KIND_ATTEMPT_FINAL: 1024 * 1024,
-    KIND_ATTEMPT_END: 64 * 1024,
-    KIND_PARTICIPANT_START: 64 * 1024,
-    KIND_PARTICIPANT_FINAL: 1024 * 1024,
-    KIND_PARTICIPANT_SUMMARY: 64 * 1024 * 1024,
+    KIND_PARTICIPANT_SUMMARY: 1 * 1024 * 1024,
     KIND_RESOURCE_SUMMARY: 64 * 1024 * 1024,
-    KIND_MANIFEST: 4 * 1024 * 1024,
+    KIND_STUDY_SUMMARY: 64 * 1024 * 1024,
 }
 
 U32_MAX = 2**32 - 1
@@ -141,16 +106,14 @@ MAX_CPU_UNITS = Decimal("1048576")
 
 INTEGER_PATTERN = re.compile(r"^(?:0|[1-9][0-9]{0,38})$")
 DECIMAL_PATTERN = re.compile(r"^(?:0|[1-9][0-9]{0,38})(?:\.[0-9]{0,8}[1-9])?$")
-ATTEMPT_ID_PATTERN = re.compile(r"^[0-9a-f]{32}$")
-SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
-HASH_KEY_PATTERN = re.compile(r"^sha256-[0-9a-f]{64}$")
 TIMESTAMP_PATTERN = re.compile(r"^([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2})(?:\.([0-9]{1,9}))?Z$")
 JOB_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
-PARTICIPANT_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
+PARTICIPANT_NAME_PATTERN = re.compile(r"^[A-Za-z0-9_-][A-Za-z0-9_.-]{0,127}$")
 MODEL_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._()+/@-]{0,127}$")
 ARCHITECTURE_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,31}$")
 MIG_PROFILE_PATTERN = re.compile(r"^[1-9][0-9]*g\.[1-9][0-9]*gb(?:\+me)?$")
-RELATIVE_PATH_PATTERN = re.compile(r"^[A-Za-z0-9._/-]+$")
+STUDY_NAME_PATTERN = re.compile(r"^[a-z0-9](?:[a-z0-9_-]{0,61}[a-z0-9])?$")
+JOB_STATUS_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._:/+-]{0,63}$")
 
 _FORBIDDEN_MODEL_PATTERNS = (
     re.compile(r"(?:GPU|MIG|MIG-GPU)-[0-9A-Fa-f-]{16,}", re.IGNORECASE),
@@ -265,54 +228,17 @@ def _model(value: Any, path: str) -> str:
     return value
 
 
-def _relative_path(value: Any, path: str) -> str:
-    if (
-        not isinstance(value, str)
-        or not value
-        or len(value.encode("utf-8")) > MAX_RELATIVE_PATH_BYTES
-        or not RELATIVE_PATH_PATTERN.fullmatch(value)
-        or value.startswith("/")
-        or "//" in value
-    ):
-        _fail(path, "must be a bounded normalized relative POSIX path")
-    pure = PurePosixPath(value)
-    if any(part in {"", ".", ".."} for part in pure.parts) or str(pure) != value:
-        _fail(path, "must not contain empty, current-directory, or parent-directory segments")
-    return value
-
-
-def _issues(value: Any, status: str, resource: str, path: str) -> None:
+def _issues(value: Any, allowed: frozenset[str] | set[str], path: str) -> list[str]:
     if not isinstance(value, list) or not 1 <= len(value) <= MAX_ISSUES:
         _fail(path, f"must contain 1..{MAX_ISSUES} issue codes")
     if any(not isinstance(item, str) for item in value):
         _fail(path, "must contain strings")
     if value != sorted(value) or len(value) != len(set(value)):
         _fail(path, "must be sorted and unique")
-    allowed = STATUS_ISSUES[status] & RESOURCE_ISSUES[resource]
     unknown = set(value) - allowed
     if unknown:
-        _fail(path, f"contains issues not valid for {resource}/{status}: {', '.join(sorted(unknown))}")
-
-
-def _status_shape(
-    value: Mapping[str, Any],
-    path: str,
-    *,
-    resource: str,
-    statuses: frozenset[str],
-    reported_required: set[str],
-    reported_optional: set[str] = frozenset(),
-) -> str:
-    status = _enum(value.get("status"), statuses, f"{path}.status")
-    if status == "reported":
-        _exact_keys(value, {"status"} | reported_required, set(reported_optional), path)
-    elif status == "partial":
-        _exact_keys(value, {"status", "issues"} | reported_required, set(reported_optional), path)
-        _issues(value["issues"], status, resource, f"{path}.issues")
-    else:
-        _exact_keys(value, {"status", "issues"}, set(), path)
-        _issues(value["issues"], status, resource, f"{path}.issues")
-    return status
+        _fail(path, f"contains unsupported issues: {', '.join(sorted(unknown))}")
+    return value
 
 
 def _privacy_walk(value: Any, path: str = "$") -> None:
@@ -328,223 +254,23 @@ def _privacy_walk(value: Any, path: str = "$") -> None:
             _privacy_walk(nested, f"{path}[{index}]")
 
 
-def _json_depth(value: Any, depth: int = 1) -> int:
-    if isinstance(value, Mapping):
-        return max([depth] + [_json_depth(item, depth + 1) for item in value.values()])
-    if isinstance(value, list):
-        return max([depth] + [_json_depth(item, depth + 1) for item in value])
-    return depth
+def _json_depth(value: Any) -> int:
+    """Return enough depth information without using the Python call stack."""
 
-
-def _validate_cpu(value: Any, path: str) -> None:
-    cpu = _mapping(value, path)
-    status = _status_shape(
-        cpu,
-        path,
-        resource="cpu",
-        statuses=POINT_STATUSES,
-        reported_required={"visible_units", "evidence"},
-        reported_optional={"model", "architecture"},
-    )
-    if status != "reported":
-        return
-
-    visible = _decimal(cpu["visible_units"], f"{path}.visible_units", maximum=MAX_CPU_UNITS, positive=True)
-    if "model" in cpu:
-        _model(cpu["model"], f"{path}.model")
-    if "architecture" in cpu:
-        _identifier(cpu["architecture"], ARCHITECTURE_PATTERN, f"{path}.architecture")
-
-    evidence = _mapping(cpu["evidence"], f"{path}.evidence")
-    names = {"affinity_count", "cpuset_count", "quota_units", "online_count"}
-    _exact_keys(evidence, set(), names, f"{path}.evidence")
-    if not evidence:
-        _fail(f"{path}.evidence", "must contain at least one CPU observation")
-
-    selectors: list[Decimal] = []
-    for name in ("affinity_count", "cpuset_count", "online_count"):
-        if name in evidence:
-            number = _integer(evidence[name], f"{path}.evidence.{name}", maximum=U32_MAX, positive=True)
-            if name != "online_count":
-                selectors.append(Decimal(number))
-    if "quota_units" in evidence:
-        selectors.append(
-            _decimal(
-                evidence["quota_units"],
-                f"{path}.evidence.quota_units",
-                maximum=MAX_CPU_UNITS,
-                positive=True,
-            )
-        )
-    if selectors and "online_count" in evidence:
-        _fail(
-            f"{path}.evidence.online_count",
-            "must be omitted when affinity_count, cpuset_count, or quota_units is available",
-        )
-    if not selectors:
-        if "online_count" not in evidence:
-            _fail(f"{path}.evidence", "requires a visibility selector or online_count fallback")
-        selectors.append(Decimal(evidence["online_count"]))
-    if visible != min(selectors):
-        _fail(f"{path}.visible_units", "must equal the minimum applicable CPU evidence value")
-
-
-def _validate_memory(value: Any, path: str) -> None:
-    memory = _mapping(value, path)
-    status = _status_shape(
-        memory,
-        path,
-        resource="memory",
-        statuses=POINT_STATUSES,
-        reported_required={"visible_bytes", "evidence"},
-    )
-    if status != "reported":
-        return
-
-    visible = _integer(memory["visible_bytes"], f"{path}.visible_bytes", maximum=U64_MAX, positive=True)
-    evidence = _mapping(memory["evidence"], f"{path}.evidence")
-    names = {"physical_bytes", "cgroup_limit_bytes"}
-    _exact_keys(evidence, set(), names, f"{path}.evidence")
-    if not evidence:
-        _fail(f"{path}.evidence", "must contain physical_bytes or cgroup_limit_bytes")
-    candidates = [
-        _integer(item, f"{path}.evidence.{name}", maximum=U64_MAX, positive=True) for name, item in evidence.items()
-    ]
-    if visible != min(candidates):
-        _fail(f"{path}.visible_bytes", "must equal the minimum memory evidence value")
-
-
-def _validate_storage(value: Any, path: str) -> None:
-    storage = _mapping(value, path)
-    status = _status_shape(
-        storage,
-        path,
-        resource="storage",
-        statuses=POINT_STATUSES,
-        reported_required={"capacity_bytes"},
-    )
-    if status != "reported":
-        return
-    _integer(storage["capacity_bytes"], f"{path}.capacity_bytes", maximum=U64_MAX, positive=True)
-
-
-def _gpu_group_key(group: Mapping[str, Any]) -> tuple[str, str, str, str]:
-    return (
-        group["kind"],
-        group.get("model", ""),
-        group.get("memory_bytes", ""),
-        group.get("mig_profile", ""),
-    )
-
-
-def _validate_gpu_group(value: Any, path: str, *, time_value: bool = False) -> None:
-    group = _mapping(value, path)
-    numeric_name = "instance_seconds" if time_value else "count"
-    _exact_keys(
-        group,
-        {"kind", numeric_name},
-        {"model", "memory_bytes", "mig_profile"},
-        path,
-    )
-    kind = _enum(group["kind"], GPU_KINDS, f"{path}.kind")
-    if time_value:
-        _decimal(group[numeric_name], f"{path}.{numeric_name}")
-    else:
-        _integer(group[numeric_name], f"{path}.{numeric_name}", maximum=U32_MAX, positive=True)
-    if "model" in group:
-        _model(group["model"], f"{path}.model")
-    if "memory_bytes" in group:
-        _integer(group["memory_bytes"], f"{path}.memory_bytes", maximum=U64_MAX, positive=True)
-    if "mig_profile" in group:
-        _identifier(group["mig_profile"], MIG_PROFILE_PATTERN, f"{path}.mig_profile")
-    if kind == "full_gpu" and "mig_profile" in group:
-        _fail(f"{path}.mig_profile", "is valid only for a MIG compute-instance group")
-
-
-def _validate_group_list(value: Any, path: str, *, gpu: bool, time_value: bool = False) -> None:
-    if not isinstance(value, list) or len(value) > MAX_GPU_GROUPS:
-        _fail(path, f"must be an array with at most {MAX_GPU_GROUPS} groups")
-    keys: list[tuple[str, ...]] = []
-    for index, group in enumerate(value):
-        item_path = f"{path}[{index}]"
-        if gpu:
-            _validate_gpu_group(group, item_path, time_value=time_value)
-            keys.append(_gpu_group_key(group))
-        else:
-            _validate_cpu_time_group(group, item_path)
-            keys.append((group.get("model", ""), group.get("architecture", "")))
-    if keys != sorted(keys) or len(keys) != len(set(keys)):
-        _fail(path, "groups must be consolidated, unique, and sorted by their identifying fields")
-
-
-def _validate_gpu(value: Any, path: str) -> None:
-    gpu = _mapping(value, path)
-    status = _enum(gpu.get("status"), POINT_STATUSES, f"{path}.status")
-    if status == "reported":
-        _exact_keys(gpu, {"status", "cuda_mask_present", "groups"}, set(), path)
-        if not isinstance(gpu["cuda_mask_present"], bool):
-            _fail(f"{path}.cuda_mask_present", "must be a boolean")
-        _validate_group_list(gpu["groups"], f"{path}.groups", gpu=True)
-        if sum(int(group["count"]) for group in gpu["groups"]) > U32_MAX:
-            _fail(f"{path}.groups", "the sum of group counts must fit in an unsigned 32-bit integer")
-    else:
-        _exact_keys(gpu, {"status", "cuda_mask_present", "issues"}, set(), path)
-        if not isinstance(gpu["cuda_mask_present"], bool):
-            _fail(f"{path}.cuda_mask_present", "must be a boolean")
-        _issues(gpu["issues"], status, "gpu", f"{path}.issues")
-
-
-def _validate_compute_capacity(value: Any, path: str) -> None:
-    capacity = _mapping(value, path)
-    _exact_keys(capacity, {"cpu", "memory", "gpu"}, set(), path)
-    _validate_cpu(capacity["cpu"], f"{path}.cpu")
-    _validate_memory(capacity["memory"], f"{path}.memory")
-    _validate_gpu(capacity["gpu"], f"{path}.gpu")
-
-
-def _validate_retained_content(value: Any, path: str) -> None:
-    retained = _mapping(value, path)
-    status = _status_shape(
-        retained,
-        path,
-        resource="retained_content",
-        statuses=MEASUREMENT_STATUSES,
-        reported_required={"bytes"},
-    )
-    if status not in {"reported", "partial"}:
-        return
-    _integer(retained["bytes"], f"{path}.bytes")
-
-
-def _validate_counter(value: Any, path: str) -> None:
-    counter = _mapping(value, path)
-    _exact_keys(counter, {"payload_bytes", "messages"}, set(), path)
-    payload_bytes = _integer(counter["payload_bytes"], f"{path}.payload_bytes")
-    messages = _integer(counter["messages"], f"{path}.messages")
-    if messages == 0 and payload_bytes != 0:
-        _fail(path, "payload_bytes must be zero when messages is zero")
-
-
-_F3_BUCKETS = (
-    "remote_accepted",
-    "local_delivered",
-    "remote_failed_before_acceptance",
-)
-
-
-def _validate_f3(value: Any, path: str) -> None:
-    f3 = _mapping(value, path)
-    status = _status_shape(
-        f3,
-        path,
-        resource="f3",
-        statuses=MEASUREMENT_STATUSES,
-        reported_required=set(_F3_BUCKETS),
-    )
-    if status not in {"reported", "partial"}:
-        return
-    for bucket in _F3_BUCKETS:
-        _validate_counter(f3[bucket], f"{path}.{bucket}")
+    stack: list[tuple[Any, int]] = [(value, 1)]
+    maximum = 0
+    while stack:
+        item, depth = stack.pop()
+        maximum = max(maximum, depth)
+        # Validation only needs to know that the fixed bound was exceeded.
+        # Stopping here also makes cyclic already-decoded inputs terminate.
+        if depth > MAX_JSON_DEPTH:
+            return depth
+        if isinstance(item, Mapping):
+            stack.extend((nested, depth + 1) for nested in item.values())
+        elif isinstance(item, list):
+            stack.extend((nested, depth + 1) for nested in item)
+    return maximum
 
 
 def _validate_cpu_time_group(value: Any, path: str) -> None:
@@ -557,81 +283,197 @@ def _validate_cpu_time_group(value: Any, path: str) -> None:
         _identifier(group["architecture"], ARCHITECTURE_PATTERN, f"{path}.architecture")
 
 
-def _total_status_shape(value: Mapping[str, Any], path: str, fields: set[str]) -> str:
-    """Validate a derived total; explanations are derived, not persisted."""
+def _gpu_group_key(group: Mapping[str, Any]) -> tuple[str, str, str, str]:
+    return (
+        group["kind"],
+        group.get("model", ""),
+        group.get("memory_bytes", ""),
+        group.get("mig_profile", ""),
+    )
 
-    status = _enum(value.get("status"), TOTAL_STATUSES, f"{path}.status")
-    if status in {"reported", "partial"}:
-        _exact_keys(value, {"status"} | fields, set(), path)
+
+def _validate_gpu_time_group(value: Any, path: str) -> None:
+    group = _mapping(value, path)
+    _exact_keys(group, {"kind", "instance_seconds"}, {"model", "memory_bytes", "mig_profile"}, path)
+    kind = _enum(group["kind"], GPU_KINDS, f"{path}.kind")
+    _decimal(group["instance_seconds"], f"{path}.instance_seconds", positive=True)
+    if "model" in group:
+        _model(group["model"], f"{path}.model")
+    if "memory_bytes" in group:
+        _integer(group["memory_bytes"], f"{path}.memory_bytes", maximum=U64_MAX, positive=True)
+    if "mig_profile" in group:
+        _identifier(group["mig_profile"], MIG_PROFILE_PATTERN, f"{path}.mig_profile")
+    if kind == "full_gpu" and "mig_profile" in group:
+        _fail(f"{path}.mig_profile", "is valid only for a MIG compute-instance group")
+
+
+def _validate_group_list(value: Any, path: str, *, gpu: bool) -> None:
+    if not isinstance(value, list) or len(value) > MAX_GPU_GROUPS or (not gpu and not value):
+        minimum = "1" if not gpu else "0"
+        _fail(path, f"must contain {minimum}..{MAX_GPU_GROUPS} consolidated groups")
+    keys: list[tuple[str, ...]] = []
+    for index, group in enumerate(value):
+        item_path = f"{path}[{index}]"
+        if gpu:
+            _validate_gpu_time_group(group, item_path)
+            keys.append(_gpu_group_key(group))
+        else:
+            _validate_cpu_time_group(group, item_path)
+            keys.append((group.get("model", ""), group.get("architecture", "")))
+    if keys != sorted(keys) or len(keys) != len(set(keys)):
+        _fail(path, "groups must be consolidated, unique, and sorted by identifying fields")
+
+
+def _validate_cpu_time(value: Any, path: str) -> None:
+    cpu = _mapping(value, path)
+    _exact_keys(cpu, {"groups"}, set(), path)
+    _validate_group_list(cpu["groups"], f"{path}.groups", gpu=False)
+
+
+def _validate_memory_time(value: Any, path: str) -> None:
+    memory = _mapping(value, path)
+    _exact_keys(memory, {"byte_seconds"}, set(), path)
+    _decimal(memory["byte_seconds"], f"{path}.byte_seconds")
+
+
+def _validate_gpu_time(value: Any, path: str) -> None:
+    gpu = _mapping(value, path)
+    _exact_keys(gpu, {"groups"}, set(), path)
+    _validate_group_list(gpu["groups"], f"{path}.groups", gpu=True)
+
+
+_RESOURCE_TIME_NUMERIC_FIELDS = frozenset({"measured_seconds", "cpu", "memory", "gpu"})
+
+
+def _validate_resource_time(value: Any, path: str) -> None:
+    resource_time = _mapping(value, path)
+    status = _enum(resource_time.get("status"), RESOURCE_TIME_STATUSES, f"{path}.status")
+    if status == "reported":
+        _exact_keys(resource_time, {"status"} | set(_RESOURCE_TIME_NUMERIC_FIELDS), set(), path)
+    elif status == "partial":
+        _exact_keys(resource_time, {"status", "issues"}, set(_RESOURCE_TIME_NUMERIC_FIELDS), path)
+        _issues(resource_time["issues"], RESOURCE_TIME_PARTIAL_ISSUES, f"{path}.issues")
+        if not set(resource_time) & _RESOURCE_TIME_NUMERIC_FIELDS:
+            _fail(path, "partial resource_time must contain at least one numeric member")
     else:
-        _exact_keys(value, {"status"}, set(), path)
-    return status
+        _exact_keys(resource_time, {"status", "issues"}, set(), path)
+        _issues(resource_time["issues"], RESOURCE_TIME_UNAVAILABLE_ISSUES, f"{path}.issues")
+
+    if "measured_seconds" in resource_time:
+        _decimal(resource_time["measured_seconds"], f"{path}.measured_seconds")
+    if "cpu" in resource_time:
+        _validate_cpu_time(resource_time["cpu"], f"{path}.cpu")
+    if "memory" in resource_time:
+        _validate_memory_time(resource_time["memory"], f"{path}.memory")
+    if "gpu" in resource_time:
+        _validate_gpu_time(resource_time["gpu"], f"{path}.gpu")
 
 
-def _validate_group_total(value: Any, path: str, *, resource: str, gpu: bool) -> None:
-    total = _mapping(value, path)
-    status = _total_status_shape(total, path, {"groups"})
+def _validate_workspace_filesystem(value: Any, path: str) -> None:
+    workspace = _mapping(value, path)
+    status = _enum(workspace.get("status"), frozenset({"reported", "unavailable", "error"}), f"{path}.status")
+    if status == "reported":
+        _exact_keys(workspace, {"status", "capacity_bytes"}, set(), path)
+        _integer(workspace["capacity_bytes"], f"{path}.capacity_bytes", maximum=U64_MAX, positive=True)
+    else:
+        _exact_keys(workspace, {"status", "issues"}, set(), path)
+        allowed = CAPACITY_UNAVAILABLE_ISSUES if status == "unavailable" else SOURCE_ERROR_ISSUES
+        _issues(workspace["issues"], allowed, f"{path}.issues")
+
+
+def _validate_retained_content(value: Any, path: str, *, aggregate: bool = False) -> None:
+    retained = _mapping(value, path)
+    statuses = TOTAL_STATUSES if aggregate else MEASUREMENT_STATUSES
+    status = _enum(retained.get("status"), statuses, f"{path}.status")
+    if status == "reported":
+        _exact_keys(retained, {"status", "bytes"}, set(), path)
+        _integer(retained["bytes"], f"{path}.bytes")
+    elif status == "partial":
+        if aggregate:
+            _exact_keys(retained, {"status", "bytes"}, set(), path)
+        else:
+            _exact_keys(retained, {"status", "issues", "bytes"}, set(), path)
+            _issues(
+                retained["issues"],
+                frozenset({"attribution_incomplete", "observation_incomplete"}),
+                f"{path}.issues",
+            )
+        _integer(retained["bytes"], f"{path}.bytes")
+    elif status == "unavailable":
+        required = {"status"} if aggregate else {"status", "issues"}
+        _exact_keys(retained, required, set(), path)
+        if not aggregate:
+            _issues(retained["issues"], SOURCE_UNAVAILABLE_ISSUES, f"{path}.issues")
+    else:
+        _exact_keys(retained, {"status", "issues"}, set(), path)
+        _issues(retained["issues"], SOURCE_ERROR_ISSUES, f"{path}.issues")
+
+
+def _validate_counter(value: Any, path: str) -> None:
+    counter = _mapping(value, path)
+    _exact_keys(counter, {"payload_bytes", "messages"}, set(), path)
+    payload_bytes = _integer(counter["payload_bytes"], f"{path}.payload_bytes")
+    messages = _integer(counter["messages"], f"{path}.messages")
+    if messages == 0 and payload_bytes != 0:
+        _fail(path, "payload_bytes must be zero when messages is zero")
+
+
+_F3_BUCKETS = ("remote_accepted", "local_delivered", "remote_failed_before_acceptance")
+
+
+def _validate_f3(value: Any, path: str, *, aggregate: bool = False) -> None:
+    f3 = _mapping(value, path)
+    statuses = TOTAL_STATUSES if aggregate else MEASUREMENT_STATUSES
+    status = _enum(f3.get("status"), statuses, f"{path}.status")
+    if aggregate:
+        if status in {"reported", "partial"}:
+            _exact_keys(f3, {"status", "remote_accepted"}, set(), path)
+            _validate_counter(f3["remote_accepted"], f"{path}.remote_accepted")
+        else:
+            _exact_keys(f3, {"status"}, set(), path)
+        return
+
     if status in {"reported", "partial"}:
-        _validate_group_list(total["groups"], f"{path}.groups", gpu=gpu, time_value=gpu)
-
-
-def _validate_scalar_total(value: Any, path: str, *, resource: str, field: str) -> None:
-    total = _mapping(value, path)
-    status = _total_status_shape(total, path, {field})
-    if status in {"reported", "partial"}:
-        _decimal(total[field], f"{path}.{field}")
-
-
-def _validate_retained_total(value: Any, path: str) -> None:
-    total = _mapping(value, path)
-    status = _total_status_shape(total, path, {"bytes"})
-    if status in {"reported", "partial"}:
-        _integer(total["bytes"], f"{path}.bytes")
-
-
-def _validate_f3_total(value: Any, path: str) -> None:
-    total = _mapping(value, path)
-    status = _total_status_shape(total, path, {"remote_accepted"})
-    if status in {"reported", "partial"}:
-        _validate_counter(total["remote_accepted"], f"{path}.remote_accepted")
-
-
-_TOTAL_FIELDS = ("cpu", "memory", "gpu", "retained_content", "f3")
+        required = {"status"} | set(_F3_BUCKETS)
+        if status == "partial":
+            required.add("issues")
+        _exact_keys(f3, required, set(), path)
+        if status == "partial":
+            _issues(f3["issues"], PARTIAL_ISSUES, f"{path}.issues")
+        for bucket in _F3_BUCKETS:
+            _validate_counter(f3[bucket], f"{path}.{bucket}")
+    else:
+        _exact_keys(f3, {"status", "issues"}, set(), path)
+        allowed = SOURCE_UNAVAILABLE_ISSUES if status == "unavailable" else SOURCE_ERROR_ISSUES
+        _issues(f3["issues"], allowed, f"{path}.issues")
 
 
 def _validate_totals(value: Any, path: str) -> None:
     totals = _mapping(value, path)
-    _exact_keys(totals, set(_TOTAL_FIELDS), set(), path)
-    _validate_group_total(totals["cpu"], f"{path}.cpu", resource="cpu", gpu=False)
-    _validate_scalar_total(totals["memory"], f"{path}.memory", resource="memory", field="byte_seconds")
-    _validate_group_total(totals["gpu"], f"{path}.gpu", resource="gpu", gpu=True)
-    _validate_retained_total(totals["retained_content"], f"{path}.retained_content")
-    _validate_f3_total(totals["f3"], f"{path}.f3")
+    _exact_keys(totals, {"resource_time", "retained_content", "f3"}, set(), path)
+    _validate_resource_time(totals["resource_time"], f"{path}.resource_time")
+    _validate_retained_content(totals["retained_content"], f"{path}.retained_content", aggregate=True)
+    _validate_f3(totals["f3"], f"{path}.f3", aggregate=True)
 
 
 def _canonical_decimal(value: Decimal) -> str:
     if value == value.to_integral():
-        return str(value.quantize(Decimal(1)))
-    rendered = format(value, "f").rstrip("0").rstrip(".")
-    return rendered or "0"
+        # Decimal.quantize(Decimal(1)) uses the ambient precision and raises
+        # InvalidOperation for otherwise valid 29..39 digit totals. Fixed-point
+        # rendering is exact and independent of that context.
+        return format(value, "f").partition(".")[0]
+    return format(value, "f").rstrip("0").rstrip(".") or "0"
 
 
 def normalize_quota_units(quota_us: int, period_us: int) -> str:
-    """Normalize a finite CPU quota conservatively for the canonical wire format.
-
-    The raw positive microsecond values stay probe-internal.  Division is exact
-    Decimal arithmetic followed by floor-to-nine-fractional-digits so a
-    repeating ratio cannot overstate the effective CPU limit.
-    """
+    """Return an exact quota ratio conservatively floored to nine digits."""
 
     for name, value in (("quota_us", quota_us), ("period_us", period_us)):
         if isinstance(value, bool) or not isinstance(value, int) or value <= 0 or value > U64_MAX:
             raise ValueError(f"{name} must be a positive unsigned 64-bit integer")
     with localcontext() as context:
         context.prec = 100
-        normalized = (Decimal(quota_us) / Decimal(period_us)).quantize(
-            Decimal("0.000000001"), rounding=ROUND_FLOOR
-        )
+        normalized = (Decimal(quota_us) / Decimal(period_us)).quantize(Decimal("0.000000001"), rounding=ROUND_FLOOR)
     if normalized <= 0:
         raise ValueError("CPU quota ratio is below the v1 nine-decimal precision")
     if normalized > MAX_CPU_UNITS:
@@ -648,584 +490,255 @@ def _sum_decimals(values: Sequence[Decimal], path: str) -> Decimal:
     return result
 
 
-def _aggregate_status(
-    participants: Sequence[Mapping[str, Any]], accepted: Sequence[Mapping[str, Any]], resource: str
-) -> str:
-    states = [entry["totals"][resource]["status"] for entry in accepted]
-    numeric_count = sum(state in {"reported", "partial"} for state in states)
-    all_accepted = len(accepted) == len(participants)
-    if numeric_count and all_accepted and all(state == "reported" for state in states):
-        return "reported"
-    return "partial" if numeric_count else "unavailable"
-
-
-def _expected_group_total(
-    participants: Sequence[Mapping[str, Any]],
-    accepted: Sequence[Mapping[str, Any]],
-    resource: str,
+def _resource_time_aggregate(
+    values: Sequence[Mapping[str, Any]],
+    *,
+    complete: bool,
+    path: str,
 ) -> dict[str, Any]:
-    status = _aggregate_status(participants, accepted, resource)
-    if status == "unavailable":
-        return {"status": status}
+    numeric_seen = {name: any(name in value for value in values) for name in _RESOURCE_TIME_NUMERIC_FIELDS}
+    fully_reported = complete and bool(values) and all(value["status"] == "reported" for value in values)
 
-    value_name = "unit_seconds" if resource == "cpu" else "instance_seconds"
-    sums: dict[tuple[str, ...], list[Decimal]] = defaultdict(list)
-    templates: dict[tuple[str, ...], dict[str, Any]] = {}
-    for entry in accepted:
-        source = entry["totals"][resource]
-        if source["status"] not in {"reported", "partial"}:
-            continue
-        for group in source["groups"]:
-            if resource == "cpu":
+    result: dict[str, Any] = {}
+    if numeric_seen["measured_seconds"]:
+        measured = [Decimal(value["measured_seconds"]) for value in values if "measured_seconds" in value]
+        result["measured_seconds"] = _canonical_decimal(_sum_decimals(measured, f"{path}.measured_seconds"))
+
+    if numeric_seen["cpu"]:
+        sums: dict[tuple[str, str], list[Decimal]] = defaultdict(list)
+        templates: dict[tuple[str, str], dict[str, Any]] = {}
+        for value in values:
+            if "cpu" not in value:
+                continue
+            for group in value["cpu"]["groups"]:
                 key = (group.get("model", ""), group.get("architecture", ""))
-            else:
+                templates[key] = {name: item for name, item in group.items() if name != "unit_seconds"}
+                sums[key].append(Decimal(group["unit_seconds"]))
+        result["cpu"] = {
+            "groups": [
+                {
+                    **templates[key],
+                    "unit_seconds": _canonical_decimal(_sum_decimals(sums[key], f"{path}.cpu.groups")),
+                }
+                for key in sorted(sums)
+            ]
+        }
+
+    if numeric_seen["memory"]:
+        values_to_sum = [Decimal(value["memory"]["byte_seconds"]) for value in values if "memory" in value]
+        result["memory"] = {
+            "byte_seconds": _canonical_decimal(_sum_decimals(values_to_sum, f"{path}.memory.byte_seconds"))
+        }
+
+    if numeric_seen["gpu"]:
+        gpu_sums: dict[tuple[str, str, str, str], list[Decimal]] = defaultdict(list)
+        gpu_templates: dict[tuple[str, str, str, str], dict[str, Any]] = {}
+        for value in values:
+            if "gpu" not in value:
+                continue
+            for group in value["gpu"]["groups"]:
                 key = _gpu_group_key(group)
-            template = {name: item for name, item in group.items() if name != value_name}
-            templates[key] = template
-            sums[key].append(Decimal(group[value_name]))
+                gpu_templates[key] = {name: item for name, item in group.items() if name != "instance_seconds"}
+                gpu_sums[key].append(Decimal(group["instance_seconds"]))
+        result["gpu"] = {
+            "groups": [
+                {
+                    **gpu_templates[key],
+                    "instance_seconds": _canonical_decimal(_sum_decimals(gpu_sums[key], f"{path}.gpu.groups")),
+                }
+                for key in sorted(gpu_sums)
+            ]
+        }
 
-    groups = []
-    for key in sorted(sums):
-        group = dict(templates[key])
-        group[value_name] = _canonical_decimal(_sum_decimals(sums[key], f"$.totals.{resource}"))
-        groups.append(group)
-    result: dict[str, Any] = {"status": status, "groups": groups}
-    return result
+    if fully_reported:
+        result["status"] = "reported"
+    elif any(numeric_seen.values()):
+        issues: set[str] = set()
+        if not complete:
+            issues.add("observation_incomplete")
+        for value in values:
+            if value["status"] == "partial":
+                issues.update(value["issues"])
+            elif value["status"] == "unavailable":
+                if value["issues"] == ["attribution_incomplete"]:
+                    issues.add("attribution_incomplete")
+                else:
+                    issues.add("observation_incomplete")
+        if not issues:
+            issues.add("observation_incomplete")
+        result["status"] = "partial"
+        result["issues"] = sorted(issues)
+    else:
+        result = {"status": "unavailable", "issues": ["observation_incomplete"]}
+
+    ordered = {"status": result.pop("status")}
+    if "issues" in result:
+        ordered["issues"] = result.pop("issues")
+    ordered.update(result)
+    _validate_resource_time(ordered, path)
+    return ordered
 
 
-def _expected_scalar_total(
-    participants: Sequence[Mapping[str, Any]],
-    accepted: Sequence[Mapping[str, Any]],
-    resource: str,
-    field: str,
+def _aggregate_retained(
+    values: Sequence[Mapping[str, Any]],
+    *,
+    complete: bool,
+    path: str,
 ) -> dict[str, Any]:
-    status = _aggregate_status(participants, accepted, resource)
-    if status == "unavailable":
-        return {"status": status}
-    values = [
-        Decimal(entry["totals"][resource][field])
-        for entry in accepted
-        if entry["totals"][resource]["status"] in {"reported", "partial"}
-    ]
-    result: dict[str, Any] = {
-        "status": status,
-        field: _canonical_decimal(_sum_decimals(values, f"$.totals.{resource}.{field}")),
-    }
-    return result
+    numeric = [value for value in values if value["status"] in {"reported", "partial"}]
+    if not numeric:
+        return {"status": "unavailable"}
+    amount = sum(int(value["bytes"]) for value in numeric)
+    if amount > U128_MAX:
+        _fail(f"{path}.bytes", "aggregate exceeds the unsigned 128-bit bound")
+    reported = complete and len(numeric) == len(values) and all(value["status"] == "reported" for value in values)
+    return {"status": "reported" if reported else "partial", "bytes": str(amount)}
 
 
-def _expected_retained_total(
-    participants: Sequence[Mapping[str, Any]], accepted: Sequence[Mapping[str, Any]]
+def _aggregate_f3(
+    values: Sequence[Mapping[str, Any]],
+    *,
+    complete: bool,
+    path: str,
 ) -> dict[str, Any]:
-    status = _aggregate_status(participants, accepted, "retained_content")
-    if status == "unavailable":
-        return {"status": status}
-    value = sum(
-        int(entry["totals"]["retained_content"]["bytes"])
-        for entry in accepted
-        if entry["totals"]["retained_content"]["status"] in {"reported", "partial"}
-    )
-    if value > U128_MAX:
-        _fail("$.totals.retained_content.bytes", "aggregate exceeds the unsigned 128-bit bound")
-    result: dict[str, Any] = {"status": status, "bytes": str(value)}
-    return result
-
-
-def _expected_f3_total(
-    participants: Sequence[Mapping[str, Any]], accepted: Sequence[Mapping[str, Any]]
-) -> dict[str, Any]:
-    status = _aggregate_status(participants, accepted, "f3")
-    if status == "unavailable":
-        return {"status": status}
-    numeric = [
-        entry["totals"]["f3"]["remote_accepted"]
-        for entry in accepted
-        if entry["totals"]["f3"]["status"] in {"reported", "partial"}
-    ]
-    payload = sum(int(counter["payload_bytes"]) for counter in numeric)
-    messages = sum(int(counter["messages"]) for counter in numeric)
+    numeric = [value for value in values if value["status"] in {"reported", "partial"}]
+    if not numeric:
+        return {"status": "unavailable"}
+    payload = sum(int(value["remote_accepted"]["payload_bytes"]) for value in numeric)
+    messages = sum(int(value["remote_accepted"]["messages"]) for value in numeric)
     if payload > U128_MAX or messages > U128_MAX:
-        _fail("$.totals.f3.remote_accepted", "aggregate exceeds the unsigned 128-bit bound")
-    result: dict[str, Any] = {
-        "status": status,
+        _fail(f"{path}.remote_accepted", "aggregate exceeds the unsigned 128-bit bound")
+    reported = complete and len(numeric) == len(values) and all(value["status"] == "reported" for value in values)
+    return {
+        "status": "reported" if reported else "partial",
         "remote_accepted": {"payload_bytes": str(payload), "messages": str(messages)},
     }
-    return result
 
 
-def _expected_job_totals(participants: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
-    accepted = [entry for entry in participants if entry["status"] == "accepted"]
-    return {
-        "cpu": _expected_group_total(participants, accepted, "cpu"),
-        "memory": _expected_scalar_total(participants, accepted, "memory", "byte_seconds"),
-        "gpu": _expected_group_total(participants, accepted, "gpu"),
-        "retained_content": _expected_retained_total(participants, accepted),
-        "f3": _expected_f3_total(participants, accepted),
+def _aggregate_totals(
+    resource_times: Sequence[Mapping[str, Any]],
+    retained_values: Sequence[Mapping[str, Any]],
+    f3_values: Sequence[Mapping[str, Any]],
+    *,
+    complete: bool,
+    path: str,
+) -> dict[str, Any]:
+    totals = {
+        "resource_time": _resource_time_aggregate(resource_times, complete=complete, path=f"{path}.resource_time"),
+        "retained_content": _aggregate_retained(retained_values, complete=complete, path=f"{path}.retained_content"),
+        "f3": _aggregate_f3(f3_values, complete=complete, path=f"{path}.f3"),
     }
-
-
-_COMMON_ATTEMPT_FIELDS = {
-    "schema_version",
-    "kind",
-    "job_id",
-    "participant_id",
-    "attempt_id",
-    "environment_key",
-}
-
-RESOURCE_TIME_FORMULAS = {
-    "cpu.unit_seconds": "attempt_start.cpu.visible_units * (closed_at - opened_at)",
-    "memory.byte_seconds": "attempt_start.memory.visible_bytes * (closed_at - opened_at)",
-    "gpu.instance_seconds": "attempt_start.gpu.groups[].count * (closed_at - opened_at)",
-}
-
-
-def _validate_attempt_identity(record: Mapping[str, Any], path: str) -> None:
-    if record.get("schema_version") != SCHEMA_VERSION:
-        _fail(f"{path}.schema_version", f"must equal {SCHEMA_VERSION}")
-    _identifier(record.get("job_id"), JOB_ID_PATTERN, f"{path}.job_id")
-    _identifier(record.get("participant_id"), PARTICIPANT_ID_PATTERN, f"{path}.participant_id")
-    _identifier(record.get("attempt_id"), ATTEMPT_ID_PATTERN, f"{path}.attempt_id")
-    _identifier(record.get("environment_key"), HASH_KEY_PATTERN, f"{path}.environment_key")
-
-
-def _validate_attempt_start_body(value: Any, path: str) -> None:
-    body = _mapping(value, path)
-    _exact_keys(body, {"capacity"}, set(), path)
-    _validate_compute_capacity(body["capacity"], f"{path}.capacity")
-
-
-def _validate_attempt_final_body(value: Any, path: str) -> None:
-    body = _mapping(value, path)
-    _exact_keys(body, {"capacity"}, set(), path)
-    _validate_compute_capacity(body["capacity"], f"{path}.capacity")
-
-
-def _validate_participant_start_body(value: Any, path: str) -> None:
-    body = _mapping(value, path)
-    _exact_keys(body, {"observed_at", "storage"}, set(), path)
-    _timestamp(body["observed_at"], f"{path}.observed_at")
-    _validate_storage(body["storage"], f"{path}.storage")
-
-
-def _validate_participant_final_body(value: Any, path: str) -> None:
-    body = _mapping(value, path)
-    _exact_keys(body, {"observed_at", "storage", "retained_content", "f3"}, set(), path)
-    _timestamp(body["observed_at"], f"{path}.observed_at")
-    _validate_storage(body["storage"], f"{path}.storage")
-    _validate_retained_content(body["retained_content"], f"{path}.retained_content")
-    _validate_f3(body["f3"], f"{path}.f3")
-
-
-def _validate_attempt_end_body(value: Any, path: str) -> None:
-    body = _mapping(value, path)
-    _exact_keys(body, {"closed_at", "reason"}, set(), path)
-    _timestamp(body["closed_at"], f"{path}.closed_at")
-    _enum(body["reason"], ATTEMPT_END_REASONS, f"{path}.reason")
-
-
-def _validate_attempt_start(record: Mapping[str, Any], path: str) -> None:
-    _exact_keys(record, _COMMON_ATTEMPT_FIELDS | {"opened_at", "capacity"}, set(), path)
-    _validate_attempt_identity(record, path)
-    _timestamp(record["opened_at"], f"{path}.opened_at")
-    _validate_attempt_start_body({"capacity": record["capacity"]}, path)
-
-
-def _validate_attempt_final(record: Mapping[str, Any], path: str) -> None:
-    _exact_keys(
-        record,
-        _COMMON_ATTEMPT_FIELDS | {"capacity"},
-        set(),
-        path,
-    )
-    _validate_attempt_identity(record, path)
-    _validate_attempt_final_body({"capacity": record["capacity"]}, path)
-
-
-def _validate_attempt_end(record: Mapping[str, Any], path: str) -> None:
-    _exact_keys(record, _COMMON_ATTEMPT_FIELDS | {"opened_at", "closed_at", "reason"}, set(), path)
-    _validate_attempt_identity(record, path)
-    opened_at = _timestamp(record["opened_at"], f"{path}.opened_at")
-    closed_at = _timestamp(record["closed_at"], f"{path}.closed_at")
-    if _timestamp_nanoseconds(closed_at) < _timestamp_nanoseconds(opened_at):
-        _fail(f"{path}.closed_at", "must not precede opened_at")
-    _validate_attempt_end_body({name: record[name] for name in ("closed_at", "reason")}, path)
-
-
-def _validate_participant_identity(record: Mapping[str, Any], path: str) -> None:
-    if record.get("schema_version") != SCHEMA_VERSION:
-        _fail(f"{path}.schema_version", f"must equal {SCHEMA_VERSION}")
-    _identifier(record.get("job_id"), JOB_ID_PATTERN, f"{path}.job_id")
-    _identifier(record.get("participant_id"), PARTICIPANT_ID_PATTERN, f"{path}.participant_id")
-
-
-def _validate_participant_start(record: Mapping[str, Any], path: str) -> None:
-    required = {"schema_version", "kind", "job_id", "participant_id", "observed_at", "storage"}
-    _exact_keys(record, required, set(), path)
-    _validate_participant_identity(record, path)
-    _validate_participant_start_body({name: record[name] for name in ("observed_at", "storage")}, path)
-
-
-def _validate_participant_final(record: Mapping[str, Any], path: str) -> None:
-    required = {
-        "schema_version",
-        "kind",
-        "job_id",
-        "participant_id",
-        "observed_at",
-        "storage",
-        "retained_content",
-        "f3",
-    }
-    _exact_keys(record, required, set(), path)
-    _validate_participant_identity(record, path)
-    _validate_participant_final_body(
-        {name: record[name] for name in ("observed_at", "storage", "retained_content", "f3")}, path
-    )
-
-
-def _validate_attempt_summary(value: Any, path: str) -> tuple[str, int, int]:
-    attempt = _mapping(value, path)
-    _exact_keys(
-        attempt,
-        {"attempt_id", "environment_key", "opened_at", "end"},
-        {"start", "final"},
-        path,
-    )
-    attempt_id = _identifier(attempt["attempt_id"], ATTEMPT_ID_PATTERN, f"{path}.attempt_id")
-    environment_key = _identifier(attempt["environment_key"], HASH_KEY_PATTERN, f"{path}.environment_key")
-    opened_at = _timestamp(attempt["opened_at"], f"{path}.opened_at")
-    if "start" in attempt:
-        _validate_attempt_start_body(attempt["start"], f"{path}.start")
-    if "final" in attempt:
-        _validate_attempt_final_body(attempt["final"], f"{path}.final")
-    _validate_attempt_end_body(attempt["end"], f"{path}.end")
-
-    opened_ns = _timestamp_nanoseconds(opened_at)
-    closed_ns = _timestamp_nanoseconds(attempt["end"]["closed_at"])
-    if closed_ns < opened_ns:
-        _fail(f"{path}.end.closed_at", "must not precede opened_at")
-    if attempt["end"]["reason"] == "launch_failed":
-        if "start" in attempt or "final" in attempt:
-            _fail(path, "a launch_failed attempt cannot contain start or final capacity observations")
-    elif "start" not in attempt:
-        _fail(f"{path}.start", "is required unless end.reason is launch_failed")
-    return environment_key, opened_ns, closed_ns
+    _validate_totals(totals, path)
+    return totals
 
 
 def _validate_participant_summary(record: Mapping[str, Any], path: str) -> None:
-    required = {"schema_version", "kind", "job_id", "participant_key", "start", "final", "attempts"}
-    _exact_keys(record, required, set(), path)
+    _exact_keys(
+        record,
+        {
+            "schema_version",
+            "kind",
+            "job_id",
+            "participant_name",
+            "reported_at",
+            "resource_time",
+            "workspace_filesystem",
+            "retained_content",
+            "f3",
+        },
+        set(),
+        path,
+    )
     if record["schema_version"] != SCHEMA_VERSION:
         _fail(f"{path}.schema_version", f"must equal {SCHEMA_VERSION}")
     _identifier(record["job_id"], JOB_ID_PATTERN, f"{path}.job_id")
-    _identifier(record["participant_key"], HASH_KEY_PATTERN, f"{path}.participant_key")
-    _validate_participant_start_body(record["start"], f"{path}.start")
-    _validate_participant_final_body(record["final"], f"{path}.final")
-    participant_start_ns = _timestamp_nanoseconds(record["start"]["observed_at"])
-    participant_final_ns = _timestamp_nanoseconds(record["final"]["observed_at"])
-    if participant_final_ns < participant_start_ns:
-        _fail(f"{path}.final.observed_at", "must not precede participant startup")
-    attempts = record["attempts"]
-    if not isinstance(attempts, list) or len(attempts) > MAX_ATTEMPTS:
-        _fail(f"{path}.attempts", f"must contain 0..{MAX_ATTEMPTS} attempts")
-
-    attempt_ids: list[str] = []
-    intervals: dict[str, list[tuple[int, int, str, Mapping[str, Any]]]] = defaultdict(list)
-    for index, attempt in enumerate(attempts):
-        item_path = f"{path}.attempts[{index}]"
-        environment_key, opened_ns, closed_ns = _validate_attempt_summary(attempt, item_path)
-        attempt_ids.append(attempt["attempt_id"])
-        if opened_ns < participant_start_ns:
-            _fail(f"{item_path}.opened_at", "must not precede participant startup")
-        if closed_ns > participant_final_ns:
-            _fail(f"{item_path}.end.closed_at", "must not follow participant finalization")
-        intervals[environment_key].append((opened_ns, closed_ns, item_path, attempt))
-    if attempt_ids != sorted(attempt_ids) or len(attempt_ids) != len(set(attempt_ids)):
-        _fail(f"{path}.attempts", "must be sorted by unique attempt_id")
-
-    for environment_intervals in intervals.values():
-        environment_intervals.sort()
-        previous_closed_ns: int | None = None
-        for opened_ns, closed_ns, item_path, _attempt in environment_intervals:
-            if previous_closed_ns is not None and opened_ns < previous_closed_ns:
-                _fail(item_path, "overlaps another attempt in the same execution environment")
-            previous_closed_ns = closed_ns
+    _identifier(record["participant_name"], PARTICIPANT_NAME_PATTERN, f"{path}.participant_name")
+    _timestamp(record["reported_at"], f"{path}.reported_at")
+    _validate_resource_time(record["resource_time"], f"{path}.resource_time")
+    _validate_workspace_filesystem(record["workspace_filesystem"], f"{path}.workspace_filesystem")
+    _validate_retained_content(record["retained_content"], f"{path}.retained_content")
+    _validate_f3(record["f3"], f"{path}.f3")
 
 
-def _duration_seconds(start: str, end: str) -> Decimal:
-    nanoseconds = _timestamp_nanoseconds(end) - _timestamp_nanoseconds(start)
-    assert nanoseconds >= 0
-    return Decimal(nanoseconds) / Decimal(1_000_000_000)
-
-
-def _resource_product(capacity: Decimal, seconds: Decimal, path: str) -> Decimal:
-    with localcontext() as context:
-        context.prec = 100
-        value = (capacity * seconds).quantize(Decimal("0.000000001"), rounding=ROUND_HALF_EVEN)
-    if value > Decimal(U128_MAX):
-        _fail(path, "derived resource time exceeds the unsigned 128-bit bound")
-    return value
-
-
-def _capacity_signature(resource: str, value: Mapping[str, Any]) -> Any:
-    if value["status"] not in {"reported", "partial"}:
-        return None
-    if resource == "cpu":
-        return value["visible_units"]
-    if resource == "memory":
-        return value["visible_bytes"]
-    counts: dict[str, int] = defaultdict(int)
-    for group in value["groups"]:
-        counts[group["kind"]] += int(group["count"])
-    return tuple(sorted(counts.items()))
-
-
-def _derived_status(numeric_seen: bool, degraded: bool) -> str:
-    if not numeric_seen:
-        return "unavailable"
-    return "partial" if degraded else "reported"
-
-
-def derive_participant_totals(
-    participant_record: Mapping[str, Any],
-) -> tuple[str, dict[str, Any]]:
-    """Derive totals from one site's resource-statistics report.
-
-    In the JSON, an attempt is a measurement period.  Its start and end must use
-    one NVFlare clock, but the schema does not choose which component records
-    them. A final sample is optional stability evidence. The saved-result byte
-    total and F3 totals are counted once.
-    Each product is rounded half-even to nine fractional digits before summing.
-    """
+def derive_participant_totals(participant_record: Mapping[str, Any]) -> dict[str, Any]:
+    """Copy the three accepted values from one validated terminal report."""
 
     validate_record(participant_record)
     if participant_record["kind"] != KIND_PARTICIPANT_SUMMARY:
         _fail("$.kind", f"must equal {KIND_PARTICIPANT_SUMMARY}")
-
-    transient_resources = ("cpu", "memory", "gpu")
-    numeric = {name: False for name in _TOTAL_FIELDS}
-    degraded = {name: False for name in _TOTAL_FIELDS}
-    resource_window_values: list[Decimal] = []
-    cpu_values: dict[tuple[str, str], list[Decimal]] = defaultdict(list)
-    cpu_templates: dict[tuple[str, str], dict[str, str]] = {}
-    gpu_values: dict[tuple[str, str, str, str], list[Decimal]] = defaultdict(list)
-    gpu_templates: dict[tuple[str, str, str, str], dict[str, str]] = {}
-    memory_values: list[Decimal] = []
-
-    # A completed participant lifecycle with no attempts authoritatively says
-    # that no transient resource window occurred.  This is a reported zero,
-    # unlike an end-only launch_failed attempt whose capacity is unobserved.
-    if not participant_record["attempts"]:
-        for resource in transient_resources:
-            numeric[resource] = True
-
-    for index, attempt in enumerate(participant_record["attempts"]):
-        attempt_path = f"$.attempts[{index}]"
-        start = attempt.get("start")
-        final = attempt.get("final")
-        seconds = _duration_seconds(attempt["opened_at"], attempt["end"]["closed_at"])
-        resource_window_values.append(seconds)
-        if start is None:
-            for resource in transient_resources:
-                degraded[resource] = True
-        else:
-            for resource in transient_resources:
-                startup_resource = start["capacity"][resource]
-                if startup_resource["status"] != "reported":
-                    degraded[resource] = True
-                    continue
-                numeric[resource] = True
-                final_resource = final["capacity"][resource] if final is not None else None
-                if (
-                    final_resource is None
-                    or final_resource["status"] != "reported"
-                    or _capacity_signature(resource, startup_resource) != _capacity_signature(resource, final_resource)
-                ):
-                    degraded[resource] = True
-
-                if resource == "cpu":
-                    key = (
-                        startup_resource.get("model", ""),
-                        startup_resource.get("architecture", ""),
-                    )
-                    cpu_templates[key] = {
-                        name: startup_resource[name] for name in ("model", "architecture") if name in startup_resource
-                    }
-                    cpu_values[key].append(
-                        _resource_product(
-                            Decimal(startup_resource["visible_units"]),
-                            seconds,
-                            f"{attempt_path}.start.capacity.cpu",
-                        )
-                    )
-                elif resource == "memory":
-                    memory_values.append(
-                        _resource_product(
-                            Decimal(startup_resource["visible_bytes"]),
-                            seconds,
-                            f"{attempt_path}.start.capacity.memory",
-                        )
-                    )
-                else:
-                    for group in startup_resource["groups"]:
-                        key = _gpu_group_key(group)
-                        gpu_templates[key] = {
-                            name: group[name]
-                            for name in ("kind", "model", "memory_bytes", "mig_profile")
-                            if name in group
-                        }
-                        gpu_values[key].append(
-                            _resource_product(
-                                Decimal(group["count"]),
-                                seconds,
-                                f"{attempt_path}.start.capacity.gpu.groups",
-                            )
-                        )
-
-    resource_window_seconds = _canonical_decimal(
-        _sum_decimals(resource_window_values, "$.resource_window_seconds")
-    )
-
-    participant_final = participant_record["final"]
-    retained = participant_final["retained_content"]
-    retained_value = 0
-    if retained["status"] in {"reported", "partial"}:
-        numeric["retained_content"] = True
-        retained_value = int(retained["bytes"])
-        if retained["status"] == "partial":
-            degraded["retained_content"] = True
-    else:
-        degraded["retained_content"] = True
-
-    f3 = participant_final["f3"]
-    f3_payload = 0
-    f3_messages = 0
-    if f3["status"] in {"reported", "partial"}:
-        numeric["f3"] = True
-        f3_payload = int(f3["remote_accepted"]["payload_bytes"])
-        f3_messages = int(f3["remote_accepted"]["messages"])
-        if f3["status"] == "partial":
-            degraded["f3"] = True
-    else:
-        degraded["f3"] = True
-
-    cpu_status = _derived_status(numeric["cpu"], degraded["cpu"])
-    if cpu_status == "unavailable":
-        cpu_total: dict[str, Any] = {"status": cpu_status}
-    else:
-        cpu_groups = []
-        for key in sorted(cpu_values):
-            group = dict(cpu_templates[key])
-            group["unit_seconds"] = _canonical_decimal(_sum_decimals(cpu_values[key], "$.totals.cpu.groups"))
-            cpu_groups.append(group)
-        cpu_total = {"status": cpu_status, "groups": cpu_groups}
-
-    gpu_status = _derived_status(numeric["gpu"], degraded["gpu"])
-    if gpu_status == "unavailable":
-        gpu_total: dict[str, Any] = {"status": gpu_status}
-    else:
-        gpu_groups = []
-        for key in sorted(gpu_values):
-            group = dict(gpu_templates[key])
-            group["instance_seconds"] = _canonical_decimal(_sum_decimals(gpu_values[key], "$.totals.gpu.groups"))
-            gpu_groups.append(group)
-        gpu_total = {"status": gpu_status, "groups": gpu_groups}
-
-    def scalar_resource(resource: str, values: Sequence[Decimal]) -> dict[str, Any]:
-        status = _derived_status(numeric[resource], degraded[resource])
-        if status == "unavailable":
-            return {"status": status}
-        return {
-            "status": status,
-            "byte_seconds": _canonical_decimal(_sum_decimals(values, f"$.totals.{resource}.byte_seconds")),
-        }
-
-    retained_status = _derived_status(numeric["retained_content"], degraded["retained_content"])
-    if retained_status == "unavailable":
-        retained_total: dict[str, Any] = {"status": retained_status}
-    else:
-        if retained_value > U128_MAX:
-            _fail("$.totals.retained_content.bytes", "derived total exceeds unsigned 128-bit bound")
-        retained_total = {"status": retained_status, "bytes": str(retained_value)}
-
-    f3_status = _derived_status(numeric["f3"], degraded["f3"])
-    if f3_status == "unavailable":
-        f3_total: dict[str, Any] = {"status": f3_status}
-    else:
-        if f3_payload > U128_MAX or f3_messages > U128_MAX:
-            _fail("$.totals.f3.remote_accepted", "derived total exceeds unsigned 128-bit bound")
-        f3_total = {
-            "status": f3_status,
-            "remote_accepted": {"payload_bytes": str(f3_payload), "messages": str(f3_messages)},
-        }
-
-    totals = {
-        "cpu": cpu_total,
-        "memory": scalar_resource("memory", memory_values),
-        "gpu": gpu_total,
-        "retained_content": retained_total,
-        "f3": f3_total,
+    return {
+        "resource_time": deepcopy(participant_record["resource_time"]),
+        "retained_content": deepcopy(participant_record["retained_content"]),
+        "f3": deepcopy(participant_record["f3"]),
     }
-    _validate_totals(totals, "$.totals")
-    return resource_window_seconds, totals
 
 
 def _validate_participant_entry(value: Any, path: str, cutoff_ns: int) -> None:
     entry = _mapping(value, path)
     status = _enum(entry.get("status"), PARTICIPANT_STATUSES, f"{path}.status")
-    base = {"participant_id", "participant_key", "role", "status"}
+    base = {"participant_name", "role", "status"}
     if status == "accepted":
         _exact_keys(
             entry,
-            base | {"received_at", "summary_sha256", "resource_window_seconds", "totals"},
+            base
+            | {
+                "received_at",
+                "resource_time",
+                "retained_content",
+                "f3",
+            },
             set(),
             path,
         )
         received_at = _timestamp(entry["received_at"], f"{path}.received_at")
-        _identifier(entry["summary_sha256"], SHA256_PATTERN, f"{path}.summary_sha256")
-        _decimal(entry["resource_window_seconds"], f"{path}.resource_window_seconds")
-        _validate_totals(entry["totals"], f"{path}.totals")
         if _timestamp_nanoseconds(received_at) > cutoff_ns:
             _fail(f"{path}.received_at", "must not be later than report_cutoff_at")
+        _validate_resource_time(entry["resource_time"], f"{path}.resource_time")
+        _validate_retained_content(entry["retained_content"], f"{path}.retained_content")
+        _validate_f3(entry["f3"], f"{path}.f3")
     elif status == "invalid":
         _exact_keys(entry, base | {"received_at", "issues"}, set(), path)
         received_at = _timestamp(entry["received_at"], f"{path}.received_at")
         if _timestamp_nanoseconds(received_at) > cutoff_ns:
             _fail(f"{path}.received_at", "must not be later than report_cutoff_at")
-        issues = entry["issues"]
-        if (
-            not isinstance(issues, list)
-            or not 1 <= len(issues) <= MAX_ISSUES
-            or issues != sorted(issues)
-            or len(issues) != len(set(issues))
-            or set(issues) - {"malformed_source", "permission_denied"}
-        ):
-            _fail(f"{path}.issues", "must be a sorted non-empty invalid-report issue list")
+        _issues(entry["issues"], INVALID_REPORT_ISSUES, f"{path}.issues")
     else:
         _exact_keys(entry, base, set(), path)
-    _identifier(entry["participant_key"], HASH_KEY_PATTERN, f"{path}.participant_key")
-    _identifier(entry["participant_id"], PARTICIPANT_ID_PATTERN, f"{path}.participant_id")
+    _identifier(entry["participant_name"], PARTICIPANT_NAME_PATTERN, f"{path}.participant_name")
     _enum(entry["role"], ROLES, f"{path}.role")
 
 
-def derive_job_totals(participants: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
-    """Derive job totals from one complete, fixed expected-participant list."""
-
+def _validate_participant_list(
+    participants: Sequence[Mapping[str, Any]],
+    *,
+    cutoff_ns: int,
+    path: str,
+) -> None:
     if not isinstance(participants, list) or not 1 <= len(participants) <= MAX_PARTICIPANTS:
-        _fail("participants", f"must contain 1..{MAX_PARTICIPANTS} entries")
-    maximum_timestamp = _timestamp_nanoseconds("9999-12-31T23:59:59.999999999Z")
-    ordering: list[tuple[str, str, str]] = []
+        _fail(path, f"must contain 1..{MAX_PARTICIPANTS} entries")
+    ordering: list[tuple[str, str]] = []
     for index, entry in enumerate(participants):
-        _validate_participant_entry(entry, f"participants[{index}]", maximum_timestamp)
-        ordering.append((entry["role"], entry["participant_id"], entry["participant_key"]))
+        _validate_participant_entry(entry, f"{path}[{index}]", cutoff_ns)
+        ordering.append((entry["role"], entry["participant_name"]))
     if ordering != sorted(ordering):
-        _fail("participants", "must be sorted by role, participant_id, then participant_key")
+        _fail(path, "must be sorted by role, then participant_name")
     if len({item[1] for item in ordering}) != len(ordering):
-        _fail("participants", "participant_id values must be unique")
-    if len({item[2] for item in ordering}) != len(ordering):
-        _fail("participants", "participant_key values must be unique")
-    return _expected_job_totals(participants)
+        _fail(path, "participant_name values must be unique")
+
+
+def derive_job_totals(participants: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    """Derive job totals from one complete expected-participant list."""
+
+    maximum_timestamp = _timestamp_nanoseconds("9999-12-31T23:59:59.999999999Z")
+    _validate_participant_list(participants, cutoff_ns=maximum_timestamp, path="participants")
+    accepted = [entry for entry in participants if entry["status"] == "accepted"]
+    return _aggregate_totals(
+        [entry["resource_time"] for entry in accepted],
+        [entry["retained_content"] for entry in accepted],
+        [entry["f3"] for entry in accepted],
+        complete=len(accepted) == len(participants),
+        path="totals",
+    )
 
 
 def _validate_resource_summary(record: Mapping[str, Any], path: str) -> None:
@@ -1243,61 +756,97 @@ def _validate_resource_summary(record: Mapping[str, Any], path: str) -> None:
     cutoff_ns = _timestamp_nanoseconds(cutoff)
     if _timestamp_nanoseconds(finalized) < cutoff_ns:
         _fail(f"{path}.finalized_at", "must not precede report_cutoff_at")
-    participants = record["participants"]
-    if not isinstance(participants, list) or not 1 <= len(participants) <= MAX_PARTICIPANTS:
-        _fail(f"{path}.participants", f"must contain 1..{MAX_PARTICIPANTS} entries")
-    ordering: list[tuple[str, str, str]] = []
-    for index, entry in enumerate(participants):
-        _validate_participant_entry(entry, f"{path}.participants[{index}]", cutoff_ns)
-        ordering.append((entry["role"], entry["participant_id"], entry["participant_key"]))
-    if ordering != sorted(ordering):
-        _fail(f"{path}.participants", "must be sorted by role, participant_id, then participant_key")
-    if len({item[1] for item in ordering}) != len(ordering):
-        _fail(f"{path}.participants", "participant_id values must be unique")
-    if len({item[2] for item in ordering}) != len(ordering):
-        _fail(f"{path}.participants", "participant_key values must be unique")
+    _validate_participant_list(record["participants"], cutoff_ns=cutoff_ns, path=f"{path}.participants")
     _validate_totals(record["totals"], f"{path}.totals")
-    expected = derive_job_totals(participants)
+    expected = derive_job_totals(record["participants"])
     if record["totals"] != expected:
-        _fail(f"{path}.totals", "must exactly equal the deterministic sum and coverage state of participants")
+        _fail(f"{path}.totals", "must exactly equal the deterministic sum and coverage of participants")
 
 
-_PARTICIPANT_MANIFEST_PATH = re.compile(r"^participants/sha256-[0-9a-f]{64}\.json$")
+def _validate_study_job(value: Any, path: str) -> None:
+    job = _mapping(value, path)
+    resource_data = _enum(job.get("resource_data"), RESOURCE_DATA_STATES, f"{path}.resource_data")
+    if resource_data == "included":
+        _exact_keys(
+            job,
+            {"job_id", "job_status", "resource_data", "totals"},
+            set(),
+            path,
+        )
+        _validate_totals(job["totals"], f"{path}.totals")
+    else:
+        _exact_keys(job, {"job_id", "job_status", "resource_data"}, set(), path)
+    _identifier(job["job_id"], JOB_ID_PATTERN, f"{path}.job_id")
+    job_status = _identifier(job["job_status"], JOB_STATUS_PATTERN, f"{path}.job_status")
+    terminal = job_status.startswith("FINISHED:") or job_status in LEGACY_TERMINAL_JOB_STATES
+    if resource_data in {"included", "unavailable"} and not terminal:
+        _fail(f"{path}.job_status", f"must be a terminal job status when resource_data is {resource_data}")
+    if resource_data == "nonterminal" and terminal:
+        _fail(f"{path}.job_status", "must not be a terminal job status when resource_data is nonterminal")
 
 
-def _validate_manifest(record: Mapping[str, Any], path: str) -> None:
-    _exact_keys(record, {"schema_version", "kind", "job_id", "entries"}, set(), path)
+def _validate_study_jobs(jobs: Sequence[Mapping[str, Any]], path: str) -> None:
+    if not isinstance(jobs, list) or len(jobs) > MAX_STUDY_JOBS:
+        _fail(path, f"must contain 0..{MAX_STUDY_JOBS} entries")
+    job_ids: list[str] = []
+    for index, job in enumerate(jobs):
+        _validate_study_job(job, f"{path}[{index}]")
+        job_ids.append(job["job_id"])
+    if job_ids != sorted(job_ids) or len(job_ids) != len(set(job_ids)):
+        _fail(path, "must be sorted by unique job_id")
+
+
+def derive_study_totals(job_rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    """Derive transient study totals from the bounded selected-job rows."""
+
+    _validate_study_jobs(job_rows, "jobs")
+    included = [job for job in job_rows if job["resource_data"] == "included"]
+    return _aggregate_totals(
+        [job["totals"]["resource_time"] for job in included],
+        [job["totals"]["retained_content"] for job in included],
+        [job["totals"]["f3"] for job in included],
+        complete=len(included) == len(job_rows),
+        path="totals",
+    )
+
+
+def _validate_study_summary(record: Mapping[str, Any], path: str) -> None:
+    _exact_keys(
+        record,
+        {"schema_version", "kind", "selection", "generated_at", "coverage", "jobs", "totals"},
+        set(),
+        path,
+    )
     if record["schema_version"] != SCHEMA_VERSION:
         _fail(f"{path}.schema_version", f"must equal {SCHEMA_VERSION}")
-    _identifier(record["job_id"], JOB_ID_PATTERN, f"{path}.job_id")
-    entries = record["entries"]
-    if not isinstance(entries, list) or not 1 <= len(entries) <= MAX_PARTICIPANTS + 1:
-        _fail(f"{path}.entries", f"must contain 1..{MAX_PARTICIPANTS + 1} entries")
-    paths: list[str] = []
-    for index, entry_value in enumerate(entries):
-        item_path = f"{path}.entries[{index}]"
-        entry = _mapping(entry_value, item_path)
-        _exact_keys(entry, {"relative_path", "sha256"}, set(), item_path)
-        relative_path = _relative_path(entry["relative_path"], f"{item_path}.relative_path")
-        if relative_path != "resource_summary.json" and not _PARTICIPANT_MANIFEST_PATH.fullmatch(relative_path):
-            _fail(
-                f"{item_path}.relative_path",
-                "must identify resource_summary.json or a participant summary by participant_key",
-            )
-        paths.append(relative_path)
-        _identifier(entry["sha256"], SHA256_PATTERN, f"{item_path}.sha256")
-    if paths != sorted(paths) or len(paths) != len(set(paths)):
-        _fail(f"{path}.entries", "must be sorted by unique relative_path")
-    if paths.count("resource_summary.json") != 1:
-        _fail(f"{path}.entries", "must contain exactly one resource_summary.json entry")
+    selection = _mapping(record["selection"], f"{path}.selection")
+    _exact_keys(selection, {"study_name"}, set(), f"{path}.selection")
+    _identifier(selection["study_name"], STUDY_NAME_PATTERN, f"{path}.selection.study_name")
+    _timestamp(record["generated_at"], f"{path}.generated_at")
+    _validate_study_jobs(record["jobs"], f"{path}.jobs")
+
+    coverage = _mapping(record["coverage"], f"{path}.coverage")
+    coverage_names = {"selected_jobs", "included_jobs", "unavailable_jobs", "nonterminal_jobs"}
+    _exact_keys(coverage, coverage_names, set(), f"{path}.coverage")
+    actual = {
+        "selected_jobs": len(record["jobs"]),
+        "included_jobs": sum(job["resource_data"] == "included" for job in record["jobs"]),
+        "unavailable_jobs": sum(job["resource_data"] == "unavailable" for job in record["jobs"]),
+        "nonterminal_jobs": sum(job["resource_data"] == "nonterminal" for job in record["jobs"]),
+    }
+    for name in sorted(coverage_names):
+        reported = _integer(coverage[name], f"{path}.coverage.{name}", maximum=MAX_STUDY_JOBS)
+        if reported != actual[name]:
+            _fail(f"{path}.coverage.{name}", f"must equal {actual[name]} from jobs")
+
+    _validate_totals(record["totals"], f"{path}.totals")
+    expected = derive_study_totals(record["jobs"])
+    if record["totals"] != expected:
+        _fail(f"{path}.totals", "must exactly equal the deterministic sum and coverage of included jobs")
 
 
 def validate_record(record: Mapping[str, Any], *, serialized_size: int | None = None) -> None:
-    """Validate one already-decoded canonical record.
-
-    ``serialized_size`` should be supplied by callers that received serialized
-    bytes.  ``load_and_validate`` supplies it automatically.
-    """
+    """Validate one already-decoded canonical record."""
 
     record = _mapping(record, "$")
     kind = _enum(record.get("kind"), RECORD_KINDS, "$.kind")
@@ -1309,18 +858,11 @@ def validate_record(record: Mapping[str, Any], *, serialized_size: int | None = 
     if _json_depth(record) > MAX_JSON_DEPTH:
         _fail("$", f"record exceeds maximum JSON depth {MAX_JSON_DEPTH}")
     _privacy_walk(record)
-
-    validators = {
-        KIND_ATTEMPT_START: _validate_attempt_start,
-        KIND_ATTEMPT_FINAL: _validate_attempt_final,
-        KIND_ATTEMPT_END: _validate_attempt_end,
-        KIND_PARTICIPANT_START: _validate_participant_start,
-        KIND_PARTICIPANT_FINAL: _validate_participant_final,
+    {
         KIND_PARTICIPANT_SUMMARY: _validate_participant_summary,
         KIND_RESOURCE_SUMMARY: _validate_resource_summary,
-        KIND_MANIFEST: _validate_manifest,
-    }
-    validators[kind](record, "$")
+        KIND_STUDY_SUMMARY: _validate_study_summary,
+    }[kind](record, "$")
 
 
 def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -1349,13 +891,11 @@ def load_and_validate(data: bytes) -> dict[str, Any]:
     except UnicodeDecodeError as exc:
         raise ContractError("$: input must be valid UTF-8") from exc
     try:
-        record = json.loads(
-            text,
-            object_pairs_hook=_reject_duplicate_keys,
-            parse_constant=_reject_nonfinite,
-        )
+        record = json.loads(text, object_pairs_hook=_reject_duplicate_keys, parse_constant=_reject_nonfinite)
     except ContractError:
         raise
+    except RecursionError as exc:
+        raise ContractError(f"$: JSON nesting exceeds maximum depth {MAX_JSON_DEPTH}") from exc
     except (json.JSONDecodeError, ValueError) as exc:
         raise ContractError(f"$: invalid JSON: {exc}") from exc
     if not isinstance(record, dict):
@@ -1367,49 +907,33 @@ def load_and_validate(data: bytes) -> dict[str, Any]:
 def validate_bundle(
     resource_summary: Mapping[str, Any],
     participant_records: Mapping[str, Mapping[str, Any]],
-    manifest: Mapping[str, Any],
     file_bytes: Mapping[str, bytes],
 ) -> None:
-    """Validate one finalized archive, including exact-byte digest relationships.
+    """Validate the exact inventory and content of a finalized archive bundle.
 
-    ``participant_records`` is keyed by participant_key. ``file_bytes`` contains
-    the exact archived bytes for ``resource_summary.json`` and every accepted
-    ``participants/<participant_key>.json`` file. The manifest itself is not an
-    entry in its own digest list.
+    The resource summary is the commit record: its accepted participant names
+    determine every participant member, and it is written last by producers.
     """
 
     validate_record(resource_summary)
     if resource_summary["kind"] != KIND_RESOURCE_SUMMARY:
         _fail("resource_summary.kind", f"must equal {KIND_RESOURCE_SUMMARY}")
-    validate_record(manifest)
-    if manifest["kind"] != KIND_MANIFEST:
-        _fail("manifest.kind", f"must equal {KIND_MANIFEST}")
-    if manifest["job_id"] != resource_summary["job_id"]:
-        _fail("manifest.job_id", "must equal resource_summary.job_id")
     if not isinstance(participant_records, Mapping):
-        _fail("participant_records", "must be a participant_key-to-record mapping")
+        _fail("participant_records", "must be a participant_name-to-record mapping")
     if not isinstance(file_bytes, Mapping):
         _fail("file_bytes", "must be a relative-path-to-bytes mapping")
 
     accepted = {
-        entry["participant_key"]: entry
-        for entry in resource_summary["participants"]
-        if entry["status"] == "accepted"
+        entry["participant_name"]: entry for entry in resource_summary["participants"] if entry["status"] == "accepted"
     }
     if set(participant_records) != set(accepted):
-        _fail(
-            "participant_records",
-            "keys must exactly equal the accepted participant keys in the expected participant list",
-        )
+        _fail("participant_records", "keys must exactly equal the accepted participant names")
 
     expected_paths = {"resource_summary.json"} | {
-        f"participants/{participant_key}.json" for participant_key in accepted
+        f"participants/{participant_name}.json" for participant_name in accepted
     }
-    manifest_entries = {entry["relative_path"]: entry["sha256"] for entry in manifest["entries"]}
-    if set(manifest_entries) != expected_paths:
-        _fail("manifest.entries", "paths must exactly cover the summary and accepted participant records")
     if set(file_bytes) != expected_paths:
-        _fail("file_bytes", "paths must exactly match manifest.entries")
+        _fail("file_bytes", "paths must exactly match the summary and accepted participant records")
 
     decoded_summary: Mapping[str, Any] | None = None
     decoded_participants: dict[str, Mapping[str, Any]] = {}
@@ -1417,77 +941,34 @@ def validate_bundle(
         data = file_bytes[relative_path]
         if not isinstance(data, bytes):
             _fail(f"file_bytes[{relative_path!r}]", "must be exact bytes")
-        digest = hashlib.sha256(data).hexdigest()
-        if digest != manifest_entries[relative_path]:
-            _fail(f"manifest.entries[{relative_path!r}].sha256", "does not match archived bytes")
         decoded = load_and_validate(data)
         if relative_path == "resource_summary.json":
             decoded_summary = decoded
         else:
-            participant_key = relative_path.removeprefix("participants/").removesuffix(".json")
-            decoded_participants[participant_key] = decoded
+            participant_name = relative_path.removeprefix("participants/").removesuffix(".json")
+            decoded_participants[participant_name] = decoded
 
     if decoded_summary != resource_summary:
         _fail("resource_summary", "does not equal the exact decoded archived record")
 
-    environment_intervals: dict[str, list[tuple[int, int, str, str]]] = defaultdict(list)
-    for participant_key, record in participant_records.items():
-        _identifier(participant_key, HASH_KEY_PATTERN, f"participant_records[{participant_key!r}]")
+    for participant_name, record in participant_records.items():
+        _identifier(participant_name, PARTICIPANT_NAME_PATTERN, f"participant_records[{participant_name!r}]")
         validate_record(record)
         if record["kind"] != KIND_PARTICIPANT_SUMMARY:
-            _fail(
-                f"participant_records[{participant_key!r}].kind",
-                f"must equal {KIND_PARTICIPANT_SUMMARY}",
-            )
-        if record["participant_key"] != participant_key:
-            _fail(
-                f"participant_records[{participant_key!r}].participant_key",
-                "must equal its mapping key",
-            )
+            _fail(f"participant_records[{participant_name!r}].kind", f"must equal {KIND_PARTICIPANT_SUMMARY}")
+        if record["participant_name"] != participant_name:
+            _fail(f"participant_records[{participant_name!r}].participant_name", "must equal its mapping key")
         if record["job_id"] != resource_summary["job_id"]:
-            _fail(f"participant_records[{participant_key!r}].job_id", "must equal summary job_id")
-        if decoded_participants.get(participant_key) != record:
-            _fail(
-                f"participant_records[{participant_key!r}]",
-                "does not equal the exact decoded archived record",
-            )
-        relative_path = f"participants/{participant_key}.json"
-        digest = hashlib.sha256(file_bytes[relative_path]).hexdigest()
-        participant_entry = accepted[participant_key]
-        if participant_entry["summary_sha256"] != digest:
-            _fail(
-                f"resource_summary.participants[{participant_key!r}].summary_sha256",
-                "does not match the accepted participant bytes",
-            )
-        resource_window_seconds, totals = derive_participant_totals(record)
-        if participant_entry["resource_window_seconds"] != resource_window_seconds:
-            _fail(
-                f"resource_summary.participants[{participant_key!r}].resource_window_seconds",
-                "does not equal the lifecycle-derived resource-window interval sum",
-            )
-        if participant_entry["totals"] != totals:
-            _fail(
-                f"resource_summary.participants[{participant_key!r}].totals",
-                "does not equal startup capacity multiplied by the derived intervals",
-            )
-        for attempt in record["attempts"]:
-            environment_intervals[attempt["environment_key"]].append(
-                (
-                    _timestamp_nanoseconds(attempt["opened_at"]),
-                    _timestamp_nanoseconds(attempt["end"]["closed_at"]),
-                    participant_key,
-                    attempt["attempt_id"],
-                )
-            )
+            _fail(f"participant_records[{participant_name!r}].job_id", "must equal summary job_id")
+        if decoded_participants.get(participant_name) != record:
+            _fail(f"participant_records[{participant_name!r}]", "does not equal the decoded archived record")
 
-    for environment_key, intervals in environment_intervals.items():
-        intervals.sort()
-        previous = intervals[0]
-        for current in intervals[1:]:
-            if current[0] < previous[1]:
+        relative_path = f"participants/{participant_name}.json"
+        entry = accepted[participant_name]
+        copied = derive_participant_totals(record)
+        for field in ("resource_time", "retained_content", "f3"):
+            if entry[field] != copied[field]:
                 _fail(
-                    "participant_records",
-                    "overlapping reporters for environment "
-                    f"{environment_key}: {previous[2]}/{previous[3]} and {current[2]}/{current[3]}",
+                    f"resource_summary.participants[{participant_name!r}].{field}",
+                    "must exactly copy the accepted terminal participant report",
                 )
-            previous = current

@@ -1,0 +1,17 @@
+Recorded resources for job job-20260917-001.
+Job coverage: COMPLETE (2 accepted / 2 expected)
+
+Recorded average visible capacity over each measured interval
+SITE    ROLE    REPORT    COMPUTE   MEASURED TIME  CPU UNITS  MEM GiB   FULL GPUs
+site-1  client  accepted  REPORTED  37m3s          32.0000    192.0000  4.0000
+server  server  accepted  REPORTED  37m20s         8.0000     64.0000   0.0000
+
+Additive participant resource-time from accepted reports | compute: REPORTED
+  Summed measured participant time: 1h14m23s
+  CPU 24.7422 unit h | MEMORY 158.4089 GiB h | FULL GPUs 2.4706 instance h
+
+Notes:
+  PARTIAL means at least one expected report or observation was incomplete.
+  Each average is resource-time divided by that row's measured interval.
+  Totals add participant reports; overlapping resources can be counted more than once.
+  Use --site SITE or --format json to see hardware model details.

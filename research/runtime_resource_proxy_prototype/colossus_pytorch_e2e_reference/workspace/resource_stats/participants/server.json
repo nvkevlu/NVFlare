@@ -1,0 +1,42 @@
+{
+  "schema_version": "1.0",
+  "kind": "nvflare.resource_stats.participant_summary",
+  "job_id": "bb65f3e7-28bc-48d9-9ed4-656e596811fd",
+  "participant_name": "server",
+  "reported_at": "2026-09-21T15:05:45.041460Z",
+  "resource_time": {
+    "status": "partial",
+    "issues": [
+      "observation_incomplete"
+    ],
+    "measured_seconds": "76.384144872",
+    "cpu": {
+      "groups": [
+        {
+          "unit_seconds": "2444.292635904",
+          "model": "AMD EPYC 7313P 16-Core Processor",
+          "architecture": "x86_64"
+        }
+      ]
+    },
+    "memory": {
+      "byte_seconds": "10305589849337.20080384"
+    }
+  },
+  "workspace_filesystem": {
+    "status": "reported",
+    "capacity_bytes": "1889447919616"
+  },
+  "retained_content": {
+    "status": "unavailable",
+    "issues": [
+      "not_bound"
+    ]
+  },
+  "f3": {
+    "status": "unavailable",
+    "issues": [
+      "not_bound"
+    ]
+  }
+}

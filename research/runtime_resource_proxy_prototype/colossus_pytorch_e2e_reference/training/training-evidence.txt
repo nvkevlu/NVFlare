@@ -1,0 +1,17 @@
+Real training evidence derived from the two client application logs
+
+site-1
+- round 0: initial test accuracy 9%; four local epochs completed
+- round 1: initial test accuracy 59%; four local epochs completed
+- round 2: initial test accuracy 65%; four local epochs completed
+- cross-site evaluation results: 65%, 65%, 63%, 63%
+
+site-2
+- round 0: initial test accuracy 9%; four local epochs completed
+- round 1: initial test accuracy 59%; four local epochs completed
+- round 2: initial test accuracy 65%; four local epochs completed
+- cross-site evaluation results: 65%, 65%, 63%, 63%
+
+Both client error logs were zero bytes. The exact per-round aggregated metrics
+are preserved in round_metrics.jsonl. The original broad application logs and
+process identifiers were intentionally left out of the durable review bundle.

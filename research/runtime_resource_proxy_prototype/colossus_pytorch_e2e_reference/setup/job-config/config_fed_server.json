@@ -1,0 +1,82 @@
+{
+    "format_version": 2,
+    "workflows": [
+        {
+            "id": "controller",
+            "path": "nvflare.app_common.workflows.fedavg.FedAvg",
+            "args": {
+                "aggregation_weights": {},
+                "num_clients": 2,
+                "num_rounds": 3
+            }
+        },
+        {
+            "id": "controller1",
+            "path": "nvflare.app_common.workflows.cross_site_model_eval.CrossSiteModelEval",
+            "args": {
+                "model_locator_id": "component"
+            }
+        }
+    ],
+    "components": [
+        {
+            "id": "json_generator",
+            "path": "nvflare.app_common.widgets.validation_json_generator.ValidationJsonGenerator",
+            "args": {}
+        },
+        {
+            "id": "model_selector",
+            "path": "nvflare.app_common.widgets.intime_model_selector.IntimeModelSelector",
+            "args": {
+                "aggregation_weights": {},
+                "key_metric": "accuracy"
+            }
+        },
+        {
+            "id": "metrics_artifact_writer",
+            "path": "nvflare.app_common.widgets.metrics_artifact_writer.MetricsArtifactWriter",
+            "args": {}
+        },
+        {
+            "id": "persistor",
+            "path": "nvflare.app_opt.pt.file_model_persistor.PTFileModelPersistor",
+            "args": {
+                "model": {
+                    "path": "model.SimpleNetwork",
+                    "args": {}
+                }
+            }
+        },
+        {
+            "id": "locator",
+            "path": "nvflare.app_opt.pt.file_model_locator.PTFileModelLocator",
+            "args": {
+                "pt_persistor_id": "persistor"
+            }
+        },
+        {
+            "id": "receiver",
+            "path": "nvflare.app_opt.tracking.tb.tb_receiver.TBAnalyticsReceiver",
+            "args": {
+                "events": [
+                    "analytix_log_stats",
+                    "fed.analytix_log_stats"
+                ]
+            }
+        },
+        {
+            "id": "component",
+            "path": "nvflare.app_opt.pt.file_model_locator.PTFileModelLocator",
+            "args": {
+                "pt_persistor_id": "persistor"
+            }
+        },
+        {
+            "id": "component1",
+            "path": "nvflare.app_common.widgets.validation_json_generator.ValidationJsonGenerator",
+            "args": {}
+        }
+    ],
+    "task_data_filters": [],
+    "task_result_filters": []
+}

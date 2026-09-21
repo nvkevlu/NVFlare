@@ -1,0 +1,13 @@
+Connecting to FLARE ...
+Resources recorded for finalized jobs in study default.
+1 jobs found | 1 finalized | 1 valid summaries | 0 unavailable | 0 still running (excluded)
+
+JOB                                   JOB STATUS          RESOURCE DATA  QUALITY   FULL GPU h  CPU h   MEM GiB h  SAVED GiB  F3 REMOTE GiB
+84722338-787a-41b0-8132-6de19bb89c92  FINISHED:COMPLETED  included       COMPLETE  0.0062      0.1997  0.7701     N/A        N/A
+
+Study totals from 1 valid job summaries | coverage: COMPLETE
+  FULL GPU 0.0062 h | CPU 0.1997 h | MEM 0.7701 GiB h | SAVED N/A GiB | F3 REMOTE N/A GiB
+
+Notes:
+  Totals include only finalized jobs with valid resource summaries.
+  This view includes only jobs still retained by the job store.

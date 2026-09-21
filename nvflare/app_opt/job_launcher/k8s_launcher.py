@@ -49,6 +49,7 @@ from nvflare.utils.job_launcher_utils import (
     get_client_job_args,
     get_credential_env,
     get_job_launcher_spec,
+    get_job_process_bootstrap_args,
     get_portable_resource_spec,
     get_server_job_args,
 )
@@ -411,7 +412,10 @@ class K8sJobHandle(JobHandleSpec):
         command = job_config.get("command")
         if not command:
             raise ValueError("job_config must contain a non-empty 'command' key")
-        self.container_args_python_args_list = ["-u", "-m", command]
+        try:
+            self.container_args_python_args_list = get_job_process_bootstrap_args(command)
+        except ValueError as e:
+            raise ValueError(f"job_config command is invalid: {e}") from e
         self.container_volume_mount_list = []
         self._make_manifest(job_config)
         self._stuck_count = 0
@@ -1048,7 +1052,6 @@ class K8sJobLauncher(JobLauncherSpec):
         workspace_obj = fl_ctx.get_prop(FLContextKey.WORKSPACE_OBJECT)
         if workspace_obj is None:
             raise RuntimeError(f"missing {FLContextKey.WORKSPACE_OBJECT} in FLContext")
-        app_custom_folder = workspace_obj.get_app_custom_dir(raw_job_id)
         args = fl_ctx.get_prop(FLContextKey.ARGS)
         if args is None:
             raise RuntimeError(f"missing {FLContextKey.ARGS} in FLContext")
@@ -1105,14 +1108,9 @@ class K8sJobLauncher(JobLauncherSpec):
         _, job_cmd = exe_module_entry
 
         env = dict(study_runtime.env) if study_runtime is not None else {}
-        if app_custom_folder:
-            workspace_root_abs = os.path.abspath(workspace_root)
-            custom_folder_abs = os.path.abspath(app_custom_folder)
-            if os.path.commonpath([workspace_root_abs, custom_folder_abs]) != workspace_root_abs:
-                raise RuntimeError(f"custom folder {app_custom_folder} is not under workspace {workspace_root}")
-            env["PYTHONPATH"] = os.path.join(
-                self.workspace_mount_path, os.path.relpath(custom_folder_abs, workspace_root_abs)
-            )
+        # Python isolated mode ignores image/template PYTHONPATH during
+        # interpreter startup.  Preserve it so the worker can make dependency
+        # paths available after its initial resource snapshot.
 
         startup_dir = workspace_obj.get_startup_kit_dir()
         engine = fl_ctx.get_engine()

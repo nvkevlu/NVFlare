@@ -178,6 +178,9 @@ class JobFailureMsgKey:
     JOB_ID = "job_id"
     CODE = "code"
     REASON = "reason"
+    RESOURCE_REPORT = "resource_report"
+    PARTICIPANT_SUMMARY = "participant_summary"
+    RESOURCE_REPORT_STATUS = "resource_report_status"
 
 
 class InternalFLContextKey:

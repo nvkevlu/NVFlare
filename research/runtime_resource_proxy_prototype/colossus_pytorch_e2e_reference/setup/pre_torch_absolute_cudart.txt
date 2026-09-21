@@ -1,0 +1,14 @@
+python=/tmp/nvflare-resource-pytorch-e2e-20260921/venv/bin/python
+cuda_visible_devices='0'
+torch_loaded_before_probe=False
+bundled_cudart=/tmp/nvflare-resource-pytorch-e2e-20260921/venv/lib/python3.12/site-packages/nvidia/cu13/lib/libcudart.so.13
+pre_torch_cuda_device_count=1
+torch_loaded_after_probe=False
+torch_version=2.14.0+cu130
+torch_cuda_version=13.0
+torch_cuda_available=True
+torch_cuda_device_count=1
+torch_cuda_device_0=NVIDIA L40
+matmul_shape=(2048, 2048)
+matmul_device=cuda:0
+matmul_finite=True

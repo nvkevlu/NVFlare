@@ -143,6 +143,20 @@ class TestJobCLI:
         args = parser.parse_args(["job", "log", "job-1", "DEBUG"])
         assert args.job_sub_cmd == "log"
 
+    def test_resources_parser_supports_job_study_and_site_without_all_jobs(self):
+        parser = argparse.ArgumentParser(prog="nvflare")
+        subparsers = parser.add_subparsers(dest="command")
+        job_cli.def_job_cli_parser(subparsers)
+
+        args = parser.parse_args(
+            ["job", "resources", "--job", "job-1", "--study", "cancer-research", "--site", "site-1"]
+        )
+
+        assert args.job_sub_cmd == "resources"
+        assert args.job_id == "job-1"
+        assert args.study == "cancer-research"
+        assert args.site == "site-1"
+
     @pytest.mark.parametrize(
         ("subcommand", "args_before_study", "args_after_study"),
         [

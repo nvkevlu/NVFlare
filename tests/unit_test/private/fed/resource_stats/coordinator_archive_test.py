@@ -1,0 +1,470 @@
+# Copyright (c) 2026, NVIDIA CORPORATION.  All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+import io
+import threading
+from pathlib import Path
+from unittest.mock import patch
+from zipfile import ZIP_DEFLATED, ZipFile
+
+import pytest
+
+from nvflare.private.fed.resource_stats import coordinator as coordinator_module
+from nvflare.private.fed.resource_stats.archive_reader import WorkspaceResourceStatsError, WorkspaceResourceStatsReader
+from nvflare.private.fed.resource_stats.collector import canonical_json_bytes
+from nvflare.private.fed.resource_stats.coordinator import (
+    RESOURCE_REPORT_ACCEPTED,
+    RESOURCE_REPORT_CONFLICT,
+    RESOURCE_REPORT_DUPLICATE,
+    RESOURCE_REPORT_INVALID,
+    RESOURCE_REPORT_SERVER_ERROR,
+    RESOURCE_REPORT_TOO_LATE,
+    RESOURCE_SUMMARY_FILE,
+    ResourceStatsCoordinator,
+)
+
+
+def _participant(job_id="job-1", participant_name="site-1", reported_at="2026-09-17T12:00:00Z"):
+    return {
+        "schema_version": "1.0",
+        "kind": "nvflare.resource_stats.participant_summary",
+        "job_id": job_id,
+        "participant_name": participant_name,
+        "reported_at": reported_at,
+        "resource_time": {"status": "unavailable", "issues": ["observation_incomplete"]},
+        "workspace_filesystem": {"status": "unavailable", "issues": ["observation_incomplete"]},
+        "retained_content": {"status": "unavailable", "issues": ["not_bound"]},
+        "f3": {"status": "unavailable", "issues": ["not_bound"]},
+    }
+
+
+def _workspace_zip(run_dir):
+    stream = io.BytesIO()
+    with ZipFile(stream, "w", ZIP_DEFLATED) as archive:
+        stats_dir = run_dir / "resource_stats"
+        archive.write(stats_dir, stats_dir.relative_to(run_dir).as_posix())
+        for path in sorted(stats_dir.rglob("*")):
+            archive.write(path, path.relative_to(run_dir).as_posix())
+    return stream.getvalue()
+
+
+def test_accept_is_idempotent_and_finalized_bundle_reads_from_workspace(tmp_path):
+    run_dir = tmp_path / "run_job-1"
+    coordinator = ResourceStatsCoordinator()
+    coordinator.start_job("job-1", ["site-1"], run_dir)
+    data = canonical_json_bytes(_participant())
+
+    assert (
+        coordinator.accept_resource_report("job-1", "site-1", {"participant_summary": data}) == RESOURCE_REPORT_ACCEPTED
+    )
+    assert (
+        coordinator.accept_resource_report("job-1", "site-1", {"participant_summary": data})
+        == RESOURCE_REPORT_DUPLICATE
+    )
+    assert (
+        coordinator.accept_resource_report("job-1", "site-1", {"participant_summary": b"{}"}) == RESOURCE_REPORT_INVALID
+    )
+    conflict = canonical_json_bytes(_participant(reported_at="2026-09-17T12:00:01Z"))
+    assert (
+        coordinator.accept_resource_report("job-1", "site-1", {"participant_summary": conflict})
+        == RESOURCE_REPORT_CONFLICT
+    )
+    participant_path = run_dir / "resource_stats" / "participants" / "site-1.json"
+    assert not participant_path.exists()
+    assert not (run_dir / "resource_stats" / RESOURCE_SUMMARY_FILE).exists()
+
+    # The accepted bytes live only in the parent ledger until finalization.
+    # Anything the job child places at the publication path is replaced by
+    # those exact accepted bytes before the summary marker is written.
+    participant_path.write_bytes(b"child-side mutation")
+
+    summary = coordinator.finalize_job("job-1")
+    assert [(entry["participant_name"], entry["status"]) for entry in summary["participants"]] == [
+        ("site-1", "accepted"),
+        ("server", "missing"),
+    ]
+    assert participant_path.read_bytes() == data
+    assert {
+        path.relative_to(run_dir).as_posix() for path in (run_dir / "resource_stats").rglob("*") if path.is_file()
+    } == {
+        "resource_stats/participants/site-1.json",
+        "resource_stats/resource_summary.json",
+    }
+    assert (
+        coordinator.accept_resource_report("job-1", "site-1", {"participant_summary": data})
+        == RESOURCE_REPORT_DUPLICATE
+    )
+    assert (
+        coordinator.accept_resource_report("job-1", "site-1", {"participant_summary": conflict})
+        == RESOURCE_REPORT_TOO_LATE
+    )
+
+    reader = WorkspaceResourceStatsReader(_workspace_zip(run_dir))
+    assert reader.read_resource_summary() == summary
+    assert reader.read_participant_summary("site-1") == _participant()
+
+
+def test_participant_write_failure_occurs_at_finalization_not_acceptance(tmp_path):
+    run_dir = tmp_path / "run_job-1"
+    coordinator = ResourceStatsCoordinator()
+    coordinator.start_job("job-1", ["site-1"], run_dir)
+    data = canonical_json_bytes(_participant())
+
+    with patch.object(ResourceStatsCoordinator, "_atomic_write_resource", side_effect=OSError("disk full")):
+        assert (
+            coordinator.accept_resource_report("job-1", "site-1", {"participant_summary": data})
+            == RESOURCE_REPORT_ACCEPTED
+        )
+        with pytest.raises(OSError, match="disk full"):
+            coordinator.finalize_job("job-1")
+
+    assert not (run_dir / "resource_stats" / "participants" / "site-1.json").exists()
+    assert not (run_dir / "resource_stats" / RESOURCE_SUMMARY_FILE).exists()
+
+
+def test_finalization_writes_resource_summary_last(tmp_path):
+    writes = []
+
+    class RecordingCoordinator(ResourceStatsCoordinator):
+        @classmethod
+        def _atomic_write_resource(cls, run_dir, file_name, data, include_participants=False):
+            writes.append((file_name, include_participants))
+            return super()._atomic_write_resource(run_dir, file_name, data, include_participants)
+
+    run_dir = tmp_path / "run_job-1"
+    coordinator = RecordingCoordinator()
+    coordinator.start_job("job-1", ["site-1"], run_dir)
+    coordinator.accept_resource_report("job-1", "site-1", {"participant_summary": canonical_json_bytes(_participant())})
+
+    coordinator.finalize_job("job-1")
+
+    assert writes == [("site-1.json", True), (RESOURCE_SUMMARY_FILE, False)]
+
+
+def test_workspace_reader_accepts_archive_path_and_open_file(tmp_path):
+    run_dir = tmp_path / "run_job-1"
+    coordinator = ResourceStatsCoordinator()
+    coordinator.start_job("job-1", ["site-1"], run_dir)
+    coordinator.accept_resource_report("job-1", "site-1", {"participant_summary": canonical_json_bytes(_participant())})
+    summary = coordinator.finalize_job("job-1")
+    archive_path = tmp_path / "workspace.zip"
+    archive_path.write_bytes(_workspace_zip(run_dir))
+
+    assert WorkspaceResourceStatsReader(archive_path).read_resource_summary() == summary
+    with archive_path.open("rb") as archive_file:
+        assert WorkspaceResourceStatsReader(archive_file).read_participant_summary("site-1") == _participant()
+
+
+def test_start_job_rejects_resource_stats_symlink(tmp_path):
+    run_dir = tmp_path / "run_job-1"
+    outside = tmp_path / "outside"
+    run_dir.mkdir()
+    outside.mkdir()
+    (run_dir / "resource_stats").symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(OSError):
+        ResourceStatsCoordinator().start_job("job-1", ["site-1"], run_dir)
+
+    assert list(outside.iterdir()) == []
+
+
+def test_restore_registration_purges_untrusted_pre_restart_reports(tmp_path):
+    run_dir = tmp_path / "run_job-1"
+    stale = run_dir / "resource_stats" / "participants" / "site-1.json"
+    stale.parent.mkdir(parents=True)
+    stale.write_bytes(canonical_json_bytes(_participant()))
+
+    coordinator = ResourceStatsCoordinator()
+    coordinator.start_job("job-1", ["site-1"], run_dir, reset_existing=True)
+
+    assert not stale.exists()
+    summary = coordinator.finalize_job("job-1")
+    site = next(entry for entry in summary["participants"] if entry["participant_name"] == "site-1")
+    assert site["status"] == "missing"
+
+
+def test_restore_registration_replaces_existing_in_memory_ledger(tmp_path):
+    run_dir = tmp_path / "run_job-1"
+    coordinator = ResourceStatsCoordinator()
+    coordinator.start_job("job-1", ["site-1"], run_dir)
+    report = canonical_json_bytes(_participant())
+    assert (
+        coordinator.accept_resource_report("job-1", "site-1", {"participant_summary": report})
+        == RESOURCE_REPORT_ACCEPTED
+    )
+
+    coordinator.start_job("job-1", ["site-1"], run_dir, reset_existing=True)
+    summary = coordinator.finalize_job("job-1")
+
+    site = next(entry for entry in summary["participants"] if entry["participant_name"] == "site-1")
+    assert site["status"] == "missing"
+
+
+def test_start_job_enforces_schema_identity_and_total_participant_bounds(tmp_path, monkeypatch):
+    coordinator = ResourceStatsCoordinator()
+
+    with pytest.raises(ValueError, match="job_id"):
+        coordinator.start_job("../job", [], tmp_path / "bad-job")
+    with pytest.raises(ValueError, match="client names"):
+        coordinator.start_job("job-1", ["../site"], tmp_path / "bad-site")
+
+    monkeypatch.setattr(coordinator_module, "MAX_PARTICIPANTS", 2)
+    with pytest.raises(ValueError, match="cannot exceed 2"):
+        coordinator.start_job("job-1", ["site-1", "site-2"], tmp_path / "too-many")
+
+
+def test_finalization_clamps_cutoff_and_finalized_time_when_clock_moves_backward(tmp_path):
+    coordinator = ResourceStatsCoordinator()
+    run_dir = tmp_path / "run_job-1"
+    coordinator.start_job("job-1", ["site-1"], run_dir)
+    report = canonical_json_bytes(_participant())
+
+    with patch.object(
+        coordinator_module,
+        "utc_timestamp",
+        side_effect=[
+            "2026-09-17T12:00:01.000000Z",
+            "2026-09-17T12:00:00.000000Z",
+            "2026-09-17T11:59:59.000000Z",
+        ],
+    ):
+        assert (
+            coordinator.accept_resource_report("job-1", "site-1", {"participant_summary": report})
+            == RESOURCE_REPORT_ACCEPTED
+        )
+        summary = coordinator.finalize_job("job-1")
+
+    assert summary["report_cutoff_at"] == "2026-09-17T12:00:01.000000Z"
+    assert summary["finalized_at"] == "2026-09-17T12:00:01.000000Z"
+
+
+def test_reader_rejects_unexpected_resource_member(tmp_path):
+    run_dir = tmp_path / "run_job-1"
+    coordinator = ResourceStatsCoordinator()
+    coordinator.start_job("job-1", ["site-1"], run_dir)
+    coordinator.accept_resource_report("job-1", "site-1", {"participant_summary": canonical_json_bytes(_participant())})
+    coordinator.finalize_job("job-1")
+
+    workspace = io.BytesIO(_workspace_zip(run_dir))
+    with ZipFile(workspace, "a", ZIP_DEFLATED) as archive:
+        archive.writestr("resource_stats/unexpected.json", "{}")
+
+    with pytest.raises(WorkspaceResourceStatsError, match="inventory"):
+        WorkspaceResourceStatsReader(workspace.getvalue()).read_resource_summary()
+
+
+def test_reader_rejects_staging_directory_member(tmp_path):
+    run_dir = tmp_path / "run_job-1"
+    coordinator = ResourceStatsCoordinator()
+    coordinator.start_job("job-1", ["site-1"], run_dir)
+    coordinator.accept_resource_report("job-1", "site-1", {"participant_summary": canonical_json_bytes(_participant())})
+    coordinator.finalize_job("job-1")
+
+    workspace = io.BytesIO(_workspace_zip(run_dir))
+    with ZipFile(workspace, "a", ZIP_DEFLATED) as archive:
+        archive.writestr("resource_stats/staging/", b"")
+
+    with pytest.raises(WorkspaceResourceStatsError, match="inventory"):
+        WorkspaceResourceStatsReader(workspace.getvalue()).read_resource_summary()
+
+
+def test_reader_rejects_missing_accepted_participant_member(tmp_path):
+    run_dir = tmp_path / "run_job-1"
+    coordinator = ResourceStatsCoordinator()
+    coordinator.start_job("job-1", ["site-1"], run_dir)
+    coordinator.accept_resource_report("job-1", "site-1", {"participant_summary": canonical_json_bytes(_participant())})
+    coordinator.finalize_job("job-1")
+    (run_dir / "resource_stats" / "participants" / "site-1.json").unlink()
+
+    with pytest.raises(WorkspaceResourceStatsError, match="inventory"):
+        WorkspaceResourceStatsReader(_workspace_zip(run_dir)).read_resource_summary()
+
+
+def test_reader_rejects_duplicate_resource_member(tmp_path):
+    run_dir = tmp_path / "run_job-1"
+    coordinator = ResourceStatsCoordinator()
+    coordinator.start_job("job-1", ["site-1"], run_dir)
+    coordinator.accept_resource_report("job-1", "site-1", {"participant_summary": canonical_json_bytes(_participant())})
+    coordinator.finalize_job("job-1")
+
+    workspace = io.BytesIO(_workspace_zip(run_dir))
+    with pytest.warns(UserWarning, match="Duplicate name"):
+        with ZipFile(workspace, "a", ZIP_DEFLATED) as archive:
+            archive.writestr("resource_stats/participants/site-1.json", "{}")
+
+    with pytest.raises(WorkspaceResourceStatsError, match="duplicate member"):
+        WorkspaceResourceStatsReader(workspace.getvalue()).read_resource_summary()
+
+
+def test_reader_rejects_participant_values_that_disagree_with_resource_summary(tmp_path):
+    run_dir = tmp_path / "run_job-1"
+    coordinator = ResourceStatsCoordinator()
+    coordinator.start_job("job-1", ["site-1"], run_dir)
+    coordinator.accept_resource_report("job-1", "site-1", {"participant_summary": canonical_json_bytes(_participant())})
+    coordinator.finalize_job("job-1")
+
+    participant_path = run_dir / "resource_stats" / "participants" / "site-1.json"
+    participant = _participant()
+    participant["f3"] = {"status": "unavailable", "issues": ["unsupported"]}
+    participant_data = canonical_json_bytes(participant)
+    participant_path.write_bytes(participant_data)
+
+    reader = WorkspaceResourceStatsReader(_workspace_zip(run_dir))
+    reader.read_resource_summary()
+    with pytest.raises(WorkspaceResourceStatsError, match="values do not match"):
+        reader.read_participant_summary("site-1")
+
+
+def test_accept_rejects_report_that_would_exceed_per_job_payload_cap(tmp_path):
+    run_dir = tmp_path / "run_job-1"
+    coordinator = ResourceStatsCoordinator()
+    coordinator.start_job("job-1", ["site-1", "site-2"], run_dir)
+    first = canonical_json_bytes(_participant(participant_name="site-1"))
+    second = canonical_json_bytes(_participant(participant_name="site-2"))
+
+    with patch.object(coordinator_module, "MAX_ACCEPTED_REPORT_BYTES_PER_JOB", len(first) + len(second) - 1):
+        assert (
+            coordinator.accept_resource_report("job-1", "site-1", {"participant_summary": first})
+            == RESOURCE_REPORT_ACCEPTED
+        )
+        assert (
+            coordinator.accept_resource_report("job-1", "site-2", {"participant_summary": second})
+            == RESOURCE_REPORT_SERVER_ERROR
+        )
+
+    summary = coordinator.finalize_job("job-1")
+    statuses = {entry["participant_name"]: entry["status"] for entry in summary["participants"]}
+    assert statuses["site-1"] == "accepted"
+    assert statuses["site-2"] == "missing"
+
+
+def test_atomic_write_fsyncs_parent_directory_after_replace(tmp_path):
+    target = tmp_path / "resource_stats" / "participant.json"
+
+    with patch.object(ResourceStatsCoordinator, "_fsync_directory") as fsync_directory:
+        ResourceStatsCoordinator._atomic_write(target, b"report")
+
+    assert target.read_bytes() == b"report"
+    fsync_directory.assert_called_once_with(Path(target.parent))
+
+
+def test_finalizing_one_job_does_not_block_report_for_another_job(tmp_path):
+    run_a = tmp_path / "run_job-a"
+    run_b = tmp_path / "run_job-b"
+    final_write_started = threading.Event()
+    allow_final_write = threading.Event()
+
+    class BlockingCoordinator(ResourceStatsCoordinator):
+        @classmethod
+        def _atomic_write_resource(cls, run_dir, file_name, data, include_participants=False):
+            if Path(run_dir) == run_a and file_name == RESOURCE_SUMMARY_FILE:
+                final_write_started.set()
+                if not allow_final_write.wait(timeout=5):
+                    raise TimeoutError("test did not release the blocked finalization")
+            return super()._atomic_write_resource(run_dir, file_name, data, include_participants)
+
+    coordinator = BlockingCoordinator()
+    coordinator.start_job("job-a", [], run_a)
+    coordinator.start_job("job-b", ["site-b"], run_b)
+    report = canonical_json_bytes(_participant(job_id="job-b", participant_name="site-b"))
+    finalize_errors = []
+    report_results = []
+
+    def finalize_a():
+        try:
+            coordinator.finalize_job("job-a")
+        except Exception as exc:
+            finalize_errors.append(exc)
+
+    def report_b():
+        report_results.append(coordinator.accept_resource_report("job-b", "site-b", {"participant_summary": report}))
+
+    finalize_thread = threading.Thread(target=finalize_a)
+    report_thread = threading.Thread(target=report_b)
+    finalize_thread.start()
+    report_finished_before_release = False
+    try:
+        assert final_write_started.wait(timeout=2)
+        report_thread.start()
+        report_thread.join(timeout=1)
+        report_finished_before_release = not report_thread.is_alive()
+    finally:
+        allow_final_write.set()
+        finalize_thread.join(timeout=5)
+        if report_thread.ident is not None:
+            report_thread.join(timeout=5)
+
+    assert report_finished_before_release
+    assert not finalize_thread.is_alive()
+    assert not report_thread.is_alive()
+    assert finalize_errors == []
+    assert report_results == [RESOURCE_REPORT_ACCEPTED]
+
+
+def test_finalization_cutoff_remains_atomic_for_reports_to_same_job(tmp_path):
+    run_dir = tmp_path / "run_job-1"
+    target_run_dir = run_dir
+    final_write_started = threading.Event()
+    allow_final_write = threading.Event()
+    report_started = threading.Event()
+
+    class BlockingCoordinator(ResourceStatsCoordinator):
+        @classmethod
+        def _atomic_write_resource(cls, run_dir, file_name, data, include_participants=False):
+            if Path(run_dir) == target_run_dir and file_name == RESOURCE_SUMMARY_FILE:
+                final_write_started.set()
+                if not allow_final_write.wait(timeout=5):
+                    raise TimeoutError("test did not release the blocked finalization")
+            return super()._atomic_write_resource(run_dir, file_name, data, include_participants)
+
+    coordinator = BlockingCoordinator()
+    coordinator.start_job("job-1", ["site-1"], run_dir)
+    report = canonical_json_bytes(_participant())
+    finalize_results = []
+    finalize_errors = []
+    report_results = []
+
+    def finalize():
+        try:
+            finalize_results.append(coordinator.finalize_job("job-1"))
+        except Exception as exc:
+            finalize_errors.append(exc)
+
+    def report_after_cutoff():
+        report_started.set()
+        report_results.append(coordinator.accept_resource_report("job-1", "site-1", {"participant_summary": report}))
+
+    finalize_thread = threading.Thread(target=finalize)
+    report_thread = threading.Thread(target=report_after_cutoff)
+    finalize_thread.start()
+    report_was_blocked = False
+    try:
+        assert final_write_started.wait(timeout=2)
+        report_thread.start()
+        assert report_started.wait(timeout=2)
+        report_thread.join(timeout=0.2)
+        report_was_blocked = report_thread.is_alive()
+    finally:
+        allow_final_write.set()
+        finalize_thread.join(timeout=5)
+        if report_thread.ident is not None:
+            report_thread.join(timeout=5)
+
+    assert report_was_blocked
+    assert not finalize_thread.is_alive()
+    assert not report_thread.is_alive()
+    assert finalize_errors == []
+    assert report_results == [RESOURCE_REPORT_TOO_LATE]
+    site = next(entry for entry in finalize_results[0]["participants"] if entry["participant_name"] == "site-1")
+    assert site["status"] == "missing"
