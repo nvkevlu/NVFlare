@@ -1,0 +1,34 @@
+{
+  "gpu_name": "NVIDIA L40G",
+  "job_window": {
+    "end": "2026-09-22T16:10:45.059298",
+    "memory_used_mib": {
+      "maximum": 1112.0
+    },
+    "power_watts": {
+      "maximum": 95.9
+    },
+    "samples": 32,
+    "start": "2026-09-22T16:10:12.341001",
+    "utilization_percent": {
+      "average": 7.88,
+      "maximum": 26.0
+    }
+  },
+  "memory_total_mib": 23028.0,
+  "whole_capture": {
+    "first_timestamp": "2026/09/22 16:09:53.195",
+    "last_timestamp": "2026/09/22 16:11:17.228",
+    "memory_used_mib": {
+      "maximum": 1112.0
+    },
+    "power_watts": {
+      "maximum": 95.9
+    },
+    "samples": 85,
+    "utilization_percent": {
+      "average": 2.96,
+      "maximum": 26.0
+    }
+  }
+}

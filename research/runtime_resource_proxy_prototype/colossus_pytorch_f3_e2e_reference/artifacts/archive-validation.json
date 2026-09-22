@@ -1,0 +1,24 @@
+{
+  "archive_valid": true,
+  "job_id": "0137b861-101e-4ce4-9e62-ddef0e8c935a",
+  "participant_messages": {
+    "server": "8",
+    "site-1": "3",
+    "site-2": "3"
+  },
+  "participant_payload_bytes": {
+    "server": "1559756",
+    "site-1": "760203",
+    "site-2": "760203"
+  },
+  "resource_totals_reconciled": true,
+  "retained_content": "unavailable:not_bound",
+  "sha256_or_manifest_fields_present": false,
+  "totals": {
+    "remote_accepted": {
+      "messages": "14",
+      "payload_bytes": "3080162"
+    },
+    "status": "reported"
+  }
+}

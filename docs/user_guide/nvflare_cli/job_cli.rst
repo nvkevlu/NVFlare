@@ -640,10 +640,13 @@ Reported fields
   validated).
 - **Workspace filesystem capacity**: a one-time snapshot taken when the
   participant's report was assembled, shown only with ``--site``.
-- **Saved content** and **F3 network traffic**: part of the schema, but not
-  yet populated in this release. They always report as unavailable and are
-  omitted from the table unless the underlying data becomes available in a
-  future release.
+- **Saved content**: the total size of the participant's job run directory
+  (excluding the platform's own resource-stats bookkeeping). This is a
+  workspace-size measurement, not a curated "just the model/result" figure --
+  it also includes logs, configuration, and job inputs.
+- **F3 network traffic**: accepted send bytes for job deployment, real task
+  responses, and submitted task results. It excludes acknowledgements, empty
+  task polling, and traffic outside those three operations.
 
 Totals are **additive across participants**: if participants share physical
 hardware (for example, a proof-of-concept deployment running multiple sites on

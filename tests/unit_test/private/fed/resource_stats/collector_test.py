@@ -27,6 +27,7 @@ from nvflare.private.fed.resource_stats.collector import (
     assemble_participant_summary,
     canonical_json_bytes,
     merge_f3_snapshots,
+    observe_retained_content,
     probe_gpu,
     read_terminal_handoff,
     remove_terminal_handoff,
@@ -676,12 +677,95 @@ def test_handoff_to_public_report_round_trip(tmp_path):
     assert load_and_validate(encoded)["participant_name"] == "site-1"
     assert report["resource_time"]["measured_seconds"] == "2"
     assert report["workspace_filesystem"]["status"] == "reported"
-    assert report["retained_content"] == {"status": "unavailable", "issues": ["not_bound"]}
+    assert report["retained_content"] == {"status": "reported", "bytes": "0"}
     assert report["f3"] == {
         "status": "reported",
         "remote_accepted": {"payload_bytes": "1500", "messages": "3"},
     }
     assert "participant_key" not in encoded.decode()
+
+
+def test_observe_retained_content_sums_regular_files_under_the_run_dir(tmp_path):
+    (tmp_path / "output.bin").write_bytes(b"x" * 100)
+    nested = tmp_path / "app" / "checkpoints"
+    nested.mkdir(parents=True)
+    (nested / "model.pt").write_bytes(b"y" * 250)
+
+    assert observe_retained_content(tmp_path) == {"status": "reported", "bytes": "350"}
+
+
+def test_observe_retained_content_excludes_only_the_resource_stats_directory(tmp_path):
+    (tmp_path / "output.bin").write_bytes(b"x" * 100)
+    stats_dir = tmp_path / "resource_stats" / "participants"
+    stats_dir.mkdir(parents=True)
+    (stats_dir / "site-1.json").write_bytes(b"z" * 900)
+
+    assert observe_retained_content(tmp_path) == {"status": "reported", "bytes": "100"}
+
+
+def test_observe_retained_content_does_not_exclude_a_nested_directory_of_the_same_name(tmp_path):
+    # Only the top-level resource_stats directory is platform bookkeeping; a
+    # job-produced directory that happens to share that name deeper in the
+    # tree is ordinary job output and must still be counted.
+    nested_same_name = tmp_path / "app" / "resource_stats"
+    nested_same_name.mkdir(parents=True)
+    (nested_same_name / "custom_output.bin").write_bytes(b"w" * 40)
+
+    assert observe_retained_content(tmp_path) == {"status": "reported", "bytes": "40"}
+
+
+def test_observe_retained_content_is_reported_zero_for_an_empty_directory(tmp_path):
+    assert observe_retained_content(tmp_path) == {"status": "reported", "bytes": "0"}
+
+
+def test_observe_retained_content_is_unavailable_when_run_dir_does_not_exist(tmp_path):
+    assert observe_retained_content(tmp_path / "never-created") == {
+        "status": "unavailable",
+        "issues": ["observation_incomplete"],
+    }
+
+
+def test_observe_retained_content_is_unavailable_when_run_dir_is_a_file(tmp_path):
+    run_dir = tmp_path / "not-a-directory"
+    run_dir.write_bytes(b"")
+
+    assert observe_retained_content(run_dir) == {"status": "unavailable", "issues": ["observation_incomplete"]}
+
+
+def test_observe_retained_content_records_a_symlinked_file_at_its_own_size_without_following_it(tmp_path):
+    outside = tmp_path.parent / "outside_the_run_dir.bin"
+    outside.write_bytes(b"o" * 10_000)
+    try:
+        run_dir = tmp_path / "run"
+        run_dir.mkdir()
+        link = run_dir / "linked.bin"
+        link.symlink_to(outside)
+
+        result = observe_retained_content(run_dir)
+
+        # The symlink's own (lstat) size is recorded; the large target it
+        # points to, outside the run directory, must not inflate the count.
+        assert result["status"] == "reported"
+        assert int(result["bytes"]) < 10_000
+    finally:
+        outside.unlink()
+
+
+def test_observe_retained_content_skips_a_file_that_disappears_mid_walk(tmp_path, monkeypatch):
+    (tmp_path / "kept.bin").write_bytes(b"k" * 60)
+    (tmp_path / "removed.bin").write_bytes(b"r" * 40)
+
+    real_walk = os.walk
+
+    def flaky_walk(top, **kwargs):
+        for current_dir, dir_names, file_names in real_walk(top, **kwargs):
+            if "removed.bin" in file_names:
+                (Path(current_dir) / "removed.bin").unlink()
+            yield current_dir, dir_names, file_names
+
+    monkeypatch.setattr(collector.os, "walk", flaky_walk)
+
+    assert observe_retained_content(tmp_path) == {"status": "reported", "bytes": "60"}
 
 
 def test_restored_collector_keeps_new_totals_but_marks_prior_interval_incomplete(tmp_path):

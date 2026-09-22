@@ -1,0 +1,26 @@
+Connecting to FLARE ...
+Recorded resources for job 0137b861-101e-4ce4-9e62-ddef0e8c935a.
+Job coverage: COMPLETE (3 accepted / 3 expected)
+
+Recorded average visible capacity over each measured interval
+SITE    ROLE    REPORT    COMPUTE   MEASURED TIME  CPU UNITS  MEM GiB   FULL GPUs
+site-1  client  accepted  REPORTED  27s            32.0000    125.6553  1.0000
+site-2  client  accepted  REPORTED  27s            32.0000    125.6553  1.0000
+server  server  accepted  REPORTED  28s            32.0000    125.6553  1.0000
+
+Other recorded participant totals
+SITE    F3 STATUS  F3 REMOTE ACCEPTED GiB
+site-1  REPORTED   0.0007
+site-2  REPORTED   0.0007
+server  REPORTED   0.0015
+
+Additive participant resource-time from accepted reports | compute: REPORTED
+  Summed measured participant time: 1m24s
+  CPU 0.7498 unit h | MEMORY 2.9443 GiB h | FULL GPUs 0.0234 instance h
+  Other additive totals: F3 STATUS REPORTED | F3 REMOTE ACCEPTED 0.0029 GiB
+
+Notes:
+  PARTIAL means at least one expected report or observation was incomplete.
+  Each average is resource-time divided by that row's measured interval.
+  Totals add participant reports; overlapping resources can be counted more than once.
+  Use --site SITE or --format json to see hardware model details.

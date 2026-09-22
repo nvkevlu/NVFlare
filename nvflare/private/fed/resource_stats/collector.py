@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import datetime
 import os
+import stat
 import time
 from collections.abc import Callable, Mapping
 from copy import deepcopy
@@ -78,6 +79,7 @@ __all__ = [
     "probe_gpu",
     "probe_capacity",
     "observe_workspace_filesystem",
+    "observe_retained_content",
     "JobResourceCollector",
     "assemble_participant_summary",
     "merge_f3_snapshots",
@@ -124,6 +126,50 @@ def observe_workspace_filesystem(workspace_path: str | Path) -> dict[str, Any]:
     if stats.f_frsize <= 0 or stats.f_blocks <= 0 or capacity <= 0:
         return {"status": "unavailable", "issues": ["observation_incomplete"]}
     return {"status": "reported", "capacity_bytes": str(capacity)}
+
+
+def observe_retained_content(run_dir: str | Path) -> dict[str, Any]:
+    """Approximate retained result size as the run directory's total file size.
+
+    This is a workspace-size measurement, not a curated result-artifact size:
+    it also counts logs, config, and job inputs. A precise figure would need
+    every built-in and custom workflow component to register which files it
+    actually produced as "the result" -- judged not worth that integration
+    cost against every workflow implementation, in exchange for a number that
+    needs zero workflow-specific wiring. Only the platform's own resource_stats
+    bookkeeping directory is excluded, since including it would make this
+    figure grow from the act of measuring it rather than from job output.
+
+    Symlinked entries are recorded at their own (lstat) size rather than
+    followed, since the job workspace is job-owned and only partially
+    trusted: a symlink to a file outside the run directory must not be able
+    to inflate this count.
+    """
+
+    root = Path(run_dir)
+    try:
+        if not root.is_dir():
+            return {"status": "unavailable", "issues": ["observation_incomplete"]}
+    except OSError:
+        return {"status": "unavailable", "issues": ["observation_incomplete"]}
+
+    total = 0
+    for current_dir, dir_names, file_names in os.walk(root, followlinks=False):
+        current_path = Path(current_dir)
+        if current_path == root:
+            dir_names[:] = [name for name in dir_names if name != RESOURCE_STATS_DIR]
+        for name in file_names:
+            try:
+                entry_stat = (current_path / name).lstat()
+            except OSError:
+                # Best-effort: a file can disappear mid-walk, or be unreadable
+                # for reasons unrelated to the job (e.g. another process's
+                # transient lock). One missing entry should not blank out an
+                # otherwise-observable total.
+                continue
+            if stat.S_ISREG(entry_stat.st_mode):
+                total += entry_stat.st_size
+    return {"status": "reported", "bytes": str(total)}
 
 
 def _unavailable(issue: str) -> dict[str, Any]:
@@ -184,7 +230,7 @@ class JobResourceCollector:
             "kind": INTERNAL_HANDOFF_KIND,
             "resource_time": resource_time,
             "workspace_filesystem": observe_workspace_filesystem(self.run_dir),
-            "retained_content": _unavailable("not_bound"),
+            "retained_content": observe_retained_content(self.run_dir),
             "child_f3": deepcopy(child_f3) if child_f3 is not None else _unavailable("observation_incomplete"),
         }
 

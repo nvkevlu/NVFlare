@@ -62,6 +62,11 @@ Every remaining change must preserve this deployment rule:
   origin-only logical-send accounting after FOBS and before encryption;
   `DownloadService` byte folding; bounded condition-based cleanup drains; and
   checked child/parent merge into the existing public `f3` field.
+- `retained_content` as the job process's total run-directory file size,
+  excluding only the platform's own `resource_stats/` bookkeeping. This is a
+  deliberate simplification over the provider-registry design this document
+  previously described as the remaining work here (see "Retained-result
+  bytes" below for what changed and why).
 - Real one-server, two-client Process-launch POCs on Colossus have exercised
   isolated child startup, child-to-parent handoff, client CellNet delivery,
   root reconciliation, normal `WORKSPACE` persistence, and job/site/study CLI
@@ -107,63 +112,47 @@ code bindings, cutoff/merge behavior, and remaining validation.
 
 ### 2. Retained-result bytes
 
-Production currently emits `retained_content.status=unavailable` with
-`not_bound`. This value is hard-coded where
+This document previously described the remaining work here as a
+platform-internal, job-scoped retained-result *provider registry*: every
+built-in and custom workflow component would need to register which files it
+actually produced as "the result," so the field could report an exact
+curated-result size. That design is no longer planned. The integration cost
+of wiring every built-in workflow (and every custom one, which by definition
+the platform cannot enumerate in advance) was judged not worth it against a
+number that needs zero workflow-specific wiring instead.
+
+Production now emits `retained_content` as the job process's total run-
+directory file size (regular files only; symlinked entries are recorded at
+their own size and not followed), computed in
 [`JobResourceCollector.finish()`](../../nvflare/private/fed/resource_stats/collector.py)
-builds the private child handoff. The rest of the implemented path already
-validates, transports, copies, and adds a numeric retained-content result. The
-missing piece is the source of that result, not its public schema or rollup.
+via `observe_retained_content()`. The only exclusion is the run directory's
+own top-level `resource_stats/` subtree, so the platform's own bookkeeping
+does not inflate the figure it is itself part of computing.
 
-No current directory is an authoritative saved-result set:
+This is explicitly a workspace-size measurement, not a curated retained-
+result size, and the two other reasons the registry design was considered
+still apply and are now accepted tradeoffs rather than open problems:
 
-- `Workspace.get_result_root(job_id)` falls back to the run directory, so it
-  may contain the deployed app, configuration, logs, statistics, temporary
-  files, inputs, and outputs together;
-- built-in result owners do not all write through that root; and
-- `JobRunner._save_workspace()` archives the available run, result, log, and
-  audit roots, while a separate-workspace launcher returns the whole job run
-  directory. These paths define what is packaged, not which files are workflow
-  results.
+- the deployed app, configuration, logs, and job inputs are counted alongside
+  any real output, so the number is an upper bound on "what this job
+  retained," not an exact figure; and
+- an empty directory reports `bytes: "0"` without distinguishing "the
+  workflow genuinely retained nothing" from "nothing was ever written here" --
+  there is no authoritative owner to make that distinction, by design.
 
-Scanning any of those trees would produce a directory-size measurement, not
-the exact size of a complete retained-result set. It also cannot prove that an
-empty directory means the workflow retained no result. Reported zero is valid
-only when an authoritative owner declares that its complete set is empty.
+A missing or inaccessible run directory still reports `unavailable` with
+`observation_incomplete`; an individual file that disappears mid-scan is
+skipped rather than failing the whole observation, since that race is
+expected and unrelated to job correctness.
 
-To populate the existing field without new user configuration, each supported
-workflow needs a platform-internal, job-scoped retained-result provider. A
-small registry is one implementation of that provider, but it is not a public
-job setting or a fallback workspace scanner. Built-in components that own
-results register their final artifacts after a successful final write and
-declare whether the registered set is complete. Unknown or custom workflows
-without that ownership contract continue to report `unavailable/not_bound`.
-
-The provider must freeze after workflow finalizers have finished and before
-`JobResourceCollector.finish()` writes the terminal handoff in client or server
-`_archive_results()`. It should count the logical byte size of only registered
-regular files that are actually on the normal result-return/retention path.
-File names, paths, and hashes remain private and do not enter the participant
-report.
-
-The implementation still needs fixed internal limits for entry count, path
-length, and registry memory. It must reject paths outside approved job roots,
-symlinks, non-regular files, duplicates, and totals outside the existing U128
-contract. A complete successfully observed set reports `reported`, including
-`bytes: "0"` for a known empty set. If an owner identifies the intended set but
-only an exact subset can be observed, the provider may report that subtotal as
-`partial/observation_incomplete`. If completeness or the subtotal cannot be
-established, it reports unavailable; malformed or inaccessible registered
-content follows the existing typed error rules. Resource reporting remains
-best effort and never changes the job outcome.
-
-The final job-store `WORKSPACE` component is authoritative for a different
-fact: the bytes in the centrally retained archive. That archive includes app,
-configuration, log, audit, and resource-statistics content, is available only
-after participant reports are frozen, and is not a per-participant additive
-result. Compressed archive size and uncompressed member size would also be
-different measurements. If that fact is wanted, it needs a separately named
-job-level metric and an explicit byte definition; it must not be substituted
-for the current `retained_content` field.
+The final job-store `WORKSPACE` component remains authoritative for a
+different fact: the bytes in the centrally retained archive. That archive
+includes app, configuration, log, audit, and resource-statistics content, is
+available only after participant reports are frozen, and is not a
+per-participant additive result. Compressed archive size and uncompressed
+member size would also be different measurements from either of the above. If
+that fact is wanted, it needs a separately named job-level metric and an
+explicit byte definition; it must not be substituted for `retained_content`.
 
 ### 3. Resource changes and multi-node collection
 
