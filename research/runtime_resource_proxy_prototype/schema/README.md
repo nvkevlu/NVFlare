@@ -223,25 +223,39 @@ per-file paths or hashes.
 
 ## F3 counters
 
-The terminal F3 object has one status and three counter pairs:
+The terminal F3 object has one status and one counter pair:
 
-- `remote_accepted`;
-- `local_delivered`; and
-- `remote_failed_before_acceptance`.
+- `remote_accepted`.
 
 Each pair contains payload bytes and messages. Counters freeze in one atomic
 operation before the report is serialized. A callback contributes only if it
 linearizes before that cutoff; later callbacks cannot change canonical values.
 If the platform cannot stop new included traffic and drain already admitted
 callbacks before freezing, F3 reports `partial/counter_gap`, not `reported`.
+Child cleanup first closes command admission and pre-drains admitted callbacks
+for up to five seconds while transport remains alive; timeout or error marks
+`counter_gap`. Child and parent processes then each use the fixed five-second
+F3 drain, and the parent checked-merges their non-overlapping semantic-origin
+contributions. Lost pre-restore history is
+`partial/attribution_incomplete`.
 
-Included application classes are task request, task response, task result,
-job application, and attributable job-stream data. Empty polling, control
-traffic, workspace transfer, logs, unknown classes, and resource-report
-traffic are excluded. Remote bytes count only after send acceptance. Fan-out
-counts once per destination and forwarding once per sender hop. Headers,
-framing, TLS, transport compression, and retransmissions are outside the
-metric.
+Included application classes are exactly job application, real task response,
+and task result. Task requests, empty polling, exact final in-process delivery,
+failed send attempts, a relay's duplicate contribution, control traffic,
+workspace transfer, logs, unknown classes, and resource-report traffic are
+excluded. A remote logical destination through a local first-hop relay remains
+counted once at its origin. Remote bytes count only after local transport
+acceptance. A streamed send remains pending until its `StreamFuture` ends
+successfully; asynchronous failure or cancellation abandons it. Fan-out counts
+one logical message per destination, and only the trusted semantic origin
+counts it. Bytes are measured after FOBS encoding and before optional
+encryption. Successfully accepted unique `DownloadService` data is folded into
+that operation without another message or retry duplication. Headers,
+encryption expansion, framing, TLS, transport compression, and retransmissions
+are outside the metric.
+If a large-object contribution or settlement cannot be proved, the affected
+operation is discarded and F3 is `partial/counter_gap` rather than a complete
+undercount.
 
 ## Expected participants and job reduction
 

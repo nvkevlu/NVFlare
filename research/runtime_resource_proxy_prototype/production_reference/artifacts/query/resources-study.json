@@ -52,7 +52,11 @@
           "status": "unavailable"
         },
         "f3": {
-          "status": "unavailable"
+          "status": "reported",
+          "remote_accepted": {
+            "payload_bytes": "9707796576",
+            "messages": "7"
+          }
         }
       }
     },
@@ -106,7 +110,11 @@
       "status": "unavailable"
     },
     "f3": {
-      "status": "unavailable"
+      "status": "partial",
+      "remote_accepted": {
+        "payload_bytes": "9707796576",
+        "messages": "7"
+      }
     }
   }
 }

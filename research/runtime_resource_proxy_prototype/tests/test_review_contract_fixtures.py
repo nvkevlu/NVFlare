@@ -64,7 +64,7 @@ class TestReviewContractFixtures(unittest.TestCase):
             network = json.loads((root / "f3_finalization.json").read_text())
             self.assertEqual("5632", network["primary_metrics"][0]["value"])
             self.assertEqual("2", network["primary_metrics"][1]["value"])
-            self.assertEqual("256", network["canonical_f3"]["local_delivered"]["payload_bytes"])
+            self.assertEqual({"status", "remote_accepted"}, set(network["canonical_f3"]))
             diagnostics = network["post_cutoff_diagnostics_not_embedded_in_summary"]
             self.assertEqual(1024, diagnostics["excluded_summary_publication"]["payload_bytes"])
             self.assertEqual(512, diagnostics["late_after_cutoff"]["payload_bytes"])

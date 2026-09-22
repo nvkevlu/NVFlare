@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import copy
 import dataclasses
 import functools
 import threading
@@ -296,9 +297,35 @@ class _Ref:
         self._receiver_progress = {}
         self._terminal_progress_state = None
         self._progress_lock = threading.Lock()
+        # Source-owned logical chunk identities for sender accounting.  A
+        # repeated request with the same producer state reuses the same id, so
+        # only the first transport-accepted response can contribute bytes.
+        self._accounting_chunks = {}
+        self._accounting_chunk_seq = 0
 
     def mark_active(self):
         self.tx.mark_active()
+
+    def accounting_chunk_id(self, requester: str, request_state) -> Optional[int]:
+        """Return a stable source-owned id for one logical produced chunk."""
+
+        try:
+            request_snapshot = copy.deepcopy(request_state)
+        except Exception:
+            return None
+
+        with self._progress_lock:
+            chunks = self._accounting_chunks.setdefault(requester, [])
+            try:
+                for prior_request, chunk_id in chunks:
+                    if prior_request == request_snapshot:
+                        return chunk_id
+            except Exception:
+                return None
+            self._accounting_chunk_seq += 1
+            chunk_id = self._accounting_chunk_seq
+            chunks.append((request_snapshot, chunk_id))
+            return chunk_id
 
     def obj_downloaded(self, to_receiver: str, status: str):
         self._finalize_receiver(to_receiver, status)
@@ -681,6 +708,7 @@ class _Transaction:
         min_receivers: Optional[int] = None,
         receiver_acquire_timeout: Optional[float] = None,
         receiver_idle_timeout: Optional[float] = None,
+        send_accounting_context=None,
     ):
         """Constructor of the transaction object.
 
@@ -747,6 +775,7 @@ class _Transaction:
         self.transaction_done_cb = transaction_done_cb
         self.cb_kwargs = cb_kwargs or {}
         self.outcome_cb = outcome_cb
+        self.send_accounting_context = send_accounting_context
         self.progress_cb = progress_cb
         if progress_interval < 0:
             raise ValueError(f"progress_interval must be non-negative, got {progress_interval}")
@@ -995,6 +1024,35 @@ class _Transaction:
                 # last-resort belt: an exception between the computation handler and
                 # here left no verdict at all
                 outcome = self._fail_closed_outcome(status)
+            if self.send_accounting_context is not None:
+                successful_receivers = set()
+                if outcome is not None and outcome.refs:
+                    candidates = (
+                        set(outcome.receiver_ids)
+                        if outcome.receiver_ids is not None
+                        else set().union(*(ref.receiver_statuses for ref in outcome.refs))
+                    )
+                    successful_receivers = {
+                        receiver
+                        for receiver in candidates
+                        if all(ref.receiver_statuses.get(receiver) == DownloadStatus.SUCCESS for ref in outcome.refs)
+                    }
+                try:
+                    self.send_accounting_context.settle_oob_transaction(self.tid, successful_receivers)
+                except BaseException as ex:
+                    self.logger.warning(
+                        f"logical-send accounting settlement for tx {self.tid} failed: "
+                        f"{secure_format_exception(ex)}"
+                    )
+                    try:
+                        self.send_accounting_context.mark_counter_gap()
+                    except BaseException:
+                        pass
+                    for receiver in successful_receivers:
+                        try:
+                            self.send_accounting_context.mark_oob_incomplete(receiver)
+                        except BaseException:
+                            pass
             if on_outcome and outcome is not None:
                 _invoke_cb_safely(self.logger, f"outcome recording for tx {self.tid}", on_outcome, outcome)
             self._settlement_complete = True
@@ -1321,6 +1379,7 @@ class DownloadService:
         min_receivers: Optional[int] = None,
         receiver_acquire_timeout: Optional[float] = None,
         receiver_idle_timeout: Optional[float] = None,
+        send_accounting_context=None,
         **cb_kwargs,
     ):
         cls._initialize(cell)
@@ -1337,6 +1396,7 @@ class DownloadService:
             min_receivers=min_receivers,
             receiver_acquire_timeout=receiver_acquire_timeout,
             receiver_idle_timeout=receiver_idle_timeout,
+            send_accounting_context=send_accounting_context,
         )
         # tx_ids are ATTEMPT-SCOPED and single-use while known: a retry is a NEW
         # transaction with a new id (the stable cross-attempt identity is the
@@ -1372,6 +1432,18 @@ class DownloadService:
                     )
                 cls._outcome_owners[tx.tid] = tx
                 cls._tx_table[tx.tid] = tx
+        if send_accounting_context is not None:
+            try:
+                send_accounting_context.register_oob_transaction(tx.tid, tx.receiver_ids)
+            except BaseException as ex:
+                cls._logger.warning(
+                    f"failed to register logical-send accounting for download transaction {tx.tid}: "
+                    f"{secure_format_exception(ex)}"
+                )
+                try:
+                    send_accounting_context.mark_counter_gap()
+                except BaseException:
+                    pass
         return tx.tid
 
     @classmethod
@@ -1752,6 +1824,7 @@ class DownloadService:
                 # continue — accumulate bytes for timing summary in transaction_done()
                 # CacheableObject returns a list of byte-chunks; FileDownloader returns raw bytes.
                 # Sum chunk lengths for lists (len(list) counts items, not bytes).
+                bytes_delta = 0
                 if data is not None:
                     bytes_delta = sum(len(c) for c in data) if isinstance(data, list) else len(data)
                     items_delta = len(data) if isinstance(data, list) else None
@@ -1765,7 +1838,7 @@ class DownloadService:
                 # no CONFIRM_EXPECTED on data chunks: the receiver only consumes it from the
                 # terminal reply (confirms are sent only after terminal serves), so advertising
                 # per chunk would be dead weight on the hottest wire message
-                return make_reply(
+                reply = make_reply(
                     ReturnCode.OK,
                     body={
                         _PropKey.STATUS: rc,
@@ -1774,6 +1847,34 @@ class DownloadService:
                         _PropKey.CANCEL_CAPABLE: True,
                     },
                 )
+                if tx.send_accounting_context is not None:
+                    try:
+                        chunk_id = ref.accounting_chunk_id(requester, current_state)
+                        contribution_context = None
+                        if chunk_id is not None:
+                            contribution_context = tx.send_accounting_context.make_oob_contribution_context(
+                                transaction_id=tx.tid,
+                                destination=requester,
+                                contribution_id=(tx.tid, rid, requester, chunk_id),
+                                payload_bytes=bytes_delta,
+                            )
+                        if contribution_context is not None:
+                            reply.set_logical_send_context(contribution_context)
+                        else:
+                            tx.send_accounting_context.mark_oob_incomplete(requester)
+                    except BaseException as ex:
+                        cls._logger.warning(
+                            f"logical-send accounting contribution for tx {tx.tid} failed: "
+                            f"{secure_format_exception(ex)}"
+                        )
+                        try:
+                            tx.send_accounting_context.mark_oob_incomplete(requester)
+                        except BaseException:
+                            try:
+                                tx.send_accounting_context.mark_counter_gap()
+                            except BaseException:
+                                pass
+                return reply
 
         finally:
             ref.tx.end_op()

@@ -33,11 +33,12 @@ import datetime
 import os
 import time
 from collections.abc import Callable, Mapping
+from copy import deepcopy
 from pathlib import Path
 from typing import Any, Optional
 
 from .accumulator import ClockOrderError, CollectorClosedError, ResourceTimeAccumulator
-from .contract import validate_record
+from .contract import U128_MAX, validate_record
 from .handoff import (
     INTERNAL_HANDOFF_KIND,
     INTERNAL_HANDOFF_VERSION,
@@ -79,6 +80,7 @@ __all__ = [
     "observe_workspace_filesystem",
     "JobResourceCollector",
     "assemble_participant_summary",
+    "merge_f3_snapshots",
     "CapacitySnapshot",
     "CapacityProbe",
 ]
@@ -168,7 +170,7 @@ class JobResourceCollector:
 
         self._accumulator.observe(capacity)
 
-    def finish(self) -> dict[str, Any]:
+    def finish(self, *, child_f3: Optional[Mapping[str, Any]] = None) -> dict[str, Any]:
         """Build the one private child handoff at process finalization."""
 
         resource_time = self._accumulator.finish()
@@ -183,8 +185,77 @@ class JobResourceCollector:
             "resource_time": resource_time,
             "workspace_filesystem": observe_workspace_filesystem(self.run_dir),
             "retained_content": _unavailable("not_bound"),
-            "child_f3": _unavailable("not_bound"),
+            "child_f3": deepcopy(child_f3) if child_f3 is not None else _unavailable("observation_incomplete"),
         }
+
+
+def merge_f3_snapshots(
+    child_f3: Optional[Mapping[str, Any]],
+    parent_f3: Optional[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Merge the child and parent execution-environment F3 contributions.
+
+    A participant spans two processes today: its short-lived job process and
+    its long-lived parent.  Both are required for complete attribution.  A
+    missing side therefore produces a partial result when the other side has
+    numeric data, rather than silently presenting that subtotal as complete.
+    """
+
+    numeric = []
+    issues = set()
+    missing_contribution = False
+    for value in (child_f3, parent_f3):
+        if not isinstance(value, Mapping):
+            missing_contribution = True
+            continue
+        status = value.get("status")
+        if status in {"reported", "partial"}:
+            try:
+                counter = value["remote_accepted"]
+                payload_bytes = int(counter["payload_bytes"])
+                messages = int(counter["messages"])
+                if not (0 <= payload_bytes <= U128_MAX and 0 <= messages <= U128_MAX):
+                    raise ValueError("counter outside U128")
+            except (KeyError, TypeError, ValueError, OverflowError):
+                return {"status": "error", "issues": ["malformed_source"]}
+            numeric.append((payload_bytes, messages))
+            if status == "partial":
+                value_issues = value.get("issues")
+                if not isinstance(value_issues, list):
+                    return {"status": "error", "issues": ["malformed_source"]}
+                issues.update(value_issues)
+        elif status in {"unavailable", "error"}:
+            missing_contribution = True
+            value_issues = value.get("issues")
+            if status == "error" or not isinstance(value_issues, list):
+                issues.add("observation_incomplete")
+            elif "observation_incomplete" in value_issues:
+                issues.add("observation_incomplete")
+            else:
+                issues.add("attribution_incomplete")
+        else:
+            return {"status": "error", "issues": ["malformed_source"]}
+
+    if not numeric:
+        issue = "observation_incomplete" if "observation_incomplete" in issues else "attribution_incomplete"
+        return {"status": "unavailable", "issues": [issue]}
+
+    payload_bytes = sum(value[0] for value in numeric)
+    messages = sum(value[1] for value in numeric)
+    if payload_bytes > U128_MAX or messages > U128_MAX:
+        return {"status": "error", "issues": ["malformed_source"]}
+    if messages == 0 and payload_bytes != 0:
+        return {"status": "error", "issues": ["malformed_source"]}
+
+    result = {
+        "status": "partial" if missing_contribution or issues else "reported",
+        "remote_accepted": {"payload_bytes": str(payload_bytes), "messages": str(messages)},
+    }
+    if result["status"] == "partial":
+        if missing_contribution:
+            issues.add("attribution_incomplete")
+        result["issues"] = sorted(issues)
+    return result
 
 
 def assemble_participant_summary(
@@ -192,6 +263,7 @@ def assemble_participant_summary(
     job_id: str,
     participant_name: str,
     child_handoff: Optional[Mapping[str, Any]],
+    parent_f3: Optional[Mapping[str, Any]] = None,
 ) -> dict[str, Any]:
     """Create the sole public report, binding identity in the parent process.
 
@@ -206,6 +278,7 @@ def assemble_participant_summary(
         resource_time = _unavailable("observation_incomplete")
         workspace_filesystem = _unavailable("observation_incomplete")
         retained_content = _unavailable("observation_incomplete")
+        child_f3 = None
     else:
         try:
             validated = _validate_handoff(child_handoff)
@@ -215,14 +288,14 @@ def assemble_participant_summary(
             resource_time = _unavailable("observation_incomplete")
             workspace_filesystem = _unavailable("observation_incomplete")
             retained_content = _unavailable("observation_incomplete")
+            child_f3 = None
         else:
             resource_time = validated["resource_time"]
             workspace_filesystem = validated["workspace_filesystem"]
             retained_content = validated["retained_content"]
+            child_f3 = validated["child_f3"]
 
-    # Job-scoped F3 accounting is deliberately unavailable until the sender
-    # hook has authoritative job attribution and summary-message exclusion.
-    f3 = _unavailable("not_bound")
+    f3 = merge_f3_snapshots(child_f3, parent_f3)
     report = {
         "schema_version": "1.0",
         "kind": "nvflare.resource_stats.participant_summary",

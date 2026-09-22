@@ -84,14 +84,10 @@ def _f3(
     *,
     remote_payload_bytes: str = "0",
     remote_messages: str = "0",
-    local_payload_bytes: str = "0",
-    local_messages: str = "0",
 ) -> dict[str, Any]:
     return {
         "status": "reported",
         "remote_accepted": _counter(remote_payload_bytes, remote_messages),
-        "local_delivered": _counter(local_payload_bytes, local_messages),
-        "remote_failed_before_acceptance": _counter(),
     }
 
 
@@ -454,7 +450,7 @@ def _human_cli(summary: dict[str, Any], selected_site: str | None = None) -> str
         if show_retained:
             other_headers.append("SAVED CONTENT GiB")
         if show_f3:
-            other_headers.append("F3 REMOTE ACCEPTED GiB")
+            other_headers.extend(["F3 STATUS", "F3 REMOTE ACCEPTED GiB"])
         other_rows = []
         for entry in entries:
             if entry["status"] != "accepted":
@@ -464,7 +460,7 @@ def _human_cli(summary: dict[str, Any], selected_site: str | None = None) -> str
                 if show_retained:
                     values.append(_hours(_retained_bytes(entry["retained_content"]), Decimal(2**30)))
                 if show_f3:
-                    values.append(_hours(_f3_bytes(entry["f3"]), Decimal(2**30)))
+                    values.extend([entry["f3"]["status"].upper(), _hours(_f3_bytes(entry["f3"]), Decimal(2**30))])
             other_rows.append([entry["participant_name"], *values])
         lines.extend(["", "Other recorded participant totals", *_table(other_headers, other_rows)])
     if selected_site is None:
@@ -494,7 +490,12 @@ def _human_cli(summary: dict[str, Any], selected_site: str | None = None) -> str
                 _quantity("SAVED CONTENT", _hours(_retained_bytes(totals["retained_content"]), Decimal(2**30)), "GiB")
             )
         if show_f3:
-            other_totals.append(_quantity("F3 REMOTE ACCEPTED", _hours(_f3_bytes(totals["f3"]), Decimal(2**30)), "GiB"))
+            other_totals.extend(
+                [
+                    f"F3 STATUS {totals['f3']['status'].upper()}",
+                    _quantity("F3 REMOTE ACCEPTED", _hours(_f3_bytes(totals["f3"]), Decimal(2**30)), "GiB"),
+                ]
+            )
         if other_totals:
             lines.append("  Other additive totals: " + " | ".join(other_totals))
     lines.extend(
@@ -621,7 +622,7 @@ def _human_study_cli(summary: dict[str, Any]) -> str:
             if show_retained:
                 metrics.append("N/A")
             if show_f3:
-                metrics.append("N/A")
+                metrics.extend(["N/A", "N/A"])
             rows.append([row["job_id"], row["job_status"], row["resource_data"], *metrics])
             continue
         totals = row["totals"]
@@ -639,7 +640,7 @@ def _human_study_cli(summary: dict[str, Any]) -> str:
         if show_retained:
             metrics.append(_hours(_retained_bytes(totals["retained_content"]), Decimal(2**30)))
         if show_f3:
-            metrics.append(_hours(_f3_bytes(totals["f3"]), Decimal(2**30)))
+            metrics.extend([totals["f3"]["status"].upper(), _hours(_f3_bytes(totals["f3"]), Decimal(2**30))])
         rows.append([row["job_id"], row["job_status"], row["resource_data"], *metrics])
     headers = ["JOB", "JOB STATUS", "RESOURCE DATA", "QUALITY", "FULL GPU h"]
     if show_mig:
@@ -648,7 +649,7 @@ def _human_study_cli(summary: dict[str, Any]) -> str:
     if show_retained:
         headers.append("SAVED CONTENT GiB")
     if show_f3:
-        headers.append("F3 REMOTE ACCEPTED GiB")
+        headers.extend(["F3 STATUS", "F3 REMOTE ACCEPTED GiB"])
     lines.extend(_table(headers, rows))
     totals = summary["totals"]
     resource_time = totals["resource_time"]
@@ -682,7 +683,12 @@ def _human_study_cli(summary: dict[str, Any]) -> str:
             _quantity("SAVED CONTENT", _hours(_retained_bytes(totals["retained_content"]), Decimal(2**30)), "GiB")
         )
     if show_f3:
-        other_totals.append(_quantity("F3 REMOTE ACCEPTED", _hours(_f3_bytes(totals["f3"]), Decimal(2**30)), "GiB"))
+        other_totals.extend(
+            [
+                f"F3 STATUS {totals['f3']['status'].upper()}",
+                _quantity("F3 REMOTE ACCEPTED", _hours(_f3_bytes(totals["f3"]), Decimal(2**30)), "GiB"),
+            ]
+        )
     if other_totals:
         lines.append("  Other additive totals: " + " | ".join(other_totals))
     lines.extend(

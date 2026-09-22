@@ -49,6 +49,7 @@ from nvflare.private.fed.resource_stats.contract import (
     validate_record,
 )
 from nvflare.private.fed.resource_stats.coordinator import RESOURCE_REPORT_ACCEPTED, ResourceStatsCoordinator
+from nvflare.private.fed.resource_stats.f3_counter import F3Counter, F3TrafficClass
 from nvflare.tool import cli_output
 from nvflare.tool.job.job_resources import render_job_resources, render_study_resources
 
@@ -74,6 +75,8 @@ def _collect_participant(
     participant_name: str,
     clock_values: Iterable[int],
     capacity: Mapping[str, Any],
+    child_f3: Mapping[str, Any],
+    parent_f3: Mapping[str, Any],
 ) -> dict[str, Any]:
     """Exercise the production child handoff and parent assembly path."""
 
@@ -83,7 +86,7 @@ def _collect_participant(
         clock_ns=lambda: next(ticks),
         capacity_probe=lambda: capacity,
     )
-    write_terminal_handoff(run_dir, collector.finish())
+    write_terminal_handoff(run_dir, collector.finish(child_f3=child_f3))
     handoff = read_terminal_handoff(run_dir)
     if handoff is None:
         raise RuntimeError(f"production handoff could not be read for {participant_name}")
@@ -91,9 +94,33 @@ def _collect_participant(
         job_id=REFERENCE_JOB_ID,
         participant_name=participant_name,
         child_handoff=handoff,
+        parent_f3=parent_f3,
     )
     remove_terminal_handoff(run_dir)
     return report
+
+
+def _f3_snapshot(traffic_class: F3TrafficClass, operations: Iterable[tuple[int, ...]]) -> dict[str, Any]:
+    """Build a deterministic snapshot through the production counter API.
+
+    Each tuple contains the main post-FOBS payload size followed by any
+    accepted DownloadService source-byte contributions for that same logical
+    operation.
+    """
+
+    counter = F3Counter()
+    for operation in operations:
+        main_payload_bytes, *oob_payload_bytes = operation
+        admission = counter.try_begin(traffic_class)
+        if admission is None:
+            raise RuntimeError("reference F3 operation was not admitted")
+        for payload_bytes in oob_payload_bytes:
+            if not counter.add_accepted_payload_bytes(admission, payload_bytes):
+                raise RuntimeError("reference F3 OOB contribution was not accepted")
+        if not counter.complete_remote_accepted(admission, main_payload_bytes):
+            raise RuntimeError("reference F3 operation did not complete")
+    counter.close_and_drain(0)
+    return counter.freeze()
 
 
 def _workspace_zip(run_dir: Path) -> bytes:
@@ -222,6 +249,18 @@ def build_artifacts() -> dict[str, bytes]:
                         ]
                     },
                 },
+                child_f3=_f3_snapshot(
+                    F3TrafficClass.TASK_RESULT,
+                    (
+                        (12_288, 1_610_612_736),
+                        (12_304, 1_610_612_736),
+                        (12_320, 1_610_612_736),
+                    ),
+                ),
+                # The client parent originates none of the v1 traffic classes,
+                # but its zero contribution is still required for complete
+                # participant attribution.
+                parent_f3=_f3_snapshot(F3TrafficClass.TASK_RESULT, ()),
             )
 
             server_report = _collect_participant(
@@ -237,6 +276,18 @@ def build_artifacts() -> dict[str, bytes]:
                     "memory": {"bytes": str(64 * _GIB)},
                     "gpu": {"groups": []},
                 },
+                child_f3=_f3_snapshot(
+                    F3TrafficClass.TASK_RESPONSE,
+                    (
+                        (14_336, 1_610_612_736),
+                        (14_352, 1_610_612_736),
+                        (14_368, 1_610_612_736),
+                    ),
+                ),
+                parent_f3=_f3_snapshot(
+                    F3TrafficClass.JOB_APPLICATION,
+                    ((2_097_152, 41_943_040),),
+                ),
             )
 
             coordinator = ResourceStatsCoordinator()

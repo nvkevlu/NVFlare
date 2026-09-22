@@ -57,15 +57,20 @@ count by dividing each participant's resource-time by its measured interval.
 The additive resource-time values remain in a separately labelled block.
 These are display-only derivations: the JSON schema and stored records are
 unchanged. Columns for saved content, F3 traffic, and MIG appear only when the
-corresponding data is present, so this reference omits the first two while
-their `unavailable/not_bound` state remains visible in JSON.
+corresponding data is present. This reference therefore shows F3 but omits
+saved content and MIG.
 
 The `workspace/` directory mirrors members inside the normal stored
 `WORKSPACE` ZIP. It is not a proposed second storage component.
 
-`retained_content` and `f3` are explicitly `unavailable` with `not_bound` in
-these outputs. Their authoritative production hooks are not implemented yet,
-so this reference does not invent measurements for them.
+`retained_content` is explicitly `unavailable/not_bound` because the controlled
+reference has no authoritative bounded result owner. F3 comes from
+deterministic operations admitted and completed through the production
+`F3Counter`, then supplied through the production child/parent merge. The
+controlled values include main post-FOBS bytes and out-of-band source-byte
+contributions, but they are not evidence that a live CellNet route was
+exercised. The generator never infers either value from filenames or generic
+network statistics.
 
 Participant identity is the readable registered name (`site-1` or `server`) in
 filenames, stored records, rollups, and CLI output. The summary's accepted

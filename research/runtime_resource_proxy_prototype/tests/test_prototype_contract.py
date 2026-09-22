@@ -80,11 +80,6 @@ class TestResourceTimeAccumulator(unittest.TestCase):
             "child_f3": {
                 "status": "reported",
                 "remote_accepted": {"payload_bytes": "100", "messages": "1"},
-                "local_delivered": {"payload_bytes": "25", "messages": "1"},
-                "remote_failed_before_acceptance": {
-                    "payload_bytes": "0",
-                    "messages": "0",
-                },
             },
         }
 
@@ -98,8 +93,6 @@ class TestResourceTimeAccumulator(unittest.TestCase):
             parent_f3={
                 "status": "reported",
                 "remote_accepted": {"payload_bytes": "300", "messages": "2"},
-                "local_delivered": {"payload_bytes": "75", "messages": "1"},
-                "remote_failed_before_acceptance": {"payload_bytes": "10", "messages": "1"},
             },
         )
 
@@ -128,7 +121,6 @@ class TestResourceTimeAccumulator(unittest.TestCase):
         self.assertEqual("240", resource_time["gpu"]["groups"][0]["instance_seconds"])
         self.assertEqual("400", report["f3"]["remote_accepted"]["payload_bytes"])
         self.assertEqual("3", report["f3"]["remote_accepted"]["messages"])
-        self.assertEqual("100", report["f3"]["local_delivered"]["payload_bytes"])
         with self.assertRaises(AccumulatorClosedError):
             accumulator.observe(300, self.capacity("8", "68719476736", "0"))
 

@@ -109,8 +109,6 @@ def _participant(name=NAME_A, *, resource_time=None):
         "f3": {
             "status": "reported",
             "remote_accepted": _counter("147700336640", "23500"),
-            "local_delivered": _counter("65536", "12"),
-            "remote_failed_before_acceptance": _counter("0", "0"),
         },
     }
 
@@ -295,6 +293,34 @@ class TestCanonicalFinalOnlyV1Contract(unittest.TestCase):
         self.assertEqual(participant["resource_time"], copied["resource_time"])
         copied["resource_time"]["measured_seconds"] = "1"
         self.assertEqual("120", participant["resource_time"]["measured_seconds"])
+
+    def test_f3_public_shape_is_remote_accepted_only(self):
+        participant = _participant()
+        validate_record(participant)
+
+        partial = copy.deepcopy(participant)
+        partial["f3"] = {
+            "status": "partial",
+            "issues": ["counter_gap"],
+            "remote_accepted": _counter(str(2**128 - 1), "1"),
+        }
+        validate_record(partial)
+
+        old_bucket = copy.deepcopy(participant)
+        old_bucket["f3"]["local_delivered"] = _counter("0", "0")
+        self._assert_invalid_both(old_bucket)
+
+        missing_issue = copy.deepcopy(partial)
+        del missing_issue["f3"]["issues"]
+        self._assert_invalid_both(missing_issue)
+
+        too_large = copy.deepcopy(partial)
+        too_large["f3"]["remote_accepted"]["payload_bytes"] = str(2**128)
+        self._assert_invalid(too_large)
+
+        error = copy.deepcopy(participant)
+        error["f3"] = {"status": "error", "issues": ["malformed_source"]}
+        validate_record(error)
 
     def test_job_totals_sum_final_values_and_keep_hardware_groups(self):
         first = _participant(NAME_A)

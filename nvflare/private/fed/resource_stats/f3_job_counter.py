@@ -18,9 +18,8 @@ Unlike a parent process (SP/CP, see ``f3_registry.py``), a job process
 (``worker_process.py``/``runner_process.py``) only ever runs one job, so a
 single counter for the whole process's lifetime is sufficient -- there is no
 job_id to key by. A module-level singleton (rather than nesting this inside
-``JobResourceCollector``) is deliberate: the code that will eventually record
-into it (task pull, task result send, deep inside ``communicator.py`` and
-friends -- F3_GAP.md steps 3-5) has no reference to the ``JobResourceCollector``
+``JobResourceCollector``) is deliberate: the trusted task-response and
+task-result call sites have no reference to the ``JobResourceCollector``
 instance ``worker_process.py``/``runner_process.py`` construct locally, and
 should not need one just to record a send.
 """
@@ -37,11 +36,17 @@ _counter: Optional[F3Counter] = None
 
 
 def start_job_f3_counter() -> F3Counter:
-    """Create this process's counter. Must be called before any job code can run."""
+    """Create this process's counter once and return it.
+
+    Startup paths may converge or retry. Returning the existing counter keeps
+    observations already recorded in this one-job process instead of silently
+    replacing them.
+    """
 
     global _counter
     with _lock:
-        _counter = F3Counter()
+        if _counter is None:
+            _counter = F3Counter()
         return _counter
 
 

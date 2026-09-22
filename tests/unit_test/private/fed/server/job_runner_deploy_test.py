@@ -26,6 +26,7 @@ from nvflare.apis.client import Client
 from nvflare.apis.fl_constant import FLContextKey
 from nvflare.apis.job_def import Job
 from nvflare.private.admin_defs import Message, MsgHeader, ReturnCode
+from nvflare.private.fed.resource_stats.f3_counter import F3TrafficClass
 from nvflare.private.fed.server.job_runner import JobRunner
 
 # ---------------------------------------------------------------------------
@@ -130,6 +131,17 @@ def _run_deploy(runner, job, sites, fl_ctx, *, extra_patches=None):
 
 
 class TestDeployJobTimeoutClassification:
+    def test_deployment_passes_the_job_counter_and_fixed_class_to_admin_fanout(self):
+        token_to_reply = {"token-1": _ok_reply(), "token-2": _ok_reply()}
+        runner, fl_ctx, engine, job, sites = _build_fl_ctx(token_to_reply, min_sites=1)
+        counter = runner.f3_counters.start_job(job.job_id)
+
+        _run_deploy(runner, job, sites, fl_ctx)
+
+        call = engine.server.admin_server.send_requests_and_get_reply_dict.call_args
+        assert call.kwargs["logical_send_accounting"] is counter
+        assert call.kwargs["logical_send_traffic_class"] is F3TrafficClass.JOB_APPLICATION
+
     def test_timeout_reply_counted_as_failed_client(self):
         """A client that returns None (timeout) must appear in failed_clients."""
         token_to_reply = {"token-1": _ok_reply(), "token-2": None}

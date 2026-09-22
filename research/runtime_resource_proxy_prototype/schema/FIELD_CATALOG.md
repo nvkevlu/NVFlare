@@ -191,24 +191,27 @@ stored.
 
 ## F3
 
-Reported/partial F3 requires exactly three counter pairs. Every pair contains
-U128 integer strings `payload_bytes` and `messages`; zero messages requires
-zero bytes.
+Reported/partial F3 requires exactly one counter pair. The pair contains U128
+integer strings `payload_bytes` and `messages`; zero messages requires zero
+bytes.
 
 | Counter | Meaning |
 | --- | --- |
 | remote_accepted | Remote application payload accepted before counters close; primary F3 total. |
-| local_delivered | Direct/local application delivery, kept separate. |
-| remote_failed_before_acceptance | Remote traffic that failed before sender acceptance. |
 
 `status` is reported, partial, unavailable, or error. Reported forbids issues;
 partial requires counters and issues; unavailable/error requires issues and
 forbids counters. Platform code closes all counters before terminal report
 serialization. Later callbacks do not alter the record.
 
-Included classes are task request, task response, task result, job application,
-and attributable job-stream data. Control, workspace transfer, log export,
-unknown traffic, and resource-report traffic are excluded. See
+Included classes are exactly job application, real task response, and task
+result. A large object sent through `DownloadService` remains part of its
+originating operation rather than becoming another class or message. Task
+requests, exact final in-process delivery, failed send attempts, a relay's
+duplicate contribution, control, workspace transfer, log export, unknown
+traffic, and resource-report traffic are excluded. A remote logical target
+through a local first-hop relay remains counted once at its origin. Bytes are
+measured after FOBS encoding and before optional encryption. See
 [CODE_CATALOG.md](CODE_CATALOG.md) for the exact semantic boundary.
 
 ## Resource summary and expected participants

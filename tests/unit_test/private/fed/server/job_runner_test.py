@@ -1473,10 +1473,9 @@ def test_job_runner_owns_an_f3_counter_registry():
 
 def test_zero_traffic_job_f3_counter_is_reported_not_missing():
     # Mirrors the exact call sequence run()/_job_complete_process perform: start
-    # the SP counter before deployment, close+freeze it before finalization. No
-    # send call site is bound to it yet (F3_GAP.md steps 3-5), so a real job with
-    # no F3 traffic recorded must still produce a clean "reported" zero snapshot,
-    # not a missing/gap contribution.
+    # the SP counter before deployment, close+freeze it before finalization. A
+    # job that has no accepted included traffic must still produce a clean
+    # "reported" zero snapshot, not a missing/gap contribution.
     runner = JobRunner(workspace_root="/tmp")
 
     runner.f3_counters.start_job("job-1")
@@ -1485,8 +1484,6 @@ def test_zero_traffic_job_f3_counter_is_reported_not_missing():
     assert snapshot == {
         "status": "reported",
         "remote_accepted": {"payload_bytes": "0", "messages": "0"},
-        "local_delivered": {"payload_bytes": "0", "messages": "0"},
-        "remote_failed_before_acceptance": {"payload_bytes": "0", "messages": "0"},
     }
 
 
@@ -1499,12 +1496,24 @@ def test_server_handoff_is_bound_and_accepted_before_finalization(tmp_path):
     fl_ctx = MagicMock()
     fl_ctx.get_workspace.return_value = workspace
 
-    runner._accept_server_resource_report("job-1", fl_ctx)
+    runner._accept_server_resource_report(
+        "job-1",
+        fl_ctx,
+        parent_f3={
+            "status": "reported",
+            "remote_accepted": {"payload_bytes": "0", "messages": "0"},
+        },
+    )
     summary = runner.resource_stats.finalize_job("job-1")
 
     server = next(entry for entry in summary["participants"] if entry["participant_name"] == "server")
     assert server["status"] == "accepted"
     assert server["resource_time"] == {"status": "unavailable", "issues": ["observation_incomplete"]}
+    assert server["f3"] == {
+        "status": "partial",
+        "issues": ["attribution_incomplete"],
+        "remote_accepted": {"payload_bytes": "0", "messages": "0"},
+    }
 
 
 def test_restore_running_job_registers_resource_participants_before_server_start(tmp_path):

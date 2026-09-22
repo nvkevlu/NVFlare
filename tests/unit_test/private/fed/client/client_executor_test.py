@@ -67,7 +67,10 @@ def test_build_participant_resource_report_binds_parent_identity_and_removes_han
         "resource_time": {"status": "unavailable", "issues": ["observation_incomplete"]},
         "workspace_filesystem": {"status": "reported", "capacity_bytes": "1099511627776"},
         "retained_content": {"status": "unavailable", "issues": ["not_bound"]},
-        "child_f3": {"status": "unavailable", "issues": ["not_bound"]},
+        "child_f3": {
+            "status": "reported",
+            "remote_accepted": {"payload_bytes": "1200", "messages": "2"},
+        },
     }
     write_terminal_handoff(run_dir, handoff)
 
@@ -76,12 +79,20 @@ def test_build_participant_resource_report_binds_parent_identity_and_removes_han
         participant_name="site-1",
         workspace=str(tmp_path),
         logger=MagicMock(),
+        parent_f3={
+            "status": "reported",
+            "remote_accepted": {"payload_bytes": "300", "messages": "1"},
+        },
     )
 
     report = json.loads(report_bytes)
     assert report["participant_name"] == "site-1"
     assert report["job_id"] == "job-1"
     assert report["workspace_filesystem"]["capacity_bytes"] == "1099511627776"
+    assert report["f3"] == {
+        "status": "reported",
+        "remote_accepted": {"payload_bytes": "1500", "messages": "3"},
+    }
     assert not terminal_handoff_path(run_dir).exists()
 
 
@@ -797,8 +808,19 @@ def test_wait_child_process_freezes_zero_traffic_f3_counter_and_forgets_it():
     engine = MagicMock()
     fl_ctx = MagicMock()
     fl_ctx.get_engine.return_value = engine
+    captured = {}
 
-    with patch("nvflare.private.fed.client.client_executor.get_return_code", return_value=JobReturnCode.SUCCESS):
+    def build_report(**kwargs):
+        captured.update(kwargs)
+        return b"{}"
+
+    with (
+        patch("nvflare.private.fed.client.client_executor.get_return_code", return_value=JobReturnCode.SUCCESS),
+        patch(
+            "nvflare.private.fed.client.client_executor._build_participant_resource_report",
+            side_effect=build_report,
+        ),
+    ):
         job_executor._wait_child_process_finish(
             client=client,
             job_id="job-1",
@@ -812,9 +834,8 @@ def test_wait_child_process_freezes_zero_traffic_f3_counter_and_forgets_it():
     assert counter.freeze() == {
         "status": "reported",
         "remote_accepted": {"payload_bytes": "0", "messages": "0"},
-        "local_delivered": {"payload_bytes": "0", "messages": "0"},
-        "remote_failed_before_acceptance": {"payload_bytes": "0", "messages": "0"},
     }
+    assert captured["parent_f3"] == counter.freeze()
     assert job_executor.f3_counters.get("job-1") is None
 
 

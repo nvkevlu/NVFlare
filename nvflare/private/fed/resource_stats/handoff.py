@@ -14,11 +14,12 @@
 
 """Symlink-safe read/write of the private, job-process-owned terminal handoff.
 
-The job process (child) writes this file to hand its own resource_time,
-workspace_filesystem, and retained_content observations to the semi-trusted
-parent process; the parent (``collector.assemble_participant_summary``) reads
-it back, but does not trust anything else the child wrote (notably not
-``job_id``/``participant_name``, which the parent asserts itself).
+The job process (child) writes this file to hand its resource-time,
+workspace-filesystem, retained-content, and child F3 observations to the
+semi-trusted parent process. The parent
+(``collector.assemble_participant_summary``) validates those observations but
+does not accept identity from the child: ``job_id`` and ``participant_name``
+come from parent-owned lifecycle state.
 """
 
 from __future__ import annotations

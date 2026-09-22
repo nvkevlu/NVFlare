@@ -9,16 +9,16 @@ site-3  client  missing   —         —              N/A        N/A       N/A
 server  server  accepted  REPORTED  37m3s          8.0000     64.0000   0.0000
 
 Other recorded participant totals
-SITE    SAVED CONTENT GiB  F3 REMOTE ACCEPTED GiB
-site-1  0.0000             137.5567
-site-2  N/A                137.5567
-site-3  N/A                N/A
-server  27.5115            275.1133
+SITE    SAVED CONTENT GiB  F3 STATUS  F3 REMOTE ACCEPTED GiB
+site-1  0.0000             REPORTED   137.5567
+site-2  N/A                REPORTED   137.5567
+site-3  N/A                N/A        N/A
+server  27.5115            REPORTED   275.1133
 
 Additive participant resource-time from accepted reports | compute: PARTIAL
   Summed measured participant time: 1h46m9s
   CPU 40.4600 unit h | MEMORY 255.3067 GiB h | FULL GPUs 4.4400 instance h
-  Other additive totals: SAVED CONTENT 27.5115 GiB | F3 REMOTE ACCEPTED 550.2266 GiB
+  Other additive totals: SAVED CONTENT 27.5115 GiB | F3 STATUS PARTIAL | F3 REMOTE ACCEPTED 550.2266 GiB
 
 Notes:
   PARTIAL means at least one expected report or observation was incomplete.

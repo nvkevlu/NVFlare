@@ -75,7 +75,10 @@ def test_checked_in_outputs_are_exact_production_regeneration_and_reconcile():
 
     for report in (site_report, server_report):
         assert report["retained_content"] == {"status": "unavailable", "issues": ["not_bound"]}
-        assert report["f3"] == {"status": "unavailable", "issues": ["not_bound"]}
+        assert report["f3"]["status"] == "reported"
+        assert int(report["f3"]["remote_accepted"]["payload_bytes"]) > 0
+    assert site_report["f3"]["remote_accepted"]["messages"] == "3"
+    assert server_report["f3"]["remote_accepted"]["messages"] == "4"
 
     study_summary = load_and_validate(
         artifacts["query/resources-study.json"],

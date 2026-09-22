@@ -109,9 +109,8 @@ def _gpu_fixture() -> dict[str, Any]:
 
 def _f3_fixture() -> dict[str, Any]:
     counter = F3FinalizationCounter()
-    counter.send_remote(JobTrafficEvent(JobTrafficClass.TASK_REQUEST, 1536), lambda: None)
+    counter.send_remote(JobTrafficEvent(JobTrafficClass.TASK_RESPONSE, 1536), lambda: None)
     counter.send_remote(JobTrafficEvent(JobTrafficClass.TASK_RESULT, 4096), lambda: None)
-    counter.deliver_direct(JobTrafficEvent(JobTrafficClass.JOB_APPLICATION, 256), lambda: None)
     counter.send_remote(JobTrafficEvent(JobTrafficClass.PLATFORM_CONTROL, 64), lambda: None)
     frozen = counter.freeze()
     counter.send_resource_summary(JobTrafficEvent(JobTrafficClass.JOB_APPLICATION, 1024), lambda: None)
@@ -124,13 +123,6 @@ def _f3_fixture() -> dict[str, Any]:
     canonical_f3 = {
         "status": "reported",
         "remote_accepted": canonical_counter(frozen["outcomes"]["remote_transport_accepted"]),
-        "local_delivered": canonical_counter(frozen["outcomes"]["local_delivery"]),
-        "remote_failed_before_acceptance": {
-            "payload_bytes": str(
-                frozen["diagnostics"]["before_transport_acceptance_failed"]["attempted_payload_bytes"]
-            ),
-            "messages": str(frozen["diagnostics"]["before_transport_acceptance_failed"]["attempted_message_count"]),
-        },
     }
     return {
         "schema_version": "prototype-0.3",
@@ -192,8 +184,6 @@ def _accumulator_fixture(job_id: str) -> tuple[dict[str, Any], dict[str, Any]]:
         child_f3={
             "status": "reported",
             "remote_accepted": {"payload_bytes": "0", "messages": "0"},
-            "local_delivered": {"payload_bytes": "0", "messages": "0"},
-            "remote_failed_before_acceptance": {"payload_bytes": "0", "messages": "0"},
         },
     )
     report = assemble_participant_summary(
@@ -204,8 +194,6 @@ def _accumulator_fixture(job_id: str) -> tuple[dict[str, Any], dict[str, Any]]:
         parent_f3={
             "status": "reported",
             "remote_accepted": {"payload_bytes": "0", "messages": "0"},
-            "local_delivered": {"payload_bytes": "0", "messages": "0"},
-            "remote_failed_before_acceptance": {"payload_bytes": "0", "messages": "0"},
         },
     )
     return (

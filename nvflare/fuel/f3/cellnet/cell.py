@@ -13,7 +13,6 @@
 # limitations under the License.
 
 import concurrent.futures
-import copy
 import os
 import threading
 import uuid
@@ -189,7 +188,18 @@ class Adapter:
             }
         )
 
-        encode_payload(response, StreamHeaderKey.PAYLOAD_ENCODING, fobs_ctx=self.cell.get_fobs_context())
+        fobs_props = None
+        if response.get_logical_send_context() is not None:
+            fobs_props = {
+                FOBSContextKey.NUM_RECEIVERS: 1,
+                FOBSContextKey.RECEIVER_IDS: (origin,),
+            }
+        fobs_ctx = self.cell.get_fobs_context(fobs_props) if fobs_props else self.cell.get_fobs_context()
+        encode_payload(
+            response,
+            StreamHeaderKey.PAYLOAD_ENCODING,
+            fobs_ctx=fobs_ctx,
+        )
         self.logger.debug(f"sending: {stream_req_id=}: {response.headers=}, target={origin}")
         try:
             # Response production is asynchronous and can outlive the request timeout. Mark its transport frames
@@ -319,7 +329,7 @@ class Cell(StreamCell):
         with concurrent.futures.ThreadPoolExecutor(max_workers=len(targets)) as executor:
             self.logger.debug(f"broadcast to {targets=}")
             for t in targets:
-                req = Message(copy.deepcopy(request.headers), request.payload)
+                req = request.clone(deep_copy_headers=True)
                 target_argument["request"] = TargetMessage(t, channel, topic, req).message
                 target_argument["target"] = t
                 target_argument["abort_signal"] = abort_signal
@@ -364,9 +374,15 @@ class Cell(StreamCell):
         Returns: None
 
         """
-        encode_payload(message, encoding_key=StreamHeaderKey.PAYLOAD_ENCODING, fobs_ctx=self.get_fobs_context())
         if isinstance(targets, str):
             targets = [targets]
+
+        self._encode_message(
+            message,
+            abort_signal=None,
+            num_receivers=len(targets),
+            receiver_ids=targets,
+        )
 
         result = {}
         futures = {}
@@ -477,6 +493,9 @@ class Cell(StreamCell):
         Returns: reply data
 
         """
+        if request.get_logical_send_context() is not None and receiver_ids is None and num_receivers == 1:
+            receiver_ids = (target,)
+
         self._encode_message(
             request,
             abort_signal,

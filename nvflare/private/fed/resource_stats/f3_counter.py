@@ -12,274 +12,336 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Thread-safe, job-scoped F3 sender counter (step 1 of F3_GAP.md's plan).
+"""Thread-safe, process-local F3 accounting for one job.
 
-This is the state machine the rest of the F3 work builds on. It is not yet
-wired to any real NVFlare send path -- ``collector.py`` still hardcodes the
-public ``f3`` field to ``unavailable/not_bound`` (see F3_GAP.md step 8: the
-hardcoding is removed only after call sites are bound and integration-tested,
-steps 2-7). Landing the counter on its own, fully tested against the exact
-production schema, keeps that follow-up work from also having to get this
-concurrency-sensitive class right at the same time.
+F3 counts originating logical sends, not transport frames or intermediary
+forwarding hops. A trusted call site admits an included operation before it
+starts, then either completes it after the transport accepts the operation or
+abandons it when acceptance fails. The accounting API never owns or wraps
+the send, so an observability failure cannot change send behaviour.
 
-One counter instance covers one contributing process (SP, CP, SJ, or CJ; see
-F3_GAP.md "Missing production bindings"). A participant's final ``f3`` value
-is the checked sum of its job-process counter and its parent-process counter,
-which is a later step (F3_GAP.md step 6) done in ``assemble_participant_summary``.
-
-State machine
--------------
-``collecting`` -> ``closing`` -> ``frozen``, one-way, coordinated by a single
-lock:
-
-* ``begin()`` (admission) only succeeds while ``collecting``. Once
-  ``close()`` has been called, no new operation is classified/counted, but
-  the caller must still perform the underlying send -- this counter only
-  decides whether to count it, never whether to send it.
-* An operation admitted before ``close()`` is allowed to finish counting
-  during ``closing`` (the caller's own bounded drain window; this class does
-  not implement a timer -- see F3_GAP.md "five seconds is an internal bound,
-  not configuration", which lives in the parent-process caller).
-* ``freeze()`` is the one-way transition into ``frozen`` and fixes the
-  published snapshot forever: if anything was still admitted-but-incomplete
-  at that moment, the snapshot is ``partial`` with issue ``counter_gap``.
-  Anything that completes after ``freeze()`` is silently discarded -- "a
-  callback that linearizes after the freeze cannot change the canonical
-  snapshot."
+The counter has a one-way ``collecting`` -> ``closing`` -> ``frozen`` state
+machine. Closing stops new admissions while allowing admitted operations to
+finish. A bounded, condition-based drain is available before freezing. Any
+operation still pending at the cutoff makes the result partial.
 """
 
 from __future__ import annotations
 
+import math
 import threading
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Callable, Optional, TypeVar
+from typing import Any, Optional
+
+from .contract import U128_MAX
 
 _COLLECTING = "collecting"
 _CLOSING = "closing"
 _FROZEN = "frozen"
 
-_BUCKET_REMOTE_ACCEPTED = "remote_accepted"
-_BUCKET_LOCAL_DELIVERED = "local_delivered"
-_BUCKET_REMOTE_FAILED = "remote_failed_before_acceptance"
+_ISSUE_ATTRIBUTION_INCOMPLETE = "attribution_incomplete"
+_ISSUE_COUNTER_GAP = "counter_gap"
+
+# A fixed internal cutoff, not user configuration. Parent processes use this
+# bound so a stuck accounting callback cannot hold job finalization forever.
+F3_DRAIN_TIMEOUT_SECONDS = 5.0
 
 
 class F3TrafficClass(str, Enum):
-    """The closed allowlist of NVFlare traffic classes this field measures.
+    """The closed allowlist of logical operations included in F3 v1.
 
-    Only a trusted NVFlare call site that already owns the operation may
-    assign one of these; a wire header, topic, or job-supplied label is never
-    sufficient authority (F3_GAP.md "the low-level channel, topic, or a
-    job-supplied header cannot assign an included class").
+    Only the trusted NVFlare call site that originates an operation may assign
+    a class. A wire header, topic, relaying process, or job-supplied value is
+    not classification authority.
     """
 
-    TASK_REQUEST = "task_request"
+    JOB_APPLICATION = "job_application"
     TASK_RESPONSE = "task_response"
     TASK_RESULT = "task_result"
-    JOB_APPLICATION = "job_application"
-    JOB_STREAM_DATA = "job_stream_data"
 
 
 INCLUDED_F3_TRAFFIC_CLASSES = frozenset(F3TrafficClass)
 
-T = TypeVar("T")
 
+@dataclass(frozen=True)
+class _FrozenState:
+    """Immutable canonical state retained after the publication cutoff."""
 
-@dataclass
-class _Bucket:
-    payload_bytes: int = 0
-    messages: int = 0
+    status: str
+    issues: tuple[str, ...]
+    payload_bytes: int
+    messages: int
 
-    def add(self, payload_bytes: int, messages: int) -> None:
-        self.payload_bytes += payload_bytes
-        self.messages += messages
-
-    def as_dict(self) -> dict[str, str]:
-        return {"payload_bytes": str(self.payload_bytes), "messages": str(self.messages)}
+    def as_dict(self) -> dict[str, Any]:
+        result: dict[str, Any] = {"status": self.status}
+        if self.issues:
+            result["issues"] = list(self.issues)
+        result["remote_accepted"] = {
+            "payload_bytes": str(self.payload_bytes),
+            "messages": str(self.messages),
+        }
+        return result
 
 
 class F3Admission:
-    """An opaque token returned by :meth:`F3Counter.begin`.
+    """Opaque token for one originating logical send."""
 
-    Callers should treat this as opaque; it exists only so ``begin()``/the
-    completion call can be separated by an arbitrary amount of caller code
-    (typically the transport send itself) without losing which traffic class
-    was admitted.
-    """
+    __slots__ = ("_completed", "_extra_payload_bytes", "_invalid", "_owner", "_traffic_class")
 
-    __slots__ = ("traffic_class", "_completed")
-
-    def __init__(self, traffic_class: F3TrafficClass):
-        self.traffic_class = traffic_class
+    def __init__(self, owner: object, traffic_class: F3TrafficClass):
+        self._owner = owner
+        self._traffic_class = traffic_class
         self._completed = False
+        self._extra_payload_bytes = 0
+        self._invalid = False
 
 
-def _validate_payload(payload_bytes: int, messages: int) -> None:
-    if isinstance(payload_bytes, bool) or not isinstance(payload_bytes, int) or payload_bytes < 0:
-        raise ValueError("payload_bytes must be a non-negative integer")
-    if isinstance(messages, bool) or not isinstance(messages, int) or messages <= 0:
-        raise ValueError("messages must be a positive integer")
+def _valid_payload_bytes(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= U128_MAX
+
+
+def _valid_timeout(value: object) -> bool:
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, int):
+        return 0 <= value <= threading.TIMEOUT_MAX
+    if isinstance(value, float):
+        return math.isfinite(value) and 0 <= value <= threading.TIMEOUT_MAX
+    return False
 
 
 class F3Counter:
-    """One process-local, job-scoped F3 sender counter."""
+    """One process-local, job-scoped F3 sender counter.
+
+    All public mutation methods are fail-safe: malformed or duplicate
+    observability calls return ``False``/``None`` instead of raising into the
+    job's send path. A malformed admitted observation makes the final result
+    partial rather than publishing a value known to be incomplete.
+    """
 
     def __init__(self) -> None:
-        self._lock = threading.Lock()
+        self._condition = threading.Condition()
+        self._owner = object()
         self._state = _COLLECTING
         self._pending = 0
-        self._had_gap = False
-        self._buckets = {
-            _BUCKET_REMOTE_ACCEPTED: _Bucket(),
-            _BUCKET_LOCAL_DELIVERED: _Bucket(),
-            _BUCKET_REMOTE_FAILED: _Bucket(),
-        }
-        self._frozen_snapshot: Optional[dict[str, Any]] = None
+        self._payload_bytes = 0
+        self._messages = 0
+        self._issues: set[str] = set()
+        self._frozen_state: Optional[_FrozenState] = None
 
     @property
     def state(self) -> str:
-        with self._lock:
+        with self._condition:
             return self._state
 
     @property
     def pending_count(self) -> int:
-        """Operations admitted but not yet completed; used by a parent-process drain loop."""
+        """Return the number of admitted operations awaiting an outcome."""
 
-        with self._lock:
+        with self._condition:
             return self._pending
 
-    def begin(self, traffic_class: F3TrafficClass) -> Optional[F3Admission]:
-        """Admit one operation for counting if it is still possible to count it.
+    def try_begin(self, traffic_class: F3TrafficClass) -> Optional[F3Admission]:
+        """Try to admit one originating logical send.
 
-        Returns ``None`` (not an error) when the class is not in the included
-        allowlist or admission has already been closed; the caller must still
-        perform the send either way, just without counting it.
+        ``None`` means the observation was not admitted. This is expected
+        after :meth:`close`; callers must still perform the real send.
+        Supplying anything except an allowlisted enum is treated as an
+        instrumentation gap, but is never allowed to raise into send logic.
         """
 
-        if not isinstance(traffic_class, F3TrafficClass):
-            raise TypeError("traffic_class must be an F3TrafficClass")
-        with self._lock:
-            if self._state != _COLLECTING or traffic_class not in INCLUDED_F3_TRAFFIC_CLASSES:
+        with self._condition:
+            if self._state != _COLLECTING:
+                return None
+            if not isinstance(traffic_class, F3TrafficClass) or traffic_class not in INCLUDED_F3_TRAFFIC_CLASSES:
+                self._issues.add(_ISSUE_COUNTER_GAP)
                 return None
             self._pending += 1
-            return F3Admission(traffic_class)
+            return F3Admission(self._owner, traffic_class)
 
-    def record_remote_send(
-        self,
-        traffic_class: F3TrafficClass,
-        payload_bytes: int,
-        transport_send: Callable[[], T],
-        *,
-        messages: int = 1,
-    ) -> T:
-        """Send remotely; count only a transport-accepted outcome.
+    def add_accepted_payload_bytes(self, admission: Optional[F3Admission], payload_bytes: int) -> bool:
+        """Add accepted out-of-band bytes to a pending logical operation.
 
-        Mirrors the current F3 ``communicator.send`` boundary, whose failure
-        signal is an exception -- this is not a receiver-delivery
-        acknowledgement.
+        FOBS can replace a large object with a DownloadService reference. The
+        successful source bytes for that object still belong to the same
+        logical operation, but must not increment ``messages``. They are kept
+        on the admission and published atomically by
+        :meth:`complete_remote_accepted` with the main post-FOBS payload.
         """
 
-        _validate_payload(payload_bytes, messages)
-        admission = self.begin(traffic_class)
-        try:
-            result = transport_send()
-        except BaseException:
-            # BaseException, not Exception: an admission must always be released
-            # (even on KeyboardInterrupt/SystemExit) or pending_count leaks and
-            # every later freeze() would report a phantom counter_gap forever.
-            self._complete(admission, _BUCKET_REMOTE_FAILED, payload_bytes, messages)
-            raise
-        self._complete(admission, _BUCKET_REMOTE_ACCEPTED, payload_bytes, messages)
-        return result
+        with self._condition:
+            if not isinstance(admission, F3Admission) or admission._owner is not self._owner:
+                return False
+            if admission._completed:
+                if self._frozen_state is None:
+                    self._issues.add(_ISSUE_COUNTER_GAP)
+                return False
+            if self._frozen_state is not None:
+                return False
+            if not _valid_payload_bytes(payload_bytes):
+                admission._invalid = True
+                self._issues.add(_ISSUE_COUNTER_GAP)
+                return False
+            if admission._extra_payload_bytes > U128_MAX - payload_bytes:
+                admission._invalid = True
+                self._issues.add(_ISSUE_COUNTER_GAP)
+                return False
+            admission._extra_payload_bytes += payload_bytes
+            return True
 
-    def record_local_delivery(
-        self,
-        traffic_class: F3TrafficClass,
-        payload_bytes: int,
-        direct_delivery: Callable[[], T],
-        *,
-        messages: int = 1,
-    ) -> T:
-        """Deliver directly (same process); only a successful delivery is counted.
+    def complete_remote_accepted(self, admission: Optional[F3Admission], payload_bytes: int) -> bool:
+        """Record one admitted operation accepted by the local transport.
 
-        There is no public bucket for a failed direct delivery (see the
-        three-bucket production schema in contract.py); a failure is simply
-        not counted, matching how ``remote_failed_before_acceptance`` is
-        reserved for the remote-transport boundary only.
+        ``payload_bytes`` is the serialized logical payload size at the
+        agreed F3 boundary. Each admission represents one logical message to
+        one destination, so a successful completion increments ``messages``
+        by exactly one.
+
+        The return value is diagnostic only. ``False`` means the observation
+        was not applied (for example, because it was malformed, duplicated,
+        foreign, or completed after the cutoff).
         """
 
-        _validate_payload(payload_bytes, messages)
-        admission = self.begin(traffic_class)
-        try:
-            result = direct_delivery()
-        except BaseException:
-            self._discard(admission)
-            raise
-        self._complete(admission, _BUCKET_LOCAL_DELIVERED, payload_bytes, messages)
-        return result
+        with self._condition:
+            if not self._owns_incomplete(admission):
+                return False
+
+            admission._completed = True
+            self._pending -= 1
+            self._condition.notify_all()
+
+            if self._frozen_state is not None:
+                return False
+            if admission._invalid or not _valid_payload_bytes(payload_bytes):
+                self._issues.add(_ISSUE_COUNTER_GAP)
+                return False
+            if admission._extra_payload_bytes > U128_MAX - payload_bytes:
+                self._issues.add(_ISSUE_COUNTER_GAP)
+                return False
+            operation_bytes = admission._extra_payload_bytes + payload_bytes
+            if self._payload_bytes > U128_MAX - operation_bytes or self._messages == U128_MAX:
+                self._issues.add(_ISSUE_COUNTER_GAP)
+                return False
+
+            self._payload_bytes += operation_bytes
+            self._messages += 1
+            return True
+
+    def abandon(self, admission: Optional[F3Admission]) -> bool:
+        """Release an admission whose operation was not transport-accepted.
+
+        A known rejection is not a counter gap and contributes no public F3
+        value. This method is also safe after close/freeze and never raises.
+        """
+
+        with self._condition:
+            if not self._owns_incomplete(admission):
+                return False
+            admission._completed = True
+            self._pending -= 1
+            self._condition.notify_all()
+            return True
+
+    def mark_incomplete(self, admission: Optional[F3Admission]) -> bool:
+        """Release an admitted operation whose observation cannot be finalized.
+
+        Unlike :meth:`abandon`, this means the accounting outcome is unknown,
+        not that the transport definitely rejected the operation. Any bytes
+        accumulated on the admission are discarded and the final snapshot is
+        marked ``partial/counter_gap``.
+        """
+
+        with self._condition:
+            if not self._owns_incomplete(admission):
+                return False
+            admission._completed = True
+            self._pending -= 1
+            self._issues.add(_ISSUE_COUNTER_GAP)
+            self._condition.notify_all()
+            return True
+
+    def mark_counter_gap(self) -> bool:
+        """Mark an instrumentation failure that occurred before admission.
+
+        This is distinct from missing history after a process restart. It is
+        intended for fail-safe integration boundaries that could not create
+        or attach an accounting context but must not disrupt the real send.
+        """
+
+        with self._condition:
+            if self._frozen_state is not None:
+                return False
+            self._issues.add(_ISSUE_COUNTER_GAP)
+            return True
+
+    def mark_prior_history_incomplete(self) -> bool:
+        """Record that traffic before this counter was created is unavailable.
+
+        Parent processes use this after restoring a running job. The method
+        is idempotent and returns ``False`` only after the publication cutoff.
+        """
+
+        with self._condition:
+            if self._frozen_state is not None:
+                return False
+            self._issues.add(_ISSUE_ATTRIBUTION_INCOMPLETE)
+            return True
 
     def close(self) -> None:
-        """Stop admitting new operations; already-admitted ones may still complete."""
+        """Stop admitting new operations; already-admitted ones may finish."""
 
-        with self._lock:
+        with self._condition:
             if self._state == _COLLECTING:
                 self._state = _CLOSING
 
-    def freeze(self) -> dict[str, Any]:
-        """Fix the immutable, publishable snapshot. Idempotent: returns the same dict every call."""
+    def close_and_drain(self, timeout_seconds: float) -> bool:
+        """Close admission and wait at most ``timeout_seconds`` for pending work.
 
-        with self._lock:
-            if self._frozen_snapshot is None:
-                if self._pending > 0:
-                    self._had_gap = True
-                self._state = _FROZEN
-                self._frozen_snapshot = self._snapshot_locked()
-            return self._frozen_snapshot
-
-    def snapshot(self) -> dict[str, Any]:
-        """Return the current f3-shaped totals without fixing the cutoff.
-
-        Once :meth:`freeze` has been called, this always returns that same
-        frozen dict. Before that, it is a live diagnostic view: an operation
-        still admitted-but-incomplete makes it ``partial``/``counter_gap``,
-        exactly like a real freeze taken at this instant would.
+        Waiting uses a condition rather than polling. ``True`` means every
+        admitted operation completed before return. An invalid timeout is
+        treated as a zero-length drain and marks the observation partial;
+        observability mistakes never raise into lifecycle code.
         """
 
-        with self._lock:
-            if self._frozen_snapshot is not None:
-                return self._frozen_snapshot
-            return self._snapshot_locked()
+        with self._condition:
+            if self._state == _COLLECTING:
+                self._state = _CLOSING
+            if not _valid_timeout(timeout_seconds):
+                self._issues.add(_ISSUE_COUNTER_GAP)
+                timeout_seconds = 0.0
+            return self._condition.wait_for(lambda: self._pending == 0, timeout=float(timeout_seconds))
 
-    def _complete(self, admission: Optional[F3Admission], bucket: str, payload_bytes: int, messages: int) -> None:
-        if admission is None:
-            return
-        with self._lock:
-            if admission._completed:
-                raise RuntimeError("this F3Admission has already been completed once")
-            admission._completed = True
-            self._pending -= 1
-            if self._frozen_snapshot is not None:
-                # Linearized after freeze(): diagnostic-only, never mutates the
-                # already-published snapshot.
-                return
-            self._buckets[bucket].add(payload_bytes, messages)
+    def freeze(self) -> dict[str, Any]:
+        """Fix the publication cutoff and return a defensive snapshot copy."""
 
-    def _discard(self, admission: Optional[F3Admission]) -> None:
-        """Release an admission whose outcome is not counted in any public bucket."""
+        with self._condition:
+            if self._frozen_state is None:
+                if self._pending:
+                    self._issues.add(_ISSUE_COUNTER_GAP)
+                self._state = _FROZEN
+                self._frozen_state = self._make_state_locked(include_pending=False)
+            return self._frozen_state.as_dict()
 
-        if admission is None:
-            return
-        with self._lock:
-            if admission._completed:
-                raise RuntimeError("this F3Admission has already been completed once")
-            admission._completed = True
-            self._pending -= 1
+    def snapshot(self) -> dict[str, Any]:
+        """Return a defensive diagnostic snapshot without fixing the cutoff."""
 
-    def _snapshot_locked(self) -> dict[str, Any]:
-        gap = self._had_gap or self._pending > 0
-        result: dict[str, Any] = {"status": "partial" if gap else "reported"}
-        if gap:
-            result["issues"] = ["counter_gap"]
-        for bucket_name, bucket in self._buckets.items():
-            result[bucket_name] = bucket.as_dict()
-        return result
+        with self._condition:
+            if self._frozen_state is not None:
+                return self._frozen_state.as_dict()
+            return self._make_state_locked(include_pending=True).as_dict()
+
+    def _owns_incomplete(self, admission: object) -> bool:
+        return isinstance(admission, F3Admission) and admission._owner is self._owner and not admission._completed
+
+    def _make_state_locked(self, *, include_pending: bool) -> _FrozenState:
+        issues = set(self._issues)
+        if include_pending and self._pending:
+            issues.add(_ISSUE_COUNTER_GAP)
+        ordered_issues = tuple(sorted(issues))
+        return _FrozenState(
+            status="partial" if ordered_issues else "reported",
+            issues=ordered_issues,
+            payload_bytes=self._payload_bytes,
+            messages=self._messages,
+        )

@@ -12,7 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from nvflare.private.fed.resource_stats.f3_counter import F3Counter
+import threading
+
+from nvflare.private.fed.resource_stats.f3_counter import F3Counter, F3TrafficClass
 from nvflare.private.fed.resource_stats.f3_registry import F3CounterRegistry
 
 
@@ -53,3 +55,58 @@ def test_two_jobs_get_independent_counters():
     assert counter_a is not counter_b
     counter_a.freeze()
     assert counter_b.state == "collecting"
+
+
+def test_start_can_mark_restored_job_history_incomplete():
+    registry = F3CounterRegistry()
+
+    counter = registry.start_job("job-1", prior_history_incomplete=True)
+
+    assert counter.freeze() == {
+        "status": "partial",
+        "issues": ["attribution_incomplete"],
+        "remote_accepted": {"payload_bytes": "0", "messages": "0"},
+    }
+
+
+def test_mark_prior_history_incomplete_handles_known_and_unknown_jobs():
+    registry = F3CounterRegistry()
+    registry.start_job("job-1")
+
+    assert registry.mark_prior_history_incomplete("job-1")
+    assert not registry.mark_prior_history_incomplete("unknown")
+
+
+def test_close_and_freeze_condition_drains_before_snapshot():
+    registry = F3CounterRegistry()
+    counter = registry.start_job("job-1")
+    admission = counter.try_begin(F3TrafficClass.JOB_APPLICATION)
+    timer = threading.Timer(0.02, counter.complete_remote_accepted, args=(admission, 10))
+    timer.start()
+    try:
+        snapshot = registry.close_and_freeze("job-1", drain_timeout_seconds=1.0)
+    finally:
+        timer.join()
+
+    assert snapshot == {
+        "status": "reported",
+        "remote_accepted": {"payload_bytes": "10", "messages": "1"},
+    }
+
+
+def test_close_and_freeze_timeout_reports_pending_operation_as_gap():
+    registry = F3CounterRegistry()
+    counter = registry.start_job("job-1")
+    counter.try_begin(F3TrafficClass.JOB_APPLICATION)
+
+    snapshot = registry.close_and_freeze("job-1", drain_timeout_seconds=0.0)
+
+    assert snapshot == {
+        "status": "partial",
+        "issues": ["counter_gap"],
+        "remote_accepted": {"payload_bytes": "0", "messages": "0"},
+    }
+
+
+def test_close_and_freeze_returns_none_for_unknown_job():
+    assert F3CounterRegistry().close_and_freeze("unknown") is None

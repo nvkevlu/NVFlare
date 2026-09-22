@@ -149,16 +149,31 @@ study totals.
 
 ## F3 decisions
 
-Keep only three final counters:
+Keep only one final counter: remote accepted. Exact final delivery to an
+in-process logical destination and failed send attempts are outside the v1
+public metric.
 
-- remote accepted;
-- local delivered; and
-- remote failed before acceptance.
+Include exactly three trusted semantic operations: job application deployment,
+a response containing a real task, and a submitted task result. Do not count
+task requests or add another contribution at a forwarding process. One message
+is one top-level logical send to one remote destination. A remote destination
+reached through a local first-hop relay still counts once at its origin; only
+an exact final in-process delivery is excluded.
 
-Count application payload bytes at the approved F3 boundary. Do not store
-headers, TLS overhead, lower-layer retransmissions, or individual messages.
-The collector closes the counters once during terminal finalization. Platform
-code excludes resource-report traffic so job code cannot spoof the exclusion.
+Count the main payload after FOBS encoding and before optional encryption. If
+FOBS moves a large value through `DownloadService`, fold successfully accepted
+unique source bytes into the same operation without another message. Do not
+store headers, encryption expansion, TLS overhead, lower-layer
+retransmissions, or retries.
+
+The accounting context stays inside the process that originates the trusted
+operation. Child cleanup closes command admission and pre-drains admitted
+callbacks for up to five seconds while transport remains alive; timeout or
+error marks `counter_gap`. The child then performs its fixed F3
+close/drain/freeze before transport stop, while the parent uses its own fixed
+F3 close/drain/freeze. The parent checked-merges their non-overlapping
+contributions. Platform code freezes before terminal-report serialization, so
+the report is excluded without a spoofable marker.
 
 ## Server, storage, and query decisions
 

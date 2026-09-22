@@ -152,6 +152,7 @@ class TestCanonicalReviewArtifacts(unittest.TestCase):
         self.assertIn("CPU 40.4600 unit h", human)
         self.assertIn("MEMORY 255.3067 GiB h", human)
         self.assertIn("SAVED CONTENT 27.5115 GiB", human)
+        self.assertIn("F3 STATUS PARTIAL", human)
         self.assertIn("F3 REMOTE ACCEPTED 550.2266 GiB", human)
         self.assertNotIn("STORAGE", human)
         self.assertNotIn("not utilization", human)
@@ -221,6 +222,7 @@ class TestCanonicalReviewArtifacts(unittest.TestCase):
         self.assertIn("FULL GPUs 36.4400 instance h", human)
         self.assertIn("CPU 552.4600 unit h", human)
         self.assertIn("MEMORY 2303.3067 GiB h", human)
+        self.assertIn("F3 STATUS PARTIAL", human)
         self.assertNotIn("MIG", human)
         self.assertEqual({"study": "cancer-research"}, envelope["data"]["selection"])
         self.assertEqual(study, envelope["data"]["summary"])
@@ -259,7 +261,7 @@ class TestCanonicalReviewArtifacts(unittest.TestCase):
         summary = json.loads((SCHEMA_ROOT / "golden/v1/resource_summary.json").read_text())
         accepted = summary["participants"][0]
         self.assertEqual("147700336640", accepted["f3"]["remote_accepted"]["payload_bytes"])
-        self.assertIn("local_delivered", accepted["f3"])
+        self.assertEqual({"status", "remote_accepted"}, set(accepted["f3"]))
         self.assertEqual(
             {"status", "remote_accepted"},
             set(summary["totals"]["f3"]),

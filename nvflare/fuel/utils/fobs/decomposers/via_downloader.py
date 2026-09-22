@@ -614,6 +614,20 @@ class ViaDownloaderDecomposer(fobs.Decomposer, ABC):
         downloader = None
         cell = fobs_ctx.get(fobs.FOBSContextKey.CELL)
         if cell:
+            send_accounting_context = None
+            message = fobs_ctx.get(fobs.FOBSContextKey.MESSAGE)
+            if message:
+                context = message.get_logical_send_context()
+                if context:
+                    try:
+                        if context.is_origin(cell.get_fqcn()):
+                            send_accounting_context = context
+                    except BaseException as ex:
+                        self.logger.warning(f"logical-send accounting origin check failed: {ex}")
+                        try:
+                            context.mark_counter_gap()
+                        except BaseException:
+                            pass
             num = (
                 num_receivers_override
                 if num_receivers_override is not None
@@ -637,6 +651,7 @@ class ViaDownloaderDecomposer(fobs.Decomposer, ABC):
                 # expected receiver identities: enables the transaction's per-receiver
                 # acquire budget; None when any identity is unknown
                 receiver_ids=receiver_ids,
+                send_accounting_context=send_accounting_context,
             )
 
         return downloader

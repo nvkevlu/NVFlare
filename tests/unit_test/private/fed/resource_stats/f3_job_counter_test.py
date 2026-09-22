@@ -14,7 +14,7 @@
 
 import pytest
 
-from nvflare.private.fed.resource_stats.f3_counter import F3Counter
+from nvflare.private.fed.resource_stats.f3_counter import F3Counter, F3TrafficClass
 from nvflare.private.fed.resource_stats.f3_job_counter import (
     clear_job_f3_counter,
     get_job_f3_counter,
@@ -40,12 +40,16 @@ def test_start_creates_a_counter_reachable_from_anywhere():
     assert get_job_f3_counter() is started
 
 
-def test_start_replaces_any_prior_counter():
+def test_start_is_idempotent_and_preserves_prior_observations():
     first = start_job_f3_counter()
+    admission = first.try_begin(F3TrafficClass.TASK_RESULT)
+    assert first.complete_remote_accepted(admission, 10)
+
     second = start_job_f3_counter()
 
-    assert first is not second
-    assert get_job_f3_counter() is second
+    assert first is second
+    assert get_job_f3_counter() is first
+    assert second.freeze()["remote_accepted"] == {"payload_bytes": "10", "messages": "1"}
 
 
 def test_clear_drops_the_reference():

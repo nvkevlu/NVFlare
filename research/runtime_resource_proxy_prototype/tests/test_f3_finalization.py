@@ -16,13 +16,12 @@ import sys
 import unittest
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from f3_finalization import (  # noqa: E402
-    F3FinalizationCounter,
     INCLUDED_JOB_TRAFFIC_CLASSES,
+    F3FinalizationCounter,
     JobTrafficClass,
     JobTrafficEvent,
 )
@@ -32,23 +31,22 @@ class TestF3FinalizationCounter(unittest.TestCase):
     def test_explicit_allowlist_excludes_non_job_traffic(self):
         counter = F3FinalizationCounter()
 
-        counter.send_remote(JobTrafficEvent(JobTrafficClass.TASK_REQUEST, 128), lambda: None)
+        counter.send_remote(JobTrafficEvent(JobTrafficClass.TASK_RESPONSE, 128), lambda: None)
+        counter.send_remote(JobTrafficEvent(JobTrafficClass.TASK_REQUEST, 16), lambda: None)
         counter.send_remote(JobTrafficEvent(JobTrafficClass.WORKSPACE_TRANSFER, 64), lambda: None)
         counter.send_remote(JobTrafficEvent(JobTrafficClass.BULK_ENVELOPE, 32), lambda: None)
 
         snapshot = counter.snapshot()
         self.assertEqual(
             {
-                JobTrafficClass.TASK_REQUEST,
                 JobTrafficClass.TASK_RESPONSE,
                 JobTrafficClass.TASK_RESULT,
                 JobTrafficClass.JOB_APPLICATION,
-                JobTrafficClass.JOB_STREAM_DATA,
             },
             INCLUDED_JOB_TRAFFIC_CLASSES,
         )
         self.assertEqual({"payload_bytes": 128, "message_count": 1}, snapshot["outcomes"]["remote_transport_accepted"])
-        self.assertEqual({"payload_bytes": 96, "message_count": 2}, snapshot["diagnostics"]["excluded_traffic_class"])
+        self.assertEqual({"payload_bytes": 112, "message_count": 3}, snapshot["diagnostics"]["excluded_traffic_class"])
 
     def test_remote_bytes_are_recorded_only_after_transport_accepts(self):
         counter = F3FinalizationCounter()
@@ -62,24 +60,10 @@ class TestF3FinalizationCounter(unittest.TestCase):
 
         rejected = counter.snapshot()
         self.assertEqual({"payload_bytes": 0, "message_count": 0}, rejected["outcomes"]["remote_transport_accepted"])
-        self.assertEqual(
-            {"attempted_payload_bytes": 256, "attempted_message_count": 1},
-            rejected["diagnostics"]["before_transport_acceptance_failed"],
-        )
 
         self.assertEqual("accepted", counter.send_remote(event, lambda: "accepted"))
         accepted = counter.snapshot()
         self.assertEqual({"payload_bytes": 256, "message_count": 1}, accepted["outcomes"]["remote_transport_accepted"])
-
-    def test_direct_delivery_is_not_added_to_remote_transport(self):
-        counter = F3FinalizationCounter()
-        event = JobTrafficEvent(JobTrafficClass.JOB_APPLICATION, 48, message_count=2)
-
-        counter.deliver_direct(event, lambda: None)
-        snapshot = counter.snapshot()
-
-        self.assertEqual({"payload_bytes": 0, "message_count": 0}, snapshot["outcomes"]["remote_transport_accepted"])
-        self.assertEqual({"payload_bytes": 48, "message_count": 2}, snapshot["outcomes"]["local_delivery"])
 
     def test_summary_publication_uses_a_separate_nvflare_operation(self):
         counter = F3FinalizationCounter()
@@ -100,19 +84,18 @@ class TestF3FinalizationCounter(unittest.TestCase):
 
     def test_frozen_cutoff_is_fixed_and_late_events_are_diagnostic_only(self):
         counter = F3FinalizationCounter()
-        counter.send_remote(JobTrafficEvent(JobTrafficClass.TASK_REQUEST, 100), lambda: None)
+        counter.send_remote(JobTrafficEvent(JobTrafficClass.TASK_RESPONSE, 100), lambda: None)
 
         frozen = counter.freeze()
         self.assertEqual("frozen", frozen["finalization"]["state"])
         self.assertEqual(1, frozen["finalization"]["accepted_event_sequence_cutoff"])
 
         counter.send_remote(JobTrafficEvent(JobTrafficClass.TASK_RESULT, 25), lambda: None)
-        counter.deliver_direct(JobTrafficEvent(JobTrafficClass.JOB_APPLICATION, 75), lambda: None)
+        counter.send_remote(JobTrafficEvent(JobTrafficClass.JOB_APPLICATION, 75), lambda: None)
         again = counter.freeze()
 
         self.assertEqual(1, again["finalization"]["accepted_event_sequence_cutoff"])
         self.assertEqual({"payload_bytes": 100, "message_count": 1}, again["outcomes"]["remote_transport_accepted"])
-        self.assertEqual({"payload_bytes": 0, "message_count": 0}, again["outcomes"]["local_delivery"])
         self.assertEqual({"payload_bytes": 100, "message_count": 2}, again["diagnostics"]["late_after_cutoff"])
 
 

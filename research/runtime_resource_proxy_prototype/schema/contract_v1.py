@@ -418,9 +418,6 @@ def _validate_counter(value: Any, path: str) -> None:
         _fail(path, "payload_bytes must be zero when messages is zero")
 
 
-_F3_BUCKETS = ("remote_accepted", "local_delivered", "remote_failed_before_acceptance")
-
-
 def _validate_f3(value: Any, path: str, *, aggregate: bool = False) -> None:
     f3 = _mapping(value, path)
     statuses = TOTAL_STATUSES if aggregate else MEASUREMENT_STATUSES
@@ -434,14 +431,13 @@ def _validate_f3(value: Any, path: str, *, aggregate: bool = False) -> None:
         return
 
     if status in {"reported", "partial"}:
-        required = {"status"} | set(_F3_BUCKETS)
+        required = {"status", "remote_accepted"}
         if status == "partial":
             required.add("issues")
         _exact_keys(f3, required, set(), path)
         if status == "partial":
             _issues(f3["issues"], PARTIAL_ISSUES, f"{path}.issues")
-        for bucket in _F3_BUCKETS:
-            _validate_counter(f3[bucket], f"{path}.{bucket}")
+        _validate_counter(f3["remote_accepted"], f"{path}.remote_accepted")
     else:
         _exact_keys(f3, {"status", "issues"}, set(), path)
         allowed = SOURCE_UNAVAILABLE_ISSUES if status == "unavailable" else SOURCE_ERROR_ISSUES

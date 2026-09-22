@@ -167,6 +167,6 @@ values change slightly on every run.
 | `resource_time.gpu.groups[].instance_seconds` | Step 3 CUDA count multiplied by elapsed seconds |
 | GPU `kind`, `model`, and `memory_bytes` | Step 5 NVML data for the CUDA/Driver-matched UUID |
 | `workspace_filesystem.capacity_bytes` | Step 6 `f_blocks * f_frsize` |
-| `retained_content` | Not measured by these probes; currently `unavailable/not_bound` |
-| `f3` | Not measured by these probes; currently `unavailable/not_bound` |
+| `retained_content` | Not measured by these probes; unavailable until a bounded result owner supplies it |
+| `f3` | Not measured by capacity probes; populated by the separate origin-only F3 send instrumentation |
 | `job_id`, `participant_name`, `reported_at` | Trusted parent inputs and parent UTC clock, not machine probes |

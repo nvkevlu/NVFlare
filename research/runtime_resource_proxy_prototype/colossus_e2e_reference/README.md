@@ -68,8 +68,9 @@ interval. The job total adds those participant reports, so their overlapping
 GPU time is deliberately counted more than once. The total is participant
 resource-time, not physical cluster capacity.
 
-`retained_content` and F3 are `unavailable/not_bound`, matching the documented
-production gaps. The run proves the current Linux Process-launch path with an
+`retained_content` and F3 are `unavailable/not_bound` because this historical
+run predates the current F3 bindings and a retained-result owner. The run
+proves the Linux Process-launch path at the time with an
 unconstrained cgroup and one full GPU. It does not prove Docker, Kubernetes,
 Slurm, constrained-cgroup, multi-GPU, or MIG behavior.
 

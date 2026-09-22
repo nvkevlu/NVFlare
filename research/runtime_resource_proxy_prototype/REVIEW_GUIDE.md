@@ -29,10 +29,12 @@ NVIDIA distribution metadata while leaving the historical artifact unchanged.
 Each NVFlare client and server job process keeps CPU, memory, and GPU
 capacity-time in memory while it runs. At finalization it writes one bounded
 private handoff containing those totals, one workspace-filesystem capacity
-observation, and typed retained-result/F3 results. The current retained-result
-and F3 hooks are not bound, so those two results are unavailable rather than
-guessed. The parent validates the handoff and builds the participant's only
-public report. The client parent sends that report once on the existing
+observation, and typed retained-result/F3 results. Retained-result ownership is
+not yet bound for every workflow, so that value remains unavailable rather
+than guessed. F3 now has platform-owned counters for deployment, real task
+responses, and task results. The parent validates the handoff, merges its own
+F3 contribution with the child's, and builds the participant's only public
+report. The client parent sends that report once on the existing
 terminal-outcome request; a newly named versioned completion request remains a
 fallback design, not implemented code. The server adds accepted participant
 totals, stores everything in the normal archived job workspace, and serves
@@ -192,9 +194,10 @@ The concise source, hook, and readiness table is in the
 [operational collection map](ROLLUP_FLOW.md#operational-collection-map).
 Production collection uses native APIs and direct kernel-interface parsing;
 the shell commands in the implementation plan are operator diagnostics only.
-CPU, memory, CUDA/NVML, and workspace-filesystem collection are implemented in
-the production path. Exact F3 instrumentation bindings and authoritative
-retained-result sets are still open and report unavailable until implemented.
+CPU, memory, CUDA/NVML, workspace-filesystem, and F3 collection are implemented
+in the production path. The focused F3 suite passes 366 of 366 tests; a new
+live process-mode reference remains. Authoritative retained-result sets remain
+open and report unavailable until implemented.
 
 ### CPU
 
@@ -272,21 +275,46 @@ required owner/provider boundary and failure behavior are detailed in
 
 ### F3
 
-The following is the target definition. Production currently emits
-`f3.status=unavailable` with issue `not_bound`; it does not yet create these
-counters.
+F3 publishes one `remote_accepted` counter pair. It includes exactly three
+platform-classified operations: job application deployment, a response that
+contains a real task, and a submitted task result. It does not include task
+poll requests, acknowledgements, final in-process delivery, failed sends, an
+extra relay contribution, workspace transfer, the resource report,
+authentication, heartbeats, logs, HCI, or unclassified traffic.
 
-Count selected job application, real task request/response/result, and bound
-job stream data at the sender. Exclude polling, acknowledgements, control,
-retries, workspace transfer, the resource report, authentication, heartbeats,
-logs, HCI, and unclassified traffic.
+One message means one top-level logical send to one destination. Its bytes are
+measured after FOBS encoding and before optional encryption. If FOBS moves a
+large object through `DownloadService`, successfully accepted unique object
+bytes are added to the same operation without another message. Retries do not
+add bytes again.
 
-The child freezes its local counters in the private handoff. After the child
-ends, the parent stops new included traffic, waits up to the fixed internal
-five-second drain for admitted callbacks, and atomically freezes its counters.
-A send-acceptance or local-delivery callback contributes only if it linearizes
-before the applicable freeze. If the drain cannot complete, F3 is
-`partial/counter_gap`; an early snapshot is never labeled complete.
+Only the trusted semantic origin counts. The accounting context stays inside
+the originating process and is not serialized, so a relay cannot count the
+operation a second time. A remote logical destination routed through a local
+first-hop relay is still counted once by the origin; it is not mistaken for a
+final local delivery.
+
+During child cleanup, NVFlare first closes command admission and gives already
+admitted command callbacks a fixed five-second wait while Cell and streaming
+remain alive. Timeout or error marks `counter_gap`. The child then closes and
+drains its F3 admissions for up to five seconds, freezes its local counter into
+the private handoff, and only then stops streaming and Cell. If the callback
+pre-drain failed, cleanup keeps one bounded post-stop callback wait.
+
+After the child ends, the parent stops new F3 admissions, gives admitted
+operations the same fixed internal five-second drain, freezes, and performs a
+checked merge. A send contributes only if its acceptance boundary settles
+before the cutoff. In particular, a streamed send remains pending until its
+`StreamFuture` ends successfully; asynchronous failure or cancellation
+abandons it. If a drain cannot complete, useful numeric data is retained as
+`partial/counter_gap`. Restored history is
+`partial/attribution_incomplete`. The parent freezes before constructing the
+terminal report, so the report cannot count itself.
+
+The production hooks are present, and the final focused suite—including
+socket-backed transport coverage—passes 366 of 366 tests. A new process-mode
+or Colossus live F3 reference has not yet replaced the older `not_bound`
+artifact. See [F3 implementation status](F3_GAP.md).
 
 ## How completion and the report reach the server
 
@@ -305,8 +333,8 @@ The parent first builds the sole canonical `participant_summary` from the
 validated private handoff, deletes staging, and frees launcher-managed compute
 resources. It then sends the request and waits for the CellNet reply, so that
 network wait does not keep the completed job's allocation held. Parent F3 is
-currently unavailable. The branch
-implements the first of two reviewed one-message transports:
+already frozen before this request. The branch implements the first of two
+reviewed one-message transports:
 
 - **Option A, implemented:** extend `CellChannelTopic.REPORT_JOB_FAILURE`, wire
   topic `report_job_failure`, with the exact report bytes. The server compares
@@ -521,6 +549,9 @@ Generated examples:
 | Initial probe is partly unavailable | One final report may have partial resource time. |
 | Applicable cgroup CPU or memory data is unreadable or malformed | That dimension fails closed instead of falling back to a wider value. |
 | Server job process is restored | The new interval is numeric where possible but marked `partial/observation_incomplete`. |
+| Server parent F3 history is restored | Keep the new subtotal and mark F3 `partial/attribution_incomplete`. |
+| An admitted F3 operation does not settle before the fixed cutoff | Keep the bounded subtotal as `partial/counter_gap`; do not delay finalization indefinitely. |
+| An F3 route loses trusted attribution or large-object completion evidence | Report partial or unavailable F3; do not substitute generic CellNet totals. |
 | Completion request is lost | Client does not retry; the participant can be missing. |
 | Completion reply is lost | Server may already have accepted the report, but the client does not retry or learn that status. |
 | Root parent restarts after accepting a report | Expected names are restored, but accepted reports are not; a pre-restart report normally becomes missing. |
@@ -589,13 +620,21 @@ Generated examples:
   `-I`, and snapshot before workspace download/custom activation, with no user
   setting.
 - New privileges or deployment configuration: no.
+- F3 public value: remote accepted only.
+- F3 classes: job application, real task response, and task result only.
+- F3 byte boundary: after FOBS encoding and before optional encryption.
+- F3 ownership: trusted semantic origin only; a local first-hop relay does not
+  suppress the origin's remote send or recount it.
+- Large FOBS values: fold unique accepted `DownloadService` bytes into the
+  originating operation without another message.
 
 ## Remaining implementation work
 
 - broader platform/version and packaging validation for the implemented CUDA
   Runtime discovery and CUDA/NVML model matching, including device subsets,
   multi-GPU, MIG, legacy `torch`-owned runtimes, and conda-only layouts;
-- trusted F3 task correlation and stream provenance;
+- a new process-mode F3 run to replace the historical `not_bound` live
+  artifact; the focused socket-backed suite already passes 366 of 366 tests;
 - authoritative retained-result sets for supported workflows;
 - root-parent restart recovery for accepted report bytes, invalid history,
   and cutoff state if required (expected names are already restored);

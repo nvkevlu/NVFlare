@@ -33,6 +33,7 @@ from nvflare.private.fed.app.utils import monitor_parent_process
 from nvflare.private.fed.client.client_app_runner import ClientAppRunner
 from nvflare.private.fed.client.client_status import ClientStatus
 from nvflare.private.fed.resource_stats.collector import JobResourceCollector, write_terminal_handoff
+from nvflare.private.fed.resource_stats.f3_counter import F3_DRAIN_TIMEOUT_SECONDS
 from nvflare.private.fed.resource_stats.f3_job_counter import get_job_f3_counter, start_job_f3_counter
 from nvflare.private.fed.utils.fed_utils import (
     create_stats_pool_files_for_job,
@@ -66,12 +67,14 @@ def main(args):
         # Launchers keep job custom directories out of PYTHONPATH until this
         # platform-owned snapshot has completed.
         resource_collector = JobResourceCollector(workspace.get_run_dir(args.job_id))
-        # Started here, before job/site custom code can run, so it is available for
-        # any included traffic the job process sends. Not yet read by anything: no
-        # send call site is bound to it until F3_GAP.md steps 3-5 land.
-        start_job_f3_counter()
     except Exception:
         # Resource reporting is observational and must never change the job outcome.
+        pass
+    try:
+        # Start independently from the capacity collector so failure in one
+        # observation path cannot disable the other.
+        start_job_f3_counter()
+    except Exception:
         pass
     download_workspace(args, secure_train)
     activate_job_python_path((workspace.get_app_custom_dir(args.job_id), workspace.get_site_custom_dir()))
@@ -145,17 +148,22 @@ def main(args):
     finally:
 
         def _archive_results():
-            # Command admission is stopping here; close and freeze the CJ F3
-            # counter now, before F3 streaming shutdown, per F3_GAP.md.
+            child_f3 = None
             counter = get_job_f3_counter()
             if counter:
-                counter.close()
-                counter.freeze()
+                try:
+                    # Application command admission is already closed here.
+                    # Close F3 admission too, then give accepted logical sends a
+                    # fixed, bounded interval to settle before writing the handoff.
+                    counter.close_and_drain(F3_DRAIN_TIMEOUT_SECONDS)
+                    child_f3 = counter.freeze()
+                except Exception:
+                    child_f3 = None
             if resource_collector:
                 try:
                     write_terminal_handoff(
                         workspace.get_run_dir(args.job_id),
-                        resource_collector.finish(),
+                        resource_collector.finish(child_f3=child_f3),
                     )
                 except Exception as e:
                     if logger:
@@ -168,6 +176,11 @@ def main(args):
                 logger.warning(err)
             upload_results_on_shutdown(args, secure_train, log=logger)
 
+        def _mark_callback_drain_incomplete():
+            counter = get_job_f3_counter()
+            if counter:
+                counter.mark_counter_gap()
+
         try:
             shutdown_job_process_runtime(
                 stop_command_admission=client_app_runner.close if client_app_runner else None,
@@ -175,6 +188,7 @@ def main(args):
                 stop_cell=federated_client.stop_cell if federated_client else None,
                 logger=logger,
                 before_streaming_shutdown=_archive_results,
+                mark_callback_drain_incomplete=_mark_callback_drain_incomplete,
             )
         finally:
             # Preserve the upload exception, but never let it bypass the remaining

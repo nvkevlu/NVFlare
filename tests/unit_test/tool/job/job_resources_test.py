@@ -104,18 +104,20 @@ def test_saved_content_and_f3_columns_are_only_shown_when_bound():
 
     participant["retained_content"] = {"status": "reported", "bytes": str(3 * 2**30)}
     participant["f3"] = {
-        "status": "reported",
+        "status": "partial",
+        "issues": ["counter_gap"],
         "remote_accepted": {"payload_bytes": str(5 * 2**30), "messages": "10"},
-        "local_delivered": {"payload_bytes": "0", "messages": "0"},
-        "remote_failed_before_acceptance": {"payload_bytes": "0", "messages": "0"},
     }
     summary = _job_summary(participant)
     output = render_job_resources(summary)
 
     assert "Other recorded participant totals" in output
     assert "SAVED CONTENT GiB" in output
+    assert "F3 STATUS" in output
+    assert "PARTIAL" in output
     assert "F3 REMOTE ACCEPTED GiB" in output
     assert "SAVED CONTENT 3.0000 GiB" in output
+    assert "F3 STATUS PARTIAL" in output
     assert "F3 REMOTE ACCEPTED 5.0000 GiB" in output
 
 
@@ -156,3 +158,12 @@ def test_study_mig_column_is_shown_only_when_an_included_job_reports_mig():
     output = render_study_resources(study)
     assert "MIG h" in output
     assert "MIG INSTANCES 1.0000 instance h" in output
+
+    job_totals["f3"] = {
+        "status": "partial",
+        "remote_accepted": {"payload_bytes": str(5 * 2**30), "messages": "10"},
+    }
+    output = render_study_resources(study)
+    assert "F3 STATUS" in output
+    assert "F3 STATUS PARTIAL" in output
+    assert "F3 REMOTE ACCEPTED 5.0000 GiB" in output

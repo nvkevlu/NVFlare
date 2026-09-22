@@ -4,8 +4,9 @@ This document follows the data from one job process to the two user views:
 one job and all retained jobs in a study.
 
 This is the selected Phase 1 design mapped onto today's NVFlare processes. The
-production subset is implemented; parent F3, retries, and other target-only
-behavior remain identified as such.
+production path, including parent/child F3 ownership and merge, is implemented
+in this branch. Remaining validation and target-only delivery/recovery behavior
+are identified as such.
 
 ## The complete flow
 
@@ -55,8 +56,8 @@ are troubleshooting aids for an operator, not production collectors.
 | Elapsed time | Start hook, any platform resource-change call, and `_archive_results()` | A monotonic nanosecond clock, converted to seconds with at most nine fractional digits | Each closed interval contributes CPU unit-seconds, memory byte-seconds, and GPU instance-seconds to the in-memory accumulator. |
 | Workspace-filesystem capacity | CJ or SJ `_archive_results()`, once at finalization | `os.statvfs(Workspace.get_run_dir(job_id))`; capacity is `f_blocks * f_frsize` | One terminal observation enters the private handoff. It is never added across participants or jobs. |
 | Retained-content bytes | CJ or SJ `_archive_results()`, once at finalization | A bounded retained-result set supplied by an existing workflow owner | The rule is fixed, but the authoritative set is not yet bound for every workflow. An unbound workflow reports unavailable; NVFlare does not scan the workspace or guess filenames. |
-| Child F3 counters | CJ or SJ throughout the run, frozen in `_archive_results()` | Sender-side acceptance/local-delivery instrumentation for the allowlisted job traffic classes | Exact production provenance and task/stream correlation call sites remain open. Unproven coverage is partial or unavailable. |
-| Parent F3 counters | CP or SP from before deployment/forwarding until after `job_handle.wait()` | The same sender-side instrumentation in the parent; admission closes, admitted callbacks drain for at most five seconds, then counters freeze | The parent adds non-overlapping child and parent sender hops before it builds the public report. |
+| Child F3 counters | CJ or SJ throughout the run, frozen in `_archive_results()` | Origin-only sender accounting for real task responses and task results; one logical message per remote destination, with bytes measured after FOBS and before encryption | Cleanup closes command admission and pre-drains callbacks for up to five seconds while transport is alive, then closes/drains F3 for up to five seconds and writes its snapshot into the private handoff. |
+| Parent F3 counters | CP or SP from trusted job start until after `job_handle.wait()` | Origin-only sender accounting; SP owns job-application deployment, while forwarded traffic is not recounted | The parent closes and drains for at most five seconds, then checked-adds the non-overlapping process contributions before it builds the public report. |
 
 CJ means client job process, CP client parent, SJ server job process, and SP
 server parent. The exact current-code hook map is in
@@ -106,6 +107,13 @@ released, or reconfigured during the job.
 
 ## Stage 2: write one private terminal handoff
 
+Child cleanup rejects new application commands, then waits up to five seconds
+for already admitted command callbacks while Cell and streaming remain alive.
+A timeout or error marks child F3 `partial/counter_gap`. `_archive_results()`
+then closes F3 admission, drains admitted logical sends for up to five seconds,
+and freezes before streaming and Cell stop. If the callback pre-drain failed,
+cleanup retains a bounded post-stop callback wait before security closes.
+
 `_archive_results()` finishes the accumulator and writes a bounded private
 handoff with four child-derived facts:
 
@@ -133,7 +141,8 @@ validation and assembly, the parent deletes the staging directory.
 After `job_handle.wait()`, CP or SP bounds and strictly validates the private
 handoff. It stops new included parent-process F3 traffic, drains admitted
 callbacks for at most five seconds, freezes the parent counters, and adds
-distinct child and parent sender hops. It then builds exactly one public
+the non-overlapping semantic-origin contributions from child and parent. A
+relay is not another contribution. It then builds exactly one public
 report:
 
 ```text
@@ -159,6 +168,16 @@ participant_summary
 
 There is no public startup record, final-capacity comparison, attempt ID,
 environment key, end reason, stability flag, or raw period list.
+
+`f3.remote_accepted` includes only job application deployment, real task
+responses, and task results. One operation contributes one message per remote
+destination. The main payload is measured after FOBS encoding and before
+optional encryption. Successfully accepted unique `DownloadService` bytes are
+folded into that operation without another message or retry duplication.
+Final delivery to an in-process logical destination, failed sends, task
+requests, acknowledgements, a relay's duplicate contribution, and the terminal
+report are excluded. A remote logical destination reached through a local
+first-hop relay is still counted once at its origin.
 
 If the child handoff is missing, oversized, or invalid, the parent still
 builds a valid report: child-derived objects are unavailable and usable parent

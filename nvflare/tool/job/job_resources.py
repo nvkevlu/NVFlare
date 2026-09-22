@@ -96,7 +96,13 @@ def _other_metrics(value: dict, show_retained: bool, show_f3: bool) -> list[str]
     if show_retained:
         metrics.append(_number(value.get("retained_content", {}).get("bytes"), _GIB))
     if show_f3:
-        metrics.append(_number(value.get("f3", {}).get("remote_accepted", {}).get("payload_bytes"), _GIB))
+        f3 = value.get("f3", {})
+        metrics.extend(
+            [
+                f3.get("status", "—").upper(),
+                _number(f3.get("remote_accepted", {}).get("payload_bytes"), _GIB),
+            ]
+        )
     return metrics
 
 
@@ -170,7 +176,7 @@ def render_job_resources(summary: dict, participant: dict | None = None) -> str:
         if show_retained:
             other_headers.append("SAVED CONTENT GiB")
         if show_f3:
-            other_headers.append("F3 REMOTE ACCEPTED GiB")
+            other_headers.extend(["F3 STATUS", "F3 REMOTE ACCEPTED GiB"])
         other_rows = []
         for entry in visible_entries:
             values = (
@@ -205,7 +211,8 @@ def render_job_resources(summary: dict, participant: dict | None = None) -> str:
                 labels.append(_quantity("SAVED CONTENT", other_totals[index], "GiB"))
                 index += 1
             if show_f3:
-                labels.append(_quantity("F3 REMOTE ACCEPTED", other_totals[index], "GiB"))
+                labels.append(f"F3 STATUS {other_totals[index]}")
+                labels.append(_quantity("F3 REMOTE ACCEPTED", other_totals[index + 1], "GiB"))
             lines.append("  Other additive totals: " + " | ".join(labels))
     lines.extend(
         [
@@ -284,7 +291,7 @@ def render_study_resources(summary: dict) -> str:
             if show_retained:
                 row_metrics.append(metrics[6])
             if show_f3:
-                row_metrics.append(metrics[7])
+                row_metrics.extend([job["totals"].get("f3", {}).get("status", "—").upper(), metrics[7]])
         else:
             row_metrics = ["—", "N/A", "N/A", "N/A"]
             if show_mig:
@@ -292,7 +299,7 @@ def render_study_resources(summary: dict) -> str:
             if show_retained:
                 row_metrics.append("N/A")
             if show_f3:
-                row_metrics.append("N/A")
+                row_metrics.extend(["N/A", "N/A"])
         rows.append([job["job_id"], job["job_status"], job["resource_data"], *row_metrics])
     metric_headers = ["QUALITY", "FULL GPU h", "MIG h", "CPU unit h", "MEM GiB h"]
     if not show_mig:
@@ -300,7 +307,7 @@ def render_study_resources(summary: dict) -> str:
     if show_retained:
         metric_headers.append("SAVED CONTENT GiB")
     if show_f3:
-        metric_headers.append("F3 REMOTE ACCEPTED GiB")
+        metric_headers.extend(["F3 STATUS", "F3 REMOTE ACCEPTED GiB"])
     lines.extend(
         _table(
             ["JOB", "JOB STATUS", "RESOURCE DATA", *metric_headers],
@@ -335,6 +342,7 @@ def render_study_resources(summary: dict) -> str:
             labels.append(_quantity("SAVED CONTENT", other_totals[index], "GiB"))
             index += 1
         if show_f3:
-            labels.append(_quantity("F3 REMOTE ACCEPTED", other_totals[index], "GiB"))
+            labels.append(f"F3 STATUS {other_totals[index]}")
+            labels.append(_quantity("F3 REMOTE ACCEPTED", other_totals[index + 1], "GiB"))
         lines.insert(-4, "  Other additive totals: " + " | ".join(labels))
     return "\n".join(lines)

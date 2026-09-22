@@ -57,6 +57,11 @@ Every remaining change must preserve this deployment rule:
 - Readable registered participant names. The live coordinator compares exact
   canonical bytes directly. The ZIP reader checks a member's CRC when it reads
   that member, but makes no cryptographic integrity or signing claim.
+- Process-local F3 counters for SP, CP, SJ, and CJ; trusted semantic bindings
+  for job application deployment, real task responses, and task results;
+  origin-only logical-send accounting after FOBS and before encryption;
+  `DownloadService` byte folding; a fixed five-second close/drain/freeze; and
+  checked child/parent merge into the existing public `f3` field.
 - Real one-server, two-client Process-launch POCs on Colossus have exercised
   isolated child startup, child-to-parent handoff, client CellNet delivery,
   root reconciliation, normal `WORKSPACE` persistence, and job/site/study CLI
@@ -71,23 +76,34 @@ The exact files and CLI text generated through these production classes are in
 
 ## Remaining Phase 1 work
 
-### 1. F3 attribution and cutoff
+### 1. F3 validation
 
-Production currently emits `f3.status=unavailable` with `not_bound`.
+The production bindings and rollup are now present. The public value contains
+only `remote_accepted`, for exactly three classes: job application deployment,
+a response containing a real task, and a submitted task result. Task requests,
+final delivery to an in-process logical destination, failures before
+acceptance, acknowledgements, a relay's duplicate contribution, workspace
+transfer, the resource report, and protocol traffic are excluded. A remote
+logical destination through a local first-hop relay is still counted once by
+its origin.
 
-Before it can report counters, the implementation needs trusted job/class
-attribution for real task requests and responses, task results, job deployment,
-and included stream data. It must exclude polling, acknowledgements, workspace
-transfer, the resource report itself, and protocol traffic; count a remote
-send only after local send acceptance; distinguish direct delivery; suppress
-same-hop retry duplication; and freeze all included processes at a defined
-cutoff.
+One message is one top-level logical operation per remote destination. The main
+payload is sized after FOBS encoding and before optional encryption. Successful
+unique `DownloadService` data bytes are folded into that operation without an
+extra message; retries do not add the same bytes again. Only the trusted
+semantic origin counts because the accounting context is process-local and is
+not serialized.
 
-The F3 prototype and route analysis remain useful design material, but they
-are not connected to the production collector or parent processes.
-The focused [F3 reporting gap](F3_GAP.md) records the exact field semantics,
-route bindings, cutoff and merge work, integration traps, and recommended
-implementation order.
+The final focused suite, including socket-backed transport coverage, passes
+366 of 366 tests across fan-out, semantic filtering, pre-encryption sizing,
+large-object and stream outcomes, exact final-local/local-relay handling,
+child callback pre-drain, cutoff, merge, restore, and self-exclusion. The
+remaining evidence is a new process-mode live run. Any future uncovered path
+must remain partial or unavailable rather than use generic CellNet counters or
+claim a complete zero.
+
+The focused [F3 implementation status](F3_GAP.md) records the exact semantics,
+code bindings, cutoff/merge behavior, and remaining validation.
 
 ### 2. Retained-result bytes
 
@@ -334,6 +350,13 @@ coverage; none is required to interpret the proven Process-mode result.
 - job and study views read that archive rather than a `RESOURCE_STATS`
   component; and
 - the schema does not choose the future task/resource process topology.
+- F3 publishes remote-accepted logical payload only;
+- F3 includes job application, real task response, and task result only;
+- F3 measures after FOBS and before encryption, folds unique accepted
+  `DownloadService` data into the originating operation, counts a remote
+  logical target through a local first-hop relay once at the origin, and never
+  recounts it at the relay; and
+- F3 uses one fixed five-second close/drain/freeze without user configuration.
 
 ## Phase 2
 

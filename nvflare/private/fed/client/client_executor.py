@@ -46,6 +46,7 @@ from nvflare.private.fed.resource_stats.collector import (
     read_terminal_handoff,
     remove_terminal_handoff,
 )
+from nvflare.private.fed.resource_stats.f3_counter import F3_DRAIN_TIMEOUT_SECONDS
 from nvflare.private.fed.resource_stats.f3_registry import F3CounterRegistry
 from nvflare.private.fed.utils.fed_utils import get_job_launcher, get_return_code
 from nvflare.security.logging import secure_format_exception, secure_log_traceback
@@ -70,7 +71,13 @@ def _log_resource_warning(logger, message: str) -> None:
         pass
 
 
-def _build_participant_resource_report(job_id: str, participant_name: str, workspace: str, logger) -> bytes | None:
+def _build_participant_resource_report(
+    job_id: str,
+    participant_name: str,
+    workspace: str,
+    logger,
+    parent_f3=None,
+) -> bytes | None:
     """Read the private child handoff and build the public report.
 
     Identity comes from the authenticated client parent, never from the child
@@ -97,6 +104,7 @@ def _build_participant_resource_report(job_id: str, participant_name: str, works
             job_id=str(job_id),
             participant_name=participant_name,
             child_handoff=handoff,
+            parent_f3=parent_f3,
         )
         return canonical_json_bytes(report)
     except Exception as e:
@@ -257,10 +265,10 @@ class JobExecutor(ClientExecutor):
         self.startup = startup
         self.run_processes = {}
         self.lock = threading.Lock()
-        # Client-parent (CP) F3 sender counters, one per running job. Not yet
-        # read by anything: no send call site is bound to a counter until
-        # F3_GAP.md steps 3-5 land. See _wait_child_process_finish for the
-        # close()/freeze() side of this job's lifecycle.
+        # Client-parent (CP) F3 sender counters, one per running job. Phase 1
+        # has no positive CP-owned traffic class, but the explicit zero-valued
+        # parent contribution is still merged with the child snapshot at the
+        # same lifecycle boundary used by other launch arrangements.
         self.f3_counters = F3CounterRegistry()
 
         self.job_query_timeout = ConfigService.get_float_var(
@@ -325,7 +333,13 @@ class JobExecutor(ClientExecutor):
         # confirmed to match what was deployed, and before launcher selection or
         # launch -- earlier deployment traffic was an incoming SP send, already
         # accounted for on the SP side, not a CP send.
-        self.f3_counters.start_job(job_id)
+        try:
+            self.f3_counters.start_job(job_id)
+        except Exception as e:
+            _log_resource_warning(
+                self.logger,
+                f"could not start F3 statistics for job {job_id}: {secure_format_exception(e)}",
+            )
 
         job_launcher: JobLauncherSpec = get_job_launcher(job_meta, fl_ctx)
 
@@ -726,12 +740,20 @@ class JobExecutor(ClientExecutor):
 
                     self.logger.info(f"run ({job_id}): child worker process finished with RC {return_code}")
 
-                    # The job handle has finished: close CP admission and freeze now.
-                    # No send call site is bound to this counter yet (F3_GAP.md steps
-                    # 3-5), so there is nothing to drain; this also guarantees the
-                    # freeze happens before the terminal resource report is sent below,
-                    # so the report cannot count itself.
-                    self.f3_counters.close_and_freeze(job_id)
+                    # Freeze before constructing/sending the terminal report so
+                    # the report cannot count itself.  Any already-admitted send
+                    # has one fixed, bounded interval in which to settle.
+                    try:
+                        parent_f3 = self.f3_counters.close_and_freeze(
+                            job_id,
+                            drain_timeout_seconds=F3_DRAIN_TIMEOUT_SECONDS,
+                        )
+                    except Exception as e:
+                        parent_f3 = None
+                        _log_resource_warning(
+                            self.logger,
+                            f"could not finalize F3 statistics for job {job_id}: {secure_format_exception(e)}",
+                        )
 
                     failure_reason = REPORTABLE_JOB_FAILURES.get(return_code)
                     participant_summary = None
@@ -741,6 +763,7 @@ class JobExecutor(ClientExecutor):
                             participant_name=client.client_name,
                             workspace=workspace,
                             logger=self.logger,
+                            parent_f3=parent_f3,
                         )
                     except Exception as e:
                         _log_resource_warning(

@@ -6,9 +6,15 @@ SITE    ROLE    REPORT    COMPUTE   MEASURED TIME  CPU UNITS  MEM GiB   FULL GPU
 site-1  client  accepted  REPORTED  37m3s          32.0000    192.0000  4.0000
 server  server  accepted  REPORTED  37m20s         8.0000     64.0000   0.0000
 
+Other recorded participant totals
+SITE    F3 STATUS  F3 REMOTE ACCEPTED GiB
+site-1  REPORTED   4.5000
+server  REPORTED   4.5411
+
 Additive participant resource-time from accepted reports | compute: REPORTED
   Summed measured participant time: 1h14m23s
   CPU 24.7422 unit h | MEMORY 158.4089 GiB h | FULL GPUs 2.4706 instance h
+  Other additive totals: F3 STATUS REPORTED | F3 REMOTE ACCEPTED 9.0411 GiB
 
 Notes:
   PARTIAL means at least one expected report or observation was incomplete.

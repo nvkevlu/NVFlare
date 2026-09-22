@@ -53,6 +53,7 @@ from nvflare.private.fed.resource_stats.coordinator import (
     RESOURCE_REPORT_DUPLICATE,
     ResourceStatsCoordinator,
 )
+from nvflare.private.fed.resource_stats.f3_counter import F3_DRAIN_TIMEOUT_SECONDS, F3TrafficClass
 from nvflare.private.fed.resource_stats.f3_registry import F3CounterRegistry
 from nvflare.private.fed.server.admin import check_client_replies
 from nvflare.private.fed.server.server_state import HotState
@@ -120,10 +121,8 @@ class JobRunner(FLComponent):
         self._pending_client_outcomes = {}
         self._client_outcome_deadlines = {}
         self.resource_stats = ResourceStatsCoordinator()
-        # Server-parent (SP) F3 sender counters, one per running job. Not yet
-        # read by anything: no send call site is bound to a counter until
-        # F3_GAP.md steps 3-5 land. See _job_complete_process for the
-        # close()/freeze() side of this job's lifecycle.
+        # Server-parent (SP) sender counters are kept per running job because
+        # this process can host several jobs concurrently.
         self.f3_counters = F3CounterRegistry()
         self.client_outcome_wait_timeout = ConfigService.get_float_var(
             name=ConfigVarName.CLIENT_OUTCOME_WAIT_TIMEOUT, conf=SystemConfigs.APPLICATION_CONF, default=900.0
@@ -149,7 +148,7 @@ class JobRunner(FLComponent):
 
         return self.resource_stats.accept_resource_report(job_id, client_name, resource_report)
 
-    def _accept_server_resource_report(self, job_id: str, fl_ctx: FLContext) -> None:
+    def _accept_server_resource_report(self, job_id: str, fl_ctx: FLContext, parent_f3=None) -> None:
         """Turn the fixed server-child handoff into the trusted server participant report."""
 
         run_dir = fl_ctx.get_workspace().get_run_dir(job_id)
@@ -158,6 +157,7 @@ class JobRunner(FLComponent):
                 job_id=job_id,
                 participant_name=SiteType.SERVER,
                 child_handoff=read_terminal_handoff(run_dir),
+                parent_f3=parent_f3,
             )
             status = self.resource_stats.accept_resource_report(
                 job_id,
@@ -288,7 +288,10 @@ class JobRunner(FLComponent):
             engine = fl_ctx.get_engine()
             admin_server = engine.server.admin_server
             client_token_to_reply = admin_server.send_requests_and_get_reply_dict(
-                client_deploy_requests, timeout_secs=admin_server.timeout
+                client_deploy_requests,
+                timeout_secs=admin_server.timeout,
+                logical_send_accounting=self.f3_counters.get(job.job_id),
+                logical_send_traffic_class=F3TrafficClass.JOB_APPLICATION,
             )
 
             # check replies and see whether required clients are okay
@@ -580,11 +583,27 @@ class JobRunner(FLComponent):
                                 if not finished_state.resource_stats_finalized:
                                     if self.resource_stats.has_job(job.job_id):
                                         try:
-                                            # No send call site is bound to this counter yet
-                                            # (F3_GAP.md steps 3-5), so there is nothing to drain;
-                                            # close+freeze immediately rather than waiting.
-                                            self.f3_counters.close_and_freeze(job.job_id)
-                                            self._accept_server_resource_report(job.job_id, completion_ctx)
+                                            # Freeze before accepting/publishing the server
+                                            # participant report so that report cannot count
+                                            # itself. Already-admitted sends get one fixed,
+                                            # bounded interval in which to settle.
+                                            try:
+                                                parent_f3 = self.f3_counters.close_and_freeze(
+                                                    job.job_id,
+                                                    drain_timeout_seconds=F3_DRAIN_TIMEOUT_SECONDS,
+                                                )
+                                            except Exception as f3_error:
+                                                parent_f3 = None
+                                                self.log_warning(
+                                                    completion_ctx,
+                                                    f"Could not finalize F3 statistics for job ({job.job_id}): "
+                                                    f"{secure_format_exception(f3_error)}",
+                                                )
+                                            self._accept_server_resource_report(
+                                                job.job_id,
+                                                completion_ctx,
+                                                parent_f3=parent_f3,
+                                            )
                                             self.resource_stats.finalize_job(job.job_id)
                                         except Exception as e:
                                             # Resource statistics are observability data. Never change the job outcome or
@@ -782,7 +801,14 @@ class JobRunner(FLComponent):
                             # Start the SP F3 counter after scheduling selects the job and
                             # before deployment, so deployment sends and later included
                             # forwarding are covered from the start.
-                            self.f3_counters.start_job(ready_job.job_id)
+                            try:
+                                self.f3_counters.start_job(ready_job.job_id)
+                            except Exception as e:
+                                self.log_warning(
+                                    fl_ctx,
+                                    f"F3 statistics are unavailable for job ({ready_job.job_id}): "
+                                    f"{secure_format_exception(e)}",
+                                )
                             job_id, failed_clients = self._deploy_job(ready_job, sites, fl_ctx)
                             job_manager.set_status(ready_job.job_id, RunStatus.DISPATCHED, fl_ctx)
 
@@ -887,27 +913,33 @@ class JobRunner(FLComponent):
             # complete.  Otherwise every client report received after a server restart
             # is rejected as not_expected because coordinator state is process-local.
             run_dir = fl_ctx.get_workspace().get_run_dir(job_id)
+            expected_names = job.meta.get(JobMetaKey.RESOURCE_PARTICIPANTS)
+            if not isinstance(expected_names, list) or not all(
+                isinstance(name, str) and name for name in expected_names
+            ):
+                expected_names = [client.name for client in job_clients.values()]
             try:
-                expected_names = job.meta.get(JobMetaKey.RESOURCE_PARTICIPANTS)
-                if not isinstance(expected_names, list) or not all(
-                    isinstance(name, str) and name for name in expected_names
-                ):
-                    expected_names = [client.name for client in job_clients.values()]
                 self.resource_stats.start_job(
                     job_id,
                     expected_names,
                     run_dir,
                     reset_existing=True,
                 )
-                # A restart loses any pre-restart F3 traffic history, same as the
-                # accepted-report ledger; start fresh rather than report stale/partial data.
-                self.f3_counters.start_job(job_id)
             except Exception as e:
                 self.resource_stats.forget_job(job_id)
-                self.f3_counters.forget_job(job_id)
                 self.log_warning(
                     fl_ctx,
                     f"Resource statistics are unavailable for restored job ({job_id}): {secure_format_exception(e)}",
+                )
+            try:
+                # A restart loses pre-restart traffic history. Keep the new
+                # subtotal, but label it partial rather than a clean zero/full total.
+                self.f3_counters.start_job(job_id, prior_history_incomplete=True)
+            except Exception as e:
+                self.f3_counters.forget_job(job_id)
+                self.log_warning(
+                    fl_ctx,
+                    f"F3 statistics are unavailable for restored job ({job_id}): {secure_format_exception(e)}",
                 )
             err = engine.start_app_on_server(fl_ctx, job=job, job_clients=job_clients, snapshot=snapshot)
             if err:

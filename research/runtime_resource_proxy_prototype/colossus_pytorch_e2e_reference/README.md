@@ -106,8 +106,9 @@ point-in-time filesystem observation, not usage, allocation, job-owned space,
 or a billable value. It is shown only in site detail and is not multiplied by
 time or aggregated.
 
-`retained_content` and `f3` are `unavailable/not_bound`, as expected from the
-current production gaps.
+`retained_content` and `f3` are `unavailable/not_bound` because this artifact
+was captured before the current F3 bindings and before a retained-result owner
+existed. The artifact is intentionally not rewritten.
 
 ## Original finding: real GPU work, but no GPU resource total
 

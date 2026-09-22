@@ -88,6 +88,52 @@ def test_validate_record_accepts_well_formed_participant_summary():
     validate_record(_participant_summary())
 
 
+def test_validate_record_accepts_only_the_remote_f3_counter():
+    reported = _participant_summary()
+    reported["f3"] = {
+        "status": "reported",
+        "remote_accepted": {"payload_bytes": str(2**128 - 1), "messages": "1"},
+    }
+    validate_record(reported)
+
+    partial = _participant_summary()
+    partial["f3"] = {
+        "status": "partial",
+        "issues": ["counter_gap"],
+        "remote_accepted": {"payload_bytes": "1", "messages": "1"},
+    }
+    validate_record(partial)
+
+    old_bucket = _participant_summary()
+    old_bucket["f3"] = {
+        "status": "reported",
+        "remote_accepted": {"payload_bytes": "1", "messages": "1"},
+        "local_delivered": {"payload_bytes": "0", "messages": "0"},
+    }
+    with pytest.raises(ContractError):
+        validate_record(old_bucket)
+
+    missing_issue = _participant_summary()
+    missing_issue["f3"] = {
+        "status": "partial",
+        "remote_accepted": {"payload_bytes": "1", "messages": "1"},
+    }
+    with pytest.raises(ContractError):
+        validate_record(missing_issue)
+
+    too_large = _participant_summary()
+    too_large["f3"] = {
+        "status": "reported",
+        "remote_accepted": {"payload_bytes": str(2**128), "messages": "1"},
+    }
+    with pytest.raises(ContractError):
+        validate_record(too_large)
+
+    error = _participant_summary()
+    error["f3"] = {"status": "error", "issues": ["malformed_source"]}
+    validate_record(error)
+
+
 def test_validate_record_rejects_unknown_kind():
     record = _participant_summary()
     record["kind"] = "nvflare.resource_stats.not_a_real_kind"

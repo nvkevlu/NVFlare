@@ -19,12 +19,16 @@ client job process                         client parent
 start platform worker with Python -I
 create Workspace
 create JobResourceCollector
+start child F3 counter
   before workspace download/custom activation
 download workspace; enable custom imports
 run application
-finish collector in _archive_results()
+close command admission; pre-drain callbacks with transport alive
+close/drain/freeze child F3; finish collector in _archive_results()
 write private terminal_handoff.json  --->  wait for child exit
+                                             close/drain/freeze parent F3
                                              read + validate fixed handoff
+                                             checked-merge child + parent F3
                                              bind trusted client name
                                              build participant_summary bytes
                                              delete private handoff
@@ -138,9 +142,15 @@ the remaining process shutdown. It is the implemented application-run window,
 including waits inside that window; it is not the operating-system process's
 entire lifetime and is not active-task utilization.
 
-At `_archive_results()`, both job entry points call
-`JobResourceCollector.finish()` and `write_terminal_handoff()`. The handoff is
-atomically written at:
+Job-process cleanup first rejects new application commands and waits up to five
+seconds for already admitted command callbacks while Cell and streaming remain
+alive. A timeout or error marks the child counter `partial/counter_gap`. At
+`_archive_results()`, both job entry points then close new F3 admissions, wait
+up to the fixed five-second internal bound for admitted logical sends, freeze
+the child snapshot, and pass it to `JobResourceCollector.finish()`. They call
+`write_terminal_handoff()` before streaming and Cell stop. If the callback
+pre-drain failed, cleanup also retains one bounded post-stop callback wait
+before closing security state. The handoff is atomically written at:
 
 ```text
 <run_dir>/resource_stats/staging/terminal_handoff.json
@@ -164,19 +174,37 @@ in the final resource namespace.
 
 ### What is measured now
 
-CPU, memory, CUDA-authorized GPU resource time, and the final
-workspace-filesystem capacity observation are implemented.
+CPU, memory, CUDA-authorized GPU resource time, the final
+workspace-filesystem capacity observation, and F3 are implemented.
 
-`retained_content` and `f3` are intentionally emitted as:
+`retained_content` is intentionally emitted as:
 
 ```json
 {"issues":["not_bound"],"status":"unavailable"}
 ```
 
-Their authoritative production hooks are not implemented. The code does not
-guess model filenames, scan arbitrary saved files, or substitute generic
-network counters. The exact retained-result ownership contract still needed is
+Its authoritative production source is not implemented. The code does not
+guess model filenames or scan arbitrary saved files. The exact retained-result
+ownership contract still needed is
 described in [Remaining implementation gaps](GAPS.md#2-retained-result-bytes).
+
+F3 has one public `remote_accepted` pair. It includes only job application
+deployment, a response containing a real task, and a submitted task result.
+Task requests, acknowledgements, final delivery to an in-process logical
+destination, failures before acceptance, an extra relay contribution,
+workspace transfer, and the terminal report are excluded. A remote logical
+destination routed through a local first-hop relay still counts once at its
+origin.
+
+One message is one top-level logical operation per remote destination. The main
+payload is measured after FOBS encoding and before optional encryption. When
+FOBS creates a `DownloadService` transaction, successfully accepted unique
+source bytes are folded into that same operation without another message or
+retry duplication. Classification and accounting context remain process-local
+at the trusted semantic origin; they are never accepted from a wire header.
+For a blob stream, the admission remains pending until its whole
+`StreamFuture` succeeds. An asynchronous stream error or cancellation abandons
+the operation, while individual frames and retries cannot add counters.
 
 For a Slurm launch with more than one node, the current rank-zero observation
 cannot cover every node. The collector therefore discards the rank-zero
@@ -224,16 +252,22 @@ accurate to one nanosecond.
 After the child handle completes,
 `nvflare/private/fed/client/client_executor.py::_build_participant_resource_report()`:
 
-1. reads the fixed handoff through `read_terminal_handoff()`;
-2. calls `assemble_participant_summary()` with the parent's existing
+1. closes new parent F3 admissions, gives already admitted operations the fixed
+   five-second internal drain, and freezes the parent snapshot;
+2. reads the fixed handoff through `read_terminal_handoff()`;
+3. checked-merges the child and parent F3 snapshots;
+4. calls `assemble_participant_summary()` with the parent's existing
    `client.client_name`;
-3. validates the report and serializes it with the production deterministic,
+5. validates the report and serializes it with the production deterministic,
    readable JSON encoder; and
-4. removes the private handoff in a `finally` block.
+6. removes the private handoff in a `finally` block.
 
 If the handoff is absent or invalid, the parent still builds a report, with
-child-derived values marked unavailable. Resource-report failures are logged
-but do not change the job outcome or prevent resource release.
+child-derived values marked unavailable and any usable parent F3 subtotal
+marked partial. A drain gap likewise preserves bounded values as partial.
+Resource-report failures are logged but do not change the job outcome or
+prevent resource release. The parent freezes before it serializes the terminal
+report, so that report cannot count itself.
 
 After consuming and deleting the handoff, the client parent frees the
 launcher's allocated compute resources. Only then does it wait for the
@@ -465,9 +499,9 @@ pytest -q research/runtime_resource_proxy_prototype/production_reference/test_re
 ```
 
 The larger files under `schema/golden/v1/` remain design and contract examples.
-They demonstrate intended complete F3/retained-content cases and boundary
-conditions that the current hooks cannot yet produce. They are not evidence
-that every value is implemented.
+They demonstrate complete and boundary F3/retained-content cases. They are not
+evidence that the older live runs exercised the new F3 bindings or that an
+authoritative retained-content source exists for every workflow.
 
 ### Live process-mode proof
 
@@ -480,6 +514,11 @@ the installed Python `-I` bootstrap, three real job child processes, private
 child-to-parent handoffs, authenticated client CellNet completion requests,
 root-parent reconciliation, normal `WORKSPACE` archival, the admin API, and
 the job, site, and study CLI paths.
+
+That run predates the F3 implementation in this branch, so its exact F3 value
+remains `unavailable/not_bound`. No new process-mode or Colossus live reference
+has yet replaced it. The implementation status and remaining proof are tracked
+in [F3 implementation and validation status](F3_GAP.md).
 
 All three reports were accepted. The archived records pass the production
 bundle validator, and the job, participant, and study views reconcile exactly.
@@ -511,10 +550,12 @@ the installed-NVIDIA-distribution fallback. These runs cover the Process
 launcher on Linux hosts; they do not substitute for live Docker, Kubernetes,
 Slurm, constrained-cgroup, CUDA-subset, multi-GPU, or MIG coverage.
 
-## 7. Known implementation gaps
+## 7. Known implementation and validation gaps
 
 - `retained_content` has no authoritative bounded result-set provider.
-- F3 has no trusted job/class binding, cutoff, or parent/child merge yet.
+- The focused F3 suite, including socket-backed transport coverage, passes 366
+  of 366 tests. A new process-mode live run is still needed to replace the
+  historical `not_bound` F3 artifact.
 - `observe_capacity_change()` is not wired to runtime resource changes. No
   future worker, GPU-release, or supervisor topology is assumed here.
 - Official Process, Docker, Kubernetes, and Slurm workers use `-I`, sanitize

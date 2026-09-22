@@ -19,8 +19,8 @@ transport.  It fixes the contract a production hook must preserve:
 
 * only a small, explicit list of NVFlare job traffic classes contributes
   to the primary counter;
-* a remote counter increment happens only after the transport-send callable
-  returned normally, while direct delivery is kept in a separate bucket;
+* the remote counter increments only after the transport-send callable returns
+  normally; direct delivery and failed attempts are outside the public metric;
 * resource-summary messages use a private NVFlare sender so they cannot count
   themselves; a payload, topic, channel, or job-controlled label cannot request
   this exclusion; and
@@ -45,14 +45,14 @@ from typing import Any, Callable, TypeVar
 class JobTrafficClass(str, Enum):
     """Bounded logical classes assigned by NVFlare integration code."""
 
-    TASK_REQUEST = "task_request"
     TASK_RESPONSE = "task_response"
     TASK_RESULT = "task_result"
     JOB_APPLICATION = "job_application"
-    JOB_STREAM_DATA = "job_stream_data"
 
     # These are deliberately modeled so an explicit allowlist—not an implicit
     # catch-all—can reject them from the primary resource proxy.
+    TASK_REQUEST = "task_request"
+    JOB_STREAM_DATA = "job_stream_data"
     JOB_STREAM_CONTROL = "job_stream_control"
     BULK_ENVELOPE = "bulk_envelope"
     WORKSPACE_TRANSFER = "workspace_transfer"
@@ -62,18 +62,16 @@ class JobTrafficClass(str, Enum):
 
 INCLUDED_JOB_TRAFFIC_CLASSES = frozenset(
     {
-        JobTrafficClass.TASK_REQUEST,
         JobTrafficClass.TASK_RESPONSE,
         JobTrafficClass.TASK_RESULT,
         JobTrafficClass.JOB_APPLICATION,
-        JobTrafficClass.JOB_STREAM_DATA,
     }
 )
 
 
 @dataclass(frozen=True)
 class JobTrafficEvent:
-    """A post-serialization/encryption payload observation for one logical hop."""
+    """A post-FOBS, pre-encryption observation for one originating logical send."""
 
     traffic_class: JobTrafficClass
     payload_bytes: int
@@ -104,12 +102,6 @@ class _Totals:
     def as_payload_totals(self) -> dict[str, int]:
         return {"payload_bytes": self.payload_bytes, "message_count": self.message_count}
 
-    def as_attempt_totals(self) -> dict[str, int]:
-        return {
-            "attempted_payload_bytes": self.payload_bytes,
-            "attempted_message_count": self.message_count,
-        }
-
 
 T = TypeVar("T")
 
@@ -131,9 +123,6 @@ class F3FinalizationCounter:
         self._cutoff_sequence: int | None = None
 
         self._remote_accepted = _Totals()
-        self._local_delivery = _Totals()
-        self._before_transport_acceptance_failed = _Totals()
-        self._direct_delivery_failed = _Totals()
         self._excluded_summary_publication = _Totals()
         self._excluded_traffic_class = _Totals()
         self._late_after_cutoff = _Totals()
@@ -148,11 +137,6 @@ class F3FinalizationCounter:
         """Send remotely and count only a transport-accepted outcome."""
 
         return self._send_remote(event, transport_send)
-
-    def deliver_direct(self, event: JobTrafficEvent, direct_delivery: Callable[[], T]) -> T:
-        """Deliver directly and retain it separately from remote transport."""
-
-        return self._deliver_direct(event, direct_delivery)
 
     def send_resource_summary(self, event: JobTrafficEvent, transport_send: Callable[[], T]) -> T:
         """Send the final resource report without counting the report itself."""
@@ -187,25 +171,11 @@ class F3FinalizationCounter:
         try:
             result = transport_send()
         except Exception:
-            self._record(event, accepted=False, direct=False)
             raise
-        self._record(event, accepted=True, direct=False)
+        self._record_accepted(event)
         return result
 
-    def _deliver_direct(
-        self,
-        event: JobTrafficEvent,
-        direct_delivery: Callable[[], T],
-    ) -> T:
-        try:
-            result = direct_delivery()
-        except Exception:
-            self._record(event, accepted=False, direct=True)
-            raise
-        self._record(event, accepted=True, direct=True)
-        return result
-
-    def _record(self, event: JobTrafficEvent, *, accepted: bool, direct: bool) -> None:
+    def _record_accepted(self, event: JobTrafficEvent) -> None:
         with self._lock:
             self._event_sequence += 1
 
@@ -216,14 +186,7 @@ class F3FinalizationCounter:
                 self._late_after_cutoff.add(event)
                 return
 
-            if accepted and direct:
-                self._local_delivery.add(event)
-            elif accepted:
-                self._remote_accepted.add(event)
-            elif direct:
-                self._direct_delivery_failed.add(event)
-            else:
-                self._before_transport_acceptance_failed.add(event)
+            self._remote_accepted.add(event)
 
     def _snapshot_locked(self) -> dict[str, Any]:
         return {
@@ -234,11 +197,8 @@ class F3FinalizationCounter:
             },
             "outcomes": {
                 "remote_transport_accepted": self._remote_accepted.as_payload_totals(),
-                "local_delivery": self._local_delivery.as_payload_totals(),
             },
             "diagnostics": {
-                "before_transport_acceptance_failed": self._before_transport_acceptance_failed.as_attempt_totals(),
-                "direct_delivery_failed": self._direct_delivery_failed.as_attempt_totals(),
                 "excluded_summary_publication": self._excluded_summary_publication.as_payload_totals(),
                 "excluded_traffic_class": self._excluded_traffic_class.as_payload_totals(),
                 "late_after_cutoff": self._late_after_cutoff.as_payload_totals(),

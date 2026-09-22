@@ -97,9 +97,10 @@ and nonterminal jobs separately.
 | malformed_source | A source failed parsing, range, or consistency validation. |
 
 `issues` is a sorted, unique array of one to four values. The containing object
-provides context; for example, `not_bound` on F3 means no existing job counter
-is available, while the same issue on retained content means there is no
-authoritative bounded result set.
+provides context. For example, `not_bound` on retained content means there is
+no authoritative bounded result set. F3 counters are now bound at the three
+trusted semantic origins; runtime coverage failures use the applicable gap or
+incomplete-attribution code rather than a clean zero.
 
 | Context/status | Allowed issues |
 | --- | --- |
@@ -118,6 +119,9 @@ authoritative bounded result set.
 Reported objects never carry issues. A missing/invalid participant or an
 unavailable/nonterminal job is already an explicit coverage fact, so its
 effect is not copied into a separate warning list on derived totals.
+`not_bound` remains legal for historical F3 records and readers, but the
+current supported production bindings do not hard-code it; a runtime loss of
+an expected counter is observation or attribution incompleteness.
 
 ## GPU group kind
 
@@ -132,38 +136,42 @@ empty reported group array means authoritative total GPU resource time of
 zero. `mig_profile` is legal only on a MIG group. Full-GPU and MIG time remain
 separate through participant, job, and study reduction.
 
-## F3 factual buckets
+## F3 counter
 
 | Field | Included fact |
 | --- | --- |
 | remote_accepted | Remote application payload accepted before counters close; the primary total. |
-| local_delivered | Direct/local application delivery, kept separately. |
-| remote_failed_before_acceptance | Remote traffic that failed before sender acceptance. |
 
-Reported/partial participant F3 contains all three counter pairs;
-unavailable/error has no counters. Zero messages requires zero bytes. NVFlare
+Reported/partial participant F3 contains this counter pair;
+unavailable/error has no counter. Zero messages requires zero bytes. NVFlare
 closes the counters once before terminal report serialization. Later callbacks
 do not alter canonical totals. Platform code excludes the resource report;
 job code cannot request that exclusion.
 
-Included classes are `task_request`, `task_response`, `task_result`,
-`job_application`, and `job_stream_data`. Excluded classes are
-`job_stream_control`, `bulk_envelope`, `workspace_transfer`,
-`platform_control`, `log_export`, unknown classes, and resource-report
-traffic. These are platform classifications, not caller labels.
+Included classes are exactly `job_application`, `task_response`, and
+`task_result`. A task response counts only when it carries a real task; empty
+polls, `__try_again__`, and `__end_run__` are excluded. Task requests are not
+counted. Large-object `DownloadService` data retains its originating class; it
+is not a separate stream class. Control, bulk-envelope, workspace-transfer,
+platform-control, log-export, unknown, and resource-report traffic are
+excluded. These are platform classifications, not caller labels.
 
-Task request/response counts only a pair that carries a real task; empty polls,
-`__try_again__`, and `__end_run__` are excluded. Job-stream data requires
-platform-owned provenance from an included parent payload. Reliable stream
-retries do not add logical bytes or messages.
-
-`payload_bytes` is sampled after payload encoding and optional end-to-end
-encryption, immediately before direct delivery or normal send. It excludes
-headers, SFM/driver/TLS/network framing, transport compression, and
-retransmissions. Fan-out counts once per destination. Forwarding counts the
-sender hop again. Direct delivery increments `local_delivered`; remote send
-increments `remote_accepted` only after send acceptance, or
-`remote_failed_before_acceptance` if it fails first.
+`payload_bytes` is sampled after FOBS encoding and before optional end-to-end
+encryption. Successfully accepted unique `DownloadService` source bytes are
+folded into the originating operation without adding messages. It excludes
+headers, encryption expansion, SFM/driver/TLS/network framing, transport
+compression, and retransmissions. Fan-out counts one logical message per
+destination. Only the trusted semantic origin counts; the process-local
+context is not serialized, so relays and forwarders do not count the payload
+again. A remote logical destination routed through a local first-hop relay is
+still counted once at that origin. A send increments `remote_accepted` only
+after local transport acceptance. Exact final delivery to an in-process
+logical destination and failed send attempts do not contribute. A streamed
+send remains pending until its `StreamFuture` ends successfully; asynchronous
+failure or cancellation abandons it.
+An unidentifiable `DownloadService` contribution or a failed, unknown, or
+ambiguous transaction settlement discards the affected logical operation and
+marks F3 `partial/counter_gap`; it is never published as a complete undercount.
 
 ## Participant acceptance and replay
 
@@ -217,8 +225,8 @@ Documentation may explain that:
 - participant and job resource-time totals may overlap physically;
 - missing participants or unavailable jobs make otherwise numeric aggregates
   partial;
-- F3 counts accepted application payload at sender hops and excludes the
-  resource report; and
+- F3 counts accepted application payload only at its trusted semantic origin,
+  does not recount relays, and excludes the resource report; and
 - site observations are self-reported until accepted and stored by the server.
 
 These statements do not require another warning array. A duplicate caveat list

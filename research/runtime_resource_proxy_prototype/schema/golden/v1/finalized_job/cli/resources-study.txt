@@ -1,15 +1,15 @@
 Resources recorded for finalized jobs in study cancer-research.
 4 jobs found | 3 finalized | 2 valid summaries | 1 unavailable | 1 still running (excluded)
 
-JOB               JOB STATUS          RESOURCE DATA  QUALITY   FULL GPU h  CPU unit h  MEM GiB h  SAVED CONTENT GiB  F3 REMOTE ACCEPTED GiB
-job-20260909-001  FINISHED:COMPLETED  included       PARTIAL   4.4400      40.4600     255.3067   27.5115            550.2266
-job-20260910-002  FINISHED:COMPLETED  included       COMPLETE  32.0000     512.0000    2048.0000  55.0230            2200.9065
-job-20260911-003  FINISHED:COMPLETED  unavailable    —         N/A         N/A         N/A        N/A                N/A
-job-20260912-004  RUNNING             nonterminal    —         N/A         N/A         N/A        N/A                N/A
+JOB               JOB STATUS          RESOURCE DATA  QUALITY   FULL GPU h  CPU unit h  MEM GiB h  SAVED CONTENT GiB  F3 STATUS  F3 REMOTE ACCEPTED GiB
+job-20260909-001  FINISHED:COMPLETED  included       PARTIAL   4.4400      40.4600     255.3067   27.5115            PARTIAL    550.2266
+job-20260910-002  FINISHED:COMPLETED  included       COMPLETE  32.0000     512.0000    2048.0000  55.0230            REPORTED   2200.9065
+job-20260911-003  FINISHED:COMPLETED  unavailable    —         N/A         N/A         N/A        N/A                N/A        N/A
+job-20260912-004  RUNNING             nonterminal    —         N/A         N/A         N/A        N/A                N/A        N/A
 
 Study totals from 2 valid job summaries | coverage: PARTIAL
   Additive participant resource-time: FULL GPUs 36.4400 instance h | CPU 552.4600 unit h | MEMORY 2303.3067 GiB h
-  Other additive totals: SAVED CONTENT 82.5346 GiB | F3 REMOTE ACCEPTED 2751.1332 GiB
+  Other additive totals: SAVED CONTENT 82.5346 GiB | F3 STATUS PARTIAL | F3 REMOTE ACCEPTED 2751.1332 GiB
 
 Notes:
   Totals include only finalized jobs with valid resource summaries.

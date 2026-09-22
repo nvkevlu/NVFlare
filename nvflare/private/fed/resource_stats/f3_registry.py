@@ -28,7 +28,7 @@ from __future__ import annotations
 import threading
 from typing import Optional
 
-from .f3_counter import F3Counter
+from .f3_counter import F3_DRAIN_TIMEOUT_SECONDS, F3Counter
 
 
 class F3CounterRegistry:
@@ -38,11 +38,12 @@ class F3CounterRegistry:
         self._lock = threading.Lock()
         self._counters: dict[str, F3Counter] = {}
 
-    def start_job(self, job_id: str) -> F3Counter:
+    def start_job(self, job_id: str, *, prior_history_incomplete: bool = False) -> F3Counter:
         """Create (or return the existing) counter for a job.
 
         Idempotent so a caller does not need to track whether it already
-        started this job's counter.
+        started this job's counter. ``prior_history_incomplete`` is used when
+        a parent restores a job whose traffic before the restart is unknown.
         """
 
         with self._lock:
@@ -50,6 +51,8 @@ class F3CounterRegistry:
             if counter is None:
                 counter = F3Counter()
                 self._counters[job_id] = counter
+            if prior_history_incomplete:
+                counter.mark_prior_history_incomplete()
             return counter
 
     def get(self, job_id: str) -> Optional[F3Counter]:
@@ -58,21 +61,21 @@ class F3CounterRegistry:
         with self._lock:
             return self._counters.get(job_id)
 
-    def close_and_freeze(self, job_id: str) -> Optional[dict]:
-        """Stop admission and fix the immutable snapshot for a job's counter, if one exists.
+    def mark_prior_history_incomplete(self, job_id: str) -> bool:
+        """Mark an existing job counter partial after a parent restart."""
 
-        Callers that need a bounded drain between admission close and freeze
-        (F3_GAP.md's "allows already-classified sends to drain for at most
-        five seconds" for a parent process) should call ``get(job_id).close()``
-        themselves, poll ``pending_count``, and only then call this -- or
-        ``F3Counter.freeze()`` directly. This convenience method is for the
-        no-drain-needed case (nothing is bound to the counter yet).
-        """
+        counter = self.get(job_id)
+        return counter.mark_prior_history_incomplete() if counter is not None else False
+
+    def close_and_freeze(
+        self, job_id: str, *, drain_timeout_seconds: float = F3_DRAIN_TIMEOUT_SECONDS
+    ) -> Optional[dict]:
+        """Close, condition-drain for a bounded time, and freeze a job counter."""
 
         counter = self.get(job_id)
         if counter is None:
             return None
-        counter.close()
+        counter.close_and_drain(drain_timeout_seconds)
         return counter.freeze()
 
     def forget_job(self, job_id: str) -> None:

@@ -60,7 +60,6 @@ INTERNAL_HANDOFF_KIND = "nvflare.resource_stats.internal.terminal_handoff"
 
 _PARTICIPANT_NAME_PATTERN = re.compile(r"^[A-Za-z0-9_-][A-Za-z0-9_.-]{0,127}$")
 _GPU_KINDS = frozenset({"full_gpu", "mig_compute_instance"})
-_F3_BUCKETS = ("remote_accepted", "local_delivered", "remote_failed_before_acceptance")
 _U128_MAX = 2**128 - 1
 
 
@@ -365,7 +364,7 @@ def _unavailable(issue: str = "observation_incomplete") -> dict[str, Any]:
 
 
 def _f3_has_numbers(value: Mapping[str, Any]) -> bool:
-    return value.get("status") in {"reported", "partial"} and all(bucket in value for bucket in _F3_BUCKETS)
+    return value.get("status") in {"reported", "partial"} and "remote_accepted" in value
 
 
 def _merge_f3(child_f3: Mapping[str, Any], parent_f3: Mapping[str, Any]) -> dict[str, Any]:
@@ -382,13 +381,11 @@ def _merge_f3(child_f3: Mapping[str, Any], parent_f3: Mapping[str, Any]) -> dict
     if not numeric:
         return _unavailable("attribution_incomplete")
 
-    result: dict[str, Any] = {}
-    for bucket in _F3_BUCKETS:
-        payload_bytes = sum(int(value[bucket]["payload_bytes"]) for value in numeric)
-        messages = sum(int(value[bucket]["messages"]) for value in numeric)
-        if payload_bytes > _U128_MAX or messages > _U128_MAX:
-            raise OverflowError(f"merged F3 {bucket} exceeds the unsigned 128-bit bound")
-        result[bucket] = {"payload_bytes": str(payload_bytes), "messages": str(messages)}
+    payload_bytes = sum(int(value["remote_accepted"]["payload_bytes"]) for value in numeric)
+    messages = sum(int(value["remote_accepted"]["messages"]) for value in numeric)
+    if payload_bytes > _U128_MAX or messages > _U128_MAX:
+        raise OverflowError("merged F3 remote_accepted exceeds the unsigned 128-bit bound")
+    result = {"remote_accepted": {"payload_bytes": str(payload_bytes), "messages": str(messages)}}
 
     complete = len(numeric) == 2 and all(value.get("status") == "reported" for value in numeric)
     if complete:

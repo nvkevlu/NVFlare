@@ -41,9 +41,10 @@
     ]
   },
   "f3": {
-    "status": "unavailable",
-    "issues": [
-      "not_bound"
-    ]
+    "status": "reported",
+    "remote_accepted": {
+      "payload_bytes": "4831875120",
+      "messages": "3"
+    }
   }
 }

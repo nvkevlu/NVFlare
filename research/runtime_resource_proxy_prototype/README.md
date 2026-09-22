@@ -15,7 +15,7 @@ schema fixtures for behavior that is not implemented yet.
 | 5 | [Review guide](REVIEW_GUIDE.md) | Learn the schema and user-facing concepts in plain language. |
 | 6 | [Rollup flow](ROLLUP_FLOW.md) | Follow a terminal participant report through job and study rollups. |
 | 7 | [Implementation gaps](GAPS.md) | See what remains incomplete without confusing it with implemented behavior. |
-| 8 | [Detailed integration design](CURRENT_CODE_INTEGRATION.md) | Review deeper alternatives and target behavior, including the unimplemented completion-topic fallback and F3 design. |
+| 8 | [Detailed integration design](CURRENT_CODE_INTEGRATION.md) | Review exact code hooks, the unimplemented completion-topic fallback, and the F3 implementation. |
 | 9 | [Phase 1 implementation plan](../../docs/design/job_resource_statistics_implementation_plan.md) | Discuss the broader contract, tradeoffs, and remaining work. |
 | 10 | [Phase 2 JobStatsReporter sketch](../../docs/design/job_resource_statistics_phase2_telemetry_sketch.md) | Discuss finalized-summary publication and the deferred periodic-capacity direction. |
 
@@ -34,8 +34,11 @@ The implementation and its supporting prototype contain:
 - a closed JSON Schema and semantic validator;
 - one terminal site report containing internally accumulated CPU, memory, and
   GPU resource time, a final workspace-filesystem observation, and typed
-  saved-result/F3 objects (currently `unavailable/not_bound` in production);
-- an F3 counter and cutoff prototype, not yet connected to production hooks;
+  saved-result/F3 objects;
+- production F3 ownership, trusted bindings for deployment, real task
+  responses, and task results, origin-only send accounting, a fixed cutoff,
+  and checked child/parent merge; focused validation and a new live end-to-end
+  reference remain in progress;
 - a production Option A completion/report envelope, direct canonical-byte
   duplicate/conflict comparison, and a bounded live accepted-byte ledger, plus
   a separate prototype for expanded fallback/retry behavior;
@@ -91,8 +94,11 @@ renderers:
 | [Production job summary](production_reference/artifacts/workspace/resource_stats/resource_summary.json) | Exact implemented rollup. |
 
 The following broader goldens are design and contract examples. Some include
-reported F3 or retained-content values that the production hooks currently
-emit as `unavailable/not_bound`:
+reported F3 or retained-content values that are not claims about the older
+captured live runs. Retained content still has no general authoritative source;
+F3 has production bindings and a 366-of-366 passing focused suite, but no new
+process-mode live reference yet. See
+[F3 implementation status](F3_GAP.md#validation-status):
 
 | Artifact | What to inspect |
 | --- | --- |
@@ -118,7 +124,7 @@ job history.
 | File | Purpose |
 | --- | --- |
 | [Implemented path](PRODUCTION_IMPLEMENTATION.md) | Exact current collection, transport, persistence, and CLI hooks. |
-| [F3 reporting gap](F3_GAP.md) | Exact current `not_bound` behavior, intended traffic semantics, missing production hooks, and implementation order. |
+| [F3 implementation status](F3_GAP.md) | Exact traffic semantics, production bindings, cutoff/merge behavior, and remaining proof. |
 | [Detailed integration design](CURRENT_CODE_INTEGRATION.md) | Deeper target behavior and fallback alternatives; clearly distinguish these from implemented code. |
 | [Schema guide](schema/README.md) | Record relationships and calculation rules. |
 | [Field catalog](schema/FIELD_CATALOG.md) | Every field, type, unit, and bound. |

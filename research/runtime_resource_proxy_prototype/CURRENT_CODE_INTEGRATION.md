@@ -4,9 +4,10 @@ Status: detailed design and code audit. A production subset now exists.
 
 For the authoritative description of what this branch implements, read
 [PRODUCTION_IMPLEMENTATION.md](PRODUCTION_IMPLEMENTATION.md). This longer file
-also preserves target designs for F3 counters, retained-content binding,
-delivery retries/tombstones, and the versioned completion-topic fallback.
-Those target sections are not claims about current production behavior.
+also records the current F3 bindings and remaining proof, plus target designs
+for retained-content binding, delivery retries/tombstones, and the versioned
+completion-topic fallback. Target-only sections are not claims about current
+production behavior.
 
 This document names the current processes, code hooks, messages, files, and
 cutoffs. It makes no assumption about which GPU-release design will be chosen.
@@ -14,14 +15,17 @@ cutoffs. It makes no assumption about which GPU-release design will be chosen.
 The implemented path is:
 
 1. Each client and server job process starts one in-memory resource-time
-   accumulator. Parent and child F3 counters are not connected yet.
+   accumulator and one process-local F3 counter. CP and SP keep job-scoped
+   parent counters from trusted lifecycle state.
 2. From `_archive_results()`, the job process writes one private terminal
-   measurement handoff in its existing job workspace. This is not a
-   `participant_summary` and is never retained in the job-store archive.
+   measurement handoff, including its frozen F3 contribution, in its existing
+   job workspace. This is not a `participant_summary` and is never retained in
+   the job-store archive.
 3. After the job handle finishes, the parent validates the child handoff,
-   binds its trusted participant name, creates the one canonical
-   `participant_summary`, and deletes staging. F3 and retained content are
-   currently typed `unavailable/not_bound`.
+   closes and freezes its own F3 counter, checked-merges the two process
+   contributions, binds its trusted participant name, creates the one
+   canonical `participant_summary`, and deletes staging. Retained content is
+   currently typed `unavailable/not_bound` unless a bounded source is added.
 4. The client parent attaches those exact final bytes to one completion
    request on the existing `REPORT_JOB_FAILURE` topic. It makes one
    application-level send; the versioned `REPORT_JOB_COMPLETION` transport is
@@ -257,16 +261,26 @@ The final hook is `_archive_results()` in each job process:
 - CJ: `nvflare/private/fed/app/client/worker_process.py::main()`
 - SJ: `nvflare/private/fed/app/server/runner_process.py::main()`
 
-After the runner has returned and before F3 streaming shutdown and workspace
-upload, the hook:
+After the runner has returned, cleanup first stops new application-command
+admission. It waits up to five seconds for callbacks already admitted by that
+gate while Cell and streaming are still alive. Timeout or error marks child F3
+`partial/counter_gap`, because one of those callbacks could otherwise
+originate traffic after publication. Before F3 streaming shutdown and workspace
+upload, `_archive_results()` then:
 
 1. advances the resource-time accumulator through the final monotonic time;
 2. finalizes one `resource_time` object with one overall status;
 3. observes the capacity of the filesystem containing the existing job
    workspace;
 4. records retained content as `unavailable/not_bound`;
-5. records child F3 as `unavailable/not_bound`; and
+5. closes F3 admission, drains admitted operations for the fixed five-second
+   internal bound, and freezes the child snapshot; and
 6. serializes one private terminal measurement handoff.
+
+Only after the handoff attempt does cleanup stop F3 streaming and Cell. If the
+live-transport callback pre-drain did not finish, it performs one bounded
+post-stop callback wait before closing security state. This keeps publication
+bounded without freezing while an admitted callback can still send normally.
 
 It writes the handoff atomically at:
 
@@ -318,9 +332,10 @@ public report with typed unavailable or partial results; it never invents
 missing child measurements. Loss of the parent/site can still leave the
 expected participant without a report.
 
-The `child_f3` member reserves the typed handoff shape, but production does not
-bind or freeze F3 counters yet. It is always `unavailable/not_bound` in the
-implemented path. The later F3 section describes target behavior.
+The `child_f3` member contains the child process's origin-only F3 snapshot.
+Trusted call sites classify real task responses and task results; a missing or
+incomplete observation remains typed partial or unavailable. The later F3
+section defines the exact boundary.
 
 ### 5. The existing launcher workspace path returns the private handoff
 
@@ -342,15 +357,19 @@ builds the terminal request, and then frees the allocated resources in
 At that point each parent performs one bounded assembly operation:
 
 1. read and strictly validate the bounded child handoff;
-2. create the canonical `participant_summary` from trusted parent identity and
-   child measurements, with F3 typed `unavailable/not_bound`; and
-3. delete the child handoff and empty staging directory.
+2. close, drain, and freeze its job-scoped F3 counter;
+3. checked-merge child and parent contributions;
+4. create the canonical `participant_summary` from trusted parent identity and
+   the final measurements; and
+5. delete the child handoff and empty staging directory.
 
 If the child handoff is absent or invalid, the parent still assembles one
 report. Child-derived resource time, workspace capacity, and retained content
 are typed unavailable (or partial only where valid child values actually
-exist). F3 is unavailable. The parent does not substitute elapsed wall time,
-an end snapshot, filenames, or generic process network totals.
+exist). A usable parent F3 subtotal is retained as
+`partial/attribution_incomplete`; if neither side is usable, F3 is unavailable.
+The parent does not substitute elapsed wall time, an end snapshot, filenames,
+or generic process network totals.
 
 CP frees launcher-managed compute resources immediately after this assembly
 and handoff cleanup, then sends the canonical bytes once and waits for the
@@ -364,22 +383,19 @@ unavailable root server therefore does not keep a completed client's GPU, CPU,
 or memory allocation held. This is a description of current ordering, not an
 assumption that a future workflow must hold resources for the whole job.
 
-### 6. Target F3 owner and cutoff (not implemented)
+### 6. F3 owner and cutoff
 
-The following F3 ownership design remains future work. Current production
-reports F3 as `unavailable/not_bound`.
-
-The target SP would create its job-scoped parent F3 counter after the scheduler selects a job
+SP creates its job-scoped parent F3 counter after the scheduler selects a job
 and before `JobRunner._deploy_job()`. This is early enough to count the
-included `job_application` sends and later SP forwarding for that job.
+included `job_application` sends. SP forwarding does not count again.
 
-The target CP would create its counter in `ClientExecutor.start_app()` after it has validated
+CP creates its counter in `ClientExecutor.start_app()` after it has validated
 the authoritative `START_JOB` metadata against deployed metadata and before it
-selects the launcher or calls `launch_job()`. This is early enough for any
-included CP forwarding caused by the launched job. The earlier deployment
-payload is incoming and is counted once by its SP sender, not by CP. Merely
-seeing an untrusted low-level route or a job-supplied header must not create or
-bind a counter.
+selects the launcher or calls `launch_job()`. The current three-class allowlist
+normally gives CP a zero contribution. The earlier deployment payload is
+incoming and is counted once by its SP origin, not by CP. Merely seeing an
+untrusted low-level route or a job-supplied header cannot create or bind a
+counter.
 
 The parent counter API is internal platform state keyed by the trusted job
 context. It adds no launcher argument, environment variable, job setting, or
@@ -606,10 +622,10 @@ Replay behavior is deterministic only while live acceptance state exists:
 The terminal outcome is resolved in a `finally` path regardless of resource
 status. Resource reporting never changes success, failure, or abort.
 
-SP validates the SJ handoff and assembles canonical bytes with its trusted
-local identity; F3 remains `unavailable/not_bound`. It passes the bytes through
-the same validator and live-ledger function, which performs the same direct
-byte comparison. It does not send a fake loopback CellNet message. After either accepting or
+SP validates the SJ handoff, checked-merges SJ and SP F3 snapshots, and
+assembles canonical bytes with its trusted local identity. It passes the bytes
+through the same validator and live-ledger function, which performs the same
+direct byte comparison. It does not send a fake loopback CellNet message. After either accepting or
 rejecting the final bytes, SP removes the private handoff and staging
 directory. Staging is not part of the final resource namespace and is not
 copied into the final job archive.
@@ -849,51 +865,87 @@ server cache—not a second durable copy of the same statistics.
 ## F3 counter bindings
 
 Phase 1 counts the sender only. The receiver does not add the same payload to
-the primary total.
+the primary total. More precisely, it counts only the process that originates
+one of the trusted semantic operations. A relaying or forwarding process does
+not count the payload again. A remote logical destination still counts once at
+the origin when routing begins through a local first-hop relay; that is not a
+final in-process delivery.
 
 F3 pools are process-local, so one process cannot claim traffic observed by
 another. Phase 1 adds one job-scoped counter in each parent and one in each job
 process. The child freezes its local contribution into the private handoff.
 After the job handle finishes, the parent closes admission to its own counter,
-performs a bounded drain of already-classified sends, freezes that snapshot,
-and merges compatible child and parent fields with checked arithmetic before
-it creates `participant_summary`.
+performs the fixed five-second drain of already-admitted operations, freezes
+that snapshot, and merges compatible child and parent fields with checked
+arithmetic before it creates `participant_summary`.
 
 Any missing contribution or incomplete drain is represented honestly. If one
 bounded contribution remains usable, F3 is partial with the applicable issue;
 if none is usable, F3 is unavailable. A missing or invalid child handoff never
-causes the parent to substitute generic process totals. Likewise, an SJ-only
-counter can never claim complete `job_application` coverage: that send belongs
-to SP's parent counter.
+causes the parent to substitute generic process totals. A restored server
+parent keeps its new subtotal as `partial/attribution_incomplete`, rather than
+claiming that pre-restore traffic was zero.
 
-F3 counts distinct sender hops. A child send to its parent and the parent's
-real relay to another endpoint are two included hops and both contributions
-are added. Trusted correlation prevents the *same* hop from being recorded by
-duplicate instrumentation or again for a reliable-transport retransmission;
-it never deduplicates a genuine parent relay against the child send. If hop
-identity cannot be proved, the affected F3 result is partial or unavailable
-rather than guessed.
+The parent/child merge combines non-overlapping semantic origins. SP originates
+job deployment, SJ originates real task responses, and CJ originates task
+results. CP owns a counter for lifecycle consistency but normally has no
+positive contribution under this three-class allowlist. The accounting context
+is a local Python object and is not serialized, so a receiver or forwarder
+cannot inherit counting authority.
 
 The low-level route cannot decide by itself whether bytes belong to a job.
 Platform code assigns job and traffic class at these call sites:
 
 | Class | Current route | Binding rule |
 | --- | --- | --- |
-| `task_request` | `server_command/get_task` from `Communicator.pull_task()` | Hold request bytes by request ID and commit them only when the paired reply contains a real task. Discard empty polls, `__try_again__`, `__end_run__`, timeout, and error. |
 | `task_response` | Reply to `server_command/get_task` | `ServerCommandAgent` tags only a platform-produced real-task reply before encoding. |
 | `task_result` | `server_command/submit_update` from `Communicator.submit_update()` | The communicator supplies trusted job ID and fixed class. Exclude the ACK. |
-| `job_application` | Inner `train.deploy` over outer `admin/admin` | `_make_deploy_message()` supplies job ID and class. The shared outer route alone is not authority. |
-| `job_stream_data` | DownloadService then `sm__STREAM/sm__DATA` | Register trusted job/class provenance when an included parent payload creates the stream. Count logical data once per destination, not reliable retransmissions. |
+| `job_application` | Inner `train.deploy` over outer `admin/admin` | `JobRunner` supplies the existing job-scoped SP counter and fixed class when it sends the deployment requests. The shared outer route alone is not authority. |
 
-Explicit exclusions include empty polling, all ACK/control traffic, workspace
-transfer, the terminal resource report, authentication, heartbeat, quit,
-shutdown, job heartbeat, logs, federated events, HCI, bulk envelopes, and every
-unrecognized or unbound route.
+There is no task-request class. A real task response already represents the
+useful work assignment. There is also no separate stream class. If FOBS moves a
+large value through `DownloadService`, its successfully accepted unique source
+bytes remain part of the originating job-application, task-response, or
+task-result operation.
 
-Count `len(message.payload)` after payload encoding and optional end-to-end
-encryption, but not Cell headers, driver/TLS framing, transport compression, or
-retransmissions. Increment remote bytes only after local transport acceptance;
-keep direct delivery and failed-before-acceptance separate.
+Explicit exclusions include task requests, empty polling, all ACK/control
+traffic, final delivery to an in-process logical destination, sends that fail
+before acceptance, a relay's duplicate contribution, workspace transfer, the
+terminal resource report, authentication, heartbeat, quit, shutdown, job
+heartbeat, logs, federated events, HCI, bulk envelopes, and every unrecognized
+or unbound route.
+
+Count the main payload after FOBS encoding and before optional end-to-end
+encryption. Exclude Cell headers, encryption expansion, driver/TLS framing,
+transport compression, and retransmissions. Fan-out counts one top-level
+logical message per remote destination. `DownloadService` data adds bytes to
+that operation without another message; repeated chunks and retries do not add
+bytes again. Increment `remote_accepted` only after local transport acceptance.
+
+For a normal CoreCell send, `_send_to_endpoint()` encodes, admits, retains the
+encoded size, optionally encrypts, and then sends. A send without error
+completes the admission unless the chosen local endpoint is also the logical
+destination. An error or that exact final local delivery abandons it. A local
+endpoint used only as the first hop toward a different destination still
+completes the origin's remote logical send.
+
+For an existing Cell blob stream, `ByteStreamer.send()` admits the already
+FOBS-encoded `BlobStream` immediately before it constructs and starts `TxTask`.
+A final process-local target is not admitted, while a remote logical target
+remains admitted even if its first routing hop is local. A setup/start exception
+abandons the admission. Otherwise it remains pending until the entire
+`StreamFuture` reaches a terminal result: success commits `stream.get_size()`
+once, and asynchronous failure or cancellation abandons it. Stream frames and
+retries do not carry the accounting context.
+
+During FOBS encoding, each `DownloadService` transaction registers against the
+same pending operation before main transport admission. A source data reply
+uses a stable source-owned logical chunk identity and adds only its raw produced
+data length after local acceptance. The operation completes only after the
+main send and every registered transaction succeed for that destination. A
+failed transaction, unknown receiver, unstable chunk identity, or ambiguous
+settlement discards that operation and records `partial/counter_gap` rather
+than publishing an undercount.
 
 `CoreCell._send_to_endpoint()` exposes the useful low-level boundary:
 
@@ -902,10 +954,10 @@ keep direct delivery and failed-before-acceptance separate.
 
 The existing generic StatsPool is not sufficient because it combines protocol
 traffic, lacks reliable job/class ownership, uses floating-point MiB, and does
-not provide the required cutoff record. Until task pairing, stream provenance,
-parent/child merging, forwarding provenance, and same-hop
-duplicate/retransmission suppression are proved, affected F3 fields must be
-partial or unavailable rather than substituted from generic process totals.
+not provide the required cutoff record. Any runtime coverage gap remains
+partial or unavailable rather than being replaced by generic process totals.
+The focused [F3 status document](F3_GAP.md#validation-status) records the
+366-of-366 passing focused suite and the remaining live-run evidence.
 
 ## Why use one completion message
 
@@ -935,9 +987,11 @@ no dual-send mode or operator configuration.
 | Slurm uses more than one node | Resource time is `unavailable/unsupported`; publish no rank-zero numeric totals and do not infer other-node capacity. |
 | Server job process is restored from a snapshot | Measure the new process interval and mark it `partial/observation_incomplete`; do not claim that it covers the pre-restore interval. |
 | Normal application exception reaches child finalization | Freeze the private handoff if possible; the parent still owns final assembly. |
-| A child callback is still active at the child F3 freeze | **Target:** freeze once and preserve partial F3 with `counter_gap`. Current F3 is unavailable. |
-| A parent F3 drain times out | **Target:** freeze the bounded contribution and mark merged F3 partial. Current parent F3 is not implemented. |
-| Hard child or launcher-managed pod loss bypasses `_archive_results()`, but the parent survives | Parent builds one report with unavailable child-derived measurements; F3 is currently unavailable. |
+| A command callback is still active during child cleanup | Close command admission and pre-drain for up to five seconds while Cell/streaming remain alive. Timeout or error marks F3 `partial/counter_gap`; after publication and transport stop, retain one bounded post-stop wait. |
+| A child F3 operation is still active at the cutoff | After the callback pre-drain, stop waiting after the fixed five-second F3 drain, freeze once, and preserve the bounded subtotal as `partial/counter_gap`. |
+| A blob stream fails or is cancelled asynchronously | Keep its admission pending until terminal `StreamFuture` outcome, then abandon it without adding public counters. |
+| A parent F3 drain times out | Freeze the bounded parent subtotal and mark merged F3 partial. |
+| Hard child or launcher-managed pod loss bypasses `_archive_results()`, but the parent survives | Parent builds one report with unavailable child-derived measurements; any usable parent F3 subtotal is `partial/attribution_incomplete`. |
 | Parent/site loss prevents parent assembly or delivery | No report reaches SP; the expected participant is missing. |
 | Separate-workspace upload fails | Parent treats the handoff as missing and builds the same typed partial/unavailable report. |
 | Selected CP completion request or reply is lost | Current CP does not retry. A lost request can leave a missing report; a lost reply can follow successful acceptance. |
@@ -994,16 +1048,16 @@ introduced.
 | Current file or area | Change |
 | --- | --- |
 | `nvflare/apis/fl_constant.py` | **Implemented:** `GET_JOB_RESOURCES` / `GET_STUDY_RESOURCES`; no resource-specific start identity. |
-| `private/fed/server/job_runner.py` | **Implemented:** persist all selected client names, launch only the deployable subset, restore the expected set, perform server local assembly, cutoff, rollup, local summary-last publication, and unchanged normal workspace save. **Remaining:** parent F3 and accepted-ledger/cutoff recovery. |
+| `private/fed/server/job_runner.py` | **Implemented:** persist all selected client names, launch only the deployable subset, own SP F3 deployment accounting, restore expected/F3 state conservatively, perform server local assembly, cutoff, rollup, local summary-last publication, and unchanged normal workspace save. **Remaining:** accepted-ledger/cutoff recovery. |
 | official Process/Docker/Kubernetes/Slurm launchers | **Implemented:** run the NVFlare worker with Python `-I` and keep app/site custom paths out of startup `PYTHONPATH`, without a user setting or extra privilege. BYOC entrypoints and global interpreter `sitecustomize` remain outside this boundary. |
 | client/server job-process entry points | **Implemented:** start the in-memory accumulator before workspace download and custom-path activation, then freeze one private terminal handoff in `_archive_results()`. |
-| `private/fed/app/job_process_cleanup.py` and command agents | **Remaining:** expose incomplete callbacks for authoritative child F3 cutoff. |
-| `private/fed/resource_stats/*` | **Implemented:** fail-closed probes, accumulation, private-handoff validation, canonical final assembly, public validation, exact arithmetic, bounded in-memory acceptance, finalization-time atomic/fsynced files, and a fail-closed path-backed archive reader. **Remaining:** parent/child F3 merge and retained-result provider. |
-| `private/fed/client/client_executor.py` | **Implemented:** after `job_handle.wait()`, validate the handoff, bind the trusted site name, delete staging, free allocated compute resources, and then send exact bytes once on Option A. **Remaining:** any approved retry/recovery behavior and parent F3. |
+| client/server command and communicator paths | **Implemented:** bind only real task responses and task results at their trusted semantic origins; task requests and acknowledgements remain excluded. |
+| `private/fed/resource_stats/*` | **Implemented:** fail-closed probes, accumulation, F3 state/cutoff, private-handoff validation, checked child/parent F3 merge, canonical final assembly, public validation, exact arithmetic, bounded in-memory acceptance, finalization-time atomic/fsynced files, and a fail-closed path-backed archive reader. **Remaining:** retained-result provider. |
+| `private/fed/client/client_executor.py` | **Implemented:** after `job_handle.wait()`, close/drain/freeze parent F3, validate and merge the handoff, bind the trusted site name, delete staging, free allocated compute resources, and then send exact bytes once on Option A. **Remaining:** any approved retry/recovery behavior. |
 | `fuel/f3/cellnet/defs.py` | **Implemented:** keep `REPORT_JOB_FAILURE`. **Fallback only:** Option B would add `REPORT_JOB_COMPLETION`. |
 | `private/defs.py` | **Implemented:** Option A report and flat status keys. **Fallback only:** Option B would add a versioned completion envelope. |
 | `private/fed/server/fed_server.py` | **Implemented:** Option A authenticates and processes the report before the once-only terminal outcome. **Remaining:** no receipt tombstone; Option B is not registered. |
-| F3 call sites and CoreCell | **Remaining:** trusted job/class/correlation, child and parent job-scoped counters, and close/drain/freeze snapshots. |
+| F3 call sites, FOBS/DownloadService, and CoreCell | **Implemented and focused-tested:** process-local trusted context, origin-only fan-out, after-FOBS/before-encryption sizing, accepted unique large-object byte folding, retry suppression, streamed terminal outcome, child callback pre-drain, and remote-acceptance completion. The socket-backed suite passes 366 of 366; a new live run remains. |
 | `private/fed/server/job_cmds.py` | **Implemented:** authorized job/study handlers that stage one normal workspace archive at a time and use the safe fixed-member reader without loading the full archive into memory. |
 | `fuel/flare_api/flare_api.py` and `tool/job/job_cli.py` | **Implemented:** session APIs and exact job/study CLI forms. |
 | JobDefManager/storage backends | No new resource component API. The private handoff uses the existing run workspace temporarily; only final resource members remain in the normal `WORKSPACE` archive. |
@@ -1012,8 +1066,9 @@ introduced.
 
 1. Broaden platform coverage and validate CUDA/NVML matching across supported
    CUDA Runtime, NVML, full-GPU, and MIG versions.
-2. Complete F3 request/reply and stream provenance without trusting
-   job-supplied headers.
+2. Capture a new process-mode F3 run; the focused suite for semantic filtering,
+   transport, streaming, OOB data, lifecycle cutoff, merge, restore, and
+   self-exclusion already passes 366 of 366 tests.
 3. Identify authoritative bounded retained-result sets.
 4. Decide whether root-parent restart must recover accepted report bytes,
    invalid history, and cutoff state. Expected participant names are already

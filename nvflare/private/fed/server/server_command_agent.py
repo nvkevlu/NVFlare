@@ -12,15 +12,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from nvflare.apis.fl_constant import ServerCommandKey
+from nvflare.apis.fl_constant import ServerCommandKey, ServerCommandNames
 from nvflare.apis.shareable import ReservedHeaderKey, Shareable
 from nvflare.apis.utils.fl_context_utils import gen_new_peer_ctx
 from nvflare.fuel.f3.cellnet.cell import Cell
 from nvflare.fuel.f3.cellnet.core_cell import MessageHeaderKey, ReturnCode, make_reply
 from nvflare.fuel.f3.message import Message as CellMessage
 from nvflare.fuel.utils.log_utils import get_obj_logger
-from nvflare.private.defs import CellChannel, CellMessageHeaderKeys, new_cell_message
+from nvflare.private.defs import CellChannel, CellMessageHeaderKeys, SpecialTaskName, new_cell_message
 from nvflare.private.fed.app.callback_admission import CallbackAdmission
+from nvflare.private.fed.resource_stats.f3_bindings import attach_f3_context
+from nvflare.private.fed.resource_stats.f3_counter import F3TrafficClass
+from nvflare.private.fed.resource_stats.f3_job_counter import get_job_f3_counter
 
 from .server_commands import ServerCommands
 
@@ -105,6 +108,14 @@ class ServerCommandAgent(object):
                             return_message.set_header(MessageHeaderKey.MSG_ROOT_ID, msg_root_id)
                         if msg_root_ttl:
                             return_message.set_header(MessageHeaderKey.MSG_ROOT_TTL, msg_root_ttl)
+                        if command_name == ServerCommandNames.GET_TASK:
+                            task_name = reply.get_header(ServerCommandKey.TASK_NAME)
+                            if task_name and task_name not in {SpecialTaskName.TRY_AGAIN, SpecialTaskName.END_RUN}:
+                                attach_f3_context(
+                                    return_message,
+                                    get_job_f3_counter(),
+                                    F3TrafficClass.TASK_RESPONSE,
+                                )
                 else:
                     return_message = make_reply(ReturnCode.PROCESS_EXCEPTION, "No process results", None)
                 return return_message

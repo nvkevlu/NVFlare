@@ -45,14 +45,6 @@
         "remote_accepted": {
           "payload_bytes": "147700336640",
           "messages": "5"
-        },
-        "local_delivered": {
-          "payload_bytes": "0",
-          "messages": "0"
-        },
-        "remote_failed_before_acceptance": {
-          "payload_bytes": "0",
-          "messages": "0"
         }
       }
     },
@@ -101,14 +93,6 @@
         "remote_accepted": {
           "payload_bytes": "147700336640",
           "messages": "5"
-        },
-        "local_delivered": {
-          "payload_bytes": "0",
-          "messages": "0"
-        },
-        "remote_failed_before_acceptance": {
-          "payload_bytes": "0",
-          "messages": "0"
         }
       }
     },
@@ -150,14 +134,6 @@
         "remote_accepted": {
           "payload_bytes": "295400673280",
           "messages": "10"
-        },
-        "local_delivered": {
-          "payload_bytes": "0",
-          "messages": "0"
-        },
-        "remote_failed_before_acceptance": {
-          "payload_bytes": "0",
-          "messages": "0"
         }
       }
     }

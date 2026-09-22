@@ -6,8 +6,8 @@ SITE    ROLE    REPORT    COMPUTE  MEASURED TIME  CPU UNITS  MEM GiB   FULL GPUs
 site-2  client  accepted  PARTIAL  32m3s          29.5039    182.0156  3.6880
 
 Other recorded participant totals
-SITE    F3 REMOTE ACCEPTED GiB
-site-2  137.5567
+SITE    F3 STATUS  F3 REMOTE ACCEPTED GiB
+site-2  REPORTED   137.5567
 
 Notes:
   PARTIAL means at least one expected report or observation was incomplete.

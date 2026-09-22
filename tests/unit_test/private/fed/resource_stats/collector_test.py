@@ -26,6 +26,7 @@ from nvflare.private.fed.resource_stats.collector import (
     ResourceTimeAccumulator,
     assemble_participant_summary,
     canonical_json_bytes,
+    merge_f3_snapshots,
     probe_gpu,
     read_terminal_handoff,
     remove_terminal_handoff,
@@ -650,17 +651,36 @@ def test_handoff_to_public_report_round_trip(tmp_path):
         },
     )
 
-    path = write_terminal_handoff(tmp_path, job_collector.finish())
+    path = write_terminal_handoff(
+        tmp_path,
+        job_collector.finish(
+            child_f3={
+                "status": "reported",
+                "remote_accepted": {"payload_bytes": "1200", "messages": "2"},
+            }
+        ),
+    )
     assert path == terminal_handoff_path(tmp_path)
     handoff = read_terminal_handoff(tmp_path)
-    report = assemble_participant_summary(job_id="job-1", participant_name="site-1", child_handoff=handoff)
+    report = assemble_participant_summary(
+        job_id="job-1",
+        participant_name="site-1",
+        child_handoff=handoff,
+        parent_f3={
+            "status": "reported",
+            "remote_accepted": {"payload_bytes": "300", "messages": "1"},
+        },
+    )
     encoded = canonical_json_bytes(report)
 
     assert load_and_validate(encoded)["participant_name"] == "site-1"
     assert report["resource_time"]["measured_seconds"] == "2"
     assert report["workspace_filesystem"]["status"] == "reported"
     assert report["retained_content"] == {"status": "unavailable", "issues": ["not_bound"]}
-    assert report["f3"] == {"status": "unavailable", "issues": ["not_bound"]}
+    assert report["f3"] == {
+        "status": "reported",
+        "remote_accepted": {"payload_bytes": "1500", "messages": "3"},
+    }
     assert "participant_key" not in encoded.decode()
 
 
@@ -708,12 +728,54 @@ def test_multinode_slurm_rank_zero_measurement_is_unavailable(monkeypatch, tmp_p
 
 
 def test_missing_handoff_is_explicitly_unavailable():
-    report = assemble_participant_summary(job_id="job-1", participant_name="site-1", child_handoff=None)
+    report = assemble_participant_summary(
+        job_id="job-1",
+        participant_name="site-1",
+        child_handoff=None,
+        parent_f3={
+            "status": "reported",
+            "remote_accepted": {"payload_bytes": "300", "messages": "1"},
+        },
+    )
 
     assert report["resource_time"] == {
         "status": "unavailable",
         "issues": ["observation_incomplete"],
     }
+    assert report["f3"] == {
+        "status": "partial",
+        "issues": ["attribution_incomplete"],
+        "remote_accepted": {"payload_bytes": "300", "messages": "1"},
+    }
+
+
+def test_merge_f3_snapshots_preserves_partial_issues_and_checks_u128():
+    assert merge_f3_snapshots(
+        {
+            "status": "partial",
+            "issues": ["counter_gap"],
+            "remote_accepted": {"payload_bytes": "5", "messages": "1"},
+        },
+        {
+            "status": "reported",
+            "remote_accepted": {"payload_bytes": "7", "messages": "2"},
+        },
+    ) == {
+        "status": "partial",
+        "issues": ["counter_gap"],
+        "remote_accepted": {"payload_bytes": "12", "messages": "3"},
+    }
+
+    assert merge_f3_snapshots(
+        {
+            "status": "reported",
+            "remote_accepted": {"payload_bytes": str(2**128 - 1), "messages": "1"},
+        },
+        {
+            "status": "reported",
+            "remote_accepted": {"payload_bytes": "1", "messages": "1"},
+        },
+    ) == {"status": "error", "issues": ["malformed_source"]}
 
 
 def _minimal_handoff():
@@ -723,7 +785,7 @@ def _minimal_handoff():
         "resource_time": {"status": "unavailable", "issues": ["observation_incomplete"]},
         "workspace_filesystem": {"status": "unavailable", "issues": ["observation_incomplete"]},
         "retained_content": {"status": "unavailable", "issues": ["not_bound"]},
-        "child_f3": {"status": "unavailable", "issues": ["not_bound"]},
+        "child_f3": {"status": "unavailable", "issues": ["observation_incomplete"]},
     }
 
 

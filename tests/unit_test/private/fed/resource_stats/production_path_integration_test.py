@@ -75,7 +75,7 @@ def _workspace_zip(run_dir):
     return stream.getvalue()
 
 
-def _terminal_handoff(run_dir, *, seconds, cpu_units, memory_bytes, gpu_count):
+def _terminal_handoff(run_dir, *, seconds, cpu_units, memory_bytes, gpu_count, f3_bytes=0, f3_messages=0):
     start_ns = 8_000_000_000_000_000_000
     elapsed_ns = int(seconds * 1_000_000_000)
     ticks = iter((start_ns, start_ns + elapsed_ns))
@@ -105,7 +105,15 @@ def _terminal_handoff(run_dir, *, seconds, cpu_units, memory_bytes, gpu_count):
             },
         },
     )
-    write_terminal_handoff(run_dir, collector.finish())
+    write_terminal_handoff(
+        run_dir,
+        collector.finish(
+            child_f3={
+                "status": "reported",
+                "remote_accepted": {"payload_bytes": str(f3_bytes), "messages": str(f3_messages)},
+            }
+        ),
+    )
     return read_terminal_handoff(run_dir)
 
 
@@ -125,7 +133,13 @@ def test_authenticated_report_to_workspace_query_and_human_output(tmp_path):
             cpu_units=8,
             memory_bytes=64 * 2**30,
             gpu_count=2,
+            f3_bytes=5_000_000,
+            f3_messages=4,
         ),
+        parent_f3={
+            "status": "reported",
+            "remote_accepted": {"payload_bytes": "1000000", "messages": "1"},
+        },
     )
     participant_bytes = canonical_json_bytes(client_report)
 
@@ -171,10 +185,20 @@ def test_authenticated_report_to_workspace_query_and_human_output(tmp_path):
         cpu_units=2,
         memory_bytes=16 * 2**30,
         gpu_count=0,
+        f3_bytes=3_000_000,
+        f3_messages=2,
     )
     fl_ctx = MagicMock()
     fl_ctx.get_workspace.return_value.get_run_dir.return_value = str(run_dir)
-    JobRunner._accept_server_resource_report(job_runner, job_id, fl_ctx)
+    JobRunner._accept_server_resource_report(
+        job_runner,
+        job_id,
+        fl_ctx,
+        parent_f3={
+            "status": "reported",
+            "remote_accepted": {"payload_bytes": "500000", "messages": "1"},
+        },
+    )
 
     finalized = coordinator.finalize_job(job_id)
     workspace_zip = _workspace_zip(run_dir)
@@ -214,6 +238,14 @@ def test_authenticated_report_to_workspace_query_and_human_output(tmp_path):
     assert result["participant_summary"] == client_report
     assert [item["participant_name"] for item in finalized["participants"]] == [participant_name, "server"]
     assert finalized["totals"]["resource_time"]["measured_seconds"] == "4463.5"
+    assert client_report["f3"] == {
+        "status": "reported",
+        "remote_accepted": {"payload_bytes": "6000000", "messages": "5"},
+    }
+    assert finalized["totals"]["f3"] == {
+        "status": "reported",
+        "remote_accepted": {"payload_bytes": "9500000", "messages": "8"},
+    }
 
     output = render_job_resources(finalized, result["participant_summary"])
     assert "selected site: site-1" in output

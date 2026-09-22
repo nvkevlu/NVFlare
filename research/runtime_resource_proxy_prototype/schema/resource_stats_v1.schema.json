@@ -239,23 +239,19 @@
     },
     "f3_reported": {
       "type": "object", "additionalProperties": false,
-      "required": ["status", "remote_accepted", "local_delivered", "remote_failed_before_acceptance"],
+      "required": ["status", "remote_accepted"],
       "properties": {
         "status": {"const": "reported"},
-        "remote_accepted": {"$ref": "#/$defs/counter"},
-        "local_delivered": {"$ref": "#/$defs/counter"},
-        "remote_failed_before_acceptance": {"$ref": "#/$defs/counter"}
+        "remote_accepted": {"$ref": "#/$defs/counter"}
       }
     },
     "f3_partial": {
       "type": "object", "additionalProperties": false,
-      "required": ["status", "issues", "remote_accepted", "local_delivered", "remote_failed_before_acceptance"],
+      "required": ["status", "issues", "remote_accepted"],
       "properties": {
         "status": {"const": "partial"},
         "issues": {"type": "array", "minItems": 1, "maxItems": 4, "uniqueItems": true, "items": {"$ref": "#/$defs/partial_issue"}},
-        "remote_accepted": {"$ref": "#/$defs/counter"},
-        "local_delivered": {"$ref": "#/$defs/counter"},
-        "remote_failed_before_acceptance": {"$ref": "#/$defs/counter"}
+        "remote_accepted": {"$ref": "#/$defs/counter"}
       }
     },
     "f3": {
