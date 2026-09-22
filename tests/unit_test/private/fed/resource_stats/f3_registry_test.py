@@ -94,12 +94,12 @@ def test_close_and_freeze_condition_drains_before_snapshot():
     }
 
 
-def test_close_and_freeze_timeout_reports_pending_operation_as_gap():
+def test_default_parent_close_freezes_pending_operation_as_gap_without_drain():
     registry = F3CounterRegistry()
     counter = registry.start_job("job-1")
     counter.try_begin(F3TrafficClass.JOB_APPLICATION)
 
-    snapshot = registry.close_and_freeze("job-1", drain_timeout_seconds=0.0)
+    snapshot = registry.close_and_freeze("job-1")
 
     assert snapshot == {
         "status": "partial",

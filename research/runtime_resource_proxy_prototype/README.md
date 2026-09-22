@@ -23,6 +23,45 @@ For a review of what this branch actually does, steps 1 through 4 and step 7
 are enough.
 The catalogs below are lookup material for exact field and validation rules.
 
+## The whole flow in plain language
+
+1. Each client or server job process observes its visible CPU, memory, and GPU
+   capacity before custom job imports and accumulates capacity-time in memory.
+2. When that process finishes, cleanup stops new application commands, lets
+   already-admitted callbacks and F3 sends settle within fixed bounds, and
+   writes one private `terminal_handoff.json` in the existing run workspace.
+3. The long-lived client or server parent freezes its own job-scoped F3
+   counter, validates that fixed handoff, checked-merges parent and child F3,
+   binds the trusted participant name, and creates the only public
+   `participant_summary`.
+4. A client parent frees launcher-managed compute resources and sends those
+   exact report bytes once with the existing authenticated completion request.
+   The server parent submits its own report to the same acceptance code
+   locally.
+5. The root server validates each expected participant report and retains the
+   first accepted canonical bytes until the existing job-completion cutoff.
+6. At cutoff it reconciles accepted and missing participants, writes accepted
+   participant files, writes `resource_summary.json` last, and saves everything
+   only in the normal `WORKSPACE` archive.
+7. `nvflare job resources --job ...` reads one retained workspace;
+   `nvflare job resources --study ...` reads matching retained workspaces and
+   builds an on-demand study total. No separate `RESOURCE_STATS` store exists.
+
+CPU, memory, GPU resource time, workspace-filesystem capacity, and F3 are bound
+in production. Saved-result bytes remain `unavailable/not_bound` until a
+workflow owner can identify a complete bounded retained-result set.
+
+### Production code map
+
+| Part of the flow | Main files |
+| --- | --- |
+| Observe capacity and accumulate resource time | [`resource_stats/probes`](../../nvflare/private/fed/resource_stats/probes), [`accumulator.py`](../../nvflare/private/fed/resource_stats/accumulator.py), and [`collector.py`](../../nvflare/private/fed/resource_stats/collector.py) |
+| Classify and count F3 sends | [`f3_counter.py`](../../nvflare/private/fed/resource_stats/f3_counter.py), [`f3_bindings.py`](../../nvflare/private/fed/resource_stats/f3_bindings.py), and [`send_accounting.py`](../../nvflare/fuel/f3/send_accounting.py) |
+| Close the child and transfer its private result | [`job_process_cleanup.py`](../../nvflare/private/fed/app/job_process_cleanup.py) and [`handoff.py`](../../nvflare/private/fed/resource_stats/handoff.py) |
+| Assemble client/server reports | [`client_executor.py`](../../nvflare/private/fed/client/client_executor.py), [`job_runner.py`](../../nvflare/private/fed/server/job_runner.py), and [`collector.py`](../../nvflare/private/fed/resource_stats/collector.py) |
+| Authenticate, validate, reduce, and publish | [`fed_server.py`](../../nvflare/private/fed/server/fed_server.py), [`coordinator.py`](../../nvflare/private/fed/resource_stats/coordinator.py), and [`contract.py`](../../nvflare/private/fed/resource_stats/contract.py) |
+| Read the archived result for CLI queries | [`archive_reader.py`](../../nvflare/private/fed/resource_stats/archive_reader.py), [`job_cmds.py`](../../nvflare/private/fed/server/job_cmds.py), and [`job_cli.py`](../../nvflare/tool/job/job_cli.py) |
+
 ## What is included
 
 The implementation and its supporting prototype contain:
@@ -37,8 +76,8 @@ The implementation and its supporting prototype contain:
   saved-result/F3 objects;
 - production F3 ownership, trusted bindings for deployment, real task
   responses, and task results, origin-only send accounting, a fixed cutoff,
-  and checked child/parent merge; focused validation and a new live end-to-end
-  reference remain in progress;
+  and checked child/parent merge; the focused suite passes, while a new live
+  process-mode reference remains to be captured;
 - a production Option A completion/report envelope, direct canonical-byte
   duplicate/conflict comparison, and a bounded live accepted-byte ledger, plus
   a separate prototype for expanded fallback/retry behavior;
@@ -96,7 +135,7 @@ renderers:
 The following broader goldens are design and contract examples. Some include
 reported F3 or retained-content values that are not claims about the older
 captured live runs. Retained content still has no general authoritative source;
-F3 has production bindings and a 366-of-366 passing focused suite, but no new
+F3 has production bindings and passing focused/socket-backed suites, but no new
 process-mode live reference yet. See
 [F3 implementation status](F3_GAP.md#validation-status):
 
@@ -133,7 +172,7 @@ job history.
 | [Semantic contract](schema/contract_v1.py) | Cross-record validation and exact arithmetic. |
 | [Artifact generator](schema/build_review_artifacts.py) | Deterministic source for the canonical artifacts. |
 | [Runtime probe](runtime_probe.py) | Ordinary-user collection experiments. |
-| [F3 finalization](f3_finalization.py) | Counter inclusion, acceptance, and cutoff behavior. |
+| [Legacy F3 fixture](f3_finalization.py) | Simplified deterministic input for standalone contract tests; production F3 behavior is defined by `F3_GAP.md` and the production code anchors listed there. |
 | [Terminal report transport](terminal_report_transport.py) | Prototype of expanded retry/conflict/cutoff behavior; it is not the production client send loop. |
 | [Prototype contracts](prototype_contract.py) | Reporter, workspace-file, and fixed-member workspace-archive reader. |
 | [Behavior fixtures](review_contract_fixtures.py) | Synthetic cases a standalone process cannot observe. |

@@ -16,9 +16,10 @@ resource manager.
 For a strict description of the code in this branch, including limitations,
 read the
 [production implementation walkthrough](../../research/runtime_resource_proxy_prototype/PRODUCTION_IMPLEMENTATION.md).
-In particular, F3, retained-content collection, client retries/tombstones, and
+In particular, retained-content collection, client retries/tombstones, and
 the versioned completion-topic fallback described later in this plan are not
-implemented. The exact current outputs are in
+implemented. F3 collection and rollup are implemented; a new live process-mode
+reference is still needed. The exact current outputs are in
 [production_reference](../../research/runtime_resource_proxy_prototype/production_reference/README.md).
 A real PyTorch Process-launch POC that exercised CUDA training, child launch,
 CellNet delivery, normal workspace storage, and the job/site/study CLI is
@@ -56,9 +57,9 @@ captured separately in the
 7. Visible workspace-filesystem capacity is observed once, at finalization.
    It is not time-integrated or aggregated across sites.
 8. Saved-result bytes (`retained_content`) and selected F3 traffic remain
-   separate typed final measurements. The implemented hooks report both as
-   `unavailable/not_bound`; authoritative retained-result binding and
-   parent/child F3 accounting are target work.
+   separate typed final measurements. Retained content currently reports
+   `unavailable/not_bound` until an authoritative result owner is bound. F3
+   uses implemented parent/child counters and checked merge.
 9. The client parent sends the exact parent-assembled bytes and terminal
    outcome once in the existing session-bound `REPORT_JOB_FAILURE` CellNet
    request. There is no application-level report retry or receipt tombstone.
@@ -97,10 +98,15 @@ total then adds both jobs. It must not be labeled cluster capacity.
 
 The current adapter covers the window from the early platform hook before
 workspace download, custom-path activation, and application-runner setup to
-`_archive_results()` before workspace upload. It includes time spent waiting
-inside that window, but not the whole operating-system process lifetime. It is
-not active-task time. Job and study `measured_seconds` add participant
-durations, so they can exceed job or study wall-clock elapsed time.
+`_archive_results()` before workspace upload. The final reading currently
+follows the callback pre-drain and child F3 drain, so it includes their actual
+elapsed cleanup tails. Both are condition waits that normally return
+immediately and are individually bounded by five seconds; the optional
+post-stop callback wait is after publication and excluded. The interval also
+includes other waiting inside that window, but not the whole operating-system
+process lifetime. It is not active-task time. Job and study
+`measured_seconds` add participant durations, so they can exceed job or study
+wall-clock elapsed time.
 
 ## 3. End-to-end flow
 
@@ -172,9 +178,9 @@ The tradeoffs are important:
   Until a multi-node collector exists, production discards rank-zero numeric
   resource-time totals and reports `unavailable/unsupported` rather than a
   partial or claimed whole-participant total.
-- F3 is currently `unavailable/not_bound`. A future implementation must define
-  and enforce child and parent cutoffs without treating late or unbound traffic
-  as counted.
+- F3 now uses process-local child and parent counters with one fixed cutoff and
+  checked merge. Its remaining proof gap is a fresh process-mode live run, not
+  an undefined counter or schema.
 - If an applicable cgroup CPU or memory constraint is unreadable or malformed,
   that dimension fails closed instead of falling back to a wider value.
 - A restored server job process covers only its new process interval. Numeric
@@ -529,55 +535,71 @@ already identifies as retained output. Do not scan arbitrary workspace files,
 guess model filenames, or hash `model.pt`. If a workflow has no authoritative
 bounded result set, report retained content as unavailable.
 
-### 7.6 F3 network counters (target; not implemented)
+### 7.6 F3 network counters
 
-F3 is sender-counted and job-scoped. It includes only the selected classes:
+F3 is sender-counted, origin-only, and job-scoped. It includes exactly three
+classes:
 
-- task request paired with a real task response;
-- real task response;
-- task result;
-- job application/deployment payload; and
-- included job stream data.
+- one job application/deployment send per remote destination;
+- a response that contains a real task; and
+- a submitted task result.
 
-It excludes empty polling, acknowledgements, protocol control, retries,
+Task polls, empty or control responses, acknowledgements, protocol control,
 workspace transfer, the resource report itself, authentication, heartbeat,
-shutdown, logs, HCI, federated events, and unclassified traffic.
+shutdown, logs, HCI, federated events, and unclassified traffic are excluded.
+An intermediate relay never counts the operation again.
 
 F3 counters are process-local. Phase 1 therefore keeps one job-scoped counter
 in the parent and one in the job process. The child freezes its contribution
 into the private handoff. After the job handle finishes, the parent closes
-admission to its counter, waits up to a fixed five seconds for
-already-classified sends to resolve, freezes its snapshot, and adds compatible
-parent and child fields with checked arithmetic. Five seconds is an internal
-constant, not a job or operator setting.
+admission and freezes immediately, then adds compatible parent and child fields
+with checked arithmetic. CP originates no included class and SP's blocking
+deployment sends have already completed; a parent admission still pending at
+cleanup is therefore marked `counter_gap` instead of delaying publication.
+
+The child's five seconds is a maximum, not an unconditional sleep. Its callback
+and F3 drains use condition variables and return immediately when no work is
+pending. The waits occur only during job-process terminal cleanup, so they add
+no polling or steady-state job overhead. Five seconds is an internal constant,
+not a job or operator setting.
 
 An incomplete drain or missing contribution is not guessed. If at least one
 bounded contribution is useful, merged F3 is partial with the applicable
 issue. If none is useful, F3 is unavailable. This does not change the separate
 compute, retained-content, or workspace results.
 
-F3 counts distinct sender hops. A child send to its parent and the parent's
-real relay to another endpoint are two included hops, so the merge adds both.
-Trusted correlation prevents duplicate instrumentation or a reliable transport
-retransmission from counting the *same* hop twice; it does not deduplicate a
-genuine parent relay against the child send. When hop identity cannot be
-proved, the affected F3 result is partial or unavailable rather than guessed.
+F3 counts one logical operation at its trusted semantic origin, once per
+remote destination. A remote logical destination reached through a local
+first-hop relay still counts once at the origin; the relay does not add a
+second contribution. Retries and stream chunks do not add messages or repeat
+bytes. When provenance or settlement cannot be proved, the affected operation
+is discarded and F3 is partial rather than guessed.
 
-Remote bytes are counted after local send acceptance. Direct in-process
-delivery and sends that fail before acceptance stay in separate counters.
-Reliable stream retransmissions are not counted twice.
+The main payload is measured after FOBS encoding and before optional
+encryption. Successfully accepted unique `DownloadService` bytes are folded
+into their originating operation without another message. Remote bytes enter
+the public value only after local transport acceptance. Direct final
+in-process delivery and sends that fail before acceptance do not contribute.
 
-The target design freezes child F3 counters once in `_archive_results()`, after new
-application-command admission has stopped and before workspace upload. Current
-teardown waits for previously admitted callbacks later. If one is still
-active, the child contribution carries `counter_gap`.
+Production freezes child F3 counters once in `_archive_results()`, after new
+application-command admission has stopped and before workspace upload.
+Cleanup first gives already-admitted command callbacks up to five seconds to
+finish while Cell and streaming remain available. A timeout or error marks the
+child contribution `partial/counter_gap` rather than publishing a complete
+undercount. It then closes F3 admission, drains pending logical sends for up to
+five seconds, and freezes before transport shutdown.
 
-The target parent counter starts before that parent can send or forward any included
+The real-task-response binding pre-admits its known origin/destination pair
+before the command callback returns. The later Cell path reuses that token and
+still supplies the post-FOBS byte count and actual acceptance result. This
+closes the callback-return/send-start race without counting early.
+
+The parent counter starts before that parent can originate any included
 traffic. CP freezes it after `job_handle.wait()` and before sending the
 terminal report. SP freezes it after the server handle finishes, before it
-assembles its local participant report. A parent drain timeout also produces
-`counter_gap`; later send completion cannot mutate the frozen result. The
-terminal resource report and workspace transfer remain excluded.
+assembles its local participant report. Any unexpected pending parent operation
+produces `counter_gap` immediately; later completion cannot mutate the frozen
+result. The terminal resource report and workspace transfer remain excluded.
 
 The exact current route bindings and remaining proof gaps are in
 [Phase 1 integration with current code](../../research/runtime_resource_proxy_prototype/CURRENT_CODE_INTEGRATION.md).
@@ -634,16 +656,16 @@ bounds. Unknown fields are rejected.
 | Action | Current location | Required behavior |
 | --- | --- | --- |
 | Record participant list | `private/fed/server/job_runner.py`, before server/client start requests | **Implemented:** preserve the server and every originally selected client; persist client names in `JobMetaKey.RESOURCE_PARTICIPANTS`; failed deployment and later start timeout leave that client visible as `missing`; restore rebuilds the expected set from metadata. |
-| Start server-parent F3 | `private/fed/server/job_runner.py`, after scheduling and before `_deploy_job()` | **Target:** create trusted job-scoped counters before the first included deployment or forwarding send. |
-| Start client-parent F3 | `private/fed/client/client_executor.py::start_app()`, after authoritative `START_JOB` metadata is validated against deployed metadata and before launcher selection or launch | **Target:** create trusted job-scoped counters before forwarding caused by the launched job. |
+| Start server-parent F3 | `private/fed/server/job_runner.py`, after scheduling and before `_deploy_job()` | **Implemented:** create a trusted job-scoped counter before the first included deployment send. |
+| Start client-parent F3 | `private/fed/client/client_executor.py::start_app()`, after authoritative `START_JOB` metadata is validated against deployed metadata and before launcher selection or launch | **Implemented:** create a trusted job-scoped counter before launching the job. The current three-class allowlist normally gives CP a zero contribution. |
 | Official launcher bootstrap | Process, Docker, Kubernetes, and Slurm launchers | **Implemented:** invoke a fixed NVFlare bootstrap with Python `-I` and an exact `client` or `server` selector, keeping job custom paths out of the effective startup path; this is automatic and needs no user setting or extra privilege. |
 | Client accumulator start | `private/fed/app/client/worker_process.py`, after `Workspace` construction and before workspace download or `activate_job_python_path()` | **Implemented:** probe CPU, memory, and GPU and start in-memory accumulation. CUDA Runtime discovery may use one unique metadata-owned NVIDIA runtime under the import-time frozen distribution roots. Persist nothing. |
 | Server accumulator start | `private/fed/app/server/runner_process.py`, at the equivalent point | **Implemented:** same behavior. |
-| Client child handoff | client `worker_process.py::_archive_results()`, after runner return and before F3 streaming shutdown/workspace upload | **Implemented:** finish the accumulator, observe workspace capacity, store retained/child-F3 as unavailable, and atomically write one private handoff. |
+| Client child handoff | client `worker_process.py::_archive_results()`, after runner return and before F3 streaming shutdown/workspace upload | **Implemented:** finish the accumulator, observe workspace capacity, freeze child F3, keep retained content unavailable until it has an authoritative owner, and atomically write one private handoff. |
 | Server child handoff | server `runner_process.py::_archive_results()` | Same behavior. |
-| Client parent assembly and delivery | `private/fed/client/client_executor.py`, after `job_handle.wait()` | **Implemented:** validate the handoff, assemble canonical bytes even when child data is unavailable, delete staging, free launcher-managed compute resources, then attach those exact bytes to one `REPORT_JOB_FAILURE` request and wait for its reply. |
+| Client parent assembly and delivery | `private/fed/client/client_executor.py`, after `job_handle.wait()` | **Implemented:** close and freeze parent F3 immediately, validate the handoff, checked-merge child and parent F3, assemble canonical bytes even when child data is unavailable, delete staging, free launcher-managed compute resources, then attach those exact bytes to one `REPORT_JOB_FAILURE` request and wait for its reply. |
 | Server acceptance | `private/fed/server/fed_server.py::process_job_failure()` | **Implemented:** authenticate and put the optional report in the bounded live ledger before resolving the outcome, without changing the job outcome. Participant files are written only at finalization. `process_job_completion()` is target-only fallback. |
-| Server parent assembly and rollup | `private/fed/server/job_runner.py::_job_complete_process()`, after the server handle finishes and before `_save_workspace()` | **Implemented:** validate the SJ handoff, assemble canonical bytes, accept locally, delete staging, close the client cutoff, write accepted participant files, publish the summary last in the parent-owned workspace, then use normal workspace archival. Parent F3 merge remains target work. |
+| Server parent assembly and rollup | `private/fed/server/job_runner.py::_job_complete_process()`, after the server handle finishes and before `_save_workspace()` | **Implemented:** close and freeze parent F3, validate the SJ handoff, checked-merge both F3 contributions, assemble canonical bytes, accept locally, delete staging, close the client cutoff, write accepted participant files, publish the summary last in the parent-owned workspace, then use normal workspace archival. |
 
 The Process command is `<sys.executable> -I <absolute platform
 job_process_bootstrap.py> {client|server} <existing args>`. Docker,
@@ -796,9 +818,10 @@ The remainder of this subsection is a possible follow-up design. Current CP
 makes one application-level send, and SP retains neither a receipt tombstone
 nor restart-restorable acceptance state.
 
-After the child handle finishes, CP validates the private handoff, drains its
-parent F3 counter, and assembles canonical bytes. A missing or invalid handoff
-normally produces a valid report with typed unavailable or partial fields.
+After the child handle finishes, CP closes and freezes its parent F3 counter
+immediately, validates the private handoff, and assembles canonical bytes. A
+missing or invalid handoff normally produces a valid report with typed
+unavailable or partial fields.
 CP keeps those exact parent-assembled bytes in memory for the bounded retry
 loop. It omits the optional report only if parent assembly fails, the final
 bytes exceed the bound, or they cannot fit the effective Cell payload limit;
@@ -1114,9 +1137,9 @@ must not show workspace capacity as usage or include it in totals.
 | Slurm job uses more than one node | Emit `resource_time: {status: unavailable, issues: [unsupported]}` with no rank-zero numeric totals; never infer other-node capacity. |
 | Server job process is restored from a snapshot | Measure its new interval and mark resource time `partial/observation_incomplete`; never claim the pre-restore interval. |
 | Job reaches Python finalization after an application error | Freeze the private handoff if possible; parent assembly and job failure remain independent. |
-| An admitted child callback remains when child F3 freezes | **Target F3 behavior:** freeze once; parent assembly preserves partial F3 with `counter_gap`. Production F3 is currently `unavailable/not_bound`. |
-| Parent F3 does not drain within its fixed bound | **Target F3 behavior:** freeze the bounded contribution and mark merged F3 partial with `counter_gap`. Production has no parent F3 counter yet. |
-| SIGKILL or launcher-managed pod loss bypasses child finalization, but the parent survives | Parent still emits one report with unavailable child-derived fields; F3 is currently unavailable. |
+| An admitted child callback remains at the pre-publication cutoff | Stop after the bounded wait, mark child F3 `partial/counter_gap`, publish once, stop transport, and retain one bounded post-stop callback wait before closing security state. |
+| A parent F3 operation is unexpectedly still pending at cleanup | Freeze immediately and mark merged F3 partial with `counter_gap`; do not block parent completion. |
+| SIGKILL or launcher-managed pod loss bypasses child finalization, but the parent survives | Parent still emits one report with unavailable child-derived fields; a usable parent F3 subtotal is preserved as `partial/attribution_incomplete`. |
 | Parent/site loss prevents parent assembly or delivery | No report reaches SP; the expected participant is missing. |
 | Workspace upload fails | Parent treats the handoff as missing and builds the same typed partial/unavailable report. |
 | Terminal request or reply is lost | Current CP does not retry. A lost request can leave the report missing; a lost reply may follow successful server acceptance. |
@@ -1165,20 +1188,20 @@ kept in the
 
 | Current area | Phase 1 change |
 | --- | --- |
-| `nvflare/apis/fl_constant.py` | Add the job/study resource command names. No resource-specific `START_JOB` identity header is needed. |
-| `private/fed/server/job_runner.py` | **Implemented:** persist all selected client names while launching only the deployable subset, restore the expected set, validate the SJ handoff, accept locally, close the cutoff, reduce, publish the summary last in the parent-owned workspace, and use unchanged normal workspace saving. **Target:** SP F3 and accepted-ledger/cutoff recovery. |
-| `private/fed/client/client_executor.py` parent F3 state | **Target:** start trusted CP job-scoped F3 before included traffic. |
+| `nvflare/apis/fl_constant.py` | **Implemented:** add the job/study resource command names. No resource-specific `START_JOB` identity header is needed. |
+| `private/fed/server/job_runner.py` | **Implemented:** persist all selected client names while launching only the deployable subset, restore the expected set, own SP F3, validate and merge the SJ handoff, accept locally, close the cutoff, reduce, publish the summary last in the parent-owned workspace, and use unchanged normal workspace saving. **Target:** accepted-ledger/cutoff recovery. |
+| `private/fed/client/client_executor.py` parent F3 state | **Implemented:** start trusted CP job-scoped F3 before job launch and freeze/merge it after the handle finishes. |
 | Process/Docker/Kubernetes/Slurm launchers | **Implemented:** fixed NVFlare bootstrap, exact worker selector, isolated (`-I`) startup, and sanitized effective startup path, with no user option or extra privilege. |
 | client/server `worker_process.py` and `runner_process.py` | **Implemented:** start the in-memory accumulator before workspace download and custom-path activation; finish once in `_archive_results()` and atomically stage one private terminal handoff. |
-| `private/fed/app/job_process_cleanup.py` and command agents | **Target:** expose incomplete admitted child callbacks for F3. |
-| New platform resource module | **Implemented:** fail-closed probes, trusted-root NVIDIA CUDA Runtime discovery, checked accumulation, handoff validation, deterministic parent assembly, public validation, bounded in-memory acceptance, finalization-time atomic/fsynced writes, and a fail-closed path-backed archive reader. **Target:** parent/child F3 merge and retained-result provider. |
-| `private/fed/client/client_executor.py` | **Implemented:** validate the handoff, bind trusted identity, delete staging, free launcher-managed compute resources, and then send exact bytes once on Option A. **Target:** CP F3 and any approved retry policy. |
+| `private/fed/app/job_process_cleanup.py` and command agents | **Implemented:** close command admission, condition-drain admitted callbacks before publication, mark timeout/error as `counter_gap`, then preserve bounded teardown. |
+| New platform resource module | **Implemented:** fail-closed probes, trusted-root NVIDIA CUDA Runtime discovery, checked accumulation, F3 state/cutoff and parent/child merge, handoff validation, deterministic parent assembly, public validation, bounded in-memory acceptance, finalization-time atomic/fsynced writes, and a fail-closed path-backed archive reader. **Target:** retained-result provider. |
+| `private/fed/client/client_executor.py` | **Implemented:** freeze/merge CP F3, validate the handoff, bind trusted identity, delete staging, free launcher-managed compute resources, and then send exact bytes once on Option A. **Target:** any approved retry policy. |
 | `fuel/f3/cellnet/defs.py` | **Implemented:** Option A keeps `REPORT_JOB_FAILURE`. **Fallback only:** Option B would add `REPORT_JOB_COMPLETION`. |
 | `private/defs.py` | **Implemented:** Option A report/reply keys. **Fallback only:** Option B would add a versioned completion envelope. |
 | `private/fed/server/fed_server.py` | **Implemented:** Option A acceptance before once-only outcome handling. **Target:** Option B and any approved receipt tombstone. |
-| F3 call sites and `fuel/f3/cellnet/core_cell.py` | **Target:** trusted job/class correlation, process-local counters, and close/drain/freeze snapshots. |
+| F3 call sites, FOBS/DownloadService, streaming, and `fuel/f3/cellnet/core_cell.py` | **Implemented and focused-tested:** three trusted semantic classes, process-local origin context, after-FOBS/before-encryption sizing, large-object byte folding, stream terminal outcome, relay/retry suppression, and close/drain/freeze snapshots. |
 | `private/fed/server/job_cmds.py` | **Implemented:** authorized job and study handlers stage one normal `WORKSPACE` at a time and use the fixed-member reader without loading the full archive into memory. |
-| `fuel/flare_api/flare_api.py` and `tool/job/job_cli.py` | Add session methods and the job/study CLI forms. |
+| `fuel/flare_api/flare_api.py` and `tool/job/job_cli.py` | **Implemented:** add session methods and the job/study CLI forms. |
 | Job store implementations | No new save/get component. The private handoff uses the run workspace temporarily; only final resource members remain in the normal `WORKSPACE` archive. |
 
 ## 15. Required tests
@@ -1198,7 +1221,7 @@ At minimum:
 - CPU affinity/cpuset/quota, memory limit, CUDA enumeration, model grouping,
   workspace-filesystem, retained-content, and F3 fixtures;
 - Slurm multi-node `unavailable/unsupported` behavior with no numeric totals,
-  child F3 with an active callback, parent F3 bounded-drain timeout, and
+  child F3 with an active callback, an unexpected pending parent operation, and
   deterministic checked parent/child counter merging;
 - one overall compute status for reported, partial, and unavailable cases;
 - hard child crash, missing/malformed handoff, and parent-built
@@ -1247,9 +1270,8 @@ proof for:
    and CUDA-to-NVML device/model matching, including device subsets,
    multi-GPU, and MIG, plus separately validated adapters if legacy
    `torch`-owned or conda-only runtime layouts must be supported;
-2. trusted F3 task-poll correlation, stream provenance, forwarding, same-hop
-   duplicate/retransmission suppression, and bounded parent close/drain
-   behavior;
+2. a new process-mode live F3 run to complement the passing focused and
+   socket-backed tests;
 3. the authoritative bounded retained-result set for each supported workflow;
 4. initial OS, cgroup, container, Kubernetes, and Slurm support, with Slurm
    multi-node kept `unavailable/unsupported` until non-rank-0 capacity is

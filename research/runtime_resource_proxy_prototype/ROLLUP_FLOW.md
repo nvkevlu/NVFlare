@@ -57,7 +57,7 @@ are troubleshooting aids for an operator, not production collectors.
 | Workspace-filesystem capacity | CJ or SJ `_archive_results()`, once at finalization | `os.statvfs(Workspace.get_run_dir(job_id))`; capacity is `f_blocks * f_frsize` | One terminal observation enters the private handoff. It is never added across participants or jobs. |
 | Retained-content bytes | CJ or SJ `_archive_results()`, once at finalization | A bounded retained-result set supplied by an existing workflow owner | The rule is fixed, but the authoritative set is not yet bound for every workflow. An unbound workflow reports unavailable; NVFlare does not scan the workspace or guess filenames. |
 | Child F3 counters | CJ or SJ throughout the run, frozen in `_archive_results()` | Origin-only sender accounting for real task responses and task results; one logical message per remote destination, with bytes measured after FOBS and before encryption | Cleanup closes command admission and pre-drains callbacks for up to five seconds while transport is alive, then closes/drains F3 for up to five seconds and writes its snapshot into the private handoff. |
-| Parent F3 counters | CP or SP from trusted job start until after `job_handle.wait()` | Origin-only sender accounting; SP owns job-application deployment, while forwarded traffic is not recounted | The parent closes and drains for at most five seconds, then checked-adds the non-overlapping process contributions before it builds the public report. |
+| Parent F3 counters | CP or SP from trusted job start until after `job_handle.wait()` | Origin-only sender accounting; SP owns blocking job-application deployment, while forwarded traffic is not recounted | The parent closes and freezes immediately, then checked-adds the non-overlapping process contributions before it builds the public report. Any pending parent operation is an instrumentation gap, not work that delays cleanup. |
 
 CJ means client job process, CP client parent, SJ server job process, and SP
 server parent. The exact current-code hook map is in
@@ -114,6 +114,9 @@ then closes F3 admission, drains admitted logical sends for up to five seconds,
 and freezes before streaming and Cell stop. If the callback pre-drain failed,
 cleanup retains a bounded post-stop callback wait before security closes.
 
+These are maximum condition waits, not fixed sleeps. A normal job with no
+active callback or pending F3 operation passes both gates immediately.
+
 `_archive_results()` finishes the accumulator and writes a bounded private
 handoff with four child-derived facts:
 
@@ -138,12 +141,14 @@ validation and assembly, the parent deletes the staging directory.
 
 ## Stage 3: assemble and deliver one participant summary
 
-After `job_handle.wait()`, CP or SP bounds and strictly validates the private
-handoff. It stops new included parent-process F3 traffic, drains admitted
-callbacks for at most five seconds, freezes the parent counters, and adds
-the non-overlapping semantic-origin contributions from child and parent. A
-relay is not another contribution. It then builds exactly one public
-report:
+After `job_handle.wait()`, CP or SP stops new included parent-process F3
+traffic and freezes the parent counter immediately. It then bounds and strictly
+validates the private handoff. CP has no included origin class, while SP's
+blocking deployment sends have already finished; any pending parent admission
+is marked as a counter gap instead of delaying terminal publication. The
+parent then adds the non-overlapping semantic-origin contributions from child
+and parent. A relay is not another contribution. It then builds exactly one
+public report:
 
 ```text
 participant_summary

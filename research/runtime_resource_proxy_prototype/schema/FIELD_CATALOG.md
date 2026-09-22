@@ -197,7 +197,7 @@ bytes.
 
 | Counter | Meaning |
 | --- | --- |
-| remote_accepted | Remote application payload accepted before counters close; primary F3 total. |
+| remote_accepted | Included payload that the originating process's local transport accepted for a remote logical destination before counters closed; primary F3 total. It does not assert receiver processing or durable storage. |
 
 `status` is reported, partial, unavailable, or error. Reported forbids issues;
 partial requires counters and issues; unavailable/error requires issues and

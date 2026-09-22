@@ -27,7 +27,7 @@ from nvflare.fuel.f3.message import Message
 from nvflare.fuel.f3.send_accounting import attach_logical_send_context
 from nvflare.fuel.f3.streaming.blob_streamer import BlobStream
 from nvflare.fuel.f3.streaming.byte_streamer import STREAM_TYPE_BLOB, ByteStreamer, TxTask
-from nvflare.fuel.f3.streaming.download_service import TransactionDoneStatus
+from nvflare.fuel.f3.streaming.download_service import TransactionDoneStatus, _Transaction
 from nvflare.private.fed.resource_stats.f3_counter import F3Counter, F3TrafficClass
 from tests.unit_test.fuel.f3.streaming.download_test_utils import (
     MockDownloadable,
@@ -80,6 +80,52 @@ def test_real_counter_counts_one_origin_send_per_destination():
     assert context.try_begin("origin", "site-1") is None
     assert context.try_begin("relay", "site-3") is None
     assert _counter_value(counter) == {"payload_bytes": "30", "messages": "2"}
+
+
+def test_pre_admission_is_reused_once_by_transport():
+    counter = F3Counter()
+    context = attach_logical_send_context(Message(), counter, F3TrafficClass.TASK_RESPONSE)
+
+    assert context.pre_admit("server/job", "client/job")
+    assert counter.pending_count == 1
+
+    attempt = context.try_begin("server/job", "client/job")
+    assert attempt is not None
+    assert counter.pending_count == 1
+    assert context.try_begin("server/job", "client/job") is None
+    attempt.accepted(17)
+
+    assert _counter_value(counter) == {"payload_bytes": "17", "messages": "1"}
+
+
+def test_pre_admission_allows_oob_registration_before_transport():
+    counter = F3Counter()
+    context = attach_logical_send_context(Message(), counter, F3TrafficClass.TASK_RESPONSE)
+
+    assert context.pre_admit("server/job", "client/job")
+    context.register_oob_transaction("tx-1", ("client/job",))
+    main = context.try_begin("server/job", "client/job")
+    assert main is not None
+    main.accepted(7)
+    contribution = context.make_oob_contribution_context("tx-1", "client/job", "chunk-1", 11)
+    contribution.try_begin("server/job", "client/job").accepted(999)
+    context.settle_oob_transaction("tx-1", {"client/job"})
+
+    assert _counter_value(counter) == {"payload_bytes": "18", "messages": "1"}
+
+
+def test_failed_pre_admission_marks_closed_owner_partial():
+    counter = F3Counter()
+    counter.close()
+    context = attach_logical_send_context(Message(), counter, F3TrafficClass.TASK_RESPONSE)
+
+    assert not context.pre_admit("server/job", "client/job")
+
+    assert counter.freeze() == {
+        "status": "partial",
+        "issues": ["counter_gap"],
+        "remote_accepted": {"payload_bytes": "0", "messages": "0"},
+    }
 
 
 def test_oob_bytes_complete_the_same_message_only_after_settlement():
@@ -231,6 +277,22 @@ def test_core_cell_counts_post_fobs_pre_encryption_size(monkeypatch):
     assert _counter_value(counter) == {"payload_bytes": "7", "messages": "1"}
 
 
+def test_core_cell_reuses_pre_admission(monkeypatch):
+    import nvflare.fuel.f3.cellnet.core_cell as core_cell_module
+
+    cell = _core_cell("server/job")
+    counter = F3Counter()
+    message = Message(headers={MessageHeaderKey.DESTINATION: "client/job"}, payload=b"payload")
+    context = attach_logical_send_context(message, counter, F3TrafficClass.TASK_RESPONSE)
+    assert context.pre_admit("server/job", "client/job")
+    monkeypatch.setattr(core_cell_module, "encode_payload", lambda _message, fobs_ctx: 7)
+    cell.encrypt_payload = MagicMock()
+
+    assert cell._send_to_endpoint(Endpoint("client/job"), message) == ""
+    assert counter.pending_count == 0
+    assert _counter_value(counter) == {"payload_bytes": "7", "messages": "1"}
+
+
 def test_core_cell_excludes_direct_in_process_delivery(monkeypatch):
     import nvflare.fuel.f3.cellnet.core_cell as core_cell_module
 
@@ -246,6 +308,48 @@ def test_core_cell_excludes_direct_in_process_delivery(monkeypatch):
     assert cell._send_to_endpoint(Endpoint("site-1"), message) == ""
     cell._send_direct_message.assert_called_once()
     assert _counter_value(counter) == {"payload_bytes": "0", "messages": "0"}
+
+
+def test_core_cell_abandons_pre_admission_for_direct_final_delivery(monkeypatch):
+    import nvflare.fuel.f3.cellnet.core_cell as core_cell_module
+
+    cell = _core_cell("server/job")
+    cell.ALL_CELLS["client/job"] = object()
+    cell._send_direct_message = MagicMock()
+    counter = F3Counter()
+    message = Message(headers={MessageHeaderKey.DESTINATION: "client/job"}, payload=b"payload")
+    context = attach_logical_send_context(message, counter, F3TrafficClass.TASK_RESPONSE)
+    assert context.pre_admit("server/job", "client/job")
+    monkeypatch.setattr(core_cell_module, "encode_payload", lambda _message, fobs_ctx: 7)
+    cell.encrypt_payload = MagicMock()
+
+    assert cell._send_to_endpoint(Endpoint("client/job"), message) == ""
+    assert counter.pending_count == 0
+    assert _counter_value(counter) == {"payload_bytes": "0", "messages": "0"}
+
+
+def test_encode_failure_leaves_pre_admission_to_freeze_partial(monkeypatch):
+    import nvflare.fuel.f3.cellnet.core_cell as core_cell_module
+
+    cell = _core_cell("server/job")
+    counter = F3Counter()
+    message = Message(headers={MessageHeaderKey.DESTINATION: "client/job"}, payload=b"payload")
+    context = attach_logical_send_context(message, counter, F3TrafficClass.TASK_RESPONSE)
+    assert context.pre_admit("server/job", "client/job")
+
+    def fail_encode(_message, fobs_ctx):
+        raise RuntimeError("encode failed")
+
+    monkeypatch.setattr(core_cell_module, "encode_payload", fail_encode)
+    cell.encrypt_payload = MagicMock()
+
+    assert cell._send_to_endpoint(Endpoint("client/job"), message)
+    assert not counter.close_and_drain(0.0)
+    assert counter.freeze() == {
+        "status": "partial",
+        "issues": ["counter_gap"],
+        "remote_accepted": {"payload_bytes": "0", "messages": "0"},
+    }
 
 
 def test_core_cell_counts_a_local_first_hop_to_a_remote_destination(monkeypatch):
@@ -515,6 +619,102 @@ def test_download_service_contribution_is_deduped_and_settled_after_transport_ac
 
     assert counter.pending_count == 0
     assert _counter_value(counter) == {"payload_bytes": "14", "messages": "1"}
+
+
+def test_download_chunk_identity_canonicalizes_builtin_state_and_dedupes_retry():
+    tx = _Transaction(timeout=10.0, num_receivers=1)
+    ref = tx.add_object(MockDownloadable([b"data"]))
+
+    first_state = {
+        "nested": [None, True, 7, 1.25, b"bytes", bytearray(b"array"), memoryview(b"view")],
+        "position": (3, {"phase": complex(2, -1)}),
+    }
+    reordered_equivalent_state = {
+        "position": (3, {"phase": complex(2, -1)}),
+        "nested": [None, True, 7, 1.25, b"bytes", bytearray(b"array"), memoryview(b"view")],
+    }
+
+    first_key = ref.accounting_chunk_key(first_state)
+    retry_key = ref.accounting_chunk_key(reordered_equivalent_state)
+    distinct_key = ref.accounting_chunk_key({"nested": tuple(first_state["nested"])})
+
+    assert first_key == retry_key
+    assert distinct_key != first_key
+    assert len({first_key, retry_key, distinct_key}) == 2
+
+
+def test_download_chunk_identity_rejects_unbounded_or_unsupported_state_without_allocating_ledger():
+    from nvflare.fuel.f3.streaming import download_service as download_service_module
+
+    tx = _Transaction(timeout=10.0, num_receivers=1)
+    ref = tx.add_object(MockDownloadable([b"data"]))
+    cyclic_state = []
+    cyclic_state.append(cyclic_state)
+
+    assert ref.accounting_chunk_key({"custom": object()}) is None
+    assert ref.accounting_chunk_key(b"x" * (download_service_module._ACCOUNTING_STATE_MAX_SCALAR_BYTES + 1)) is None
+    assert ref.accounting_chunk_key(cyclic_state) is None
+
+
+def test_unaccounted_download_does_not_compute_a_chunk_identity(monkeypatch):
+    from nvflare.fuel.f3.streaming import download_service as download_service_module
+
+    canonicalize = MagicMock(side_effect=AssertionError("unaccounted download canonicalized state"))
+    monkeypatch.setattr(download_service_module, "_canonical_accounting_state", canonicalize)
+    service = make_isolated_download_service()
+    tx_id = service.new_transaction(cell=MagicMock(), timeout=10.0, num_receivers=1)
+    ref_id = service.add_object(tx_id, MockDownloadable([b"data"]))
+
+    reply = service._handle_download(pull_request(ref_id, "site-1"))
+
+    assert reply.payload["data"] == b"data"
+    canonicalize.assert_not_called()
+
+
+def test_unsupported_download_state_marks_f3_partial_without_changing_served_data():
+    service = make_isolated_download_service()
+    counter = F3Counter()
+    context = attach_logical_send_context(Message(), counter, F3TrafficClass.TASK_RESULT)
+    tx_id = service.new_transaction(
+        cell=MagicMock(),
+        timeout=10.0,
+        num_receivers=1,
+        receiver_ids=("site-1",),
+        send_accounting_context=context,
+    )
+    ref_id = service.add_object(tx_id, MockDownloadable([b"data"]))
+    main = context.try_begin("origin", "site-1")
+    main.accepted(4)
+
+    reply = service._handle_download(pull_request(ref_id, "site-1", state={"custom": object()}))
+
+    assert reply.payload["data"] == b"data"
+    assert reply.get_logical_send_context() is None
+    snapshot = counter.freeze()
+    assert snapshot["status"] == "partial"
+    assert snapshot["issues"] == ["counter_gap"]
+    assert snapshot["remote_accepted"] == {"payload_bytes": "0", "messages": "0"}
+
+
+def test_large_download_chunk_identity_set_has_linear_size_without_prior_chunk_scans():
+    """Exercise a realistic large ledger without a wall-clock assertion.
+
+    LogicalSendContext uses a set of these keys. Its linear size and retry
+    membership are the non-flaky complexity assertion: no per-ref history is
+    scanned to create a later key.
+    """
+
+    tx = _Transaction(timeout=10.0, num_receivers=1)
+    ref = tx.add_object(MockDownloadable([b"data"]))
+    chunk_count = 20_000
+
+    keys = set()
+    for index in range(chunk_count):
+        keys.add(ref.accounting_chunk_key({"received_bytes": index * 2 * 1024 * 1024}))
+
+    assert len(keys) == chunk_count
+    for index in (0, chunk_count // 2, chunk_count - 1):
+        assert ref.accounting_chunk_key({"received_bytes": index * 2 * 1024 * 1024}) in keys
 
 
 def test_download_service_accounting_callback_failures_do_not_change_serving_or_settlement():

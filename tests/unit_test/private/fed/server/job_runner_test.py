@@ -26,6 +26,7 @@ from nvflare.apis.utils.event import fire_event_to_components
 from nvflare.app_common.job_schedulers.job_scheduler import DefaultJobScheduler
 from nvflare.fuel.common.exit_codes import ProcessExitCode
 from nvflare.private.admin_defs import Message, MsgHeader, ReturnCode
+from nvflare.private.fed.resource_stats.f3_counter import F3_PARENT_DRAIN_TIMEOUT_SECONDS
 from nvflare.private.fed.resource_stats.f3_registry import F3CounterRegistry
 from nvflare.private.fed.server.job_runner import JobRunner, _FinishedJobState
 from nvflare.private.fed.server.message_send import ClientReply
@@ -1077,6 +1078,12 @@ def test_job_complete_process_contains_resource_stats_finalization_write_failure
     runner.resource_stats.has_job = MagicMock(return_value=True)
     runner.resource_stats.finalize_job = MagicMock(side_effect=OSError("disk full"))
     runner.resource_stats.discard_job_artifacts = MagicMock()
+    runner.f3_counters.close_and_freeze = MagicMock(
+        return_value={
+            "status": "reported",
+            "remote_accepted": {"payload_bytes": "0", "messages": "0"},
+        }
+    )
 
     engine = MagicMock()
     engine.run_processes = {}
@@ -1096,6 +1103,10 @@ def test_job_complete_process_contains_resource_stats_finalization_write_failure
         runner._job_complete_process(engine)
 
     runner.resource_stats.finalize_job.assert_called_once_with("job-1")
+    runner.f3_counters.close_and_freeze.assert_called_once_with(
+        "job-1",
+        drain_timeout_seconds=F3_PARENT_DRAIN_TIMEOUT_SECONDS,
+    )
     runner.resource_stats.discard_job_artifacts.assert_called_once_with("job-1")
     runner._save_workspace.assert_called_once_with(completion_ctx, ANY, "job-1")
     job_manager.set_status.assert_called_once_with("job-1", RunStatus.FINISHED_ABORTED, completion_ctx)

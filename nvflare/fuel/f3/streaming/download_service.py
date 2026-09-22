@@ -11,9 +11,9 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import copy
 import dataclasses
 import functools
+import struct
 import threading
 import time
 import uuid
@@ -56,6 +56,112 @@ _SOURCE_FAILURE_NOTIFY_TIMEOUT = 3.0
 _SOURCE_FAILURE_NOTIFY_TOTAL_TIMEOUT = 10.0
 _SOURCE_FAILURE_NOTIFY_ATTEMPTS = 4
 _SOURCE_FAILURE_NOTIFY_BACKOFF = 0.25
+
+# Request states are normally tiny progress dictionaries. Accounting keeps a
+# canonical key for each state until its DownloadService transaction settles so
+# a retry can reuse the original logical chunk identity. Bound that
+# observational work: unusual application-defined states make F3 partial rather
+# than allowing accounting to copy or walk an arbitrarily large object graph.
+_ACCOUNTING_STATE_MAX_DEPTH = 16
+_ACCOUNTING_STATE_MAX_NODES = 4096
+_ACCOUNTING_STATE_MAX_SCALAR_BYTES = 64 * 1024
+_ACCOUNTING_STATE_UNSUPPORTED = object()
+
+
+def _canonical_accounting_state(value):
+    """Return a bounded, hashable key for ordinary FOBS-safe request state.
+
+    Exact built-in scalars, dictionaries, lists, and tuples are supported.
+    ``None`` means the state is unsupported, cyclic, too deep, or over budget.
+    Type tags preserve distinctions such as ``True`` versus ``1`` and list
+    versus tuple. Dictionary order does not affect the key.
+    """
+
+    remaining_nodes = _ACCOUNTING_STATE_MAX_NODES
+    remaining_scalar_bytes = _ACCOUNTING_STATE_MAX_SCALAR_BYTES
+    active_containers = set()
+
+    def consume_scalar_bytes(size: int) -> bool:
+        nonlocal remaining_scalar_bytes
+        if size < 0 or size > remaining_scalar_bytes:
+            return False
+        remaining_scalar_bytes -= size
+        return True
+
+    def visit(item, depth: int):
+        nonlocal remaining_nodes
+        if depth > _ACCOUNTING_STATE_MAX_DEPTH or remaining_nodes <= 0:
+            return _ACCOUNTING_STATE_UNSUPPORTED
+        remaining_nodes -= 1
+
+        item_type = type(item)
+        if item is None:
+            return ("none",)
+        if item_type is bool:
+            return ("bool", item)
+        if item_type is int:
+            byte_count = max(1, (abs(item).bit_length() + 7) // 8)
+            return ("int", item) if consume_scalar_bytes(byte_count) else _ACCOUNTING_STATE_UNSUPPORTED
+        if item_type is float:
+            return ("float", struct.pack("!d", item))
+        if item_type is complex:
+            return ("complex", struct.pack("!dd", item.real, item.imag))
+        if item_type is str:
+            # Every Unicode code point needs at least one UTF-8 byte. Check
+            # length first so a huge string is rejected before encoding it.
+            if len(item) > remaining_scalar_bytes:
+                return _ACCOUNTING_STATE_UNSUPPORTED
+            encoded_size = len(item.encode("utf-8"))
+            return ("str", item) if consume_scalar_bytes(encoded_size) else _ACCOUNTING_STATE_UNSUPPORTED
+        if item_type is bytes:
+            return ("bytes", item) if consume_scalar_bytes(len(item)) else _ACCOUNTING_STATE_UNSUPPORTED
+        if item_type is bytearray:
+            if not consume_scalar_bytes(len(item)):
+                return _ACCOUNTING_STATE_UNSUPPORTED
+            return ("bytearray", bytes(item))
+        if item_type is memoryview:
+            if not consume_scalar_bytes(item.nbytes):
+                return _ACCOUNTING_STATE_UNSUPPORTED
+            return ("memoryview", item.tobytes())
+
+        if item_type not in (dict, list, tuple):
+            return _ACCOUNTING_STATE_UNSUPPORTED
+
+        item_id = id(item)
+        if item_id in active_containers:
+            return _ACCOUNTING_STATE_UNSUPPORTED
+        active_containers.add(item_id)
+        try:
+            if item_type is dict:
+                entries = []
+                for key, entry_value in item.items():
+                    canonical_key = visit(key, depth + 1)
+                    canonical_value = visit(entry_value, depth + 1)
+                    if (
+                        canonical_key is _ACCOUNTING_STATE_UNSUPPORTED
+                        or canonical_value is _ACCOUNTING_STATE_UNSUPPORTED
+                    ):
+                        return _ACCOUNTING_STATE_UNSUPPORTED
+                    entries.append((canonical_key, canonical_value))
+                return ("dict", frozenset(entries))
+
+            entries = []
+            for entry in item:
+                canonical_entry = visit(entry, depth + 1)
+                if canonical_entry is _ACCOUNTING_STATE_UNSUPPORTED:
+                    return _ACCOUNTING_STATE_UNSUPPORTED
+                entries.append(canonical_entry)
+            return ("list" if item_type is list else "tuple", tuple(entries))
+        finally:
+            active_containers.remove(item_id)
+
+    try:
+        result = visit(value, 0)
+        return None if result is _ACCOUNTING_STATE_UNSUPPORTED else result
+    except BaseException:
+        # Accounting is observational. A hostile or simply unusual state must
+        # never alter DownloadService's real serving path.
+        return None
 
 
 class _SourceFailureKey:
@@ -297,35 +403,24 @@ class _Ref:
         self._receiver_progress = {}
         self._terminal_progress_state = None
         self._progress_lock = threading.Lock()
-        # Source-owned logical chunk identities for sender accounting.  A
-        # repeated request with the same producer state reuses the same id, so
-        # only the first transport-accepted response can contribute bytes.
-        self._accounting_chunks = {}
-        self._accounting_chunk_seq = 0
 
     def mark_active(self):
         self.tx.mark_active()
 
-    def accounting_chunk_id(self, requester: str, request_state) -> Optional[int]:
-        """Return a stable source-owned id for one logical produced chunk."""
+    @staticmethod
+    def accounting_chunk_key(request_state) -> Optional[tuple]:
+        """Return a stable, bounded key for one logical produced chunk.
+
+        ``LogicalSendContext`` already retains accepted and in-flight
+        contribution IDs. The canonical state can therefore be used directly
+        in that ID; a second per-ref state-to-integer ledger would duplicate
+        both memory and synchronization.
+        """
 
         try:
-            request_snapshot = copy.deepcopy(request_state)
-        except Exception:
+            return _canonical_accounting_state(request_state)
+        except BaseException:
             return None
-
-        with self._progress_lock:
-            chunks = self._accounting_chunks.setdefault(requester, [])
-            try:
-                for prior_request, chunk_id in chunks:
-                    if prior_request == request_snapshot:
-                        return chunk_id
-            except Exception:
-                return None
-            self._accounting_chunk_seq += 1
-            chunk_id = self._accounting_chunk_seq
-            chunks.append((request_snapshot, chunk_id))
-            return chunk_id
 
     def obj_downloaded(self, to_receiver: str, status: str):
         self._finalize_receiver(to_receiver, status)
@@ -1849,13 +1944,13 @@ class DownloadService:
                 )
                 if tx.send_accounting_context is not None:
                     try:
-                        chunk_id = ref.accounting_chunk_id(requester, current_state)
+                        chunk_key = ref.accounting_chunk_key(current_state)
                         contribution_context = None
-                        if chunk_id is not None:
+                        if chunk_key is not None:
                             contribution_context = tx.send_accounting_context.make_oob_contribution_context(
                                 transaction_id=tx.tid,
                                 destination=requester,
-                                contribution_id=(tx.tid, rid, requester, chunk_id),
+                                contribution_id=(tx.tid, rid, requester, chunk_key),
                                 payload_bytes=bytes_delta,
                             )
                         if contribution_context is not None:

@@ -45,6 +45,7 @@ from nvflare.private.fed.resource_stats.collector import (
     terminal_handoff_path,
     write_terminal_handoff,
 )
+from nvflare.private.fed.resource_stats.f3_counter import F3_PARENT_DRAIN_TIMEOUT_SECONDS
 
 EXPECTED_REPORTABLE_JOB_FAILURES = {
     ProcessExitCode.EXCEPTION: "exception",
@@ -804,6 +805,8 @@ def test_wait_child_process_freezes_zero_traffic_f3_counter_and_forgets_it():
     }
     # Simulate start_app() having already started the counter for this job.
     counter = job_executor.f3_counters.start_job("job-1")
+    close_and_freeze = MagicMock(wraps=job_executor.f3_counters.close_and_freeze)
+    job_executor.f3_counters.close_and_freeze = close_and_freeze
 
     engine = MagicMock()
     fl_ctx = MagicMock()
@@ -836,6 +839,10 @@ def test_wait_child_process_freezes_zero_traffic_f3_counter_and_forgets_it():
         "remote_accepted": {"payload_bytes": "0", "messages": "0"},
     }
     assert captured["parent_f3"] == counter.freeze()
+    close_and_freeze.assert_called_once_with(
+        "job-1",
+        drain_timeout_seconds=F3_PARENT_DRAIN_TIMEOUT_SECONDS,
+    )
     assert job_executor.f3_counters.get("job-1") is None
 
 

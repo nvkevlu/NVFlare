@@ -60,7 +60,7 @@ Every remaining change must preserve this deployment rule:
 - Process-local F3 counters for SP, CP, SJ, and CJ; trusted semantic bindings
   for job application deployment, real task responses, and task results;
   origin-only logical-send accounting after FOBS and before encryption;
-  `DownloadService` byte folding; a fixed five-second close/drain/freeze; and
+  `DownloadService` byte folding; bounded condition-based cleanup drains; and
   checked child/parent merge into the existing public `f3` field.
 - Real one-server, two-client Process-launch POCs on Colossus have exercised
   isolated child startup, child-to-parent handoff, client CellNet delivery,
@@ -94,13 +94,13 @@ extra message; retries do not add the same bytes again. Only the trusted
 semantic origin counts because the accounting context is process-local and is
 not serialized.
 
-The final focused suite, including socket-backed transport coverage, passes
-366 of 366 tests across fan-out, semantic filtering, pre-encryption sizing,
-large-object and stream outcomes, exact final-local/local-relay handling,
-child callback pre-drain, cutoff, merge, restore, and self-exclusion. The
-remaining evidence is a new process-mode live run. Any future uncovered path
-must remain partial or unavailable rather than use generic CellNet counters or
-claim a complete zero.
+The current focused and socket-backed suites pass across fan-out, semantic
+filtering, pre-encryption sizing, large-object and stream outcomes, exact
+final-local/local-relay handling, child callback pre-admission and drain,
+cutoff, merge, restore, bounded large-object retry identity, and
+self-exclusion. The remaining evidence is a new process-mode live run. Any
+future uncovered path must remain partial or unavailable rather than use
+generic CellNet counters or claim a complete zero.
 
 The focused [F3 implementation status](F3_GAP.md) records the exact semantics,
 code bindings, cutoff/merge behavior, and remaining validation.
@@ -349,14 +349,16 @@ coverage; none is required to interpret the proven Process-mode result.
 - the existing `WORKSPACE` archive is the sole durable copy;
 - job and study views read that archive rather than a `RESOURCE_STATS`
   component; and
-- the schema does not choose the future task/resource process topology.
+- the schema does not choose the future task/resource process topology;
 - F3 publishes remote-accepted logical payload only;
 - F3 includes job application, real task response, and task result only;
 - F3 measures after FOBS and before encryption, folds unique accepted
   `DownloadService` data into the originating operation, counts a remote
   logical target through a local first-hop relay once at the origin, and never
   recounts it at the relay; and
-- F3 uses one fixed five-second close/drain/freeze without user configuration.
+- the child F3 drain uses a fixed five-second maximum condition wait without
+  user configuration and returns immediately when nothing is pending. Parent
+  F3 closes and freezes immediately.
 
 ## Phase 2
 

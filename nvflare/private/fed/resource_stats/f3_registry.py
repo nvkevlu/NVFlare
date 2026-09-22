@@ -20,7 +20,7 @@ parent) is long-lived and handles many jobs over its lifetime -- often
 concurrently on the server side -- so it needs one counter per job_id, kept
 alive from job start through finalization and discarded afterward. This is
 that per-job registry; it owns no traffic-classification logic itself (that
-lives at the trusted NVFlare call sites that will use ``get()``).
+lives at the trusted NVFlare call sites that use ``get()``).
 """
 
 from __future__ import annotations
@@ -28,7 +28,7 @@ from __future__ import annotations
 import threading
 from typing import Optional
 
-from .f3_counter import F3_DRAIN_TIMEOUT_SECONDS, F3Counter
+from .f3_counter import F3_PARENT_DRAIN_TIMEOUT_SECONDS, F3Counter
 
 
 class F3CounterRegistry:
@@ -68,7 +68,7 @@ class F3CounterRegistry:
         return counter.mark_prior_history_incomplete() if counter is not None else False
 
     def close_and_freeze(
-        self, job_id: str, *, drain_timeout_seconds: float = F3_DRAIN_TIMEOUT_SECONDS
+        self, job_id: str, *, drain_timeout_seconds: float = F3_PARENT_DRAIN_TIMEOUT_SECONDS
     ) -> Optional[dict]:
         """Close, condition-drain for a bounded time, and freeze a job counter."""
 

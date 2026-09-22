@@ -21,7 +21,13 @@ from nvflare.fuel.f3.send_accounting import attach_logical_send_context
 from .f3_counter import F3Counter, F3TrafficClass
 
 
-def attach_f3_context(message, counter: F3Counter | None, traffic_class: F3TrafficClass) -> bool:
+def attach_f3_context(
+    message,
+    counter: F3Counter | None,
+    traffic_class: F3TrafficClass,
+    *,
+    pre_admit: tuple[str, str] | None = None,
+) -> bool:
     """Attach process-local accounting without ever changing send behavior.
 
     Traffic classification is deliberately supplied only by the trusted
@@ -33,7 +39,11 @@ def attach_f3_context(message, counter: F3Counter | None, traffic_class: F3Traff
     if counter is None:
         return False
     try:
-        attach_logical_send_context(message, accounting=counter, traffic_class=traffic_class)
+        context = attach_logical_send_context(message, accounting=counter, traffic_class=traffic_class)
+        if pre_admit is not None:
+            origin, destination = pre_admit
+            if not context.pre_admit(origin=origin, destination=destination):
+                return False
         return True
     except BaseException:
         try:

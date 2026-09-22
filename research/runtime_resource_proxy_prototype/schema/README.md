@@ -1,8 +1,8 @@
 # Resource statistics schema v1
 
-This directory contains the proposed Phase 1 contract. It defines one terminal
-participant report, the server's job reduction, and the derived study-query
-response. It does not expose collector lifecycle records.
+This directory contains the Phase 1 contract used by the implementation. It
+defines one terminal participant report, the server's job reduction, and the
+derived study-query response. It does not expose collector lifecycle records.
 
 ## Files
 
@@ -72,11 +72,12 @@ The participant schema is independent of the completion topic. Option A adds
 the optional report to `REPORT_JOB_FAILURE` / `report_job_failure`. Option B
 replaces that request with `REPORT_JOB_COMPLETION` /
 `report_job_completion`, whose combined envelope has exact integer
-`protocol_version: 1`. Both carry the same outcome and exact
-`participant_summary` bytes into the same acceptance logic. Exactly one
-is sent; retries do not switch topics, and capability/rollout selection adds
-no operator setting. The envelope protocol version is not the report's
-`schema_version`.
+`protocol_version: 1`. Under either design, the request carries the same
+outcome and exact `participant_summary` bytes into the same acceptance logic.
+Production sends exactly one Option A request. If Option B were selected, the
+client would instead send exactly one Option B request; retries would not
+switch topics, and capability/rollout selection would add no operator setting.
+The envelope protocol version is not the report's `schema_version`.
 
 Option B addresses the historical topic name and handler ownership only. It
 retains the same validation, filesystem-write, acknowledgement, and retry work
@@ -111,11 +112,13 @@ bounded participant-name grammar and be one safe path component.
 ## Trust model
 
 Resource values are authenticated self-reports, not tamper-resistant
-attestation. Job custom code can execute before the in-process collector hook,
-and it may be able to alter or remove the private handoff before the parent
-validates it. A missing or invalid handoff becomes typed unavailable/partial
-data in a parent-built report. Loss of the parent or delivery path can still
-leave no accepted report.
+attestation. Official launchers take the initial observation before enabling
+app/site custom paths, but a bring-your-own-container entrypoint or globally
+installed `sitecustomize` remains outside that boundary. Job code then shares
+the process and may affect later evidence or alter or remove the private
+handoff before the parent validates it. A missing or invalid handoff becomes
+typed unavailable/partial data in a parent-built report. Loss of the parent or
+delivery path can still leave no accepted report.
 
 “Authenticated” here means the existing Cell sender checks: signed token and
 origin in secure mode, or the current registered-client token in insecure
@@ -234,10 +237,14 @@ If the platform cannot stop new included traffic and drain already admitted
 callbacks before freezing, F3 reports `partial/counter_gap`, not `reported`.
 Child cleanup first closes command admission and pre-drains admitted callbacks
 for up to five seconds while transport remains alive; timeout or error marks
-`counter_gap`. Child and parent processes then each use the fixed five-second
-F3 drain, and the parent checked-merges their non-overlapping semantic-origin
-contributions. Lost pre-restore history is
-`partial/attribution_incomplete`.
+`counter_gap`. The child then uses the fixed five-second F3 drain. The parent
+closes and freezes immediately because its current included blocking sends must
+already have settled; a pending parent operation becomes `counter_gap` without
+delaying cleanup. The parent checked-merges both non-overlapping semantic-origin
+contributions. Lost pre-restore history is `partial/attribution_incomplete`.
+
+Five seconds is a maximum child condition wait, not a fixed sleep. A child
+drain with no active callback or pending F3 operation returns immediately.
 
 Included application classes are exactly job application, real task response,
 and task result. Task requests, empty polling, exact final in-process delivery,

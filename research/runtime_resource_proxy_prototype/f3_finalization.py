@@ -12,10 +12,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Prototype-only model for a finalizable, job-scoped F3 sender counter.
+"""Legacy prototype model for a finalizable, job-scoped F3 sender counter.
 
-This module intentionally does not import or modify NVFlare's production F3
-transport.  It fixes the contract a production hook must preserve:
+This deterministic fixture predates the production F3 implementation and is
+retained for the standalone review-contract tests. The production authority is
+``nvflare.private.fed.resource_stats.f3_counter.F3Counter`` and the trusted
+Cell/stream bindings described in ``F3_GAP.md``. This simplified model does not
+represent pending-operation drains, stream-terminal outcomes, large-object
+settlement, or parent/child ownership.
+
+It demonstrates a few stable contract properties:
 
 * only a small, explicit list of NVFlare job traffic classes contributes
   to the primary counter;
@@ -28,10 +34,9 @@ transport.  It fixes the contract a production hook must preserve:
   complete after that cutoff remain visible only as post-publication diagnostics,
   never as circular fields inside the immutable participant summary.
 
-This prototype exposes the required behavior as a separate method. Product
-code should keep that call inside NVFlare and assign traffic classes from
-NVFlare state rather than message headers. The data contract does not choose
-where the counter or sender runs.
+Traffic classes in this fixture include several explicit exclusions so the
+tests can prove the three-class allowlist is closed. They are not additional
+production F3 classes.
 """
 
 from __future__ import annotations

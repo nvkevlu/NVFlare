@@ -53,7 +53,7 @@ from nvflare.private.fed.resource_stats.coordinator import (
     RESOURCE_REPORT_DUPLICATE,
     ResourceStatsCoordinator,
 )
-from nvflare.private.fed.resource_stats.f3_counter import F3_DRAIN_TIMEOUT_SECONDS, F3TrafficClass
+from nvflare.private.fed.resource_stats.f3_counter import F3_PARENT_DRAIN_TIMEOUT_SECONDS, F3TrafficClass
 from nvflare.private.fed.resource_stats.f3_registry import F3CounterRegistry
 from nvflare.private.fed.server.admin import check_client_replies
 from nvflare.private.fed.server.server_state import HotState
@@ -585,12 +585,13 @@ class JobRunner(FLComponent):
                                         try:
                                             # Freeze before accepting/publishing the server
                                             # participant report so that report cannot count
-                                            # itself. Already-admitted sends get one fixed,
-                                            # bounded interval in which to settle.
+                                            # itself. Blocking deployment sends must already
+                                            # be settled; pending work freezes immediately as
+                                            # a gap instead of blocking this serial cleanup loop.
                                             try:
                                                 parent_f3 = self.f3_counters.close_and_freeze(
                                                     job.job_id,
-                                                    drain_timeout_seconds=F3_DRAIN_TIMEOUT_SECONDS,
+                                                    drain_timeout_seconds=F3_PARENT_DRAIN_TIMEOUT_SECONDS,
                                                 )
                                             except Exception as f3_error:
                                                 parent_f3 = None

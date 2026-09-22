@@ -140,7 +140,7 @@ separate through participant, job, and study reduction.
 
 | Field | Included fact |
 | --- | --- |
-| remote_accepted | Remote application payload accepted before counters close; the primary total. |
+| remote_accepted | Included payload that the originating process's local transport accepted for a remote logical destination before counters closed; the primary total. It does not assert receiver processing or durable storage. |
 
 Reported/partial participant F3 contains this counter pair;
 unavailable/error has no counter. Zero messages requires zero bytes. NVFlare

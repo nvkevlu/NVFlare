@@ -195,9 +195,9 @@ The concise source, hook, and readiness table is in the
 Production collection uses native APIs and direct kernel-interface parsing;
 the shell commands in the implementation plan are operator diagnostics only.
 CPU, memory, CUDA/NVML, workspace-filesystem, and F3 collection are implemented
-in the production path. The focused F3 suite passes 366 of 366 tests; a new
-live process-mode reference remains. Authoritative retained-result sets remain
-open and report unavailable until implemented.
+in the production path. The current focused and socket-backed F3 suites pass;
+a new live process-mode reference remains. Authoritative retained-result sets
+remain open and report unavailable until implemented.
 
 ### CPU
 
@@ -294,25 +294,36 @@ operation a second time. A remote logical destination routed through a local
 first-hop relay is still counted once by the origin; it is not mistaken for a
 final local delivery.
 
-During child cleanup, NVFlare first closes command admission and gives already
-admitted command callbacks a fixed five-second wait while Cell and streaming
-remain alive. Timeout or error marks `counter_gap`. The child then closes and
-drains its F3 admissions for up to five seconds, freezes its local counter into
-the private handoff, and only then stops streaming and Cell. If the callback
-pre-drain failed, cleanup keeps one bounded post-stop callback wait.
+For a real task response, the server-job callback knows both endpoints before
+it returns the response to CellNet. It pre-admits that pair so cleanup cannot
+freeze in the short gap between callback return and transport startup. This
+does not count bytes early: FOBS sizing and the transport success/failure
+outcome are still supplied later by the normal send path.
 
-After the child ends, the parent stops new F3 admissions, gives admitted
-operations the same fixed internal five-second drain, freezes, and performs a
-checked merge. A send contributes only if its acceptance boundary settles
-before the cutoff. In particular, a streamed send remains pending until its
+During child cleanup, NVFlare first closes command admission and gives already
+admitted command callbacks up to five seconds to finish while Cell and
+streaming remain alive. Timeout or error marks `counter_gap`. The child then
+closes and drains its F3 admissions for up to five seconds, freezes its local
+counter into the private handoff, and only then stops streaming and Cell. Both
+condition waits return immediately when nothing is active or pending. Their
+actual elapsed tails precede the current resource-time final reading. If the
+callback pre-drain failed, cleanup keeps one bounded post-stop callback wait;
+that last wait occurs after publication and does not enter resource time.
+
+After the child ends, the parent stops new F3 admissions, freezes immediately,
+and performs a checked merge. CP originates no included class and SP's blocking
+deployment sends have already completed; an unexpected pending parent operation
+becomes `partial/counter_gap` without delaying terminal publication. A child
+send contributes only if its acceptance boundary settles before the cutoff. In
+particular, a streamed send remains pending until its
 `StreamFuture` ends successfully; asynchronous failure or cancellation
 abandons it. If a drain cannot complete, useful numeric data is retained as
 `partial/counter_gap`. Restored history is
 `partial/attribution_incomplete`. The parent freezes before constructing the
 terminal report, so the report cannot count itself.
 
-The production hooks are present, and the final focused suite—including
-socket-backed transport coverage—passes 366 of 366 tests. A new process-mode
+The production hooks are present, and the current focused and socket-backed
+suites pass. A new process-mode
 or Colossus live F3 reference has not yet replaced the older `not_bound`
 artifact. See [F3 implementation status](F3_GAP.md).
 
@@ -634,7 +645,7 @@ Generated examples:
   Runtime discovery and CUDA/NVML model matching, including device subsets,
   multi-GPU, MIG, legacy `torch`-owned runtimes, and conda-only layouts;
 - a new process-mode F3 run to replace the historical `not_bound` live
-  artifact; the focused socket-backed suite already passes 366 of 366 tests;
+  artifact; the current focused and socket-backed suites already pass;
 - authoritative retained-result sets for supported workflows;
 - root-parent restart recovery for accepted report bytes, invalid history,
   and cutoff state if required (expected names are already restored);

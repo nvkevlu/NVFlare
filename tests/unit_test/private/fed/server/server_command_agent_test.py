@@ -76,7 +76,9 @@ def _run_get_task_command(task_name, monkeypatch):
     command.process.return_value = task
 
     counter = F3Counter()
-    agent = ServerCommandAgent(engine=engine, cell=MagicMock())
+    cell = MagicMock()
+    cell.get_fqcn.return_value = "server/job-1"
+    agent = ServerCommandAgent(engine=engine, cell=cell)
     monkeypatch.setattr(agent, "_get_client", lambda _token: MagicMock())
     monkeypatch.setattr(
         "nvflare.private.fed.server.server_command_agent.ServerCommands.get_command",
@@ -90,6 +92,7 @@ def _run_get_task_command(task_name, monkeypatch):
     request = CellMessage(
         headers={
             MessageHeaderKey.TOPIC: ServerCommandNames.GET_TASK,
+            MessageHeaderKey.ORIGIN: "site-1/job-1",
             CellMessageHeaderKeys.TOKEN: "token-1",
         },
         payload=Shareable(),
@@ -104,6 +107,94 @@ def test_real_task_response_is_classified_at_server_job_origin(monkeypatch):
     assert context is not None
     assert context._accounting is counter
     assert context._traffic_class is F3TrafficClass.TASK_RESPONSE
+    assert counter.pending_count == 1
+
+    attempt = context.try_begin("server/job-1", "site-1/job-1")
+    assert attempt is not None
+    attempt.accepted(10)
+    assert counter.freeze()["remote_accepted"] == {"payload_bytes": "10", "messages": "1"}
+
+
+def test_real_task_response_pre_admits_while_callback_is_active(monkeypatch):
+    observed = {}
+
+    def observe_attach(_message, _counter, _traffic_class, *, pre_admit=None):
+        observed["callback_drained"] = agent.wait_for_callbacks(0.0)
+        observed["pre_admit"] = pre_admit
+        return True
+
+    engine = MagicMock()
+    engine.server.authentication_check.return_value = None
+    command = MagicMock()
+    command.get_state_check.return_value = {}
+    task = Shareable()
+    task.set_header(ServerCommandKey.TASK_NAME, "train")
+    command.process.return_value = task
+    cell = MagicMock()
+    cell.get_fqcn.return_value = "server/job-1"
+    agent = ServerCommandAgent(engine=engine, cell=cell)
+    monkeypatch.setattr(agent, "_get_client", lambda _token: MagicMock())
+    monkeypatch.setattr(
+        "nvflare.private.fed.server.server_command_agent.ServerCommands.get_command",
+        lambda _command_name: command,
+    )
+    monkeypatch.setattr(
+        "nvflare.private.fed.server.server_command_agent.get_job_f3_counter",
+        lambda: F3Counter(),
+    )
+    monkeypatch.setattr("nvflare.private.fed.server.server_command_agent.attach_f3_context", observe_attach)
+    request = CellMessage(
+        headers={
+            MessageHeaderKey.TOPIC: ServerCommandNames.GET_TASK,
+            MessageHeaderKey.ORIGIN: "site-1/job-1",
+            CellMessageHeaderKeys.TOKEN: "token-1",
+        },
+        payload=Shareable(),
+    )
+
+    agent.execute_command(request)
+
+    assert observed == {
+        "callback_drained": False,
+        "pre_admit": ("server/job-1", "site-1/job-1"),
+    }
+
+
+def test_task_response_accounting_identity_failure_does_not_change_reply(monkeypatch):
+    engine = MagicMock()
+    engine.server.authentication_check.return_value = None
+    command = MagicMock()
+    command.get_state_check.return_value = {}
+    task = Shareable()
+    task.set_header(ServerCommandKey.TASK_NAME, "train")
+    command.process.return_value = task
+    counter = F3Counter()
+    cell = MagicMock()
+    cell.get_fqcn.side_effect = RuntimeError("identity unavailable")
+    agent = ServerCommandAgent(engine=engine, cell=cell)
+    monkeypatch.setattr(agent, "_get_client", lambda _token: MagicMock())
+    monkeypatch.setattr(
+        "nvflare.private.fed.server.server_command_agent.ServerCommands.get_command",
+        lambda _command_name: command,
+    )
+    monkeypatch.setattr(
+        "nvflare.private.fed.server.server_command_agent.get_job_f3_counter",
+        lambda: counter,
+    )
+    request = CellMessage(
+        headers={
+            MessageHeaderKey.TOPIC: ServerCommandNames.GET_TASK,
+            MessageHeaderKey.ORIGIN: "site-1/job-1",
+            CellMessageHeaderKeys.TOKEN: "token-1",
+        },
+        payload=Shareable(),
+    )
+
+    response = agent.execute_command(request)
+
+    assert response.payload is task
+    assert response.get_header(MessageHeaderKey.RETURN_CODE) == ReturnCode.OK
+    assert counter.freeze()["issues"] == ["counter_gap"]
 
 
 @pytest.mark.parametrize("task_name", [SpecialTaskName.TRY_AGAIN, SpecialTaskName.END_RUN, ""])

@@ -59,6 +59,7 @@ class LogicalSendAccounting(Protocol):
 
 @dataclass
 class _DestinationState:
+    owner_admission_attempted: bool = False
     begun: bool = False
     admission: Optional[object] = None
     main_accepted: bool = False
@@ -152,6 +153,51 @@ class LogicalSendContext:
 
         self._safe_call("mark_counter_gap")
 
+    def pre_admit(self, origin: str, destination: str) -> bool:
+        """Admit one known destination before a semantic callback returns.
+
+        A task-response callback returns a ``Message`` to CellNet, which starts
+        the actual transport only after the callback has returned.  Pre-admitting
+        that one known destination closes the small teardown race between those
+        two stages.  It does not count anything: the transport still supplies
+        the post-FOBS size and terminal acceptance outcome later.
+
+        The transport ``begun`` flag intentionally remains false here.  FOBS may
+        therefore register out-of-band transactions between this method and
+        :meth:`try_begin`, exactly as it does on the ordinary lazy path.
+        """
+
+        if not origin or not destination:
+            self.mark_counter_gap()
+            return False
+
+        with self._lock:
+            if self._origin is None:
+                self._origin = origin
+            elif self._origin != origin:
+                self.mark_counter_gap()
+                return False
+
+            state = self._destinations.setdefault(destination, _DestinationState())
+            if state.owner_admission_attempted:
+                if state.admission is None:
+                    self.mark_counter_gap()
+                    return False
+                return True
+            if state.begun:
+                self.mark_counter_gap()
+                return False
+            state.owner_admission_attempted = True
+
+        admission = self._safe_call("try_begin", self._traffic_class, failed_value=_CALL_FAILED)
+        if admission is _CALL_FAILED or admission is None:
+            self.mark_counter_gap()
+            return False
+
+        with self._lock:
+            state.admission = admission
+        return True
+
     def try_begin(self, origin: str, destination: str) -> Optional[_SendAttempt]:
         """Admit the main logical send once for this origin and destination."""
 
@@ -170,6 +216,10 @@ class LogicalSendContext:
             if state.begun:
                 return None
             state.begun = True
+            owner_admission_attempted = state.owner_admission_attempted
+            admission = state.admission
+            if not owner_admission_attempted:
+                state.owner_admission_attempted = True
             state.pending_transactions = {
                 tx_id
                 for tx_id, receivers in self._transaction_receivers.items()
@@ -181,14 +231,19 @@ class LogicalSendContext:
             )
             unbound_destination = bool(self._transaction_receivers) and not destination_has_transaction
 
-        admission = self._safe_call("try_begin", self._traffic_class, failed_value=_CALL_FAILED)
-        if admission is _CALL_FAILED or admission is None:
-            if admission is _CALL_FAILED:
-                self._safe_call("mark_counter_gap")
+        if not owner_admission_attempted:
+            admission = self._safe_call("try_begin", self._traffic_class, failed_value=_CALL_FAILED)
+            if admission is _CALL_FAILED or admission is None:
+                self.mark_counter_gap()
+                return None
+            with self._lock:
+                state.admission = admission
+        elif admission is None:
+            # A failed pre-admission already marked the aggregate partial.  Do
+            # not retry after the semantic callback/cutoff boundary.
             return None
 
         with self._lock:
-            state.admission = admission
             queued_contributions = tuple(state.queued_contributions)
             state.queued_contributions.clear()
             already_failed = any(

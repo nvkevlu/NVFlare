@@ -46,10 +46,11 @@ accumulator before producing its private handoff.
 Today's adapter starts a private accumulator at the existing client/server job
 process hook, attributes the selected CPU, memory, and GPU capacity while that
 process runs, and freezes one bounded private handoff after runner `END_RUN`
-processing. CP or SP validates that handoff, drains and merges its own
-job-scoped F3 counters, assembles the one public report, and deletes the
-handoff before archival. “Private” means transient platform handoff state, not
-a new privileged service or protected storage area.
+processing. CP or SP closes and freezes its own F3 counter immediately,
+validates that handoff, merges parent and child F3, assembles the one public
+report, and deletes the handoff before archival. “Private” means transient
+platform handoff state, not a new privileged service or protected storage
+area.
 
 Future GPU release or task-runner work does not require public attempts. If
 resources change while the current process remains alive, platform code can
@@ -170,10 +171,12 @@ The accounting context stays inside the process that originates the trusted
 operation. Child cleanup closes command admission and pre-drains admitted
 callbacks for up to five seconds while transport remains alive; timeout or
 error marks `counter_gap`. The child then performs its fixed F3
-close/drain/freeze before transport stop, while the parent uses its own fixed
-F3 close/drain/freeze. The parent checked-merges their non-overlapping
-contributions. Platform code freezes before terminal-report serialization, so
-the report is excluded without a spoofable marker.
+close/drain/freeze before transport stop. The parent closes and freezes
+immediately because its included blocking operations must already have
+settled; an unexpected pending admission becomes `counter_gap`. The parent
+checked-merges their non-overlapping contributions. Platform code freezes
+before terminal-report serialization, so the report is excluded without a
+spoofable marker.
 
 ## Server, storage, and query decisions
 

@@ -26,7 +26,7 @@ run application
 close command admission; pre-drain callbacks with transport alive
 close/drain/freeze child F3; finish collector in _archive_results()
 write private terminal_handoff.json  --->  wait for child exit
-                                             close/drain/freeze parent F3
+                                             close/freeze parent F3 immediately
                                              read + validate fixed handoff
                                              checked-merge child + parent F3
                                              bind trusted client name
@@ -138,9 +138,13 @@ shell command. It uses these exact ordinary-process interfaces:
 The measured interval begins at this hook, immediately before NVFlare enables
 the job custom directory and starts the application runner. It ends in
 `_archive_results()` after the runner returns and before workspace upload and
-the remaining process shutdown. It is the implemented application-run window,
-including waits inside that window; it is not the operating-system process's
-entire lifetime and is not active-task utilization.
+the remaining process shutdown. In the current ordering, the final reading is
+taken after the command-callback pre-drain and child F3 drain, so their actual
+elapsed cleanup tails are included. Those two condition waits return
+immediately in the normal empty case, but can add up to five seconds each in a
+pathological case. The optional post-stop callback wait happens after the
+handoff and is not included. This is the implemented measurement window, not
+the operating-system process's entire lifetime or active-task utilization.
 
 Job-process cleanup first rejects new application commands and waits up to five
 seconds for already admitted command callbacks while Cell and streaming remain
@@ -155,6 +159,14 @@ before closing security state. The handoff is atomically written at:
 ```text
 <run_dir>/resource_stats/staging/terminal_handoff.json
 ```
+
+The child waits use condition variables and return immediately when no callback
+or F3 admission is pending; five seconds is only the maximum for each. They run
+at job finalization, not in the steady-state send path. Parent F3 finalization
+does not wait: CP originates no included class, SP's blocking deployment sends
+have already returned, and a parent admission still pending is immediately
+marked as a counter gap. It therefore cannot stall the server's serial
+completion loop or another job's terminal publication.
 
 It is a private, identity-free transfer record with these exact members:
 
@@ -249,11 +261,12 @@ accurate to one nanosecond.
 
 ## 2. Parent assembly and one client send
 
-After the child handle completes,
+After the child handle completes, the surrounding client-executor path and
 `nvflare/private/fed/client/client_executor.py::_build_participant_resource_report()`:
 
-1. closes new parent F3 admissions, gives already admitted operations the fixed
-   five-second internal drain, and freezes the parent snapshot;
+1. closes new parent F3 admissions and freezes immediately; a pending parent
+   operation is an instrumentation gap because all current parent-originated
+   included traffic must already have settled;
 2. reads the fixed handoff through `read_terminal_handoff()`;
 3. checked-merges the child and parent F3 snapshots;
 4. calls `assemble_participant_summary()` with the parent's existing
@@ -264,7 +277,8 @@ After the child handle completes,
 
 If the handoff is absent or invalid, the parent still builds a report, with
 child-derived values marked unavailable and any usable parent F3 subtotal
-marked partial. A drain gap likewise preserves bounded values as partial.
+marked partial. A child drain gap or unexpected pending parent admission
+likewise preserves bounded values as partial.
 Resource-report failures are logged but do not change the job outcome or
 prevent resource release. The parent freezes before it serializes the terminal
 report, so that report cannot count itself.
@@ -553,8 +567,8 @@ Slurm, constrained-cgroup, CUDA-subset, multi-GPU, or MIG coverage.
 ## 7. Known implementation and validation gaps
 
 - `retained_content` has no authoritative bounded result-set provider.
-- The focused F3 suite, including socket-backed transport coverage, passes 366
-  of 366 tests. A new process-mode live run is still needed to replace the
+- The current focused and socket-backed F3 suites pass. A new process-mode
+  live run is still needed to replace the
   historical `not_bound` F3 artifact.
 - `observe_capacity_change()` is not wired to runtime resource changes. No
   future worker, GPU-release, or supervisor topology is assumed here.

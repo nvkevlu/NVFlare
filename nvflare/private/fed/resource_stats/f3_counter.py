@@ -43,9 +43,16 @@ _FROZEN = "frozen"
 _ISSUE_ATTRIBUTION_INCOMPLETE = "attribution_incomplete"
 _ISSUE_COUNTER_GAP = "counter_gap"
 
-# A fixed internal cutoff, not user configuration. Parent processes use this
-# bound so a stuck accounting callback cannot hold job finalization forever.
+# A fixed child-process cutoff, not user configuration. It leaves a small,
+# bounded interval for an accepted final stream to settle without allowing a
+# stuck accounting operation to hold finalization forever.
 F3_DRAIN_TIMEOUT_SECONDS = 5.0
+
+# Parent processes originate no late task traffic. The CP has no included
+# origin class, and the SP's blocking job-application sends finish during
+# deployment. A parent admission still pending at terminal cleanup is therefore
+# an accounting gap, not useful work for terminal cleanup to wait on.
+F3_PARENT_DRAIN_TIMEOUT_SECONDS = 0.0
 
 
 class F3TrafficClass(str, Enum):

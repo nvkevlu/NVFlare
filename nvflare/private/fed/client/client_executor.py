@@ -46,7 +46,7 @@ from nvflare.private.fed.resource_stats.collector import (
     read_terminal_handoff,
     remove_terminal_handoff,
 )
-from nvflare.private.fed.resource_stats.f3_counter import F3_DRAIN_TIMEOUT_SECONDS
+from nvflare.private.fed.resource_stats.f3_counter import F3_PARENT_DRAIN_TIMEOUT_SECONDS
 from nvflare.private.fed.resource_stats.f3_registry import F3CounterRegistry
 from nvflare.private.fed.utils.fed_utils import get_job_launcher, get_return_code
 from nvflare.security.logging import secure_format_exception, secure_log_traceback
@@ -741,12 +741,13 @@ class JobExecutor(ClientExecutor):
                     self.logger.info(f"run ({job_id}): child worker process finished with RC {return_code}")
 
                     # Freeze before constructing/sending the terminal report so
-                    # the report cannot count itself.  Any already-admitted send
-                    # has one fixed, bounded interval in which to settle.
+                    # the report cannot count itself. Parent-originated traffic
+                    # must already be settled here; a pending operation freezes
+                    # immediately as a counter gap rather than delaying cleanup.
                     try:
                         parent_f3 = self.f3_counters.close_and_freeze(
                             job_id,
-                            drain_timeout_seconds=F3_DRAIN_TIMEOUT_SECONDS,
+                            drain_timeout_seconds=F3_PARENT_DRAIN_TIMEOUT_SECONDS,
                         )
                     except Exception as e:
                         parent_f3 = None

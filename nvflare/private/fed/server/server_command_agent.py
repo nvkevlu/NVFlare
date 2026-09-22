@@ -111,11 +111,31 @@ class ServerCommandAgent(object):
                         if command_name == ServerCommandNames.GET_TASK:
                             task_name = reply.get_header(ServerCommandKey.TASK_NAME)
                             if task_name and task_name not in {SpecialTaskName.TRY_AGAIN, SpecialTaskName.END_RUN}:
-                                attach_f3_context(
-                                    return_message,
-                                    get_job_f3_counter(),
-                                    F3TrafficClass.TASK_RESPONSE,
-                                )
+                                counter = None
+                                try:
+                                    counter = get_job_f3_counter()
+                                    attach_f3_context(
+                                        return_message,
+                                        counter,
+                                        F3TrafficClass.TASK_RESPONSE,
+                                        # CellNet transports the returned reply only
+                                        # after this callback exits. Admit its known
+                                        # origin/destination pair now so cleanup cannot
+                                        # freeze between callback return and send setup.
+                                        pre_admit=(
+                                            self.cell.get_fqcn(),
+                                            request.get_header(MessageHeaderKey.ORIGIN),
+                                        ),
+                                    )
+                                except BaseException:
+                                    # Observability must not change the task reply,
+                                    # including failures while resolving the local or
+                                    # remote Cell identity used only for accounting.
+                                    if counter is not None:
+                                        try:
+                                            counter.mark_counter_gap()
+                                        except BaseException:
+                                            pass
                 else:
                     return_message = make_reply(ReturnCode.PROCESS_EXCEPTION, "No process results", None)
                 return return_message
