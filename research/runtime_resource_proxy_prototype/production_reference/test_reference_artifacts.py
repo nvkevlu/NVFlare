@@ -75,14 +75,23 @@ def test_checked_in_outputs_are_exact_production_regeneration_and_reconcile():
     job_totals = derive_job_totals(job_summary["participants"])
     assert "job_name" not in job_summary
     assert {entry["participant_name"] for entry in job_summary["participants"]} == {"server", "site-1"}
+    assert all("status" not in entry for entry in job_summary["participants"])
     assert site_report["participant_name"] == "site-1"
     assert server_report["participant_name"] == "server"
+    assert site_report["cpu_consumed"] == {"seconds": "1380"}
+    assert server_report["cpu_consumed"] == {"seconds": "180"}
+    assert job_totals["cpu_consumed"] == {"seconds": "1560"}
 
     for report in (site_report, server_report):
-        assert report["retained_content"] == {"status": "reported", "bytes": "0"}
-        assert report["message_traffic"]["status"] == "reported"
+        assert report["retained_content"] == {"bytes": "0"}
+        assert "status" not in report["resource_time"]
+        assert "status" not in report["workspace_filesystem"]
+        assert "status" not in report["message_traffic"]
         assert len(report["message_traffic"]["sent_to"]) == 1
         assert int(report["message_traffic"]["sent_to"][0]["payload_bytes"]) > 0
+    for total in job_totals.values():
+        assert "status" not in total
+        assert "issues" not in total
     assert site_report["message_traffic"]["sent_to"][0]["participant_name"] == "server"
     assert site_report["message_traffic"]["sent_to"][0]["messages"] == "3"
     assert server_report["message_traffic"]["sent_to"][0]["participant_name"] == "site-1"
@@ -95,6 +104,7 @@ def test_checked_in_outputs_are_exact_production_regeneration_and_reconcile():
     )
     assert study_summary["jobs"][0]["totals"] == job_totals
     assert study_summary["totals"] == derive_study_totals(study_summary["jobs"])
+    assert study_summary["totals"]["cpu_consumed"] == {"status": "partial", "seconds": "1560"}
     assert [job["job_name"] for job in study_summary["jobs"]] == [
         REFERENCE_JOB_NAME,
         "hello-pt-retry",
@@ -108,6 +118,8 @@ def test_checked_in_outputs_are_exact_production_regeneration_and_reconcile():
         render_job_resources(job_summary, site_report, job_name=REFERENCE_JOB_NAME) + "\n"
     )
     assert artifacts["cli/resources-study.txt"].decode() == render_study_resources(study_summary) + "\n"
+    assert "CPU time used 0.4333 core-h" in artifacts["cli/resources-job.txt"].decode()
+    assert "CPU time used 0.4333* core-h" in artifacts["cli/resources-study.txt"].decode()
 
     job_cli = json.loads(artifacts["cli/resources-job.json"])
     site_cli = json.loads(artifacts["cli/resources-site-1.json"])
@@ -125,9 +137,7 @@ def test_checked_in_outputs_are_exact_production_regeneration_and_reconcile():
     assert site_cli["data"]["participant"]["participant_name"] == "site-1"
     assert study_cli["data"]["selection"] == {"study": "cancer-research"}
 
-    accepted_names = {
-        entry["participant_name"] for entry in job_summary["participants"] if entry["status"] == "accepted"
-    }
+    accepted_names = {entry["participant_name"] for entry in job_summary["participants"] if "status" not in entry}
     assert {path for path in artifacts if path.startswith("workspace/resource_stats/")} == {
         "workspace/resource_stats/resource_summary.json",
         *(f"workspace/resource_stats/participants/{name}.json" for name in accepted_names),

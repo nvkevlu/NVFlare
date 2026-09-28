@@ -10,8 +10,9 @@ Both are launched through `nvflare/private/fed/app/job_process_bootstrap.py`
 under `python -I` and follow the same measurement sequence. Code is cited by
 function name because line numbers drift.
 
-The parents (CP, SP) take no resource-time, filesystem, or retained-content
-measurements. They only add their own F3 counter and assemble the report; see
+The parents (CP, SP) take no resource-time, CPU-consumption, filesystem, or
+retained-content measurements. They only add their own F3 counter and
+assemble the report; see
 [What the parents add](#what-the-parents-add).
 
 ## Summary
@@ -21,6 +22,7 @@ measurements. They only add their own F3 counter and assemble the report; see
 | Capacity snapshot (CPU, memory, GPU) | `JobResourceCollector.__init__` → `probe_capacity()`, constructed at the top of `worker_process.main()` / `runner_process.main()` | Once, at job-process start, before `download_workspace()` and `activate_job_python_path()` — before any job or site custom code is importable | Capacity visible to *this process*: cgroup CPU quota/cpuset and affinity, cgroup or physical memory limit, and GPUs enumerated by the CUDA Runtime (which honors a launcher- or resource-manager-set `CUDA_VISIBLE_DEVICES`), enriched by NVML |
 | Resource-time interval **start** | `ResourceTimeAccumulator.observe()`, called by the constructor | Monotonic clock read *immediately after* `probe_capacity()` returns (the probe's own duration is excluded) | Start of `measured_seconds` |
 | Resource-time interval **end** | `JobResourceCollector.finish()` → `ResourceTimeAccumulator.finish()` | Inside `_archive_results()` during teardown, after the command-callback pre-drain and the child F3 drain | `measured_seconds` = end − start. Each resource-time total = start capacity × `measured_seconds`. Capacity is **not** re-sampled at the end, and this is capacity-time, not utilization |
+| CPU consumed | Job-process collector, at lifecycle hooks adjacent to the resource-time boundaries | Read once just after the resource-time start clock and once just before its final clock in `_archive_results()` | Linux/macOS `RUSAGE_SELF` user plus system delta for CJ/SJ and `RUSAGE_CHILDREN` delta for descendants exited and waited/reaped between readings, regardless of launch time. This includes short-lived waited children without periodic sampling. It is separate from CPU capacity × time. |
 | Workspace filesystem capacity | `observe_workspace_filesystem(run_dir)` inside `finish()` | Same moment as the interval end | `statvfs` total size (`f_blocks × f_frsize`) of the filesystem holding the job's run directory |
 | Retained content | `observe_retained_content(run_dir)` inside `finish()` | Same moment as the interval end | Sum of regular-file sizes under the job's run directory (`Workspace.get_run_dir(job_id)`), excluding the top-level `resource_stats/`; symlinks are not followed. A scan error yields `partial/observation_incomplete` |
 | Child F3 | Counter started by `start_job_f3_counter()` right after the collector; records at the CoreCell send boundary for sends bound by `Communicator.submit_update()` (CJ, `task_result`) and `ServerCommandAgent` real `GET_TASK` replies (SJ, `task_response`) | From counter start until `freeze()` inside `_archive_results()` | Bytes after FOBS encoding and before optional encryption, counted when the local transport accepts the send; one message per remote destination |
@@ -37,7 +39,9 @@ window; ✅ marks work inside it.
 3. **Interval start:** `ResourceTimeAccumulator.observe()` reads the monotonic
    clock. On an SJ snapshot restore (`restore_snapshot`), the collector is built
    with `prior_observation_incomplete=True`, so resource time is reported
-   `partial/observation_incomplete`.
+   `partial/observation_incomplete`. The CPU-consumption baseline is taken
+   immediately after this clock read; prior server-process CPU remains
+   unavailable.
 4. ✅ `start_job_f3_counter()` starts the process-global child F3 counter. On an
    SJ restore, `mark_prior_history_incomplete()` makes F3 `partial` with
    `attribution_incomplete`.
@@ -62,8 +66,8 @@ window; ✅ marks work inside it.
    3. `_archive_results()`:
       1. Child F3 `close_and_drain(5 s)` (`F3_DRAIN_TIMEOUT_SECONDS`), then
          `freeze()` — child F3 is now fixed.
-      2. **`finish()` — interval end**, then the filesystem `statvfs` and the
-         run-directory walk.
+      2. **`finish()` — final CPU-consumption reading and interval end**, then
+         the filesystem `statvfs` and the run-directory walk.
       3. `write_terminal_handoff()` writes
          `run_dir/resource_stats/staging/terminal_handoff.json`.
       4. ⛔ `create_stats_pool_files_for_job()` — written after the walk, so
@@ -83,6 +87,13 @@ window; ✅ marks work inside it.
   anything after `finish()` — stats-pool files, result upload, transport and
   Cell shutdown, security close, and process exit; and all parent-side work
   (waiting for the child, assembling and sending the report).
+- **CPU consumed:** user plus system execution by the job process and waited
+  descendants. The shared CP/SP site parent is excluded. `RUSAGE_CHILDREN`
+  does not include an unawaited or still-running child; a known gap is partial
+  or unavailable, never an implicit zero. Current PyTorch
+  `MultiProcessExecutor` ranks are not waited for, and the XGBoost v2
+  partial-HE process pool cannot be verified as fully reaped, so their CPU is not covered
+  by the counter. The SJ restore path cannot recover its earlier process CPU.
 - **Snapshot timing for the two point-in-time fields:** workspace filesystem
   capacity and retained content are observed once, at `finish()`. Files written
   after that — `stats_pool_summary.json`, the terminal handoff itself, late log
@@ -105,7 +116,8 @@ process's own view.
 The child handoff is written only by `_archive_results()`. If the process ends
 without reaching it, the parent still sends a participant report, but its
 child-derived fields (resource time, workspace filesystem, retained content,
-child F3) are `unavailable/observation_incomplete`. The parent's own F3 zero is
+child F3, CPU consumed) are `unavailable/observation_incomplete`. The parent's
+own F3 zero is
 then merged as `partial/attribution_incomplete`. This happens when:
 
 - `JobResourceCollector(...)` construction fails. This is silent by design.
@@ -134,6 +146,14 @@ If only `start_job_f3_counter()` fails, the handoff is still written, with
   4. Remove the handoff, free compute resources, and send the report on
      `REPORT_JOB_FAILURE`.
 
+  Before launch, CP creates and syncs a per-job CPU-attempt marker under the
+  site workspace root, outside the redeployed run directory and job archive.
+  An existing marker, earlier launch seen in memory, or scheduler attempt
+  count above one makes the new CPU subtotal partial. Marker persistence
+  failure also makes the current subtotal partial without blocking launch.
+  If no marker persisted before a later crash, a fresh parent cannot recover
+  that attempt from an unchanged scheduler count.
+
   The freeze precedes the send, so the report cannot count itself.
 - **SP** — `JobRunner._job_complete_process()` in
   `nvflare/private/fed/server/job_runner.py`:
@@ -150,6 +170,8 @@ If only `start_job_f3_counter()` fails, the handoff is still written, with
 - Capacity probes: `probes/cgroup_linux.probe_cpu`, `probe_memory`;
   `probes/gpu_nvidia.probe_gpu`; composed by `collector.probe_capacity`
 - Interval math: `accumulator.ResourceTimeAccumulator.observe` / `.finish`
+- CPU-consumption counters: job-process `RUSAGE_SELF` and
+  `RUSAGE_CHILDREN` start/end readings
 - Final observations: `collector.JobResourceCollector.finish`,
   `observe_workspace_filesystem`, `observe_retained_content`
 - Teardown order: `job_process_cleanup.shutdown_job_process_runtime`; the

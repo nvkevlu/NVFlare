@@ -89,7 +89,6 @@ def test_close_and_freeze_condition_drains_before_snapshot():
         timer.join()
 
     assert snapshot == {
-        "status": "reported",
         "sent_to": [{"participant_name": "site-1", "payload_bytes": "10", "messages": "1"}],
     }
 

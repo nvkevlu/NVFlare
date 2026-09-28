@@ -19,12 +19,13 @@ client job process                         client parent
 start platform worker with Python -I
 create Workspace
 create JobResourceCollector
+read initial job-process CPU accounting
 start child F3 counter
   before workspace download/custom activation
 download workspace; enable custom imports
 run application
 close command admission; pre-drain callbacks with transport alive
-close/drain/freeze child F3; finish collector in _archive_results()
+close/drain/freeze child F3; read final CPU accounting and finish collector in _archive_results()
 write private terminal_handoff.json  --->  wait for child exit
                                              close/freeze parent F3 immediately
                                              read + validate fixed handoff
@@ -181,6 +182,7 @@ It is a private, identity-free transfer record with these exact members:
 internal_version
 kind
 resource_time
+cpu_consumed
 workspace_filesystem
 retained_content
 child_f3
@@ -193,10 +195,36 @@ in the final resource namespace.
 
 ### What is measured now
 
-CPU, memory, CUDA-authorized GPU resource time, the final
+CPU, memory, CUDA-authorized GPU resource time, CPU consumed, the final
 workspace-filesystem capacity observation, retained content, and
 `message_traffic` are
 implemented.
+
+`cpu_consumed` is a separate typed user plus system CPU-seconds total. On
+Linux and macOS, `RUSAGE_SELF` and `RUSAGE_CHILDREN` are read once just after
+the start clock and once just before the final clock. The adjacent reads are
+not simultaneous. Own-process
+CPU and exited, waited-for descendant CPU are added from disjoint counter
+deltas. A short-lived child launched and waited for between boundaries is
+included without periodic sampling. The shared client or server site parent
+is excluded because its CPU is shared among jobs. An unawaited or still-running
+child cannot be read through `RUSAGE_CHILDREN`; known missing work leaves
+the value partial or unavailable. Current PyTorch `MultiProcessExecutor`
+ranks are not waited for, the XGBoost v2 partial-HE process pool cannot be
+verified as fully reaped, and a restored server worker cannot recover the
+prior process's CPU, so those paths cannot claim complete consumption. This
+metric is a practical billing proxy for covered execution, not an
+independently verified invoice ledger.
+`JobExecutor` marks a client relaunch's new CPU subtotal
+`partial/observation_incomplete` when it finds the per-job attempt marker,
+has seen that job ID before, or the scheduler attempt count is greater than
+one. The exclusive, synced marker is created in the site workspace root
+before launch, outside the redeployed run directory and archive; it survives
+a normal site-parent restart even if the attempt count is unchanged. Marker
+persistence failure leaves the current CPU subtotal partial and does not
+block launch. An attempt whose marker never persisted before a later crash
+cannot be reconstructed, so billing use still needs a storage-reliability or
+policy decision for that exceptional case.
 
 In v1, `retained_content` is a terminal best-effort scan of the participant's
 run directory. It sums logical `st_size` for regular files and excludes the
@@ -265,12 +293,15 @@ fractional digits.
 ```text
 elapsed_seconds      = (current_monotonic_ns - previous_monotonic_ns) / 1e9
 CPU unit-seconds     += visible_CPU_units * elapsed_seconds
+CPU consumed seconds = Δ(RUSAGE_SELF user+system) + Δ(RUSAGE_CHILDREN user+system)
 memory byte-seconds += visible_memory_bytes * elapsed_seconds
 GPU instance-seconds += visible_GPU_instances * elapsed_seconds
 ```
 
 Each interval product is rounded only when it exceeds nine fractional digits,
 using round-half-even, before exact decimal addition.
+CPU consumed uses only start/end counter differences. It is not derived from
+the capacity-time product and does not provide average CPU utilization.
 
 For example, private readings near `8000000000000000000` can produce the
 public value:
@@ -303,6 +334,8 @@ If the handoff is absent or invalid, the parent still builds a report, with
 child-derived values marked unavailable and any usable parent F3 subtotal
 marked partial. A child drain gap or unexpected pending parent admission
 likewise preserves bounded values as partial.
+CPU-consumption failure is independent of the capacity-time, memory, GPU, and
+retained-content statuses.
 Resource-report failures are logged but do not change the job outcome or
 prevent resource release. The parent freezes before it serializes the terminal
 report, so that report cannot count itself.
@@ -406,9 +439,10 @@ Consequently, a client report accepted only before the restart is not restored
 and, because the current client does not retry, that participant is normally
 `missing` in the eventual summary. The cutoff and invalid-candidate history
 also start fresh after restore. A restored server job process starts a new
-collector for the remaining interval; its numeric post-restart values are kept,
-but `resource_time` is marked `partial` with `observation_incomplete` so that
-the shorter interval cannot be mistaken for the complete logical job.
+collector for the remaining interval even without a component snapshot. An
+internal launch flag marks both numeric `resource_time` and `cpu_consumed`
+`partial/observation_incomplete` so the shorter interval cannot be mistaken
+for the complete logical job.
 
 ## 4. Finalization, files, and the normal archive
 
@@ -418,8 +452,10 @@ If the server job process itself fails, `JobRunner` skips that client wait and
 uses the failure observation as the immediate cutoff; remaining client reports
 are late. Abort follows the same no-wait behavior.
 Before `JobRunner._save_workspace()`, `ResourceStatsCoordinator.finalize_job()`
-closes acceptance and classifies every expected participant as `accepted`,
-`invalid`, `missing`, or `disabled`.
+closes acceptance and classifies every expected participant. Accepted entries
+omit `status`; `invalid`, `missing`, and `disabled` are explicit. The accepted
+measurement values likewise omit `status` and `issues` when complete, while
+partial, unavailable, and error values retain their exception fields.
 
 The final `resource_summary` has `job_id` but no `job_name`. The ID is the
 unique acceptance, reconciliation, storage, and ordering key. A human-facing
@@ -667,8 +703,9 @@ current contract example.
   accepted reports therefore become missing unless a new
   post-restart report is accepted.
 - A restored server job process measures only its new process interval and
-  marks `resource_time` as `partial/observation_incomplete`; it never presents
-  that post-restore interval as the complete logical-job duration.
+  marks `resource_time` and `cpu_consumed` as `partial/observation_incomplete`,
+  even without a component snapshot. It never presents that post-restore
+  interval as the complete logical-job duration.
 - The client makes one application-level completion send; no retry/tombstone
   behavior is promised.
 - Study queries stage one retained `WORKSPACE` archive at a time and avoid

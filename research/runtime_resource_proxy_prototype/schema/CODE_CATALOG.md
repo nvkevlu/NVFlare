@@ -9,34 +9,47 @@ qualification lists. The containing typed object supplies the subject. CLI
 explanations are derived from stored status and coverage rather than persisted
 again.
 
+The default human CLI marks incomplete numbers (`*`) and missing values (`—`),
+then lists the affected participants or jobs under **Data gaps**. Stored JSON
+also omits routine success statuses: an accepted participant entry has no
+`status`, and a complete typed measurement or total has neither `status` nor
+`issues`. Readers interpret those omissions only in their respective typed
+contexts. Exceptions remain explicit, so an incomplete subtotal cannot be
+mistaken for a complete value or an absent one. This is an in-place change to
+the unreleased v1 contract; no earlier public archive needs compatibility.
+
 ## Typed-object statuses
 
-| Context | Allowed statuses | Meaning |
+| Context | Explicit statuses | Meaning when status is absent / present |
 | --- | --- | --- |
-| Participant `resource_time` | reported, partial, unavailable | Complete compute resource time; at least one usable numeric member with incomplete coverage; or no usable compute resource-time value. |
-| Participant `workspace_filesystem` | reported, unavailable, error | One valid terminal capacity observation; no usable observation; or collection/integrity failure. |
-| Participant `retained_content` and `message_traffic` | reported, partial, unavailable, error | Complete facts; useful incomplete facts; no usable facts; or collection/integrity failure. |
-| Job/study `resource_time`, `retained_content`, and `message_traffic` totals | reported, partial, unavailable | Complete additive contributions; at least one numeric contribution with incomplete coverage; or no numeric contribution. `resource_time` retains one issue list when not reported; retained/message-traffic totals do not. |
+| Participant `resource_time` | partial, unavailable | Absent means complete compute resource time; `partial` has at least one usable numeric member with incomplete coverage; `unavailable` has no usable compute resource-time value. |
+| Participant `cpu_consumed` | partial, unavailable, error | Absent means complete user plus system CPU seconds for accounted job processes; explicit states mean a useful incomplete subtotal, no usable reading, or collection/integrity failure. |
+| Participant `workspace_filesystem` | unavailable, error | Absent means one valid terminal capacity observation; explicit states mean no usable observation or collection/integrity failure. |
+| Participant `retained_content` and `message_traffic` | partial, unavailable, error | Absent means complete facts; explicit states mean useful incomplete facts, no usable facts, or collection/integrity failure. |
+| Job/study `resource_time`, `cpu_consumed`, `retained_content`, and `message_traffic` totals | partial, unavailable | Absent means complete additive contributions; `partial` has at least one numeric contribution with incomplete coverage; `unavailable` has no numeric contribution. `resource_time` retains one issue list when incomplete; the other totals do not. |
 
-`resource_time` has exactly one status for measured time, CPU, memory, and GPU.
+`resource_time` has at most one exception status for measured time, CPU, memory, and GPU.
 Those nested members never carry their own statuses. This is intentional: v1
 does not expose separate CPU/memory/GPU lifecycle records.
+`cpu_consumed` is independent of that capacity-time status. A failed CPU
+consumption reading does not make sound CPU-capacity, memory, or GPU values
+partial.
 
-For participant observations, `reported` requires the applicable numeric facts
+For participant observations, absent status requires the applicable numeric facts
 and forbids issues. `partial` requires numeric facts plus applicable issues.
 `unavailable` and `error` contain no numeric facts and require issues. The
 workspace-filesystem point observation cannot be partial.
 
-In plain language, `reported` means the value is complete, `partial` means a
+In plain language, omitted status means the value is complete, `partial` means a
 useful but incomplete number, and `unavailable` means there is no number to
 show. These three meanings must stay distinct: a partial subtotal is not a
 complete total, and missing data must not look like zero. Separate statuses
-remain for compute time, workspace capacity, run-directory files, and message
-traffic because any one observation can fail while the others succeed. The
-participant status answers a different question: whether its report was
-accepted at all.
+remain for compute time, CPU consumption, workspace capacity, run-directory
+files, and message traffic because any one observation can fail while the
+others succeed. The participant status answers a different question: whether
+its report was accepted at all.
 
-**Proposed simplification, not yet part of v1:** fold measurement `error` into
+**Further proposed simplification, not yet part of v1:** fold measurement `error` into
 `unavailable` and retain its cause as an issue such as `malformed_source` or
 `permission_denied`. Both states carry no numeric value, so this would reduce
 one public status without hiding the failure. The fixed
@@ -45,31 +58,32 @@ one public status without hiding the failure. The fixed
 Until that change is approved and implemented, the allowlists below remain
 authoritative; these fields and `error` are still valid.
 
-An observed zero is explicit: a decimal string `"0"`, an empty reported GPU
-group array, a reported retained-content value of `"0"`, or zeroed reported message-traffic
+An observed zero is explicit: a decimal string `"0"`, an empty complete GPU
+group array, a complete retained-content value of `"0"`, or zeroed complete message-traffic
 counters. Missing, invalid, disabled, unbound, or nonterminal data is never
 encoded as zero.
 
 Aggregate status is derived:
 
-- `reported`: every selected contribution is present and complete;
+- no `status`: every selected contribution is present and complete;
 - `partial`: at least one numeric contribution exists and at least one source
   contribution or expected participant/job is incomplete; and
 - `unavailable`: no numeric contribution exists for that typed total.
 
 Aggregate `resource_time` keeps one derived issue list on
 partial/unavailable because it uses the same closed object as a participant.
-Retained-content and message-traffic totals do not repeat issue lists. None of the totals
-stores a second warning or caveat array.
+CPU-consumed, retained-content, and message-traffic totals do not repeat issue
+lists. None of the totals stores a second warning or caveat array.
 
 ## Expected participant state
 
 | Domain | Exact values | Rule |
 | --- | --- | --- |
 | role | client, server | Stored once for each expected participant; never inferred from its ID. |
-| status | accepted, missing, invalid, disabled | Classification of the participant's one terminal report at cutoff. |
+| status | missing, invalid, disabled, or omitted | Omission means accepted; explicit values classify exceptions at cutoff. |
 
-`accepted` requires validated bytes installed in the server run workspace.
+An accepted entry omits `status` and requires validated bytes installed in the
+server run workspace.
 `invalid` requires no accepted bytes plus at least one correctly bound,
 pre-cutoff candidate that failed report validation; `received_at` is the first
 such rejection, and its issue is `malformed_source`.
@@ -117,7 +131,7 @@ and nonterminal jobs separately.
 `issues` is a sorted, unique array of one to four values. The containing object
 provides context. Current retained-content collection normally uses
 `observation_incomplete` for run-directory scan failures; `not_bound` remains
-valid for older reports and another typed source that has no implementation.
+valid for another typed source that has no implementation.
 F3 counters are now bound at the three trusted semantic origins; runtime
 coverage failures use the applicable gap or incomplete-attribution code rather
 than a clean zero.
@@ -126,6 +140,9 @@ than a clean zero.
 | --- | --- |
 | Resource time partial | observation_incomplete, attribution_incomplete |
 | Resource time unavailable | not_bound, observation_incomplete, attribution_incomplete, unsupported, permission_denied, dependency_missing, malformed_source |
+| CPU consumed partial | observation_incomplete, attribution_incomplete |
+| CPU consumed unavailable | not_bound, observation_incomplete, attribution_incomplete, unsupported, dependency_missing |
+| CPU consumed error | permission_denied, malformed_source |
 | Workspace filesystem unavailable | observation_incomplete, attribution_incomplete, unsupported, dependency_missing |
 | Workspace filesystem error | permission_denied, malformed_source |
 | Retained content partial | observation_incomplete, attribution_incomplete |
@@ -136,11 +153,11 @@ than a clean zero.
 | Message traffic error | permission_denied, malformed_source |
 | Invalid participant report | malformed_source |
 
-Reported objects never carry issues. A missing/invalid participant or an
+Complete objects (status omitted) never carry issues. A missing/invalid participant or an
 unavailable/nonterminal job is already an explicit coverage fact, so its
 effect is not copied into a separate warning list on derived totals.
-`not_bound` remains legal for historical F3 records and readers, but the
-current supported production bindings do not hard-code it; a runtime loss of
+`not_bound` remains legal for a source with no bounded implementation, but the
+current supported production F3 bindings do not hard-code it; a runtime loss of
 an expected counter is observation or attribution incompleteness.
 
 ## GPU group kind
@@ -151,8 +168,8 @@ an expected counter is observation or attribution incompleteness.
 | mig_compute_instance | Resource time from one or more runtime-visible MIG compute instances. |
 
 Only positive `instance_seconds` groups are stored. Absence of a kind from a
-successfully reported GPU object means accumulated zero for that kind. An
-empty reported group array means authoritative total GPU resource time of
+complete GPU object means accumulated zero for that kind. An
+empty complete group array means authoritative total GPU resource time of
 zero. `mig_profile` is legal only on a MIG group. Full-GPU and MIG time remain
 separate through participant, job, and study reduction.
 
@@ -162,7 +179,7 @@ separate through participant, job, and study reduction.
 | --- | --- |
 | sent_to | Participant list of included payload by remote logical destination, accepted by the originating process's local transport before counters closed. It does not assert receiver processing or durable storage. |
 
-Reported/partial participant `message_traffic` contains zero to 2,048
+Complete/partial participant `message_traffic` contains zero to 2,048
 `sent_to` entries sorted by unique `participant_name`; each entry has a
 payload-byte/positive-message pair. A destination cannot be the sender, and
 accepted summary destinations must name another expected participant.
@@ -218,7 +235,7 @@ The selected one-message completion request needs an immediate handling result:
 `server_error`. These values control bounded retry and diagnostics. They are
 not persisted inside `participant_summary`, are not compute statuses, and do
 not add another status branch to the schema. Final expected-participant state
-is still only accepted, missing, invalid, or disabled.
+is still accepted (status omitted), missing, invalid, or disabled.
 
 The outcome list and acceptance meaning are identical whether Option A extends
 `REPORT_JOB_FAILURE` or Option B uses versioned `REPORT_JOB_COMPLETION` with
@@ -238,7 +255,9 @@ job-command errors and are not new resource-statistics codes.
 Documentation may explain that:
 
 - resource time is visible capacity multiplied by privately accumulated time,
-  not utilization, ownership, reservation, cost, or billing;
+  not CPU consumption, utilization, ownership, reservation, or cost;
+- CPU consumed is a billing proxy for covered execution, not an independently
+  verified invoice ledger;
 - the archive does not expose start/end snapshots or a resource-change
   timeline;
 - workspace-filesystem capacity is one terminal observation of only the

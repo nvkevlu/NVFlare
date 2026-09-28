@@ -12,7 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from nvflare.private.fed.resource_stats.contract import derive_job_totals
+import re
+
+from nvflare.private.fed.resource_stats.contract import derive_job_totals, derive_study_totals
 from nvflare.tool.job.job_resources import render_job_resources, render_study_resources
 
 
@@ -20,9 +22,7 @@ def _participant():
     return {
         "participant_name": "site-1",
         "role": "client",
-        "status": "accepted",
         "resource_time": {
-            "status": "reported",
             "measured_seconds": "3600",
             "cpu": {"groups": [{"unit_seconds": "28800", "model": "AMD EPYC 9654"}]},
             "memory": {"byte_seconds": str(64 * 2**30 * 3600)},
@@ -36,9 +36,10 @@ def _participant():
                 ]
             },
         },
+        "cpu_consumed": {"seconds": "1800"},
         "retained_content": {"status": "unavailable", "issues": ["not_bound"]},
         "message_traffic": {"status": "unavailable", "issues": ["not_bound"]},
-        "workspace_filesystem": {"status": "reported", "capacity_bytes": str(2 * 2**40)},
+        "workspace_filesystem": {"capacity_bytes": str(2 * 2**40)},
     }
 
 
@@ -49,9 +50,9 @@ def _job_summary(participant):
             {
                 "participant_name": participant["participant_name"],
                 "role": participant["role"],
-                "status": participant["status"],
                 "received_at": "2026-09-17T12:00:00Z",
                 "resource_time": participant["resource_time"],
+                "cpu_consumed": participant["cpu_consumed"],
                 "retained_content": participant["retained_content"],
                 "message_traffic": participant["message_traffic"],
             }
@@ -64,25 +65,39 @@ def _with_missing_server(summary):
     return summary
 
 
+def _site_cell(output: str, header: str, site: str = "site-1") -> str:
+    headings = next(line for line in output.splitlines() if header in line)
+    values = next(line for line in output.splitlines() if line.startswith(site))
+    columns = re.split(r"\s{2,}", headings.strip())
+    cells = re.split(r"\s{2,}", values.strip())
+    return cells[next(index for index, column in enumerate(columns) if column.startswith(header))]
+
+
 def test_mig_column_is_hidden_when_no_participant_reports_mig():
     participant = _participant()
 
     output = render_job_resources(_job_summary(participant), job_name="hello-pt")
 
     assert output.startswith("Recorded resources for job hello-pt (ID: job-1).")
-    assert "Recorded average visible capacity over each measured interval" in output
-    assert "CPU UNITS" in output
+    assert "AVG CPU VISIBLE" in output
+    assert "AVG CPU USED" in output
     assert "MEM GiB" in output
     assert "FULL GPUs" in output
     assert "MIG INSTANCES" not in output
     assert "8.0000" in output
+    assert "0.5000" in output  # 1,800 consumed CPU seconds / 3,600 measured seconds.
     assert "64.0000" in output
     assert "2.0000" in output
     assert "RUN-DIR FILES" not in output
     assert "MESSAGE PAYLOAD SENT" not in output
-    assert "CPU 8.0000 unit h" in output
-    assert "MEMORY 64.0000 GiB h" in output
-    assert "FULL GPUs 2.0000 instance h" in output
+    assert "CPU visible 8.0000 core-h" in output
+    assert "CPU time used 0.5000 core-h" in output
+    assert "Memory visible 64.0000 GiB-h" in output
+    assert "Full GPUs visible 2.0000 GPU-h" in output
+    assert "COMPUTE" not in output
+    assert "CPU CONSUMED STATUS" not in output
+    assert "accepted" not in output.lower()
+    assert "reported" not in output.lower()
 
 
 def test_job_header_falls_back_to_id_when_name_metadata_is_not_supplied():
@@ -115,9 +130,11 @@ def test_run_directory_files_and_message_traffic_columns_are_only_shown_when_bou
     participant = _participant()
     summary = _job_summary(participant)
 
-    assert "Other recorded participant totals" not in render_job_resources(summary)
+    initial_output = render_job_resources(summary)
+    assert "RUN-DIR FILES" not in initial_output
+    assert "MESSAGE PAYLOAD SENT" not in initial_output
 
-    participant["retained_content"] = {"status": "reported", "bytes": str(3 * 2**30)}
+    participant["retained_content"] = {"bytes": str(3 * 2**30)}
     participant["message_traffic"] = {
         "status": "partial",
         "issues": ["counter_gap"],
@@ -126,17 +143,15 @@ def test_run_directory_files_and_message_traffic_columns_are_only_shown_when_bou
     summary = _with_missing_server(_job_summary(participant))
     output = render_job_resources(summary)
 
-    assert "Other recorded participant totals" in output
     assert "RUN-DIR FILES GiB" in output
-    assert "RUN-DIR STATUS" in output
-    assert "MESSAGE TRAFFIC STATUS" in output
-    assert "PARTIAL" in output
-    assert "MESSAGE PAYLOAD SENT GiB" in output
-    assert "MESSAGE PAYLOAD SENT TO SITE GiB" in output
-    assert "RUN-DIR FILES 3.0000 GiB" in output
-    assert "RUN-DIR STATUS PARTIAL" in output
-    assert "MESSAGE TRAFFIC STATUS PARTIAL" in output
-    assert "MESSAGE PAYLOAD SENT 5.0000 GiB" in output
+    assert "PAYLOAD SENT GiB" in output
+    assert "PAYLOAD SENT TO SITE GiB" in output
+    assert "Run-dir files 3.0000* GiB" in output  # The server report is missing.
+    assert "5.0000*" in output  # Counter gap: useful subtotal, not a complete send total.
+    assert "RUN-DIR STATUS" not in output
+    assert "MESSAGE TRAFFIC STATUS" not in output
+    assert "Data gaps" in output
+    assert "server" in output  # The expected server report is missing.
 
     participant["retained_content"] = {
         "status": "partial",
@@ -144,22 +159,63 @@ def test_run_directory_files_and_message_traffic_columns_are_only_shown_when_bou
         "bytes": str(2 * 2**30),
     }
     partial_output = render_job_resources(_with_missing_server(_job_summary(participant)))
-    assert "RUN-DIR STATUS PARTIAL" in partial_output
+    assert "2.0000*" in partial_output
+    assert "RUN-DIR STATUS" not in partial_output
 
 
 def test_sender_confirmed_inbound_remains_visible_when_destination_report_is_missing():
     site = _participant()
     site["message_traffic"] = {
-        "status": "reported",
         "sent_to": [{"participant_name": "server", "payload_bytes": str(2**30), "messages": "2"}],
     }
     summary = _with_missing_server(_job_summary(site))
 
     output = render_job_resources(summary)
     server_row = next(line for line in output.splitlines() if line.startswith("server") and "1.0000" in line)
-    assert "N/A" in server_row
+    assert "—" in server_row
     assert "1.0000" in server_row
     assert "sender-confirmed" in output
+
+
+def test_cpu_used_average_is_marked_when_process_cpu_is_incomplete():
+    participant = _participant()
+    participant["cpu_consumed"] = {
+        "status": "partial",
+        "issues": ["attribution_incomplete"],
+        "seconds": "900",
+    }
+
+    output = render_job_resources(_job_summary(participant))
+
+    assert _site_cell(output, "AVG CPU VISIBLE") == "8.0000"
+    assert _site_cell(output, "AVG CPU USED") == "0.2500*"  # 900 / 3,600; incomplete subtotal.
+    assert "Data gaps" in output
+    assert "CPU CONSUMED STATUS" not in output
+
+
+def test_cpu_used_average_is_withheld_when_measured_interval_is_partial():
+    participant = _participant()
+    participant["resource_time"] = {
+        "status": "partial",
+        "issues": ["observation_incomplete"],
+        "measured_seconds": "3600",
+        "cpu": participant["resource_time"]["cpu"],
+    }
+
+    output = render_job_resources(_job_summary(participant))
+
+    assert _site_cell(output, "AVG CPU USED") == "—"
+    assert "Data gaps" in output
+
+
+def test_collection_error_is_shown_as_a_gap_without_another_status_column():
+    participant = _participant()
+    participant["retained_content"] = {"status": "error", "issues": ["permission_denied"]}
+
+    output = render_job_resources(_job_summary(participant))
+
+    assert "run-dir files unavailable (access denied)" in output
+    assert "RUN-DIR STATUS" not in output
 
 
 def test_study_mig_column_is_shown_only_when_an_included_job_reports_mig():
@@ -189,9 +245,14 @@ def test_study_mig_column_is_shown_only_when_an_included_job_reports_mig():
     assert "JOB ID" in initial_output
     assert "NAME" in initial_output
     assert "hello-pt" in initial_output
-    assert "MIG h" not in initial_output
+    assert "CPU USED core-h" in initial_output
+    assert "0.5000" in initial_output
+    assert "MIG instance-h" not in initial_output
     assert "RUN-DIR FILES" not in initial_output
     assert "MESSAGE PAYLOAD SENT" not in initial_output
+    assert "QUALITY" not in initial_output
+    assert "RESOURCE DATA" not in initial_output
+    assert "CPU CONSUMED STATUS" not in initial_output
 
     mig_group = {
         "kind": "mig_compute_instance",
@@ -201,14 +262,47 @@ def test_study_mig_column_is_shown_only_when_an_included_job_reports_mig():
     job_totals["resource_time"]["gpu"]["groups"].append(mig_group)
 
     output = render_study_resources(study)
-    assert "MIG h" in output
-    assert "MIG INSTANCES 1.0000 instance h" in output
+    assert "MIG instance-h" in output
+    assert "MIG instances visible 1.0000 instance-h" in output
 
     job_totals["message_traffic"] = {
         "status": "partial",
         "sent": {"payload_bytes": str(5 * 2**30), "messages": "10"},
     }
     output = render_study_resources(study)
-    assert "MESSAGE TRAFFIC STATUS" in output
-    assert "MESSAGE TRAFFIC STATUS PARTIAL" in output
-    assert "MESSAGE PAYLOAD SENT 5.0000 GiB" in output
+    assert "PAYLOAD SENT GiB" in output
+    assert "5.0000*" in output
+    assert "MESSAGE TRAFFIC STATUS" not in output
+
+
+def test_cpu_consumed_job_and_study_cli_reconcile_without_changing_capacity_time():
+    first = _job_summary(_participant())
+    second_participant = _participant()
+    second_participant["cpu_consumed"] = {"seconds": "900"}
+    second = _job_summary(second_participant)
+    job_totals = [derive_job_totals(summary["participants"]) for summary in (first, second)]
+    assert [total["cpu_consumed"]["seconds"] for total in job_totals] == ["1800", "900"]
+
+    jobs = [
+        {
+            "job_id": f"job-{index}",
+            "job_name": f"run-{index}",
+            "job_status": "FINISHED:COMPLETED",
+            "resource_data": "included",
+            "totals": total,
+        }
+        for index, total in enumerate(job_totals, 1)
+    ]
+    study_totals = derive_study_totals(jobs)
+    assert study_totals["cpu_consumed"] == {"seconds": "2700"}
+    assert study_totals["resource_time"]["cpu"]["groups"][0]["unit_seconds"] == "57600"
+
+    study = {
+        "selection": {"study_name": "default"},
+        "coverage": {"selected_jobs": "2", "included_jobs": "2", "unavailable_jobs": "0", "nonterminal_jobs": "0"},
+        "jobs": jobs,
+        "totals": study_totals,
+    }
+    output = render_study_resources(study)
+    assert "CPU time used 0.7500 core-h" in output
+    assert "CPU visible 16.0000 core-h" in output

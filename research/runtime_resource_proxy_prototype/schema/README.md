@@ -15,8 +15,20 @@ derived study-query response. It does not expose collector lifecycle records.
 | [golden/v1](golden/v1) | Valid example records and CLI output. |
 | [build_review_artifacts.py](build_review_artifacts.py) | Deterministic generator for the goldens. |
 
+Regenerate from the repository root in a Python environment with NVFlare and
+its test dependencies installed. The generator uses the production CLI
+renderer, so both the repository root and this script's directory must be
+importable:
+
+```console
+PYTHONPATH=. python research/runtime_resource_proxy_prototype/schema/build_review_artifacts.py
+PYTHONPATH=. python -m pytest -q research/runtime_resource_proxy_prototype/tests/test_review_artifacts.py
+```
+
 Unknown fields are rejected. JSON `null` is not a substitute for an omitted
-field. New meanings require a new schema version.
+field. V1 is not released, so the current contract requires `cpu_consumed` and
+uses implicit success states without an archive-compatibility or version-bump
+requirement.
 
 ## Record flow
 
@@ -24,9 +36,14 @@ Each participant produces exactly one `participant_summary` when its part of
 the job ends. The report contains:
 
 - one `resource_time` object for accumulated CPU, memory, and GPU time;
+- one independent `cpu_consumed` object for user plus system CPU seconds;
 - one final `workspace_filesystem` capacity observation;
 - one `retained_content` observation; and
 - one final `message_traffic` observation.
+
+Every participant report includes `cpu_consumed`. If its measurement has no
+usable value, that typed object explicitly says `unavailable` or `error` and
+records the applicable issue; it is not omitted or interpreted as zero.
 
 The root server authenticates and validates reports, reconciles them against
 the participants expected for the job, and writes one `resource_summary` with
@@ -143,11 +160,13 @@ participant's original observations were truthful. The normal ZIP CRC can
 detect accidental member corruption, but it is not a cryptographic trust
 boundary.
 
-## One compute status
+## One compute completeness decision
 
-`resource_time.status` applies to measured time, CPU, memory, and GPU together:
+`resource_time` applies one completeness decision to measured time, CPU,
+memory, and GPU together:
 
-- `reported` requires `measured_seconds`, CPU, memory, and GPU values;
+- no `status` or `issues` means complete and requires `measured_seconds`, CPU,
+  memory, and GPU values;
 - `partial` requires issues and at least one usable numeric member; and
 - `unavailable` requires issues and carries no numeric members.
 
@@ -155,15 +174,30 @@ CPU, memory, and GPU do not have nested statuses or issue arrays. This makes
 the completeness statement intentionally coarse but removes contradictory
 per-resource/start/final status combinations.
 
-`workspace_filesystem`, `retained_content`, and `message_traffic` keep separate statuses.
+`cpu_consumed`, `workspace_filesystem`, `retained_content`, and
+`message_traffic` keep independent exception statuses.
 They use independent sources and can fail even when compute resource time is
 complete.
 
-The three essential numeric meanings are complete value (`reported`), useful
+`cpu_consumed` has canonical decimal `seconds` when complete or partial.
+Partial carries an issue list and a useful incomplete subtotal; unavailable
+carries an issue list and no numeric value. Its status does not change
+otherwise sound CPU-capacity, memory, or GPU results. Linux and macOS read
+`RUSAGE_SELF` and `RUSAGE_CHILDREN` once at the start and once at the end of
+the job-process measurement window. The deltas count the job process and
+descendants that exited and were waited for in that window, without double
+counting. A short-lived waited child is included without periodic sampling.
+An unawaited or still-running known worker makes coverage partial or
+unavailable; the shared site parent is excluded. Current PyTorch
+`MultiProcessExecutor` ranks are not waited for and the earlier interval of
+a restored server worker is unrecoverable from these counters.
+
+The three essential numeric meanings are complete value (status omitted), useful
 subtotal (`partial`), and no usable value (`unavailable`). They distinguish an
-actual zero from absent evidence. Participant `accepted`/`missing`/`invalid`/
-`disabled` instead describes whether a terminal report made it into the job
-summary. The current schema also permits `error` on some measurements; see the
+actual zero from absent evidence. Participant status is likewise omitted for
+`accepted`, but explicit `missing`/`invalid`/`disabled` values describe why
+a terminal report did not make it into the job summary. The schema also
+permits `error` on some measurements; see the
 [status catalog](CODE_CATALOG.md#typed-object-statuses) for a proposed
 consolidation that has **not** changed the v1 contract.
 
@@ -220,7 +254,7 @@ NVML may enrich devices already validated by CUDA, but it cannot add a device
 or change count authority. Full GPUs and MIG compute instances stay in
 separate `instance_seconds` groups. Optional model, per-entity memory, and MIG
 profile metadata do not change the numeric authority. MIG fields are omitted
-when inapplicable. An empty reported GPU group list is authoritative zero.
+when inapplicable. An empty complete GPU group list is authoritative zero.
 
 ## Terminal workspace-filesystem observation
 
@@ -228,8 +262,9 @@ During terminal finalization, NVFlare observes the total capacity of only the
 filesystem containing the existing job workspace. It does not enumerate or
 sum other mounted filesystems.
 
-`workspace_filesystem` contains its own status and, when reported,
-`capacity_bytes`. It is a single point observation, not usage, allocation,
+`workspace_filesystem` omits status and issues when `capacity_bytes` was
+observed; otherwise it carries an explicit exception status and issues. It is
+a single point observation, not usage, allocation,
 billable storage, storage owned by the job, or evidence about capacity earlier
 in the run. It is not converted to byte-seconds and is never aggregated across
 participants or jobs.
@@ -275,7 +310,8 @@ An empty list represents no included sends. Counters freeze in one atomic
 operation before the report is serialized. A callback contributes only if it
 linearizes before that cutoff; later callbacks cannot change canonical values.
 If the platform cannot stop new included traffic and drain already admitted
-callbacks before freezing, F3 reports `partial/counter_gap`, not `reported`.
+callbacks before freezing, F3 reports `partial/counter_gap` rather than
+claiming a complete value with no status.
 Child cleanup first closes command admission and pre-drains admitted callbacks
 for up to five seconds while transport remains alive; timeout or error marks
 `counter_gap`. The child then uses the fixed five-second F3 drain. The parent
@@ -311,13 +347,14 @@ The server builds `participants` from authenticated deployment/selection
 state, not incoming reports. At cutoff, each expected participant is exactly
 one of:
 
-- `accepted`;
+- accepted (no `status` field);
 - `missing`;
 - `invalid`; or
 - `disabled`.
 
 An accepted entry includes the trusted participant name and role, receipt
-time, and the validated terminal `resource_time`, `retained_content`, and `message_traffic`
+time, and the validated terminal `resource_time`, `cpu_consumed`,
+`retained_content`, and `message_traffic`
 objects. Workspace-filesystem capacity remains only in the archived
 participant report. A retry with identical bytes is idempotent; different
 bytes cannot replace the first accepted report. The server compares the exact
@@ -325,10 +362,10 @@ accepted bytes directly; the accepted summary row does not add a receipt token.
 
 The archived job summary contains participant entries and no aggregate
 `totals`. The CLI and study query derive job totals from accepted reports when
-requested. The derived values contain only `resource_time`,
+requested. The derived values contain `resource_time`, `cpu_consumed`,
 `retained_content`, and a message-traffic `sent` pair summed from participant
-`sent_to` entries. Aggregate status
-reflects expected-participant coverage and typed status. There is no
+`sent_to` entries. Complete totals omit status and issues; partial or
+unavailable totals carry explicit status. There is no
 workspace-capacity total. Missing data is not zero.
 
 ## Server files
@@ -406,12 +443,25 @@ bounded status read during the one scan even if the job changes state while
 archives are being read.
 
 The response keeps coverage counts and per-job state so missing summaries are
-not mistaken for zero. It adds only resource time, retained-content bytes, and
-the message-traffic `sent` pair. Workspace-filesystem capacity is never
-included. Only `included` rows contribute numbers; any unavailable or
+not mistaken for zero. It adds resource time, CPU consumed seconds,
+retained-content bytes, and the message-traffic `sent` pair.
+Workspace-filesystem capacity is never included. Only `included` rows
+contribute numbers; any unavailable or
 nonterminal row makes an otherwise numeric aggregate partial. The response is
 not stored, does not include jobs already removed by retention, and is not a
-permanent audit, billing, or historical record.
+permanent audit or independently verified invoice ledger. CPU consumed is a
+practical billing proxy for the included jobs.
+
+The human CLI keeps the main numbers easy to scan: it omits repeated status
+columns, marks a useful incomplete number with `*`, and uses `—` for no usable
+number. Short data-gap notes point to the affected job, participant, or
+measurement. The JSON response preserves explicit exception statuses and issue
+codes; omitted success status means accepted or complete in its typed context.
+The job table also places average CPU cores used beside average visible CPU
+cores. The former divides process CPU seconds by `measured_seconds` only when
+the measured interval is complete and positive; a partial CPU-time subtotal
+is starred, while a partial interval suppresses the derived average. This is
+not a utilization percentage.
 
 ## Privacy
 

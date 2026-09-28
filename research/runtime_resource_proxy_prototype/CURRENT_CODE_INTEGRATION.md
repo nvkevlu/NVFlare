@@ -184,7 +184,7 @@ The equivalent SJ hook is:
 The hook:
 
 1. probes CPU, memory, and CUDA-visible GPU capacity;
-2. records one monotonic clock anchor; and
+2. records one monotonic clock anchor and a job-process CPU-accounting baseline; and
 3. creates an identity-free in-memory accumulator.
 
 It does not write a start record, send a message, or persist recovery state.
@@ -242,10 +242,10 @@ the code does not fall back to a wider affinity, online-CPU, or physical-memory
 value. Other valid dimensions may remain, making the single compute result
 partial. If none remains, it is unavailable.
 
-When the server job process is restored from a snapshot, it starts a new
+When the server job process is restored, with or without a component snapshot, it starts a new
 collector for the interval this new process can actually observe. Its numeric
 post-restore values are retained, but the result is marked
-`partial/observation_incomplete`; it is never presented as the complete
+`partial/observation_incomplete` for both resource time and CPU consumed; it is never presented as the complete
 logical-job interval.
 
 ### 3. The application runs normally
@@ -287,13 +287,15 @@ upload, `_archive_results()` then:
 
 1. closes F3 admission, drains admitted operations for the fixed five-second
    internal bound, and freezes the child snapshot;
-2. advances the resource-time accumulator through the final monotonic time and
-   finalizes one `resource_time` object with one overall status;
-3. observes the capacity of the filesystem containing the existing job
+2. reads final `RUSAGE_SELF` and `RUSAGE_CHILDREN` CPU counters and forms an
+   independent `cpu_consumed` result without periodic sampling;
+3. advances the resource-time accumulator through the final monotonic time and
+   finalizes one `resource_time` object whose status is omitted when complete;
+4. observes the capacity of the filesystem containing the existing job
    workspace;
-4. recursively sums logical `st_size` for regular files in the participant's
+5. recursively sums logical `st_size` for regular files in the participant's
    run directory, excluding top-level `resource_stats/`; and
-5. serializes one private terminal measurement handoff.
+6. serializes one private terminal measurement handoff.
 
 The retained-content walk ignores symlinks and other non-regular entries,
 counts hard links once per path, and uses logical rather than allocated size for
@@ -319,7 +321,7 @@ It writes the handoff atomically at:
 ```
 
 `terminal_handoff.json` has an internal, bounded format. It carries the child
-resource-time result, workspace-filesystem observation, retained-content
+resource-time and CPU-consumed results, workspace-filesystem observation, retained-content
 result, and child-local F3 counters. It is not the public schema and is never
 renamed into `participants/`. The parent supplies the trusted job and
 participant name when it assembles the public record.
@@ -328,12 +330,13 @@ participant name when it assembles the public record.
 internal_version = "1"
 kind = "nvflare.resource_stats.internal.terminal_handoff"
 resource_time
+cpu_consumed
 workspace_filesystem
 retained_content
 child_f3
 ```
 
-Those six fields are exact; the private handoff contains no job or participant
+Those seven fields are exact; the private handoff contains no job or participant
 identity.
 
 The parent reads only this fixed path. It requires a regular, non-symlink file,
@@ -622,11 +625,12 @@ The resource acceptance function:
 3. performs strict UTF-8 JSON parsing, rejecting duplicate keys and non-finite
    numbers;
 4. validates the schema, semantic bounds, job ID, expected participant name,
-   model grouping, one overall resource-time status, and exact number forms;
+   model grouping, the one resource-time completeness decision (implicit
+   success or explicit exception), and exact number forms;
 5. requires the bytes to equal the deterministic canonical serialization of
    that validated record;
-6. accepts `resource_time` as the parent-assembled participant total derived
-   from the child's private handoff;
+6. accepts `resource_time` and independent `cpu_consumed` as parent-assembled
+   participant totals derived from the child's private handoff;
 7. under the per-job lock, compares the canonical bytes directly with any
    accepted bytes for that participant and retains the first valid canonical
    bytes and receipt time in the root parent's live ledger; and
@@ -709,6 +713,7 @@ For accepted entries, the job CLI derives the additive values on demand:
 ```text
 job measured seconds       = sum(participant measured seconds)
 job CPU unit-seconds       = sum(participant CPU unit-seconds)
+job CPU consumed seconds   = sum(participant CPU consumed seconds)
 job memory byte-seconds    = sum(participant memory byte-seconds)
 job GPU instance-seconds   = sum(participant GPU instance-seconds)
 job run-directory bytes    = sum(participant retained_content bytes)
@@ -915,8 +920,9 @@ totals. It never truncates a study result or derives totals from a prefix.
 
 This view is calculated on demand. It creates no study-level stored component
 or duplicate job summary. It covers only retained jobs materialized by that
-scan; a deleted job has no archive to query. The output must not be described
-as an audit or billing ledger.
+scan; a deleted job has no archive to query. CPU consumed is a practical
+billing proxy for retained jobs; the output is not an independently verified
+invoice or audit ledger.
 
 For a filesystem backend, staging may use a local link. A remote backend may
 need to fetch each retained workspace archive. If that is too expensive at
@@ -1054,7 +1060,7 @@ no dual-send mode or operator configuration.
 | One startup probe fails | Finish one report with partial or unavailable resource time; do not fail the job. |
 | An applicable cgroup CPU or memory value is unreadable or malformed | Fail that dimension closed; do not substitute a wider host or process-visible value. Keep other valid dimensions as partial, or report unavailable when none remains. |
 | Slurm uses more than one node | Resource time is `unavailable/unsupported`; publish no rank-zero numeric totals and do not infer other-node capacity. |
-| Server job process is restored from a snapshot | Measure the new process interval and mark it `partial/observation_incomplete`; do not claim that it covers the pre-restore interval. |
+| Server job process is restored, with or without a component snapshot | Measure the new process interval and mark resource time and CPU consumed `partial/observation_incomplete`; do not claim that they cover the pre-restore interval. |
 | Normal application exception reaches child finalization | Freeze the private handoff if possible; the parent still owns final assembly. |
 | A command callback is still active during child cleanup | Close command admission and pre-drain for up to five seconds while Cell/streaming remain alive. Timeout or error marks F3 `partial/counter_gap`; after publication and transport stop, retain one bounded post-stop wait. |
 | A child F3 operation is still active at the cutoff | After the callback pre-drain, stop waiting after the fixed five-second F3 drain, freeze once, and preserve the bounded subtotal as `partial/counter_gap`. |

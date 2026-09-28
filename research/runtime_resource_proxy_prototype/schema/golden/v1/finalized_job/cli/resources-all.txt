@@ -1,28 +1,32 @@
 Recorded resources for job qwen2.5-14b-federated-qualification (ID: job-20260909-001).
-Job coverage: PARTIAL (3 accepted / 4 expected)
+Participants with data: 3/4
 
-Recorded average visible capacity over each measured interval
-SITE    ROLE    REPORT    COMPUTE   MEASURED TIME  CPU UNITS  MEM GiB   FULL GPUs
-site-1  client  accepted  REPORTED  37m3s          32.0000    192.0000  4.0000
-site-2  client  accepted  PARTIAL   32m3s          29.5039    182.0156  3.6880
-site-3  client  missing   —         —              N/A        N/A       N/A
-server  server  accepted  REPORTED  37m3s          8.0000     64.0000   0.0000
+Average resources per participant (CPU in cores)
+SITE    TIME    AVG CPU VISIBLE (cores)  AVG CPU USED (cores)  AVG MEM GiB  AVG FULL GPUs
+site-1  37m3s   32.0000                  0.8097                192.0000     4.0000
+site-2  32m3s*  29.5039*                 —                     182.0156*    3.6880*
+site-3  —       —                        —                     —            —
+server  37m3s   8.0000                   0.1619                64.0000      0.0000
 
-Other recorded participant totals
-SITE    RUN-DIR STATUS  RUN-DIR FILES GiB  MESSAGE TRAFFIC STATUS  MESSAGE PAYLOAD SENT GiB  MESSAGE PAYLOAD SENT TO SITE GiB
-site-1  REPORTED        0.0000             REPORTED                137.5567                  137.5567 (partial)
-site-2  UNAVAILABLE     N/A                REPORTED                137.5567                  137.5567 (partial)
-site-3  N/A             N/A                N/A                     N/A                       0.0000
-server  REPORTED        27.5115            REPORTED                275.1133                  275.1133 (partial)
+Recorded files and message payload
+SITE    RUN-DIR FILES GiB  PAYLOAD SENT GiB  PAYLOAD SENT TO SITE GiB
+site-1  0.0000             137.5567          137.5567*
+site-2  —                  137.5567          137.5567*
+site-3  —                  —                 0.0000
+server  27.5115            275.1133          275.1133*
 
-Additive participant resource-time from accepted reports | compute: PARTIAL
-  Summed measured participant time: 1h46m9s
-  CPU 40.4600 unit h | MEMORY 255.3067 GiB h | FULL GPUs 4.4400 instance h
-  Other additive totals: RUN-DIR STATUS PARTIAL | RUN-DIR FILES 27.5115 GiB | MESSAGE TRAFFIC STATUS PARTIAL | MESSAGE PAYLOAD SENT 550.2266 GiB
+Sum of recorded participant values
+  CPU visible 40.4600* core-h | Memory visible 255.3067* GiB-h | Full GPUs visible 4.4400* GPU-h
+  CPU time used 0.8500* core-h | Run-dir files 27.5115* GiB | Message payload sent 550.2266* GiB
+
+Data gaps:
+  site-2: visible capacity partial (observation incomplete); CPU time used partial (observation incomplete); run-dir files unavailable (not collected)
+  site-3: missing report
 
 Notes:
-  PARTIAL means at least one expected report or observation was incomplete.
-  Each average is resource-time divided by that row's measured interval.
-  Totals add participant reports; overlapping resources can be counted more than once.
-  Message payload sent to a site is sender-confirmed; it is not proof of receipt.
+  * = incomplete number; — = no usable value. See --format json for details.
+  CPU visible is capacity; CPU used is process CPU time divided by a complete measured interval, not host utilization %.
+  CPU used may miss child-process work; known gaps are marked *.
+  Sums add participant values; physically shared resources may be counted more than once.
+  Payload sent to a site is sender-confirmed, not proof of receipt.
   Use --site SITE or --format json to see hardware model details.

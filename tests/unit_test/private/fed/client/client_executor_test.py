@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import json
+import shutil
 import threading
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -32,10 +33,12 @@ from nvflare.private.defs import CellChannel, CellChannelTopic, JobFailureMsgKey
 from nvflare.private.fed.client.client_engine import ClientEngine
 from nvflare.private.fed.client.client_executor import (
     _ABORT_REQUESTED_KEY,
+    _CPU_ATTEMPT_DIR,
     REPORTABLE_JOB_FAILURES,
     JobExecutor,
     _build_participant_resource_report,
     _PendingJobHandle,
+    _record_client_cpu_attempt,
 )
 from nvflare.private.fed.client.client_status import ClientStatus
 from nvflare.private.fed.client.communicator import Communicator
@@ -66,10 +69,10 @@ def test_build_participant_resource_report_binds_parent_identity_and_removes_han
         "internal_version": INTERNAL_HANDOFF_VERSION,
         "kind": INTERNAL_HANDOFF_KIND,
         "resource_time": {"status": "unavailable", "issues": ["observation_incomplete"]},
-        "workspace_filesystem": {"status": "reported", "capacity_bytes": "1099511627776"},
+        "cpu_consumed": {"seconds": "12.5"},
+        "workspace_filesystem": {"capacity_bytes": "1099511627776"},
         "retained_content": {"status": "unavailable", "issues": ["not_bound"]},
         "child_f3": {
-            "status": "reported",
             "sent_to": [{"participant_name": "server", "payload_bytes": "1200", "messages": "2"}],
         },
     }
@@ -81,7 +84,6 @@ def test_build_participant_resource_report_binds_parent_identity_and_removes_han
         workspace=str(tmp_path),
         logger=MagicMock(),
         parent_f3={
-            "status": "reported",
             "sent_to": [{"participant_name": "server", "payload_bytes": "300", "messages": "1"}],
         },
     )
@@ -90,11 +92,41 @@ def test_build_participant_resource_report_binds_parent_identity_and_removes_han
     assert report["participant_name"] == "site-1"
     assert report["job_id"] == "job-1"
     assert report["workspace_filesystem"]["capacity_bytes"] == "1099511627776"
+    assert report["cpu_consumed"] == {"seconds": "12.5"}
     assert report["message_traffic"] == {
-        "status": "reported",
         "sent_to": [{"participant_name": "server", "payload_bytes": "1500", "messages": "3"}],
     }
     assert not terminal_handoff_path(run_dir).exists()
+
+
+def test_client_relaunch_downgrades_only_cpu_consumed(tmp_path):
+    run_dir = Workspace._join_under_root(str(tmp_path), WorkspaceConstants.WORKSPACE_PREFIX + "job-1")
+    write_terminal_handoff(
+        run_dir,
+        {
+            "internal_version": INTERNAL_HANDOFF_VERSION,
+            "kind": INTERNAL_HANDOFF_KIND,
+            "resource_time": {"status": "unavailable", "issues": ["observation_incomplete"]},
+            "cpu_consumed": {"seconds": "12.5"},
+            "workspace_filesystem": {"status": "unavailable", "issues": ["observation_incomplete"]},
+            "retained_content": {"status": "unavailable", "issues": ["observation_incomplete"]},
+            "child_f3": {"status": "unavailable", "issues": ["observation_incomplete"]},
+        },
+    )
+    data = _build_participant_resource_report(
+        job_id="job-1",
+        participant_name="site-1",
+        workspace=str(tmp_path),
+        logger=MagicMock(),
+        prior_attempt_incomplete=True,
+    )
+    report = json.loads(data)
+    assert report["cpu_consumed"] == {
+        "status": "partial",
+        "issues": ["observation_incomplete"],
+        "seconds": "12.5",
+    }
+    assert report["resource_time"]["status"] == "unavailable"
 
 
 def test_build_participant_resource_report_survives_missing_workspace(tmp_path):
@@ -326,6 +358,83 @@ def test_start_app_forgets_the_cp_f3_counter_when_launch_fails(tmp_path):
         )
 
     assert executor.f3_counters.get(job_id) is None
+
+
+def test_client_cpu_attempt_marker_survives_parent_restart_and_redeployment(tmp_path):
+    job_id = "job-1"
+    job_meta, workspace, client, fl_ctx = _make_start_app_inputs(tmp_path, job_id)
+    launcher = MagicMock()
+    launched_threads = []
+
+    def start_without_wait(thread):
+        launched_threads.append(thread)
+
+    def launch_with_fresh_parent():
+        executor = JobExecutor(client=client, startup=workspace.get_startup_kit_dir())
+        with (
+            patch("nvflare.private.fed.client.client_executor.get_job_launcher", return_value=launcher),
+            patch.object(threading.Thread, "start", start_without_wait),
+        ):
+            executor.start_app(
+                client,
+                job_id,
+                job_meta,
+                SimpleNamespace(workspace=str(tmp_path), set=[]),
+                None,
+                None,
+                None,
+                fl_ctx,
+            )
+        return launched_threads[-1]._args[-1]
+
+    assert launch_with_fresh_parent() is False
+    assert (tmp_path / _CPU_ATTEMPT_DIR / job_id).is_file()
+
+    # The deployer removes the run directory; the scheduler's count need not
+    # change when the parent is recreated, but the CPU marker must survive.
+    shutil.rmtree(workspace.get_run_dir(job_id))
+    (tmp_path / job_id).mkdir()
+    with open(workspace.get_job_meta_path(job_id), "w") as f:
+        json.dump(job_meta, f)
+
+    assert launch_with_fresh_parent() is True
+
+
+def test_client_cpu_attempt_marker_failure_does_not_claim_complete_or_block_launch(tmp_path, caplog):
+    job_id = "job-1"
+    job_meta, workspace, client, fl_ctx = _make_start_app_inputs(tmp_path, job_id)
+    launcher = MagicMock()
+    launched_threads = []
+    executor = JobExecutor(client=client, startup=workspace.get_startup_kit_dir())
+
+    with (
+        patch("nvflare.private.fed.client.client_executor.os.open", side_effect=OSError("disk unavailable")),
+        patch("nvflare.private.fed.client.client_executor.get_job_launcher", return_value=launcher),
+        patch.object(threading.Thread, "start", lambda thread: launched_threads.append(thread)),
+    ):
+        executor.start_app(
+            client,
+            job_id,
+            job_meta,
+            SimpleNamespace(workspace=str(tmp_path), set=[]),
+            None,
+            None,
+            None,
+            fl_ctx,
+        )
+
+    launcher.launch_job.assert_called_once()
+    assert launched_threads[-1]._args[-1] is True
+    assert "could not persist CPU attempt history" in caplog.text
+
+
+def test_client_cpu_attempt_marker_existing_file_is_prior_attempt(tmp_path):
+    workspace = _write_deployed_meta(tmp_path, "job-1", {JobConstants.JOB_ID: "job-1"})
+    logger = MagicMock()
+
+    assert _record_client_cpu_attempt(workspace, "job-1", logger) is False
+    assert _record_client_cpu_attempt(workspace, "job-1", logger) is True
+    logger.warning.assert_not_called()
 
 
 @pytest.mark.parametrize("heartbeat_cleanup", [False, True], ids=["user_abort", "heartbeat_cleanup"])
@@ -834,10 +943,7 @@ def test_wait_child_process_freezes_zero_traffic_f3_counter_and_forgets_it():
             fl_ctx=fl_ctx,
         )
 
-    assert counter.freeze() == {
-        "status": "reported",
-        "sent_to": [],
-    }
+    assert counter.freeze() == {"sent_to": []}
     assert captured["parent_f3"] == counter.freeze()
     close_and_freeze.assert_called_once_with(
         "job-1",

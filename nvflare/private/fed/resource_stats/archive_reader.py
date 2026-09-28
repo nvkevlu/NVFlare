@@ -67,7 +67,7 @@ class WorkspaceResourceStatsReader:
         expected_members = {RESOURCE_SUMMARY_MEMBER} | {
             f"{RESOURCE_STATS_PREFIX}participants/{entry['participant_name']}.json"
             for entry in summary["participants"]
-            if entry["status"] == "accepted"
+            if entry.get("status", "accepted") == "accepted"
         }
         self._validate_inventory(expected_members)
         self._summary = summary
@@ -76,7 +76,9 @@ class WorkspaceResourceStatsReader:
     def read_participant_summary(self, participant_name: str) -> dict[str, Any]:
         summary = self._summary or self.read_resource_summary()
         accepted = {
-            entry["participant_name"]: entry for entry in summary["participants"] if entry["status"] == "accepted"
+            entry["participant_name"]: entry
+            for entry in summary["participants"]
+            if entry.get("status", "accepted") == "accepted"
         }
         summary_entry = accepted.get(participant_name)
         if summary_entry is None:
@@ -91,7 +93,8 @@ class WorkspaceResourceStatsReader:
             raise WorkspaceResourceStatsError("participant summary identity does not match its archive slot")
         copied = derive_participant_totals(record)
         if any(
-            summary_entry[field] != copied[field] for field in ("resource_time", "retained_content", "message_traffic")
+            summary_entry[field] != copied[field]
+            for field in ("resource_time", "cpu_consumed", "retained_content", "message_traffic")
         ):
             raise WorkspaceResourceStatsError("participant summary values do not match the resource summary")
         return record

@@ -9,7 +9,7 @@ are canonical decimal strings rather than JSON numbers.
 
 | Record | Required members | Purpose |
 | --- | --- | --- |
-| `participant_summary` | schema_version, kind, job_id, participant_name, reported_at, resource_time, workspace_filesystem, retained_content, message_traffic | One terminal report from one participant. |
+| `participant_summary` | schema_version, kind, job_id, participant_name, reported_at, resource_time, cpu_consumed, workspace_filesystem, retained_content, message_traffic | One terminal report from one participant. |
 | `resource_summary` | schema_version, kind, job_id, participants | Final server result for one job. |
 | `study_summary` | schema_version, kind, selection, generated_at, coverage, jobs, totals | On-demand view over matching retained jobs; never archived as the study's history. |
 
@@ -71,6 +71,7 @@ written once when that participant's part of the job ends.
 | participant_name | Must match the authenticated expected participant name. |
 | reported_at | Terminal report time. |
 | resource_time | One compute status and accumulated numeric values. |
+| cpu_consumed | Required independent user plus system CPU seconds consumed by the job process and accounted descendants. |
 | workspace_filesystem | One independent terminal point observation. |
 | retained_content | One independent terminal best-effort run-directory file-size observation. |
 | message_traffic | One independent set of finalized message counters. |
@@ -81,19 +82,20 @@ measurement periods, or process outcome.
 
 ## Resource time
 
-`resource_time.status` is the single compute-completeness decision for
-measured time, CPU, memory, and GPU together.
+`resource_time` has one compute-completeness decision for measured time, CPU,
+memory, and GPU together. A complete value omits both `status` and `issues`;
+exceptional values carry an explicit status.
 
 | Field | Presence | Type/bound | Rule |
 | --- | --- | --- | --- |
-| status | required | reported, partial, unavailable | Applies to the whole object. |
+| status | partial/unavailable only | partial, unavailable | Applies to the whole object; omission means the measurement is complete. |
 | issues | partial/unavailable only | 1–4 sorted unique issue codes | Explains incomplete/no usable compute data. |
-| measured_seconds | reported; optional on partial | unsigned decimal, at most 9 fractional digits | Time covered by the internal accumulator. |
-| cpu | reported; optional on partial | CPU resource-time object | No nested status. |
-| memory | reported; optional on partial | Memory resource-time object | No nested status. |
-| gpu | reported; optional on partial | GPU resource-time object | No nested status. |
+| measured_seconds | complete; optional on partial | unsigned decimal, at most 9 fractional digits | Time covered by the internal accumulator. |
+| cpu | complete; optional on partial | CPU resource-time object | No nested status. |
+| memory | complete; optional on partial | Memory resource-time object | No nested status. |
+| gpu | complete; optional on partial | GPU resource-time object | No nested status. |
 
-`reported` requires all four numeric members and forbids issues. `partial`
+An omitted status requires all four numeric members and forbids issues. `partial`
 requires issues and at least one numeric member. `unavailable` requires issues
 and forbids every numeric member. The participant does not publish the private
 intervals used to form these values.
@@ -114,6 +116,51 @@ The private collector selects CPU units as the minimum applicable value from
 process affinity, effective cgroup cpuset, and finite quota. Online CPU count
 is fallback only. Raw affinity, cpuset, quota, period, and online-count evidence
 is not part of the terminal schema.
+
+### CPU consumed
+
+`cpu_consumed` measures CPU execution, rather than visible CPU capacity
+multiplied by elapsed time. It is a separate top-level typed value; failure to
+read it does not change `resource_time`, memory, GPU, or retained-content
+status.
+
+| Field | Participant presence | Type/bound | Rule |
+| --- | --- | --- | --- |
+| status | partial/unavailable/error only | partial, unavailable, error | Omission means the measurement is complete. `error` denotes a collection or integrity failure, distinct from unavailable coverage. |
+| seconds | complete/partial only | unsigned canonical decimal, at most 9 fractional digits | User plus system CPU seconds during the measured job window. Zero is valid when observed. |
+| issues | partial/unavailable/error only | 1–4 sorted unique issue codes | `partial`: observation_incomplete or attribution_incomplete; `unavailable`: not_bound, observation_incomplete, attribution_incomplete, unsupported, or dependency_missing; `error`: permission_denied or malformed_source. |
+
+On Linux and macOS, the job process reads `RUSAGE_SELF` and
+`RUSAGE_CHILDREN` at lifecycle hooks adjacent to the measured window's start
+and end. The first counter's delta is the job process's own CPU; the second
+is CPU of children that exited and were waited for between readings, including
+further descendants only when each intervening process waited for them.
+Adding these disjoint deltas counts neither the process nor a waited child
+twice. A short-lived waited child is counted even if it starts and exits
+between the two readings; there is no periodic sampling loop. The counter
+reads and monotonic clock reads are adjacent, not simultaneous. The shared
+client or server site parent is outside this accounting scope.
+
+`RUSAGE_CHILDREN` does not cover an unawaited child, a still-running child, or
+an independent process outside the job process tree. If a known worker is not
+accounted for, a captured subtotal is `partial/attribution_incomplete`; with
+no usable reading, the value is `unavailable`. Current PyTorch
+`MultiProcessExecutor` ranks are not waited for, and the XGBoost v2 partial-HE
+process pool cannot be verified as fully reaped, so their CPU cannot be
+claimed as reported by this source. A restored server
+worker has no reading for its earlier process interval and reports partial
+coverage. Neither case silently adds zero CPU seconds. Platforms without
+these ordinary-user process counters report CPU consumed unavailable; no
+operator setup or elevated privilege is required on Linux or macOS.
+Before a client launch, the site parent writes and syncs an exclusive per-job
+attempt marker in the workspace root, outside the redeployed run directory
+and archive. An existing marker, in-memory earlier launch, or scheduler
+attempt count greater than one keeps the new process subtotal as
+`partial/observation_incomplete`, including after a normal site-parent restart
+with an unchanged scheduler count. A marker persistence failure also marks
+the current subtotal partial without blocking launch. If the marker was
+never persisted before a subsequent crash, a new parent cannot reconstruct
+that attempt; billing use still needs a storage-reliability or policy decision.
 
 ### Memory resource time
 
@@ -164,8 +211,8 @@ terminal capacity snapshot must never be multiplied by the whole job duration.
 
 | Field | Presence | Type/bound | Rule |
 | --- | --- | --- | --- |
-| status | required | reported, unavailable, error | Independent point-observation state. |
-| capacity_bytes | reported only | positive U64 integer string | Total visible capacity of the filesystem containing the existing job workspace. |
+| status | unavailable/error only | unavailable, error | Omission means a complete point observation. |
+| capacity_bytes | complete only | positive U64 integer string | Total visible capacity of the filesystem containing the existing job workspace. |
 | issues | unavailable/error only | 1–4 sorted unique issue codes | Cause in this typed context. |
 
 The collector calls the ordinary-user filesystem API on the existing job
@@ -178,8 +225,8 @@ participant, job, or study additive totals.
 
 | Field | Presence | Type/bound | Rule |
 | --- | --- | --- | --- |
-| status | required | reported, partial, unavailable, error | Independent run-directory observation state. |
-| bytes | reported/partial only | U128 integer string | Cleanly observed total or useful observed subtotal. |
+| status | partial/unavailable/error only | partial, unavailable, error | Omission means a complete run-directory observation. |
+| bytes | complete/partial only | U128 integer string | Cleanly observed total or useful observed subtotal. |
 | issues | partial/unavailable/error only | 1–4 sorted unique issue codes | Cause in this typed context. |
 
 The collector recursively sums logical `st_size` for regular files in the
@@ -197,7 +244,7 @@ Separately configured result, log, and audit roots are not currently included.
 
 ## Message traffic
 
-Reported/partial participant `message_traffic` requires `sent_to`, a list of
+Complete/partial participant `message_traffic` requires `sent_to`, a list of
 zero to 2,048 remote destinations sorted by unique `participant_name`. Each
 entry contains U128 integer strings `payload_bytes` and positive `messages`.
 An empty list means no included sends. A participant cannot send to itself;
@@ -207,8 +254,8 @@ accepted summary destinations must name another expected participant.
 | --- | --- |
 | sent_to | Included payload that the originating process's local transport accepted for each remote logical destination before counters closed. It does not assert receiver processing or durable storage. |
 
-`status` is reported, partial, unavailable, or error. Reported forbids issues;
-partial requires counters and issues; unavailable/error requires issues and
+An omitted `status` means complete and forbids `issues`. Partial requires an
+explicit status, counters, and issues; unavailable/error requires status and issues and
 forbids `sent_to`. Platform code closes all counters before terminal report
 serialization. Later callbacks do not alter the record.
 
@@ -236,11 +283,12 @@ to `JOB_FOLDER_NAME` and finally `job_id`; names need not be unique.
 
 `participants` is the full expected set, not the set that reported. It has
 1–10,000 unique entries sorted by role, then participant name. Every entry
-contains `participant_name`, `role`, and `status`.
+contains `participant_name` and `role`. Accepted entries omit `status`;
+exceptions use an explicit status.
 
 | Participant status | Additional fields |
 | --- | --- |
-| accepted | received_at, resource_time, retained_content, message_traffic |
+| accepted (no status) | received_at, resource_time, cpu_consumed, retained_content, message_traffic |
 | invalid | received_at, issues |
 | missing | none |
 | disabled | none |
@@ -253,6 +301,8 @@ terminal report. The server cannot reconstruct `resource_time` because private
 intervals are not public. Workspace-filesystem capacity is deliberately not
 copied into the expected-participant entry or derived job totals; it remains available
 in the participant file for site detail.
+An accepted row must include `cpu_consumed`; missing CPU data is represented
+inside that typed object as `unavailable` rather than silently omitted.
 
 The archived `resource_summary` contains no totals. The CLI and study query
 derive job totals from accepted participant entries when requested:
@@ -260,14 +310,19 @@ derive job totals from accepted participant entries when requested:
 | Member | Numeric content |
 | --- | --- |
 | resource_time | measured_seconds, CPU unit-seconds groups, memory byte-seconds, GPU instance-seconds groups |
+| cpu_consumed | additive user plus system CPU seconds from accepted participant reports |
 | retained_content | additive participant run-directory file bytes; not unique storage or archive size |
 | message_traffic | additive `sent` counter pair derived by summing all accepted participants' `sent_to` entries |
 
-Aggregate statuses are reported, partial, or unavailable. Aggregate
+An aggregate omits `status` when complete; `partial` and `unavailable` are
+explicit. Aggregate
 `resource_time` uses the same one issue list when partial/unavailable;
-retained-content and message-traffic totals contain no issues. The server sums accepted
-numeric contributions and derives status from expected-participant coverage
-and accepted typed statuses. CPU/GPU groups are consolidated and sorted.
+`cpu_consumed`, retained-content, and message-traffic totals contain no issues.
+For `cpu_consumed`, a total with complete expected coverage omits status, a
+known subtotal with a missing or incomplete contribution is `partial`, and no
+usable contribution is `unavailable`. The server sums accepted
+numeric contributions and derives completeness from expected-participant coverage
+and accepted typed values. CPU/GPU groups are consolidated and sorted.
 Missing data is not zero. A participant's sender-confirmed inbound amount can
 be calculated by summing entries whose `sent_to.participant_name` is that
 participant; this is not proof of receiver processing or durable storage.
@@ -283,7 +338,7 @@ The JSON response contains:
 | generated_at | Server response-generation time. |
 | coverage | selected_jobs, included_jobs, unavailable_jobs, and nonterminal_jobs counts. |
 | jobs | Zero to 10,000 rows, unique and sorted by `job_id`, one for every retained job returned by the query's one job-store scan. |
-| totals | Additive resource_time, retained_content, and message_traffic totals only. |
+| totals | Additive resource_time, cpu_consumed, retained_content, and message_traffic totals only. |
 
 `selection.study_name` reuses NVFlare's existing study-name rule: 1–63
 lowercase ASCII characters, alphanumeric at both ends, with lowercase

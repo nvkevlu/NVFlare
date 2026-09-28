@@ -23,6 +23,7 @@ forbidden-key payloads.
 """
 
 import json
+from copy import deepcopy
 
 import pytest
 
@@ -48,13 +49,13 @@ def _participant_summary(job_id="job-1", participant_name="site-1", reported_at=
         "participant_name": participant_name,
         "reported_at": reported_at,
         "resource_time": {
-            "status": "reported",
             "measured_seconds": "2",
             "cpu": {"groups": [{"unit_seconds": "16", "model": "AMD EPYC 9654", "architecture": "x86_64"}]},
             "memory": {"byte_seconds": "8192"},
             "gpu": {"groups": []},
         },
-        "workspace_filesystem": {"status": "reported", "capacity_bytes": "1024"},
+        "cpu_consumed": {"seconds": "0"},
+        "workspace_filesystem": {"capacity_bytes": "1024"},
         "retained_content": {"status": "unavailable", "issues": ["not_bound"]},
         "message_traffic": {"status": "unavailable", "issues": ["not_bound"]},
     }
@@ -65,7 +66,6 @@ def _accepted_entry(participant_name="site-1", role="client", received_at="2026-
     return {
         "participant_name": participant_name,
         "role": role,
-        "status": "accepted",
         "received_at": received_at,
         **derive_participant_totals(record),
     }
@@ -85,10 +85,39 @@ def test_validate_record_accepts_well_formed_participant_summary():
     validate_record(_participant_summary())
 
 
+def test_success_statuses_and_issues_are_absent_from_complete_measurements():
+    report = _participant_summary()
+    report["retained_content"] = {"bytes": "0"}
+    report["message_traffic"] = {"sent_to": []}
+    validate_record(report)
+
+    for field in ("resource_time", "cpu_consumed", "workspace_filesystem", "retained_content", "message_traffic"):
+        explicit_success = deepcopy(report)
+        explicit_success[field]["status"] = "reported"
+        with pytest.raises(ContractError, match="status"):
+            validate_record(explicit_success)
+
+    issues_without_exception = deepcopy(report)
+    issues_without_exception["resource_time"]["issues"] = ["observation_incomplete"]
+    with pytest.raises(ContractError, match="unexpected fields"):
+        validate_record(issues_without_exception)
+
+    summary = _resource_summary()
+    summary["participants"][0]["status"] = "accepted"
+    with pytest.raises(ContractError, match="status"):
+        validate_record(summary)
+
+
+def test_cpu_consumed_is_required_in_unpublished_schema():
+    report = _participant_summary()
+    report.pop("cpu_consumed")
+    with pytest.raises(ContractError, match="cpu_consumed"):
+        validate_record(report)
+
+
 def test_validate_record_accepts_only_sender_confirmed_destination_groups():
     reported = _participant_summary()
     reported["message_traffic"] = {
-        "status": "reported",
         "sent_to": [{"participant_name": "server", "payload_bytes": str(2**128 - 1), "messages": "1"}],
     }
     validate_record(reported)
@@ -103,7 +132,6 @@ def test_validate_record_accepts_only_sender_confirmed_destination_groups():
 
     old_bucket = _participant_summary()
     old_bucket["message_traffic"] = {
-        "status": "reported",
         "remote_accepted": {"payload_bytes": "1", "messages": "1"},
         "local_delivered": {"payload_bytes": "0", "messages": "0"},
     }
@@ -120,7 +148,6 @@ def test_validate_record_accepts_only_sender_confirmed_destination_groups():
 
     too_large = _participant_summary()
     too_large["message_traffic"] = {
-        "status": "reported",
         "sent_to": [{"participant_name": "server", "payload_bytes": str(2**128), "messages": "1"}],
     }
     with pytest.raises(ContractError):
@@ -134,7 +161,6 @@ def test_validate_record_accepts_only_sender_confirmed_destination_groups():
 def test_validate_record_rejects_unordered_duplicate_or_self_destinations():
     report = _participant_summary()
     report["message_traffic"] = {
-        "status": "reported",
         "sent_to": [
             {"participant_name": "server", "payload_bytes": "1", "messages": "1"},
             {"participant_name": "site-2", "payload_bytes": "2", "messages": "1"},
@@ -161,19 +187,14 @@ def test_validate_record_rejects_unordered_duplicate_or_self_destinations():
 def test_derive_job_totals_rejects_unknown_destination_and_sums_known_destinations():
     site = _accepted_entry(participant_name="site-1")
     site["message_traffic"] = {
-        "status": "reported",
         "sent_to": [{"participant_name": "server", "payload_bytes": "100", "messages": "2"}],
     }
     server = _accepted_entry(participant_name="server", role="server")
     server["message_traffic"] = {
-        "status": "reported",
         "sent_to": [{"participant_name": "site-1", "payload_bytes": "200", "messages": "3"}],
     }
     totals = derive_job_totals([site, server])
-    assert totals["message_traffic"] == {
-        "status": "reported",
-        "sent": {"payload_bytes": "300", "messages": "5"},
-    }
+    assert totals["message_traffic"] == {"sent": {"payload_bytes": "300", "messages": "5"}}
 
     site["message_traffic"]["sent_to"][0]["participant_name"] = "site-unknown"
     with pytest.raises(ContractError, match="expected participant"):
@@ -207,7 +228,6 @@ def test_validate_record_rejects_serialized_size_over_the_kind_limit():
 def test_validate_record_rejects_forbidden_privacy_keys_at_any_depth(forbidden_key):
     record = _participant_summary()
     record["workspace_filesystem"] = {
-        "status": "reported",
         "capacity_bytes": "1024",
         "nested": {forbidden_key: "should-never-appear"},
     }
@@ -222,7 +242,7 @@ def test_validate_record_rejects_json_depth_over_the_bound():
         cursor["nested"] = {}
         cursor = cursor["nested"]
     record = _participant_summary()
-    record["workspace_filesystem"] = {"status": "reported", "capacity_bytes": "1024", "deep": nested}
+    record["workspace_filesystem"] = {"capacity_bytes": "1024", "deep": nested}
     with pytest.raises(ContractError, match="depth"):
         validate_record(record)
 
@@ -282,16 +302,50 @@ def test_canonical_json_bytes_is_deterministic_and_json_decodable():
     assert json.loads(first) == record
 
 
-def test_derive_participant_totals_copies_exactly_the_three_reportable_fields():
+def test_derive_participant_totals_copies_reportable_fields():
     record = _participant_summary()
 
     totals = derive_participant_totals(record)
 
-    assert set(totals) == {"resource_time", "retained_content", "message_traffic"}
+    assert set(totals) == {"resource_time", "cpu_consumed", "retained_content", "message_traffic"}
+    assert totals["cpu_consumed"] == {"seconds": "0"}
     assert totals["resource_time"] == record["resource_time"]
     # Must be a copy, not the same object the caller can still mutate.
-    totals["resource_time"]["status"] = "mutated"
-    assert record["resource_time"]["status"] == "reported"
+    totals["resource_time"]["measured_seconds"] = "99"
+    assert record["resource_time"]["measured_seconds"] == "2"
+
+
+def test_cpu_consumed_is_independent_of_capacity_time_and_required():
+    first = _accepted_entry(participant_name="site-1")
+    first["cpu_consumed"] = {"seconds": "3600"}
+    second = _accepted_entry(participant_name="site-2")
+    second["cpu_consumed"] = {
+        "status": "partial",
+        "issues": ["attribution_incomplete"],
+        "seconds": "1800",
+    }
+    second["resource_time"] = {"status": "unavailable", "issues": ["observation_incomplete"]}
+
+    totals = derive_job_totals([first, second])
+    assert totals["cpu_consumed"] == {"status": "partial", "seconds": "5400"}
+    assert totals["resource_time"]["status"] == "partial"
+
+    missing_cpu = _accepted_entry(participant_name="site-3")
+    missing_cpu.pop("cpu_consumed")
+    with pytest.raises(ContractError, match="cpu_consumed"):
+        derive_job_totals([first, second, missing_cpu])
+
+
+def test_cpu_consumed_requires_decimal_seconds_only_with_numeric_status():
+    report = _participant_summary()
+    report["cpu_consumed"] = {"seconds": "0"}
+    validate_record(report)
+    report["cpu_consumed"] = {"seconds": "NaN"}
+    with pytest.raises(ContractError, match="cpu_consumed.seconds"):
+        validate_record(report)
+    report["cpu_consumed"] = {"status": "unavailable", "issues": ["observation_incomplete"], "seconds": "0"}
+    with pytest.raises(ContractError, match="unexpected fields"):
+        validate_record(report)
 
 
 def test_derive_job_totals_sums_only_accepted_participants():
@@ -312,7 +366,7 @@ def test_derive_job_totals_is_reported_when_every_expected_participant_accepted(
 
     totals = derive_job_totals([accepted])
 
-    assert totals["resource_time"]["status"] == "reported"
+    assert "status" not in totals["resource_time"]
     assert totals["resource_time"]["measured_seconds"] == "2"
 
 
@@ -361,7 +415,7 @@ def test_derive_study_totals_is_reported_when_every_job_row_is_included():
 
     totals = derive_study_totals([job_row])
 
-    assert totals["resource_time"]["status"] == "reported"
+    assert "status" not in totals["resource_time"]
     assert totals["resource_time"]["measured_seconds"] == "2"
 
 

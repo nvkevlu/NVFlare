@@ -75,7 +75,8 @@ def main(args):
         # platform-owned snapshot has completed.
         resource_collector = JobResourceCollector(
             workspace.get_run_dir(args.job_id),
-            prior_observation_incomplete=bool(args.snapshot),
+            prior_observation_incomplete=bool(args.snapshot)
+            or kv_list.get("resource_prior_attempt_incomplete") is True,
         )
     except Exception:
         # Resource reporting is observational and must never change the job outcome.
@@ -182,6 +183,8 @@ def main(args):
                 upload_results_on_shutdown(args, secure_train, log=logger)
 
             def _mark_callback_drain_incomplete():
+                if resource_collector:
+                    resource_collector.mark_cpu_consumption_incomplete()
                 counter = get_job_f3_counter()
                 if counter:
                     counter.mark_counter_gap()

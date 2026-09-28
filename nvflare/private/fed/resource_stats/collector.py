@@ -40,6 +40,7 @@ from typing import Any, Optional
 
 from .accumulator import ClockOrderError, CollectorClosedError, ResourceTimeAccumulator
 from .contract import INTEGER_PATTERN, MAX_ISSUES, PARTIAL_ISSUES, PARTICIPANT_NAME_PATTERN, U128_MAX, validate_record
+from .cpu_consumed import CpuConsumedAccountant, install_cpu_accountant
 from .f3_counter import MAX_F3_SENT_TO_GROUPS
 from .handoff import (
     INTERNAL_HANDOFF_KIND,
@@ -126,7 +127,7 @@ def observe_workspace_filesystem(workspace_path: str | Path) -> dict[str, Any]:
         return {"status": "unavailable", "issues": ["observation_incomplete"]}
     if stats.f_frsize <= 0 or stats.f_blocks <= 0 or capacity <= 0:
         return {"status": "unavailable", "issues": ["observation_incomplete"]}
-    return {"status": "reported", "capacity_bytes": str(capacity)}
+    return {"capacity_bytes": str(capacity)}
 
 
 def observe_retained_content(run_dir: str | Path) -> dict[str, Any]:
@@ -179,7 +180,7 @@ def observe_retained_content(run_dir: str | Path) -> dict[str, Any]:
         if not observed_directory:
             return {"status": "unavailable", "issues": ["observation_incomplete"]}
         return {"status": "partial", "issues": ["observation_incomplete"], "bytes": str(total)}
-    return {"status": "reported", "bytes": str(total)}
+    return {"bytes": str(total)}
 
 
 def _unavailable(issue: str) -> dict[str, Any]:
@@ -220,15 +221,28 @@ class JobResourceCollector:
                 self._accumulator.mark_prior_observation_incomplete()
         except Exception:
             self._accumulator.mark_gap()
+        # Align the CPU baseline with the start of the resource-time window.
+        # Probe work is platform setup, not job execution CPU.
+        self._cpu_consumed = CpuConsumedAccountant(
+            prior_observation_incomplete=prior_observation_incomplete,
+            known_attribution_incomplete=self._multi_node_incomplete,
+        )
+        install_cpu_accountant(self._cpu_consumed)
 
     def observe_capacity_change(self, capacity: Mapping[str, Any]) -> None:
         """Record a confirmed runtime resource change for future schedulers."""
 
         self._accumulator.observe(capacity)
 
+    def mark_cpu_consumption_incomplete(self) -> None:
+        """Mark an unfinished job callback as a CPU accounting coverage gap."""
+
+        self._cpu_consumed.mark_attribution_incomplete()
+
     def finish(self, *, child_f3: Optional[Mapping[str, Any]] = None) -> dict[str, Any]:
         """Build the one private child handoff at process finalization."""
 
+        cpu_consumed = self._cpu_consumed.finish()
         resource_time = self._accumulator.finish()
         if self._multi_node_incomplete:
             # The current Slurm worker runs the collector on rank zero only.
@@ -239,6 +253,7 @@ class JobResourceCollector:
             "internal_version": INTERNAL_HANDOFF_VERSION,
             "kind": INTERNAL_HANDOFF_KIND,
             "resource_time": resource_time,
+            "cpu_consumed": cpu_consumed,
             "workspace_filesystem": observe_workspace_filesystem(self.run_dir),
             "retained_content": observe_retained_content(self.run_dir),
             "child_f3": deepcopy(child_f3) if child_f3 is not None else _unavailable("observation_incomplete"),
@@ -265,14 +280,14 @@ def merge_f3_snapshots(
         if not isinstance(value, Mapping):
             missing_contribution = True
             continue
-        status = value.get("status")
-        if not isinstance(status, str):
+        status = value.get("status", "reported")
+        if not isinstance(status, str) or (status == "reported" and "status" in value):
             return {"status": "error", "issues": ["malformed_source"]}
         if status in {"reported", "partial"}:
             groups = value.get("sent_to")
             if not isinstance(groups, list) or len(groups) > MAX_F3_SENT_TO_GROUPS:
                 return {"status": "error", "issues": ["malformed_source"]}
-            expected_keys = {"status", "sent_to"} if status == "reported" else {"status", "sent_to", "issues"}
+            expected_keys = {"sent_to"} if status == "reported" else {"status", "sent_to", "issues"}
             if set(value) != expected_keys:
                 return {"status": "error", "issues": ["malformed_source"]}
             prior_name = ""
@@ -338,15 +353,15 @@ def merge_f3_snapshots(
         return {"status": "error", "issues": ["malformed_source"]}
 
     result = {
-        "status": "partial" if missing_contribution or issues else "reported",
         "sent_to": [
             {"participant_name": name, "payload_bytes": str(sent_to[name][0]), "messages": str(sent_to[name][1])}
             for name in sorted(sent_to)
         ],
     }
-    if result["status"] == "partial":
+    if missing_contribution or issues:
         if missing_contribution:
             issues.add("attribution_incomplete")
+        result["status"] = "partial"
         result["issues"] = sorted(issues)
     return result
 
@@ -369,6 +384,7 @@ def assemble_participant_summary(
 
     if child_handoff is None:
         resource_time = _unavailable("observation_incomplete")
+        cpu_consumed = _unavailable("observation_incomplete")
         workspace_filesystem = _unavailable("observation_incomplete")
         retained_content = _unavailable("observation_incomplete")
         child_f3 = None
@@ -379,11 +395,13 @@ def assemble_participant_summary(
             validated = None
         if validated is None:
             resource_time = _unavailable("observation_incomplete")
+            cpu_consumed = _unavailable("observation_incomplete")
             workspace_filesystem = _unavailable("observation_incomplete")
             retained_content = _unavailable("observation_incomplete")
             child_f3 = None
         else:
             resource_time = validated["resource_time"]
+            cpu_consumed = validated["cpu_consumed"]
             workspace_filesystem = validated["workspace_filesystem"]
             retained_content = validated["retained_content"]
             child_f3 = validated["child_f3"]
@@ -396,6 +414,7 @@ def assemble_participant_summary(
         "participant_name": participant_name,
         "reported_at": utc_now(),
         "resource_time": resource_time,
+        "cpu_consumed": cpu_consumed,
         "workspace_filesystem": workspace_filesystem,
         "retained_content": retained_content,
         "message_traffic": message_traffic,

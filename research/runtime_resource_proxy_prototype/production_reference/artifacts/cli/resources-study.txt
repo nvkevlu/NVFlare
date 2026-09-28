@@ -1,15 +1,21 @@
 Resources recorded for finalized jobs in study cancer-research.
-3 jobs found | 2 finalized | 1 valid summaries | 1 unavailable | 1 still running (excluded)
+Jobs: 3 found | 1 with resource data | 1 without | 1 still running (excluded)
 
-JOB ID            NAME            JOB STATUS          RESOURCE DATA  QUALITY   FULL GPU h  CPU unit h  MEM GiB h  RUN-DIR STATUS  RUN-DIR FILES GiB  MESSAGE TRAFFIC STATUS  MESSAGE PAYLOAD SENT GiB
-job-20260917-001  hello-pt        FINISHED:COMPLETED  included       COMPLETE  2.4706      24.7422     158.4089   REPORTED        0.0000             REPORTED                9.0411
-job-20260917-002  hello-pt-retry  FINISHED:COMPLETED  unavailable    —         N/A         N/A         N/A        N/A             N/A                N/A                     N/A
-job-20260917-003  hello-pt-next   RUNNING             nonterminal    —         N/A         N/A         N/A        N/A             N/A                N/A                     N/A
+JOB ID            NAME            JOB STATUS          FULL GPU-h  CPU VISIBLE core-h  MEM VISIBLE GiB-h  CPU USED core-h  RUN-DIR GiB  PAYLOAD SENT GiB
+job-20260917-001  hello-pt        FINISHED:COMPLETED  2.4706      24.7422             158.4089           0.4333           0.0000       9.0411
+job-20260917-002  hello-pt-retry  FINISHED:COMPLETED  —           —                   —                  —                —            —
+job-20260917-003  hello-pt-next   RUNNING             —           —                   —                  —                —            —
 
-Study totals from 1 valid job summaries | coverage: PARTIAL
-  Additive participant resource-time: FULL GPUs 2.4706 instance h | CPU 24.7422 unit h | MEMORY 158.4089 GiB h
-  Other additive totals: RUN-DIR STATUS PARTIAL | RUN-DIR FILES 0.0000 GiB | MESSAGE TRAFFIC STATUS PARTIAL | MESSAGE PAYLOAD SENT 9.0411 GiB
+Sum from 1 job with resource data
+  CPU visible 24.7422* core-h | Memory visible 158.4089* GiB-h | Full GPUs visible 2.4706* GPU-h
+  CPU time used 0.4333* core-h | Run-dir files 0.0000* GiB | Message payload sent 9.0411* GiB
+
+Data gaps:
+  job-20260917-002: no valid resource summary
+  job-20260917-003: still running (excluded)
 
 Notes:
-  Totals include only finalized jobs with valid resource summaries.
+  * = incomplete number; — = no usable value. See --format json for details.
+  Sums include only finalized jobs with valid resource summaries and may count shared resources more than once.
+  CPU used is process CPU time, not visible CPU capacity or host utilization %.
   This view includes only jobs still retained by the job store.

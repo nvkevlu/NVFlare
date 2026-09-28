@@ -75,10 +75,17 @@ def test_initial_snapshot_precedes_workspace_download_and_custom_imports(monkeyp
     assert events[2][1] == ("/workspace/job-1/app/custom", "/workspace/local/custom")
 
 
-def test_restored_server_marks_pre_restart_observation_incomplete(monkeypatch):
+@pytest.mark.parametrize(
+    "bootstrap_options",
+    [
+        {"restore_snapshot": "snapshot-id"},
+        {"restore_snapshot": False, "resource_prior_attempt_incomplete": True},
+    ],
+)
+def test_restored_server_marks_pre_restart_observation_incomplete(monkeypatch, bootstrap_options):
     collector_args = []
     args = SimpleNamespace(set=[], workspace="/workspace", job_id="job-1")
-    monkeypatch.setattr(runner_process, "parse_vars", lambda _values: {"restore_snapshot": "snapshot-id"})
+    monkeypatch.setattr(runner_process, "parse_vars", lambda _values: bootstrap_options)
     monkeypatch.setattr(runner_process, "Workspace", _Workspace)
     monkeypatch.setattr(
         runner_process,

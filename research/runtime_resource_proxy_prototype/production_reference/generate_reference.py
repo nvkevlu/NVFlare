@@ -26,6 +26,7 @@ import io
 import tempfile
 from collections.abc import Iterable, Mapping
 from contextlib import redirect_stdout
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -50,6 +51,7 @@ from nvflare.private.fed.resource_stats.contract import (
     validate_record,
 )
 from nvflare.private.fed.resource_stats.coordinator import RESOURCE_REPORT_ACCEPTED, ResourceStatsCoordinator
+from nvflare.private.fed.resource_stats.cpu_consumed import CpuConsumedAccountant
 from nvflare.private.fed.resource_stats.f3_counter import F3Counter, F3TrafficClass
 from nvflare.tool import cli_output
 from nvflare.tool.job.job_resources import render_job_resources, render_study_resources
@@ -76,6 +78,7 @@ def _collect_participant(
     run_dir: Path,
     participant_name: str,
     clock_values: Iterable[int],
+    cpu_usage_values: Iterable[tuple[str, str]],
     capacity: Mapping[str, Any],
     child_f3: Mapping[str, Any],
     parent_f3: Mapping[str, Any],
@@ -83,11 +86,20 @@ def _collect_participant(
     """Exercise the production child handoff and parent assembly path."""
 
     ticks = iter(clock_values)
-    collector = JobResourceCollector(
-        run_dir,
-        clock_ns=lambda: next(ticks),
-        capacity_probe=lambda: capacity,
-    )
+    usage_values = iter((Decimal(own), Decimal(waited_children)) for own, waited_children in cpu_usage_values)
+
+    def make_cpu_accountant(**kwargs: Any) -> CpuConsumedAccountant:
+        # Inject cumulative OS-counter readings at the two lifecycle
+        # boundaries. This keeps the production accountant and its status
+        # logic in the fixture path without depending on host CPU load.
+        return CpuConsumedAccountant(usage_reader=lambda: next(usage_values), **kwargs)
+
+    with patch.object(collector_module, "CpuConsumedAccountant", side_effect=make_cpu_accountant):
+        collector = JobResourceCollector(
+            run_dir,
+            clock_ns=lambda: next(ticks),
+            capacity_probe=lambda: capacity,
+        )
     write_terminal_handoff(run_dir, collector.finish(child_f3=child_f3))
     handoff = read_terminal_handoff(run_dir)
     if handoff is None:
@@ -211,8 +223,8 @@ def build_artifacts() -> dict[str, bytes]:
                 collector_module,
                 "observe_workspace_filesystem",
                 side_effect=[
-                    {"status": "reported", "capacity_bytes": str(2 * _TIB)},
-                    {"status": "reported", "capacity_bytes": str(_TIB)},
+                    {"capacity_bytes": str(2 * _TIB)},
+                    {"capacity_bytes": str(_TIB)},
                 ],
             ),
             patch.object(
@@ -238,6 +250,7 @@ def build_artifacts() -> dict[str, bytes]:
                 run_dir=site_run,
                 participant_name="site-1",
                 clock_values=_ticks(8_000_000_000_000_000_000, "2223.5"),
+                cpu_usage_values=(("100", "30"), ("1000", "510")),
                 capacity={
                     "cpu": {
                         "units": "32",
@@ -275,6 +288,7 @@ def build_artifacts() -> dict[str, bytes]:
                 run_dir=server_run,
                 participant_name="server",
                 clock_values=_ticks(9_000_000_000_000_000_000, "2240"),
+                cpu_usage_values=(("50", "10"), ("230", "10")),
                 capacity={
                     "cpu": {
                         "units": "8",

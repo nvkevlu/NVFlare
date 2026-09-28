@@ -85,7 +85,9 @@ class _FrozenState:
     sent_to: tuple[tuple[str, int, int], ...]
 
     def as_dict(self) -> dict[str, Any]:
-        result: dict[str, Any] = {"status": self.status}
+        result: dict[str, Any] = {}
+        if self.status != "reported":
+            result["status"] = self.status
         if self.issues:
             result["issues"] = list(self.issues)
         result["sent_to"] = [

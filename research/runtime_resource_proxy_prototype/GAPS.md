@@ -239,8 +239,8 @@ If full live-job recovery is a Phase 1 requirement, restore that state from
 server-owned data without trusting a child-writable file.
 
 A restored server job process starts a new collector, preserves its numeric
-post-restore interval, and marks resource time
-`partial/observation_incomplete`. That is implemented; restoring the lost
+post-restore interval, and marks resource time and CPU consumed
+`partial/observation_incomplete`, even without a component snapshot. That is implemented; restoring the lost
 client accepted ledger remains open.
 
 The implemented transport is Option A, the existing
@@ -341,10 +341,21 @@ coverage; none is required to interpret the proven Process-mode result.
   resources before it waits for the completion request's CellNet reply.
 - A server-job-process failure skips the normal client-outcome wait and closes
   acceptance immediately; later client reports cannot change the rollup.
-- One compute status describes CPU, memory, and GPU resource time together.
+- One compute completeness decision describes CPU, memory, and GPU resource
+  time together; complete objects omit `status` and `issues`.
+- CPU consumed has its own exception status and uses job-process user plus system CPU
+  counter deltas on Linux and macOS. It includes descendants that exited and
+  were waited for during the measured window. Known unaccounted workers,
+  including current PyTorch `MultiProcessExecutor` ranks, leave a partial or
+  unavailable value rather than an apparent zero.
+- An arbitrary custom-code child that exits without being waited for or
+  registered through a managed launcher is not discoverable afterward. Its
+  CPU can be missing even when the observed result has no exception status; billing
+  use must accept that trust boundary or require stronger job isolation.
 - On-demand job and study totals add participant and job reports even when
-  physical resources overlap. They are not inventory, ownership, capacity,
-  utilization, or billing data.
+  physical resources overlap. CPU consumed is a practical billing proxy for
+  covered execution; the totals are not independently verified invoice
+  records or physical inventory, ownership, or utilization data.
 - The workspace-filesystem value is one final observation and is never
   multiplied by time or aggregated.
 - Normal multi-root workspace packaging remains unchanged. If another
@@ -358,8 +369,9 @@ coverage; none is required to interpret the proven Process-mode result.
 
 - no extra privilege or configuration;
 - one terminal participant report;
-- one compute status, with separate typed workspace, retained-content, and
-  `message_traffic` statuses;
+- one compute completeness decision, with separate typed workspace,
+  retained-content, and `message_traffic` exceptions; success needs no
+  `status` or `issues` field;
   results;
 - site hardware observations are self-reports;
 - CUDA Runtime is the only numeric GPU-count authority;
@@ -383,6 +395,8 @@ coverage; none is required to interpret the proven Process-mode result.
 - `resource_summary.json` stores participant coverage and accepted values,
   without job totals or cutoff/finalization timestamps; the live coordinator
   keeps its cutoff private and the CLI derives totals on demand;
+- accepted summary entries omit `status`; missing, invalid, and disabled
+  entries state the exception explicitly;
 - job and study views read that archive rather than a `RESOURCE_STATS`
   component; and
 - the schema does not choose the future task/resource process topology;

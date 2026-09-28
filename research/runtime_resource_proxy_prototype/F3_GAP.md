@@ -15,7 +15,6 @@ recipient:
 
 ```json
 {
-  "status": "reported",
   "sent_to": [
     {
       "participant_name": "site-1",
@@ -25,6 +24,11 @@ recipient:
   ]
 }
 ```
+
+A complete counter omits both `status` and `issues`; the explicit `partial`,
+`unavailable`, or `error` states are reserved for problems. The example above
+is complete because its required `sent_to` value is present without an
+exception status.
 
 Each `sent_to` entry means the sender's local transport accepted an included
 logical send addressed to that participant. It is not a receiver-observed byte
@@ -256,7 +260,7 @@ The child freezes first and writes `child_f3` into the existing private
 freezes its counter, validates the child handoff, and performs a checked
 parent/child merge:
 
-- two complete snapshots produce `reported`;
+- two complete snapshots produce a complete value without `status` or `issues`;
 - a useful subtotal plus a missing contribution produces
   `partial/attribution_incomplete`;
 - a counter gap preserves bounded numeric values as `partial/counter_gap`;

@@ -343,10 +343,11 @@ class TestGeneratedArtifacts(unittest.TestCase):
             self.assertNotIn("start", participant_summary)
             self.assertNotIn("final", participant_summary)
             self.assertIn(
-                participant_summary["resource_time"]["status"],
-                {"reported", "partial", "unavailable"},
+                participant_summary["resource_time"].get("status"),
+                {None, "partial", "unavailable"},
             )
-            self.assertEqual("reported", participant_summary["retained_content"]["status"])
+            self.assertEqual({"status": "unavailable", "issues": ["unsupported"]}, participant_summary["cpu_consumed"])
+            self.assertNotIn("status", participant_summary["retained_content"])
             self.assertEqual("0", participant_summary["retained_content"]["bytes"])
             self.assertEqual("unavailable", participant_summary["message_traffic"]["status"])
             self.assertNotIn("sent_to", participant_summary["message_traffic"])
@@ -374,7 +375,8 @@ class TestGeneratedArtifacts(unittest.TestCase):
             self.assertEqual("test-job", summary["job_id"])
             self.assertNotIn("job_name", summary)
             self.assertEqual(1, len(summary["participants"]))
-            self.assertEqual("accepted", summary["participants"][0]["status"])
+            self.assertNotIn("status", summary["participants"][0])
+            self.assertEqual(participant_summary["cpu_consumed"], summary["participants"][0]["cpu_consumed"])
             self.assertEqual(
                 {"schema_version", "kind", "job_id", "participants"},
                 set(summary),
@@ -411,8 +413,8 @@ class TestGeneratedArtifacts(unittest.TestCase):
             )
             study_text = (output_dir / "cli" / "resources-study.txt").read_text()
             self.assertIn("JOB STATUS", study_text)
-            self.assertIn("FULL GPU h", study_text)
-            self.assertIn("coverage:", study_text)
+            self.assertIn("FULL GPU-h", study_text)
+            self.assertIn("Jobs: 1 found | 1 with resource data", study_text)
             self.assertIn("still running (excluded)", study_text)
             self.assertNotIn("RESOURCE DATA  GPU h", study_text)
             self.assertNotIn("billing data", study_text)
@@ -420,7 +422,7 @@ class TestGeneratedArtifacts(unittest.TestCase):
                 group["kind"] == "mig_compute_instance" and Decimal(group["instance_seconds"]) > 0
                 for group in study_summary["totals"]["resource_time"].get("gpu", {}).get("groups", [])
             )
-            self.assertEqual(has_positive_mig, "MIG h" in study_text)
+            self.assertEqual(has_positive_mig, "MIG instance-h" in study_text)
             self.assertEqual("synthetic_contract_fixture", receipt["review_contract_fixtures"]["provenance"])
             self.assertEqual(
                 sorted(f"review_contracts/{path.name}" for path in (output_dir / "review_contracts").glob("*.json")),

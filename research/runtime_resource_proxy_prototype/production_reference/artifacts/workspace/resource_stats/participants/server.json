@@ -5,7 +5,6 @@
   "participant_name": "server",
   "reported_at": "2026-09-17T14:37:20.000000Z",
   "resource_time": {
-    "status": "reported",
     "measured_seconds": "2240",
     "cpu": {
       "groups": [
@@ -23,16 +22,16 @@
       "groups": []
     }
   },
+  "cpu_consumed": {
+    "seconds": "180"
+  },
   "workspace_filesystem": {
-    "status": "reported",
     "capacity_bytes": "1099511627776"
   },
   "retained_content": {
-    "status": "reported",
     "bytes": "0"
   },
   "message_traffic": {
-    "status": "reported",
     "sent_to": [
       {
         "participant_name": "site-1",

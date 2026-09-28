@@ -6,10 +6,8 @@
     {
       "participant_name": "site-1",
       "role": "client",
-      "status": "accepted",
       "received_at": "2026-09-17T14:37:05.000000Z",
       "resource_time": {
-        "status": "reported",
         "measured_seconds": "2223.5",
         "cpu": {
           "groups": [
@@ -34,12 +32,13 @@
           ]
         }
       },
+      "cpu_consumed": {
+        "seconds": "1380"
+      },
       "retained_content": {
-        "status": "reported",
         "bytes": "0"
       },
       "message_traffic": {
-        "status": "reported",
         "sent_to": [
           {
             "participant_name": "server",
@@ -52,10 +51,8 @@
     {
       "participant_name": "server",
       "role": "server",
-      "status": "accepted",
       "received_at": "2026-09-17T14:37:20.250000Z",
       "resource_time": {
-        "status": "reported",
         "measured_seconds": "2240",
         "cpu": {
           "groups": [
@@ -73,12 +70,13 @@
           "groups": []
         }
       },
+      "cpu_consumed": {
+        "seconds": "180"
+      },
       "retained_content": {
-        "status": "reported",
         "bytes": "0"
       },
       "message_traffic": {
-        "status": "reported",
         "sent_to": [
           {
             "participant_name": "site-1",

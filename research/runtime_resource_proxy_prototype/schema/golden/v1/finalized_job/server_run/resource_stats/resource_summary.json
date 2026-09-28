@@ -6,10 +6,8 @@
     {
       "participant_name": "site-1",
       "role": "client",
-      "status": "accepted",
       "received_at": "2026-09-09T14:37:03.1Z",
       "resource_time": {
-        "status": "reported",
         "measured_seconds": "2223",
         "cpu": {
           "groups": [
@@ -34,12 +32,13 @@
           ]
         }
       },
+      "cpu_consumed": {
+        "seconds": "1800"
+      },
       "retained_content": {
-        "status": "reported",
         "bytes": "0"
       },
       "message_traffic": {
-        "status": "reported",
         "sent_to": [
           {
             "participant_name": "server",
@@ -52,7 +51,6 @@
     {
       "participant_name": "site-2",
       "role": "client",
-      "status": "accepted",
       "received_at": "2026-09-09T14:37:03.2Z",
       "resource_time": {
         "status": "partial",
@@ -83,6 +81,13 @@
           ]
         }
       },
+      "cpu_consumed": {
+        "status": "partial",
+        "issues": [
+          "observation_incomplete"
+        ],
+        "seconds": "900"
+      },
       "retained_content": {
         "status": "unavailable",
         "issues": [
@@ -90,7 +95,6 @@
         ]
       },
       "message_traffic": {
-        "status": "reported",
         "sent_to": [
           {
             "participant_name": "server",
@@ -108,10 +112,8 @@
     {
       "participant_name": "server",
       "role": "server",
-      "status": "accepted",
       "received_at": "2026-09-09T14:37:03.3Z",
       "resource_time": {
-        "status": "reported",
         "measured_seconds": "2223",
         "cpu": {
           "groups": [
@@ -129,12 +131,13 @@
           "groups": []
         }
       },
+      "cpu_consumed": {
+        "seconds": "360"
+      },
       "retained_content": {
-        "status": "reported",
         "bytes": "29540266113"
       },
       "message_traffic": {
-        "status": "reported",
         "sent_to": [
           {
             "participant_name": "site-1",

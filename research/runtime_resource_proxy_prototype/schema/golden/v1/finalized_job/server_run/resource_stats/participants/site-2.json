@@ -33,8 +33,14 @@
       ]
     }
   },
+  "cpu_consumed": {
+    "status": "partial",
+    "issues": [
+      "observation_incomplete"
+    ],
+    "seconds": "900"
+  },
   "workspace_filesystem": {
-    "status": "reported",
     "capacity_bytes": "2199023255552"
   },
   "retained_content": {
@@ -44,7 +50,6 @@
     ]
   },
   "message_traffic": {
-    "status": "reported",
     "sent_to": [
       {
         "participant_name": "server",

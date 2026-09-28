@@ -27,12 +27,24 @@ predates that metadata field, while the still earlier
 [PyTorch run](colossus_pytorch_e2e_reference/README.md) preserves the CUDA
 Runtime discovery failure that the current implementation fixed.
 
+Those live captures predate CPU-consumption accounting. They remain historical
+evidence rather than invented CPU-consumed values; current readers treat the
+absent field as unavailable in new rollups.
+
+To reproduce the current examples, use a project Python environment with
+NVFlare's test dependencies from the repository root. Run
+`PYTHONPATH=. python research/runtime_resource_proxy_prototype/schema/build_review_artifacts.py`
+for the schema goldens, and follow the
+[production reference verification commands](production_reference/README.md#regenerate-or-verify)
+for the exact production handoff and CLI output.
+
 ## The idea in one paragraph
 
 Each NVFlare client and server job process keeps CPU, memory, and GPU
-capacity-time in memory while it runs. At finalization it writes one bounded
-private handoff containing those totals, one workspace-filesystem capacity
-observation, one best-effort run-directory file-size observation, and typed
+capacity-time in memory while it runs and reads cumulative CPU consumed at
+its lifecycle boundaries. At finalization it writes one bounded private
+handoff containing those totals, CPU consumed, one workspace-filesystem
+capacity observation, one best-effort run-directory file-size observation, and typed
 message-traffic results. The file-size observation sums regular files in that
 participant's run directory; it is not a curated or attested result inventory.
 Internal F3 counters cover deployment, real task
@@ -62,13 +74,17 @@ This produces a much smaller contract:
 participant_summary
 ├── identity and schema version
 ├── one resource_time result
+├── cpu_consumed (independent completeness and seconds)
 ├── one final workspace-filesystem capacity observation
 ├── retained_content
 └── message_traffic.sent_to[] (sender-confirmed, by recipient)
 ```
 
-CPU, memory, and GPU share one `resource_time.status`. Separate measurement
-status fields are not repeated under every resource.
+CPU, memory, and GPU share one `resource_time` completeness decision: complete
+data omits `status` and `issues`, while partial/unavailable data states its
+exception. Separate measurement status fields are not repeated under every
+resource. `cpu_consumed` is independent, so a failed CPU-consumption reading does
+not downgrade sound capacity-time, memory, or GPU data.
 The stored `resource_summary` also omits job totals and cutoff/finalization
 timestamps. Job and study views derive additive totals when requested; the
 server keeps the acceptance cutoff in its private coordinator state.
@@ -78,6 +94,8 @@ server keeps the acceptance cutoff in its private coordinator state.
 It measures capacity-time visible inside the NVFlare job environment:
 
 - CPU unit-seconds;
+- user plus system CPU seconds consumed by the job process and accounted
+  descendants during the measured window;
 - memory byte-seconds;
 - GPU instance-seconds, grouped by device kind and model;
 - selected job-scoped message payload bytes sent to named recipients; and
@@ -88,9 +106,12 @@ It also records one point-in-time capacity value for the filesystem containing
 the job workspace. That last value is shown only as a site observation and is
 never added across participants or jobs.
 
-It does not measure actual utilization, scheduler reservations, physical
-machine capacity, energy, cost, or billing. A job reports what its process can
-see with ordinary-user APIs.
+CPU consumed can serve as a practical billing proxy for covered execution.
+It excludes the shared site parent and processes whose CPU cannot be
+attributed to this job. The remaining measurements do not establish GPU
+utilization, scheduler reservations, physical-machine capacity, energy, or
+cost. A participant self-report is not an independently verified invoice
+ledger.
 
 ## How the calculation works
 
@@ -119,7 +140,46 @@ memory byte-seconds  = visible memory bytes × elapsed seconds
 GPU instance-seconds = visible GPU instances × elapsed seconds
 ```
 
-Nothing is persisted or sent at startup.
+No public statistics report is sent at startup. The client parent persists a
+small, private per-job CPU-attempt marker just before launch; it is outside
+the job run directory and archive.
+
+For CPU consumed, Linux and macOS read `RUSAGE_SELF` and
+`RUSAGE_CHILDREN` at lifecycle hooks adjacent to the start and finish
+clock readings. The change in `RUSAGE_SELF` is the job process's user plus
+system CPU time. The change in `RUSAGE_CHILDREN` adds
+descendants that exited and were waited for during the window, including
+short-lived children. The counters have disjoint ownership, so the job
+process and its waited descendants are counted once. The counter and clock
+reads are adjacent, not simultaneous. This needs two lifecycle readings,
+not periodic samples. The shared client or server site parent is not added
+because its CPU is not job-specific.
+
+An unawaited or still-running child is not covered by `RUSAGE_CHILDREN`.
+Known missing work yields `partial/attribution_incomplete` when a useful
+subtotal exists, or `unavailable` without one. The current PyTorch
+`MultiProcessExecutor` path does not wait for rank processes, and the XGBoost
+v2 partial-HE process pool cannot be verified as fully reaped, so their CPU
+cannot be marked reported from this source. A restarted server worker has no
+reading for its earlier process and likewise reports incomplete coverage.
+An arbitrary custom-code child that exits without being waited for or
+registered with a managed launcher cannot be discovered afterward. Its CPU
+could be absent even from a complete value with no status; billing policy must explicitly
+accept that limit or require stronger per-job isolation.
+The client parent creates and syncs an exclusive per-job attempt marker in the
+site workspace root before launch. An existing marker, in-memory earlier
+launch, or scheduler attempt count above one makes the new subtotal
+`partial/observation_incomplete`. The marker survives run-directory
+redeployment and normal site-parent restart, even with an unchanged attempt
+count. A marker-write failure does not block the job but makes the current
+CPU subtotal partial. If no marker was persisted before a later crash, the
+next parent cannot reconstruct that attempt; billing use still requires a
+storage-reliability or policy decision for that exceptional case.
+`RUSAGE_SELF` alone would omit those children. A Linux cgroup CPU counter is
+not used because the current launchers do not establish an exclusive
+per-job cgroup for every job; the Process launcher can share a site cgroup
+with other work. No new cgroup setup, privilege, or operator setting is
+required.
 
 Phase 1 keeps the resulting products and `measured_seconds`; it does not keep
 the original CPU-unit, memory-byte, or GPU-count observations. Dividing a
@@ -180,20 +240,24 @@ self-report, not tamper-proof or independently reconstructed evidence.
 
 `resource_time` contains:
 
-- one overall `reported`, `partial`, or `unavailable` status;
+- no status or issues when complete; otherwise one explicit `partial` or
+  `unavailable` status and issues;
 - measured seconds;
 - CPU unit-second groups, including CPU evidence/model information;
 - one memory byte-seconds value; and
 - GPU instance-second groups, including model information.
 
-An optional short issue list explains partial or unavailable results. MIG
+An issue list explains partial or unavailable results and is absent when the
+value is complete. MIG
 groups are omitted when MIG does not apply.
 
 The remaining top-level facts are:
 
+- `cpu_consumed`, with independent completeness and user plus system CPU seconds;
 - the final observed capacity of the workspace filesystem;
-- retained-content status and bytes; and
-- `message_traffic` status and sender-confirmed `sent_to` entries.
+- retained-content bytes, with an exception status only if incomplete; and
+- sender-confirmed `message_traffic.sent_to` entries, with an exception status
+  only if incomplete.
 
 There are no model filenames or `model.pt` hash fields. NVFlare does not assume
 which files are models.
@@ -448,8 +512,8 @@ restart. Restore starts an empty accepted ledger and clears stale in-progress
 resource files; with the current one-send client, those pre-restart reports
 normally become `missing`.
 
-A server job process restored from a snapshot starts a new collector. It keeps
-the numeric post-restore interval but marks resource time
+A restored server job process starts a new collector, whether or not it has a component snapshot. It keeps
+the numeric post-restore interval but marks resource time and CPU consumed
 `partial/observation_incomplete`, so it does not claim to cover the earlier
 interval.
 
@@ -510,14 +574,28 @@ the authenticated session's study, so a job in another study intentionally
 appears not found, matching the other job commands.
 
 The default view shows the job rollup and participant coverage. `--site` adds
-one participant's final report details. JSON uses base units; text may show
-CPU-hours, GiB-hours, GPU-hours, GiB, and message payload byte units.
+one participant's final report details. The human table places average CPU
+cores used beside average visible CPU cores. Average cores used comes from
+process CPU seconds divided by a complete, positive measured interval. A
+partial CPU-time subtotal can yield a starred average; a partial or
+unavailable interval yields `—` even if CPU seconds exist, because dividing
+by a shortened interval would mislead. It is a core count, not a utilization
+percentage. JSON retains the CPU seconds and resource-time values in base
+units; the text rollup may
+also show visible and consumed CPU core-hours, GiB-hours, GPU-hours, GiB, and
+message payload byte units.
+
+The text view does not repeat every stored status in its table. `*` marks a
+useful but incomplete number, `—` marks an unavailable one, and short data-gap
+notes say which participant or measurement is affected. For the exact status
+and reason, use `--format json`: it still has each participant's report state
+and each observation's status and issues. A missing value is not zero.
+
 The job rollup is calculated from accepted summary entries on demand.
 
-The site text labels the derived figures `MESSAGE PAYLOAD SENT GiB` (that
-site's outgoing entries) and `MESSAGE PAYLOAD SENT TO SITE GiB` (other accepted
-participants' entries addressed to it). The second label must not be read as
-confirmed receipt; missing or partial sender reports limit its coverage.
+The site text distinguishes payload sent by the site from payload other
+participants sent to it. The second figure must not be read as confirmed
+receipt; missing or partial sender reports limit its coverage.
 
 The job header is `Recorded resources for job NAME (ID: JOB_ID).` The server
 gets `NAME` from persisted job metadata, falling back to the persisted folder
@@ -564,7 +642,8 @@ For that fixed list:
 - terminal jobs with valid resource summaries are included; the displayed
   name comes separately from trusted job metadata;
 - terminal jobs with absent or invalid summaries are marked unavailable; and
-- valid jobs contribute measured time, CPU, memory, GPU, retained-content, and
+- valid jobs contribute measured time, CPU capacity time, CPU consumed,
+  memory, GPU, retained-content, and
   on-demand `message_traffic.sent` totals derived from participant `sent_to`
   entries.
 
@@ -576,8 +655,13 @@ exact bounded status string read during the scan.
 Workspace-filesystem capacity is never aggregated.
 
 The response shows per-job status and included/unavailable/excluded counts, so
-users can judge coverage. The view is calculated on demand from retained
-archives. It is not a billing ledger and cannot include deleted jobs.
+users can judge coverage. The human view keeps the essential job and data-gap
+information without a status column for every numeric measurement; the JSON
+response retains explicit exception states and issues, with success inferred
+from their absence. The view is calculated on demand
+from retained archives. CPU consumed in this view is a billing proxy for
+included jobs, not an independently verified billing ledger; deleted jobs
+cannot be included.
 
 Every row has both `job_id` and `job_name`, including unavailable and
 nonterminal rows. Human output uses separate `JOB ID` and `NAME` columns.
@@ -605,6 +689,8 @@ Generated examples:
 | Initial probe is partly unavailable | One final report may have partial resource time. |
 | Applicable cgroup CPU or memory data is unreadable or malformed | That dimension fails closed instead of falling back to a wider value. |
 | Server job process is restored | The new interval is numeric where possible but marked `partial/observation_incomplete`. |
+| Client job is relaunched after site-parent restart | The workspace-root attempt marker survives and the new CPU subtotal is `partial/observation_incomplete`, even if the scheduler count is unchanged. |
+| Client CPU-attempt marker cannot be persisted | Launch continues; current CPU subtotal is partial. If the parent later crashes before a marker exists, that attempt cannot be reconstructed. |
 | Server parent F3 history is restored | Keep the new subtotal and mark message traffic `partial/attribution_incomplete`. |
 | An admitted F3 operation does not settle before the fixed cutoff | Keep the bounded message-traffic subtotal as `partial/counter_gap`; do not delay finalization indefinitely. |
 | An F3 route loses trusted attribution or large-object completion evidence | Report partial or unavailable message traffic; do not substitute generic CellNet totals. |

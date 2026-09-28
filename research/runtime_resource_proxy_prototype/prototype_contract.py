@@ -164,6 +164,7 @@ class ResourceTimeAccumulator:
         self,
         at_seconds: object,
         *,
+        cpu_consumed: Mapping[str, Any],
         workspace_filesystem: Mapping[str, Any],
         retained_content: Mapping[str, Any],
         child_f3: Mapping[str, Any],
@@ -178,6 +179,7 @@ class ResourceTimeAccumulator:
             "internal_version": INTERNAL_HANDOFF_VERSION,
             "kind": INTERNAL_HANDOFF_KIND,
             "resource_time": self.resource_time(),
+            "cpu_consumed": deepcopy(dict(cpu_consumed)),
             "workspace_filesystem": deepcopy(dict(workspace_filesystem)),
             "retained_content": deepcopy(dict(retained_content)),
             "child_f3": deepcopy(dict(child_f3)),
@@ -227,9 +229,9 @@ class ResourceTimeAccumulator:
             status = "partial"
             issues = sorted(self._issues)
         else:
-            status = "reported"
+            status = None
             issues = []
-        return {"status": status, **({"issues": issues} if issues else {}), **body}
+        return {**({"status": status} if status else {}), **({"issues": issues} if issues else {}), **body}
 
     def _ensure_open(self) -> None:
         if self._closed:
@@ -365,7 +367,7 @@ def _unavailable(issue: str = "observation_incomplete") -> dict[str, Any]:
 
 
 def _f3_has_numbers(value: Mapping[str, Any]) -> bool:
-    return value.get("status") in {"reported", "partial"} and "sent_to" in value
+    return value.get("status") in {None, "partial"} and "sent_to" in value
 
 
 def _merge_f3(child_f3: Mapping[str, Any], parent_f3: Mapping[str, Any]) -> dict[str, Any]:
@@ -409,11 +411,9 @@ def _merge_f3(child_f3: Mapping[str, Any], parent_f3: Mapping[str, Any]) -> dict
         raise OverflowError("merged F3 traffic exceeds the unsigned 128-bit bound")
     result = {"sent_to": sent_to}
 
-    complete = (
-        len(numeric) == 2 and all(value.get("status") == "reported" for value in numeric) and not destinations_truncated
-    )
+    complete = len(numeric) == 2 and all("status" not in value for value in numeric) and not destinations_truncated
     if complete:
-        return {"status": "reported", **result}
+        return result
 
     issues = {"attribution_incomplete"} if len(numeric) != 2 else set()
     if destinations_truncated:
@@ -437,6 +437,7 @@ def _validated_child_handoff(value: Mapping[str, Any]) -> dict[str, Any]:
         "internal_version",
         "kind",
         "resource_time",
+        "cpu_consumed",
         "workspace_filesystem",
         "retained_content",
         "child_f3",
@@ -454,6 +455,7 @@ def _validated_child_handoff(value: Mapping[str, Any]) -> dict[str, Any]:
         "participant_name": "handoff-validation",
         "reported_at": "1970-01-01T00:00:00Z",
         "resource_time": deepcopy(value["resource_time"]),
+        "cpu_consumed": deepcopy(value["cpu_consumed"]),
         "workspace_filesystem": deepcopy(value["workspace_filesystem"]),
         "retained_content": deepcopy(value["retained_content"]),
         "message_traffic": deepcopy(value["child_f3"]),
@@ -466,6 +468,7 @@ def _validated_child_handoff(value: Mapping[str, Any]) -> dict[str, Any]:
         "internal_version": INTERNAL_HANDOFF_VERSION,
         "kind": INTERNAL_HANDOFF_KIND,
         "resource_time": probe_record["resource_time"],
+        "cpu_consumed": probe_record["cpu_consumed"],
         "workspace_filesystem": probe_record["workspace_filesystem"],
         "retained_content": probe_record["retained_content"],
         "child_f3": probe_record["message_traffic"],
@@ -543,11 +546,13 @@ def assemble_participant_summary(
 
     if validated_handoff is None:
         resource_time = _unavailable()
+        cpu_consumed = _unavailable()
         workspace_filesystem = _unavailable()
         retained_content = _unavailable()
         child_f3 = _unavailable("attribution_incomplete")
     else:
         resource_time = validated_handoff["resource_time"]
+        cpu_consumed = validated_handoff["cpu_consumed"]
         workspace_filesystem = validated_handoff["workspace_filesystem"]
         retained_content = validated_handoff["retained_content"]
         child_f3 = validated_handoff["child_f3"]
@@ -559,6 +564,7 @@ def assemble_participant_summary(
         "participant_name": participant_name,
         "reported_at": reported_at,
         "resource_time": resource_time,
+        "cpu_consumed": cpu_consumed,
         "workspace_filesystem": workspace_filesystem,
         "retained_content": retained_content,
         "message_traffic": _merge_f3(child_f3, parent_f3),
@@ -670,7 +676,7 @@ class WorkspaceResourceStatsReader:
 
     @staticmethod
     def _accepted_participants(summary: Mapping[str, Any]) -> dict[str, Mapping[str, Any]]:
-        return {entry["participant_name"]: entry for entry in summary["participants"] if entry["status"] == "accepted"}
+        return {entry["participant_name"]: entry for entry in summary["participants"] if "status" not in entry}
 
     def read_resource_summary_bytes(self) -> bytes:
         data = self._read_exact_member(RESOURCE_SUMMARY_MEMBER, self.max_resource_summary_bytes)
@@ -693,7 +699,7 @@ class WorkspaceResourceStatsReader:
             raise WorkspaceArchiveError("participant summary job_id does not match the resource summary")
         if participant["participant_name"] != participant_name:
             raise WorkspaceArchiveError("participant summary name does not match its archive path")
-        for field in ("resource_time", "retained_content", "message_traffic"):
+        for field in ("resource_time", "cpu_consumed", "retained_content", "message_traffic"):
             if accepted_entry[field] != participant[field]:
                 raise WorkspaceArchiveError(
                     f"resource summary accepted participant {field} does not match the participant summary"

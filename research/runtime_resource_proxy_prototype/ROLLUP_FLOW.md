@@ -65,6 +65,7 @@ are troubleshooting aids for an operator, not production collectors.
 | Memory capacity | Same startup hook as CPU | `os.sysconf("SC_PHYS_PAGES") * os.sysconf("SC_PAGE_SIZE")`; the tightest finite ancestor `memory.max` on cgroup v2 or `memory.limit_in_bytes` on cgroup v1 | The selected capacity starts the same in-memory interval. Swap is not added. |
 | GPU capacity and model | Same startup hook as CPU | CUDA Runtime enumeration is the only count authority; the CUDA Driver API supplies validated device identity and NVML may enrich only those devices | The production probe is implemented and was verified with CUDA 13 and an NVIDIA L40G on Colossus. A failed CUDA enumeration remains unavailable rather than being inferred from `CUDA_VISIBLE_DEVICES` or `nvidia-smi`; broader CUDA-version, multi-GPU, and MIG coverage remains future validation. |
 | Elapsed time | Start hook, any platform resource-change call, and `_archive_results()` | A monotonic nanosecond clock, converted to seconds with at most nine fractional digits | Each closed interval contributes CPU unit-seconds, memory byte-seconds, and GPU instance-seconds to the in-memory accumulator. |
+| CPU consumed | CJ or SJ, at hooks adjacent to the start and finish clock readings | Linux/macOS `RUSAGE_SELF` and `RUSAGE_CHILDREN` user plus system CPU counters | Deltas count the job process and descendants exited and waited/reaped between the reads, regardless of when they launched. They are disjoint and include short-lived children without periodic sampling. Known unaccounted workers make the value partial or unavailable. Shared CP/SP CPU is excluded. |
 | Workspace-filesystem capacity | CJ or SJ `_archive_results()`, once at finalization | `os.statvfs(Workspace.get_run_dir(job_id))`; capacity is `f_blocks * f_frsize` | One terminal observation enters the private handoff. It is never added across participants or jobs. |
 | Retained-content bytes | CJ or SJ `_archive_results()`, once at finalization | Recursive regular-file `lstat().st_size` sum under `Workspace.get_run_dir(job_id)`, excluding top-level `resource_stats/` | A clean traversal reports the observed total. Symlinks and non-regular entries are ignored; hard links count per path; sparse files count logical size. A useful subtotal after an error is partial. This is a non-atomic participant self-report, not a curated or attested result inventory. |
 | Child F3 counters | CJ or SJ throughout the run, frozen in `_archive_results()` | Origin-only sender accounting for real task responses and task results; one logical message per remote destination, with bytes measured after FOBS and before encryption | Cleanup closes command admission and pre-drains callbacks for up to five seconds while transport is alive, then closes/drains F3 for up to five seconds and writes its snapshot into the private handoff. |
@@ -129,9 +130,10 @@ These are maximum condition waits, not fixed sleeps. A normal job with no
 active callback or pending F3 operation passes both gates immediately.
 
 `_archive_results()` finishes the accumulator and writes a bounded private
-handoff with four child-derived facts:
+handoff with five child-derived facts:
 
 - accumulated CPU, memory, and GPU resource time;
+- CPU consumed by the job process and accounted descendants;
 - the visible capacity of the filesystem containing the existing job
   workspace;
 - a best-effort sum of regular-file logical sizes in the participant's run
@@ -139,7 +141,7 @@ handoff with four child-derived facts:
 - final child-process F3 sender counters.
 
 The handoff has a fixed internal version and kind plus `resource_time`,
-`workspace_filesystem`, `retained_content`, and `child_f3`. It is temporary
+`cpu_consumed`, `workspace_filesystem`, `retained_content`, and `child_f3`. It is temporary
 platform handoff state, not a public schema record.
 
 The retained-content traversal is not an atomic snapshot. It occurs before the
@@ -184,6 +186,10 @@ participant_summary
 │   ├── cpu.groups[].unit_seconds
 │   ├── memory.byte_seconds
 │   └── gpu.groups[].instance_seconds
+├── cpu_consumed
+│   ├── status
+│   ├── seconds (reported/partial only)
+│   └── issues (partial/unavailable only)
 ├── workspace_filesystem
 │   ├── status
 │   └── capacity_bytes (reported only)
@@ -237,17 +243,21 @@ application-level send. A target retry proposal permits at most three attempts,
 one second apart, with the same outcome and canonical report bytes; it must
 preserve that resource-release ordering.
 
-`resource_time.status` is one status for CPU, memory, and GPU together:
+`resource_time` has one completeness decision for CPU, memory, and GPU together:
 
-| Status | Meaning |
+| Stored status | Meaning |
 | --- | --- |
-| `reported` | All three dimensions were measured for the accumulator's covered duration. |
+| omitted (also no `issues`) | All three dimensions were measured for the accumulator's covered duration. |
 | `partial` | Some valid capacity-time exists, but a dimension or interval is missing. |
 | `unavailable` | The accumulator produced no usable capacity-time. |
 
-One status makes the common case easy to read. An issue list appears only for
-partial or unavailable results and explains missing coverage without
-repeating status on every resource branch.
+Omitting success status makes the common case easy to read. An explicit
+status and issue list appear only for partial or unavailable results and
+explain missing coverage without repeating status on every resource branch.
+`cpu_consumed` has its own independent exception status and canonical decimal seconds. A failed
+CPU-consumption reading does not alter otherwise sound capacity-time, memory,
+or GPU results. Its value is a practical billing proxy for covered execution,
+not an independently verified invoice ledger.
 
 ## Stage 4: accept the participant report
 
@@ -280,7 +290,7 @@ tradeoff for removing start/end records.
 
 The server starts with the participant list fixed at job start, not the set of
 reports that happened to arrive. Every selected client and the server therefore
-appears as `accepted`, `missing`, `invalid`, or `disabled`.
+appears as accepted (no `status` field), `missing`, `invalid`, or `disabled`.
 
 The resulting `resource_summary` contains `job_id` but not `job_name`.
 The CLI resolves a display name from server-owned persisted job metadata, with
@@ -294,6 +304,7 @@ accepted participant entries:
 ```text
 job measured seconds       = Σ participant measured seconds
 job CPU unit-seconds       = Σ participant CPU unit-seconds
+job CPU consumed seconds   = Σ participant CPU consumed seconds
 job memory byte-seconds    = Σ participant memory byte-seconds
 job GPU instance-seconds   = Σ participant GPU instance-seconds
 job retained bytes         = Σ participant retained bytes
@@ -401,6 +412,7 @@ For included jobs:
 ```text
 study measured seconds       = Σ included job measured seconds
 study CPU unit-seconds       = Σ included job CPU unit-seconds
+study CPU consumed seconds   = Σ included job CPU consumed seconds
 study memory byte-seconds    = Σ included job memory byte-seconds
 study GPU instance-seconds   = Σ included job GPU instance-seconds
 study retained bytes         = Σ included job retained bytes
@@ -430,7 +442,8 @@ be mistaken for the full study.
 
 The study result is calculated on demand and is not stored. It covers retained
 jobs only. Deleted jobs are not recoverable, and an active job contributes
-nothing until it becomes terminal. This is a convenience rollup, not a billing
+nothing until it becomes terminal. CPU consumed is a billing proxy for
+included jobs. This on-demand view is not an independently verified invoice
 or audit ledger.
 
 See the generated [study text](schema/golden/v1/finalized_job/cli/resources-study.txt),

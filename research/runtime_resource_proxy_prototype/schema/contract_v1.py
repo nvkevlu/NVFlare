@@ -78,10 +78,11 @@ INVALID_REPORT_ISSUES = frozenset({"malformed_source"})
 CAPACITY_UNAVAILABLE_ISSUES = SOURCE_UNAVAILABLE_ISSUES - {"not_bound"}
 PARTIAL_ISSUES = frozenset({"attribution_incomplete", "counter_gap", "observation_incomplete"})
 
-RESOURCE_TIME_STATUSES = frozenset({"reported", "partial", "unavailable"})
-MEASUREMENT_STATUSES = frozenset({"reported", "partial", "unavailable", "error"})
-TOTAL_STATUSES = frozenset({"reported", "partial", "unavailable"})
-PARTICIPANT_STATUSES = frozenset({"accepted", "missing", "invalid", "disabled"})
+RESOURCE_TIME_STATUSES = frozenset({"partial", "unavailable"})
+CPU_CONSUMED_PARTIAL_ISSUES = frozenset({"attribution_incomplete", "observation_incomplete"})
+MEASUREMENT_STATUSES = frozenset({"partial", "unavailable", "error"})
+TOTAL_STATUSES = frozenset({"partial", "unavailable"})
+PARTICIPANT_STATUSES = frozenset({"missing", "invalid", "disabled"})
 ROLES = frozenset({"client", "server"})
 GPU_KINDS = frozenset({"full_gpu", "mig_compute_instance"})
 RESOURCE_DATA_STATES = frozenset({"included", "unavailable", "nonterminal"})
@@ -169,6 +170,12 @@ def _enum(value: Any, allowed: frozenset[str] | set[str], path: str) -> str:
     if not isinstance(value, str) or value not in allowed:
         _fail(path, f"must be one of {', '.join(sorted(allowed))}")
     return value
+
+
+def _implicit_status(value: Mapping[str, Any], exceptions: frozenset[str], path: str, default: str) -> str:
+    """An omitted status means success; an explicit success label is invalid."""
+
+    return _enum(value["status"], exceptions, path) if "status" in value else default
 
 
 def _identifier(value: Any, pattern: re.Pattern[str], path: str) -> str:
@@ -340,9 +347,9 @@ _RESOURCE_TIME_NUMERIC_FIELDS = frozenset({"measured_seconds", "cpu", "memory", 
 
 def _validate_resource_time(value: Any, path: str) -> None:
     resource_time = _mapping(value, path)
-    status = _enum(resource_time.get("status"), RESOURCE_TIME_STATUSES, f"{path}.status")
+    status = _implicit_status(resource_time, RESOURCE_TIME_STATUSES, f"{path}.status", "reported")
     if status == "reported":
-        _exact_keys(resource_time, {"status"} | set(_RESOURCE_TIME_NUMERIC_FIELDS), set(), path)
+        _exact_keys(resource_time, set(_RESOURCE_TIME_NUMERIC_FIELDS), set(), path)
     elif status == "partial":
         _exact_keys(resource_time, {"status", "issues"}, set(_RESOURCE_TIME_NUMERIC_FIELDS), path)
         _issues(resource_time["issues"], RESOURCE_TIME_PARTIAL_ISSUES, f"{path}.issues")
@@ -362,11 +369,34 @@ def _validate_resource_time(value: Any, path: str) -> None:
         _validate_gpu_time(resource_time["gpu"], f"{path}.gpu")
 
 
+def _validate_cpu_consumed(value: Any, path: str, *, aggregate: bool = False) -> None:
+    consumed = _mapping(value, path)
+    statuses = TOTAL_STATUSES if aggregate else MEASUREMENT_STATUSES
+    status = _implicit_status(consumed, statuses, f"{path}.status", "reported")
+    if status == "reported":
+        _exact_keys(consumed, {"seconds"}, set(), path)
+        _decimal(consumed["seconds"], f"{path}.seconds")
+    elif status == "partial":
+        if aggregate:
+            _exact_keys(consumed, {"status", "seconds"}, set(), path)
+        else:
+            _exact_keys(consumed, {"status", "issues", "seconds"}, set(), path)
+            _issues(consumed["issues"], CPU_CONSUMED_PARTIAL_ISSUES, f"{path}.issues")
+        _decimal(consumed["seconds"], f"{path}.seconds")
+    elif status == "unavailable":
+        _exact_keys(consumed, {"status"} if aggregate else {"status", "issues"}, set(), path)
+        if not aggregate:
+            _issues(consumed["issues"], SOURCE_UNAVAILABLE_ISSUES, f"{path}.issues")
+    else:
+        _exact_keys(consumed, {"status", "issues"}, set(), path)
+        _issues(consumed["issues"], SOURCE_ERROR_ISSUES, f"{path}.issues")
+
+
 def _validate_workspace_filesystem(value: Any, path: str) -> None:
     workspace = _mapping(value, path)
-    status = _enum(workspace.get("status"), frozenset({"reported", "unavailable", "error"}), f"{path}.status")
+    status = _implicit_status(workspace, frozenset({"unavailable", "error"}), f"{path}.status", "reported")
     if status == "reported":
-        _exact_keys(workspace, {"status", "capacity_bytes"}, set(), path)
+        _exact_keys(workspace, {"capacity_bytes"}, set(), path)
         _integer(workspace["capacity_bytes"], f"{path}.capacity_bytes", maximum=U64_MAX, positive=True)
     else:
         _exact_keys(workspace, {"status", "issues"}, set(), path)
@@ -377,9 +407,9 @@ def _validate_workspace_filesystem(value: Any, path: str) -> None:
 def _validate_retained_content(value: Any, path: str, *, aggregate: bool = False) -> None:
     retained = _mapping(value, path)
     statuses = TOTAL_STATUSES if aggregate else MEASUREMENT_STATUSES
-    status = _enum(retained.get("status"), statuses, f"{path}.status")
+    status = _implicit_status(retained, statuses, f"{path}.status", "reported")
     if status == "reported":
-        _exact_keys(retained, {"status", "bytes"}, set(), path)
+        _exact_keys(retained, {"bytes"}, set(), path)
         _integer(retained["bytes"], f"{path}.bytes")
     elif status == "partial":
         if aggregate:
@@ -433,9 +463,12 @@ def _validate_sent_to(value: Any, path: str) -> None:
 def _validate_f3(value: Any, path: str, *, aggregate: bool = False) -> None:
     f3 = _mapping(value, path)
     statuses = TOTAL_STATUSES if aggregate else MEASUREMENT_STATUSES
-    status = _enum(f3.get("status"), statuses, f"{path}.status")
+    status = _implicit_status(f3, statuses, f"{path}.status", "reported")
     if aggregate:
-        if status in {"reported", "partial"}:
+        if status == "reported":
+            _exact_keys(f3, {"sent"}, set(), path)
+            _validate_counter(f3["sent"], f"{path}.sent")
+        elif status == "partial":
             _exact_keys(f3, {"status", "sent"}, set(), path)
             _validate_counter(f3["sent"], f"{path}.sent")
         else:
@@ -443,9 +476,9 @@ def _validate_f3(value: Any, path: str, *, aggregate: bool = False) -> None:
         return
 
     if status in {"reported", "partial"}:
-        required = {"status", "sent_to"}
+        required = {"sent_to"}
         if status == "partial":
-            required.add("issues")
+            required.update({"status", "issues"})
         _exact_keys(f3, required, set(), path)
         if status == "partial":
             _issues(f3["issues"], PARTIAL_ISSUES, f"{path}.issues")
@@ -458,8 +491,9 @@ def _validate_f3(value: Any, path: str, *, aggregate: bool = False) -> None:
 
 def _validate_totals(value: Any, path: str) -> None:
     totals = _mapping(value, path)
-    _exact_keys(totals, {"resource_time", "retained_content", "message_traffic"}, set(), path)
+    _exact_keys(totals, {"resource_time", "cpu_consumed", "retained_content", "message_traffic"}, set(), path)
     _validate_resource_time(totals["resource_time"], f"{path}.resource_time")
+    _validate_cpu_consumed(totals["cpu_consumed"], f"{path}.cpu_consumed", aggregate=True)
     _validate_retained_content(totals["retained_content"], f"{path}.retained_content", aggregate=True)
     _validate_f3(totals["message_traffic"], f"{path}.message_traffic", aggregate=True)
 
@@ -505,7 +539,7 @@ def _resource_time_aggregate(
     path: str,
 ) -> dict[str, Any]:
     numeric_seen = {name: any(name in value for value in values) for name in _RESOURCE_TIME_NUMERIC_FIELDS}
-    fully_reported = complete and bool(values) and all(value["status"] == "reported" for value in values)
+    fully_reported = complete and bool(values) and all("status" not in value for value in values)
 
     result: dict[str, Any] = {}
     if numeric_seen["measured_seconds"]:
@@ -559,15 +593,15 @@ def _resource_time_aggregate(
         }
 
     if fully_reported:
-        result["status"] = "reported"
+        pass
     elif any(numeric_seen.values()):
         issues: set[str] = set()
         if not complete:
             issues.add("observation_incomplete")
         for value in values:
-            if value["status"] == "partial":
+            if value.get("status") == "partial":
                 issues.update(value["issues"])
-            elif value["status"] == "unavailable":
+            elif value.get("status") == "unavailable":
                 if value["issues"] == ["attribution_incomplete"]:
                     issues.add("attribution_incomplete")
                 else:
@@ -579,12 +613,28 @@ def _resource_time_aggregate(
     else:
         result = {"status": "unavailable", "issues": ["observation_incomplete"]}
 
-    ordered = {"status": result.pop("status")}
+    ordered = {}
+    if "status" in result:
+        ordered["status"] = result.pop("status")
     if "issues" in result:
         ordered["issues"] = result.pop("issues")
     ordered.update(result)
     _validate_resource_time(ordered, path)
     return ordered
+
+
+def _aggregate_cpu_consumed(
+    values: Sequence[Mapping[str, Any]],
+    *,
+    complete: bool,
+    path: str,
+) -> dict[str, Any]:
+    numeric = [value for value in values if value.get("status") in {None, "partial"}]
+    if not numeric:
+        return {"status": "unavailable"}
+    seconds = _canonical_decimal(_sum_decimals([Decimal(value["seconds"]) for value in numeric], f"{path}.seconds"))
+    reported = complete and len(numeric) == len(values) and all("status" not in value for value in values)
+    return {**({} if reported else {"status": "partial"}), "seconds": seconds}
 
 
 def _aggregate_retained(
@@ -593,14 +643,14 @@ def _aggregate_retained(
     complete: bool,
     path: str,
 ) -> dict[str, Any]:
-    numeric = [value for value in values if value["status"] in {"reported", "partial"}]
+    numeric = [value for value in values if value.get("status") in {None, "partial"}]
     if not numeric:
         return {"status": "unavailable"}
     amount = sum(int(value["bytes"]) for value in numeric)
     if amount > U128_MAX:
         _fail(f"{path}.bytes", "aggregate exceeds the unsigned 128-bit bound")
-    reported = complete and len(numeric) == len(values) and all(value["status"] == "reported" for value in values)
-    return {"status": "reported" if reported else "partial", "bytes": str(amount)}
+    reported = complete and len(numeric) == len(values) and all("status" not in value for value in values)
+    return {**({} if reported else {"status": "partial"}), "bytes": str(amount)}
 
 
 def _aggregate_f3(
@@ -610,7 +660,7 @@ def _aggregate_f3(
     aggregate_input: bool,
     path: str,
 ) -> dict[str, Any]:
-    numeric = [value for value in values if value["status"] in {"reported", "partial"}]
+    numeric = [value for value in values if value.get("status") in {None, "partial"}]
     if not numeric:
         return {"status": "unavailable"}
     counters = (
@@ -622,15 +672,16 @@ def _aggregate_f3(
     messages = sum(int(counter["messages"]) for counter in counters)
     if payload > U128_MAX or messages > U128_MAX:
         _fail(f"{path}.sent", "aggregate exceeds the unsigned 128-bit bound")
-    reported = complete and len(numeric) == len(values) and all(value["status"] == "reported" for value in values)
+    reported = complete and len(numeric) == len(values) and all("status" not in value for value in values)
     return {
-        "status": "reported" if reported else "partial",
+        **({} if reported else {"status": "partial"}),
         "sent": {"payload_bytes": str(payload), "messages": str(messages)},
     }
 
 
 def _aggregate_totals(
     resource_times: Sequence[Mapping[str, Any]],
+    cpu_consumed_values: Sequence[Mapping[str, Any]],
     retained_values: Sequence[Mapping[str, Any]],
     f3_values: Sequence[Mapping[str, Any]],
     *,
@@ -640,6 +691,7 @@ def _aggregate_totals(
 ) -> dict[str, Any]:
     totals = {
         "resource_time": _resource_time_aggregate(resource_times, complete=complete, path=f"{path}.resource_time"),
+        "cpu_consumed": _aggregate_cpu_consumed(cpu_consumed_values, complete=complete, path=f"{path}.cpu_consumed"),
         "retained_content": _aggregate_retained(retained_values, complete=complete, path=f"{path}.retained_content"),
         "message_traffic": _aggregate_f3(
             f3_values,
@@ -663,6 +715,7 @@ def _validate_participant_summary(record: Mapping[str, Any], path: str) -> None:
             "reported_at",
             "resource_time",
             "workspace_filesystem",
+            "cpu_consumed",
             "retained_content",
             "message_traffic",
         },
@@ -675,6 +728,7 @@ def _validate_participant_summary(record: Mapping[str, Any], path: str) -> None:
     _identifier(record["participant_name"], PARTICIPANT_NAME_PATTERN, f"{path}.participant_name")
     _timestamp(record["reported_at"], f"{path}.reported_at")
     _validate_resource_time(record["resource_time"], f"{path}.resource_time")
+    _validate_cpu_consumed(record["cpu_consumed"], f"{path}.cpu_consumed")
     _validate_workspace_filesystem(record["workspace_filesystem"], f"{path}.workspace_filesystem")
     _validate_retained_content(record["retained_content"], f"{path}.retained_content")
     _validate_f3(record["message_traffic"], f"{path}.message_traffic")
@@ -684,22 +738,24 @@ def _validate_participant_summary(record: Mapping[str, Any], path: str) -> None:
 
 
 def derive_participant_totals(participant_record: Mapping[str, Any]) -> dict[str, Any]:
-    """Copy the three accepted values from one validated terminal report."""
+    """Copy accepted values from one validated terminal report."""
 
     validate_record(participant_record)
     if participant_record["kind"] != KIND_PARTICIPANT_SUMMARY:
         _fail("$.kind", f"must equal {KIND_PARTICIPANT_SUMMARY}")
-    return {
+    copied = {
         "resource_time": deepcopy(participant_record["resource_time"]),
+        "cpu_consumed": deepcopy(participant_record["cpu_consumed"]),
         "retained_content": deepcopy(participant_record["retained_content"]),
         "message_traffic": deepcopy(participant_record["message_traffic"]),
     }
+    return copied
 
 
 def _validate_participant_entry(value: Any, path: str) -> None:
     entry = _mapping(value, path)
-    status = _enum(entry.get("status"), PARTICIPANT_STATUSES, f"{path}.status")
-    base = {"participant_name", "role", "status"}
+    status = _implicit_status(entry, PARTICIPANT_STATUSES, f"{path}.status", "accepted")
+    base = {"participant_name", "role"}
     if status == "accepted":
         _exact_keys(
             entry,
@@ -707,6 +763,7 @@ def _validate_participant_entry(value: Any, path: str) -> None:
             | {
                 "received_at",
                 "resource_time",
+                "cpu_consumed",
                 "retained_content",
                 "message_traffic",
             },
@@ -715,14 +772,15 @@ def _validate_participant_entry(value: Any, path: str) -> None:
         )
         _timestamp(entry["received_at"], f"{path}.received_at")
         _validate_resource_time(entry["resource_time"], f"{path}.resource_time")
+        _validate_cpu_consumed(entry["cpu_consumed"], f"{path}.cpu_consumed")
         _validate_retained_content(entry["retained_content"], f"{path}.retained_content")
         _validate_f3(entry["message_traffic"], f"{path}.message_traffic")
     elif status == "invalid":
-        _exact_keys(entry, base | {"received_at", "issues"}, set(), path)
+        _exact_keys(entry, base | {"status", "received_at", "issues"}, set(), path)
         _timestamp(entry["received_at"], f"{path}.received_at")
         _issues(entry["issues"], INVALID_REPORT_ISSUES, f"{path}.issues")
     else:
-        _exact_keys(entry, base, set(), path)
+        _exact_keys(entry, base | {"status"}, set(), path)
     _identifier(entry["participant_name"], PARTICIPANT_NAME_PATTERN, f"{path}.participant_name")
     _enum(entry["role"], ROLES, f"{path}.role")
 
@@ -744,7 +802,7 @@ def _validate_participant_list(
         _fail(path, "participant_name values must be unique")
     known_names = {item[1] for item in ordering}
     for index, entry in enumerate(participants):
-        if entry["status"] != "accepted":
+        if "status" in entry:
             continue
         for destination in entry["message_traffic"].get("sent_to", []):
             name = destination["participant_name"]
@@ -759,9 +817,10 @@ def derive_job_totals(participants: Sequence[Mapping[str, Any]]) -> dict[str, An
     """Derive job totals from one complete expected-participant list."""
 
     _validate_participant_list(participants, path="participants")
-    accepted = [entry for entry in participants if entry["status"] == "accepted"]
+    accepted = [entry for entry in participants if "status" not in entry]
     return _aggregate_totals(
         [entry["resource_time"] for entry in accepted],
+        [entry["cpu_consumed"] for entry in accepted],
         [entry["retained_content"] for entry in accepted],
         [entry["message_traffic"] for entry in accepted],
         complete=len(accepted) == len(participants),
@@ -831,6 +890,7 @@ def derive_study_totals(job_rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]
     included = [job for job in job_rows if job["resource_data"] == "included"]
     return _aggregate_totals(
         [job["totals"]["resource_time"] for job in included],
+        [job["totals"]["cpu_consumed"] for job in included],
         [job["totals"]["retained_content"] for job in included],
         [job["totals"]["message_traffic"] for job in included],
         complete=len(included) == len(job_rows),
@@ -952,9 +1012,7 @@ def validate_bundle(
     if not isinstance(file_bytes, Mapping):
         _fail("file_bytes", "must be a relative-path-to-bytes mapping")
 
-    accepted = {
-        entry["participant_name"]: entry for entry in resource_summary["participants"] if entry["status"] == "accepted"
-    }
+    accepted = {entry["participant_name"]: entry for entry in resource_summary["participants"] if "status" not in entry}
     if set(participant_records) != set(accepted):
         _fail("participant_records", "keys must exactly equal the accepted participant names")
 
@@ -995,8 +1053,8 @@ def validate_bundle(
         relative_path = f"participants/{participant_name}.json"
         entry = accepted[participant_name]
         copied = derive_participant_totals(record)
-        for field in ("resource_time", "retained_content", "message_traffic"):
-            if entry[field] != copied[field]:
+        for field in ("resource_time", "cpu_consumed", "retained_content", "message_traffic"):
+            if entry.get(field) != copied[field]:
                 _fail(
                     f"resource_summary.participants[{participant_name!r}].{field}",
                     "must exactly copy the accepted terminal participant report",

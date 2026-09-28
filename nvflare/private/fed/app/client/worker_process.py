@@ -177,6 +177,8 @@ def main(args):
             upload_results_on_shutdown(args, secure_train, log=logger)
 
         def _mark_callback_drain_incomplete():
+            if resource_collector:
+                resource_collector.mark_cpu_consumption_incomplete()
             counter = get_job_f3_counter()
             if counter:
                 counter.mark_counter_gap()

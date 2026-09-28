@@ -46,6 +46,7 @@ from nvflare.fuel.utils.config_service import ConfigService
 from nvflare.fuel.utils.json_scanner import Node
 from nvflare.fuel.utils.log_utils import get_obj_logger
 from nvflare.private.defs import CellChannel, CellChannelTopic, new_cell_message
+from nvflare.private.fed.resource_stats.cpu_consumed import register_managed_child
 from nvflare.security.logging import secure_format_exception
 
 
@@ -284,6 +285,7 @@ class MultiProcessExecutor(Executor):
             self.exe_process = subprocess.Popen(
                 shlex.split(command, " "), shell=False, preexec_fn=os.setsid, env=os.environ.copy()
             )
+            register_managed_child(self.exe_process, descendants_may_be_unwaited=True)
 
             # send the init data to all the child processes
             cell.register_request_cb(

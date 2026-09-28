@@ -71,13 +71,12 @@ class TestResourceTimeAccumulator(unittest.TestCase):
     @staticmethod
     def handoff_fields() -> dict:
         return {
+            "cpu_consumed": {"seconds": "45.5"},
             "workspace_filesystem": {
-                "status": "reported",
                 "capacity_bytes": "1099511627776",
             },
-            "retained_content": {"status": "reported", "bytes": "0"},
+            "retained_content": {"bytes": "0"},
             "child_f3": {
-                "status": "reported",
                 "sent_to": [{"participant_name": "server", "payload_bytes": "100", "messages": "1"}],
             },
         }
@@ -90,7 +89,6 @@ class TestResourceTimeAccumulator(unittest.TestCase):
             reported_at="2026-09-09T14:37:03Z",
             child_handoff=handoff,
             parent_f3={
-                "status": "reported",
                 "sent_to": [{"participant_name": "server", "payload_bytes": "300", "messages": "2"}],
             },
         )
@@ -110,7 +108,8 @@ class TestResourceTimeAccumulator(unittest.TestCase):
         self.assertNotIn("final", report)
         self.assertNotIn("attempts", report)
         resource_time = report["resource_time"]
-        self.assertEqual("reported", resource_time["status"])
+        self.assertEqual({"seconds": "45.5"}, report["cpu_consumed"])
+        self.assertNotIn("status", resource_time)
         self.assertEqual("180", resource_time["measured_seconds"])
         self.assertEqual("1440", resource_time["cpu"]["groups"][0]["unit_seconds"])
         self.assertEqual(
@@ -148,7 +147,6 @@ class TestResourceTimeAccumulator(unittest.TestCase):
             reported_at="2026-09-09T14:37:03Z",
             child_handoff=handoff,
             parent_f3={
-                "status": "reported",
                 "sent_to": [{"participant_name": "server", "payload_bytes": "300", "messages": "2"}],
             },
         )
@@ -207,6 +205,7 @@ class TestResourceTimeAccumulator(unittest.TestCase):
     def test_parent_still_emits_one_typed_report_when_child_handoff_is_missing(self):
         report = self.assemble(None)
         self.assertEqual("unavailable", report["resource_time"]["status"])
+        self.assertEqual({"status": "unavailable", "issues": ["observation_incomplete"]}, report["cpu_consumed"])
         self.assertEqual("unavailable", report["workspace_filesystem"]["status"])
         self.assertEqual("unavailable", report["retained_content"]["status"])
         self.assertEqual("partial", report["message_traffic"]["status"])

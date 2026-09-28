@@ -47,9 +47,11 @@ deterministic production reference has the current contract.
    environment keys, end reasons, stability checks, or raw measurement
    periods.
 3. CPU, memory, and GPU capacity-time appear in one `resource_time` object
-   with one overall measurement status. Phase 1 does not persist the raw
+   with one overall measurement-completeness decision. Phase 1 does not persist the raw
    capacity snapshot behind each private interval. A future Phase 2 contract
    may keep periodic snapshots without changing this v1 terminal record.
+   `cpu_consumed` independently records job-process and accounted-child user
+   plus system CPU seconds with its own status.
 4. The current adapter keeps an in-memory accumulator from the early hook
    before workspace download, custom-path activation, and application-runner
    setup until `_archive_results()` before workspace upload. Official Process,
@@ -104,16 +106,20 @@ deterministic production reference has the current contract.
 
 ## 2. What this measures
 
-The feature answers two questions:
+The feature answers three questions:
 
 - What capacity-time was visible during each participant's implemented
   application-run window?
+- How many user plus system CPU seconds did the job's accounted execution
+  processes consume during that window?
 - How much selected job traffic and terminal run-directory content did
   NVFlare observe at its trusted hooks?
 
-It does not claim scheduler reservations, physical-machine capacity, actual
-CPU/GPU utilization, energy, ownership, cost, or billable usage. The values are
-ordinary-user observations made inside the job environment.
+`cpu_consumed` is a practical billing proxy for covered execution, kept
+separate from CPU capacity multiplied by time. It does not claim scheduler
+reservations, physical-machine capacity, GPU utilization, energy, ownership,
+or cost. These ordinary-user observations are participant self-reports, not
+an independently verified invoice ledger.
 
 The job total deliberately adds participant values. If two jobs overlap on
 the same hardware, each job reports its own visible capacity-time. A study
@@ -130,6 +136,47 @@ includes other waiting inside that window, but not the whole operating-system
 process lifetime. It is not active-task time. Job and study
 `measured_seconds` add participant durations, so they can exceed job or study
 wall-clock elapsed time.
+
+On Linux and macOS, the job process reads `RUSAGE_SELF` and
+`RUSAGE_CHILDREN` at hooks adjacent to the start and end clock readings for
+that window. These reads are not mathematically simultaneous. Own-process
+user plus system CPU deltas and exited, waited-for descendant CPU deltas are added
+once. A child launched after the start that runs and exits between the two
+readings is still included when it has been waited for. No periodic task or
+sampling loop is added. The shared client or server site parent is excluded
+because its CPU is not attributable to one job. A known unawaited,
+still-running, or external worker does not become zero: a usable subtotal is
+partial, or the result is unavailable. Current PyTorch
+`MultiProcessExecutor` ranks are not waited for on the inspected path, and
+the XGBoost v2 partial-HE process pool cannot be verified as fully reaped;
+both leave CPU-consumption attribution incomplete. A restored server
+worker cannot recover its prior process CPU.
+NVFlare cannot identify an arbitrary custom-code child that exits without
+being waited for or registered through a managed launcher. Its CPU would be
+absent from the counter even if the result has no exception status; that limit must
+be accepted explicitly or closed with stronger job isolation before invoice
+use.
+
+Before launching a client process, its site parent creates an exclusive,
+synced per-job attempt marker under the site workspace root at
+`.resource_stats_cpu_attempts/<job_id>`. This is outside the redeployed run
+directory and the job archive. An existing marker, an in-memory earlier
+launch, or a scheduler attempt count greater than one makes the new process's
+CPU subtotal `partial/observation_incomplete`; prior process CPU is unknown.
+The marker therefore survives a normal site-parent restart even when the
+scheduler count is unchanged. If marker persistence fails, the current report
+is partial and launch still proceeds. An absent marker after a storage failure
+and later crash cannot reveal that earlier attempt to a new parent; this
+exceptional gap needs a storage-reliability or billing-policy decision before
+using the metric for invoices.
+
+`RUSAGE_SELF` alone omits child CPU, and `RUSAGE_CHILDREN` includes only
+children already waited for. The current Process launcher does not establish
+an exclusive per-job Linux cgroup, so a cgroup CPU counter could include
+other jobs or shared site work. Docker, Kubernetes, and Slurm placement does
+not provide a single demonstrably exclusive cgroup contract across these
+launch paths. The implementation therefore uses the same process-boundary
+source on Linux and macOS and keeps any known worker-coverage gap visible.
 
 ## 3. End-to-end flow
 
@@ -170,6 +217,7 @@ The resulting participant record needs only:
 
 - identity and schema fields;
 - one `resource_time` result;
+- one independent `cpu_consumed` result;
 - one final workspace-filesystem capacity observation;
 - one retained-content result; and
 - one final `message_traffic` result.
@@ -232,40 +280,47 @@ participant_summary
 ├── participant_name
 ├── reported_at
 ├── resource_time
-│   ├── status
-│   ├── issues (partial/unavailable only)
+│   ├── status + issues (partial/unavailable only; omitted when complete)
 │   ├── measured_seconds
 │   ├── cpu.groups[].unit_seconds
 │   ├── memory.byte_seconds
 │   └── gpu.groups[].instance_seconds
+├── cpu_consumed
+│   ├── status + issues (exceptions only; omitted when complete)
+│   └── seconds (complete/partial only)
 ├── workspace_filesystem
-│   ├── status
-│   └── capacity_bytes (reported only)
+│   ├── status + issues (exceptions only; omitted when complete)
+│   └── capacity_bytes (complete only)
 ├── retained_content
 └── message_traffic
-    ├── status
-    ├── issues (partial/unavailable/error only)
-    └── sent_to[].{participant_name,payload_bytes,messages} (reported/partial only)
+    ├── status + issues (exceptions only; omitted when complete)
+    └── sent_to[].{participant_name,payload_bytes,messages} (complete/partial only)
 ```
 
-`resource_time.status` applies to CPU, memory, and GPU together. The supported
-measurement outcomes are:
+`resource_time` makes one completeness decision for CPU, memory, and GPU
+together. The supported outcomes are:
 
-| Status | Meaning |
+| Stored status | Meaning |
 | --- | --- |
-| `reported` | The accumulator covered the reported duration and obtained all three resource dimensions. |
+| omitted (also no `issues`) | The accumulator covered the reported duration and obtained all three resource dimensions. |
 | `partial` | At least one resource dimension or interval was not measured, but some valid capacity-time remains. |
 | `unavailable` | No usable CPU, memory, or GPU capacity-time could be produced. |
 
 The record carries a short issue list only for `partial` or `unavailable`.
 It does not repeat a separate status under CPU, memory, and GPU.
+`cpu_consumed` is independent: a failed process-CPU reading cannot
+invalidate otherwise sound capacity-time, memory, or GPU values. Complete
+consumption has canonical decimal `seconds`; partial retains a known subtotal
+and issues; unavailable has issues and no numeric value. Job and study totals
+sum accepted seconds. A complete total omits status and issues; partial or
+unavailable totals carry explicit status.
 
 For every numeric observation, the essential distinction is complete value,
 useful subtotal, or no usable value. This prevents missing data from looking
-like zero. The report-acceptance status (`accepted`, `missing`, `invalid`, or
-`disabled`) answers a different question: whether the server received a valid
-participant report. Run-directory files and message traffic have their own
-status because either collection can fail while compute succeeds. A narrower
+like zero. An accepted participant entry omits `status`; explicit `missing`,
+`invalid`, or `disabled` describes why a valid report is absent. Run-directory
+files and message traffic have independent exception states because either
+collection can fail while compute succeeds. A narrower
 proposal, **not yet part of this contract**, would fold measurement `error`
 into `unavailable` while retaining the cause in `issues`, and remove the fixed
 `invalid.issues` value; see the [status catalog](../../research/runtime_resource_proxy_prototype/schema/CODE_CATALOG.md#typed-object-statuses).
@@ -290,8 +345,8 @@ The selected client names are persisted in job metadata as
 denominator. Accepted reports, invalid history, and cutoff state are
 not restored; pre-restart accepted reports normally become `missing` because
 the current client does not retry.
-Each entry is `accepted`, `missing`, `invalid`, or `disabled` and points to an
-accepted participant file when one exists.
+Each entry is accepted (no `status` field), `missing`, `invalid`, or `disabled`
+and points to an accepted participant file when one exists.
 
 The job `resource_summary` copies accepted participant values and coverage:
 
@@ -317,6 +372,7 @@ user requests them; the persisted summary has no `totals` field.
 ```text
 job measured seconds       = sum(participant measured seconds)
 job CPU unit-seconds       = sum(participant CPU unit-seconds)
+job CPU consumed seconds   = sum(participant CPU consumed seconds)
 job memory byte-seconds    = sum(participant memory byte-seconds)
 job GPU instance-seconds   = sum(participant GPU instance-seconds)
 job retained bytes         = sum(participant retained bytes)
@@ -372,8 +428,10 @@ The study result records every job in that materialized work list as:
 Jobs that are not terminal at scan time are listed as `nonterminal` but
 excluded from additive totals. They do not contribute partial values.
 
-The study view is calculated on demand from retained job archives. It is not a
-billing ledger and cannot include jobs or workspaces that have been deleted.
+The study view is calculated on demand from retained job archives. CPU
+consumed is a billing proxy for the included jobs, while the view is not an
+independently verified invoice ledger and cannot include jobs or workspaces
+that have been deleted.
 
 ## 6. Resource-time accumulator
 
@@ -1182,8 +1240,8 @@ not a study name claimed inside a resource report.
    `WORKSPACE`, staging and removing one request-scoped archive at a time;
 3. records that job as `included` or `unavailable`;
 4. derives each included job's additive totals from its accepted participant
-   entries, then adds measured seconds, CPU unit-seconds, memory byte-seconds,
-   GPU instance-seconds, retained-content bytes, and on-demand
+   entries, then adds measured seconds, CPU unit-seconds, CPU consumed
+   seconds, memory byte-seconds, GPU instance-seconds, retained-content bytes, and on-demand
    `message_traffic.sent` bytes/messages from participant `sent_to` entries; and
 5. never adds workspace-filesystem capacity.
 
@@ -1228,13 +1286,24 @@ JSON retains exact base units:
 
 - seconds;
 - CPU unit-seconds;
+- CPU consumed seconds;
 - bytes and byte-seconds;
 - GPU instance-seconds; and
 - message payload bytes sent (and, for a site, addressed to that site).
 
-Text output may show CPU-hours, GiB-hours, GPU-hours, GiB, and MiB/GiB using
-documented conversions. It must label partial and unavailable coverage and
-must not show workspace capacity as usage or include it in totals.
+Text output places average visible CPU cores beside average CPU cores used.
+The used-core figure divides process CPU seconds by the measured interval only
+when that interval is complete (status omitted) and positive. A useful partial CPU-seconds
+subtotal may produce a starred average; a partial interval cannot produce a
+trustworthy derived average. This is not a utilization percentage. The
+additive rollup still labels CPU capacity-time and process CPU time in core-hours,
+alongside GiB-hours, GPU-hours, GiB, and MiB/GiB using
+documented conversions. The human CLI omits repeated status columns: `*`
+marks an incomplete numeric value, `—` marks no usable value, and concise
+data-gap notes explain affected jobs, participants, or measurements. The JSON
+keeps explicit exception statuses and issue codes; absence means accepted or
+complete in its typed context. Text must not show workspace
+capacity as usage or include it in totals.
 
 ## 12. Failure behavior
 
@@ -1243,7 +1312,11 @@ must not show workspace capacity as usage or include it in totals.
 | Initial CPU/memory/GPU probe partly fails | One final report may be partial; valid totals remain. |
 | An applicable cgroup CPU or memory constraint is unreadable or malformed | Fail that dimension closed; do not substitute a wider host or process-visible value. |
 | Slurm job uses more than one node | Emit `resource_time: {status: unavailable, issues: [unsupported]}` with no rank-zero numeric totals; never infer other-node capacity. |
-| Server job process is restored from a snapshot | Measure its new interval and mark resource time `partial/observation_incomplete`; never claim the pre-restore interval. |
+| Server job process is restored, with or without a component snapshot | Measure its new interval and mark resource time and CPU consumed `partial/observation_incomplete`; never claim the pre-restore interval. |
+| A client job is relaunched, even after run-dir redeployment or site-parent restart with an unchanged scheduler count | A workspace-root per-job marker identifies the earlier launch. Report the new process CPU subtotal as `cpu_consumed: partial/observation_incomplete`; prior attempt CPU is unavailable. |
+| A client CPU-attempt marker cannot be persisted | Continue launching and mark the current CPU subtotal partial. If the marker was never persisted and the parent later crashes, a subsequent parent cannot reconstruct that attempt; a storage-reliability or billing-policy decision remains necessary. |
+| A known child process is not waited for before the CPU boundary, including current PyTorch `MultiProcessExecutor` ranks and XGBoost v2 partial-HE pool workers | Keep any own-process CPU subtotal as `cpu_consumed: partial/attribution_incomplete`; never report missing worker CPU as zero. |
+| CPU accounting fails with no usable reading | Report `cpu_consumed` unavailable without changing `resource_time`, memory, GPU, or retained-content status. |
 | Job reaches Python finalization after an application error | Freeze the private handoff if possible; parent assembly and job failure remain independent. |
 | An admitted child callback remains at the pre-publication cutoff | Stop after the bounded wait, mark child message traffic `partial/counter_gap`, publish once, stop transport, and retain one bounded post-stop callback wait before closing security state. |
 | A parent F3 operation is unexpectedly still pending at cleanup | Freeze immediately and mark merged message traffic partial with `counter_gap`; do not block parent completion. |
@@ -1339,7 +1412,8 @@ At minimum:
 - Slurm multi-node `unavailable/unsupported` behavior with no numeric totals,
   child F3 with an active callback, an unexpected pending parent operation, and
   deterministic checked parent/child counter merging;
-- one overall compute status for reported, partial, and unavailable cases;
+- omitted status for complete compute data and one explicit status for partial
+  or unavailable cases;
 - hard child crash, missing/malformed handoff, and parent-built
   partial/unavailable final report behavior;
 - envelope size, strict JSON, direct canonical-byte comparison, authentication,

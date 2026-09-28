@@ -182,10 +182,10 @@ def _accumulator_fixture(job_id: str) -> tuple[dict[str, Any], dict[str, Any]]:
     )
     handoff = accumulator.finish_measurements(
         900,
-        workspace_filesystem={"status": "reported", "capacity_bytes": "1099511627776"},
-        retained_content={"status": "reported", "bytes": "0"},
+        cpu_consumed={"seconds": "100"},
+        workspace_filesystem={"capacity_bytes": "1099511627776"},
+        retained_content={"bytes": "0"},
         child_f3={
-            "status": "reported",
             "sent_to": [],
         },
     )
@@ -195,7 +195,6 @@ def _accumulator_fixture(job_id: str) -> tuple[dict[str, Any], dict[str, Any]]:
         reported_at="2026-09-04T12:15:00Z",
         child_handoff=handoff,
         parent_f3={
-            "status": "reported",
             "sent_to": [],
         },
     )

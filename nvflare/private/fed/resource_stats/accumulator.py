@@ -138,7 +138,7 @@ class ResourceTimeAccumulator:
             return {"status": "unavailable", "issues": sorted(self._issues or {"observation_incomplete"})}
         if self._issues:
             return {"status": "partial", "issues": sorted(self._issues), **body}
-        return {"status": "reported", **body}
+        return body
 
     def _read_clock(self) -> int:
         value = self._clock_ns()

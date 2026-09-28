@@ -1,23 +1,27 @@
 Recorded resources for job qwen2.5-14b-federated-qualification (ID: job-20260909-001).
-Job coverage: PARTIAL (3 accepted / 4 expected) | selected site: site-2
+Participants with data: 3/4 | showing site-2
 
-Recorded average visible capacity over each measured interval
-SITE    ROLE    REPORT    COMPUTE  MEASURED TIME  CPU UNITS  MEM GiB   FULL GPUs
-site-2  client  accepted  PARTIAL  32m3s          29.5039    182.0156  3.6880
+Average resources per participant (CPU in cores)
+SITE    TIME    AVG CPU VISIBLE (cores)  AVG CPU USED (cores)  AVG MEM GiB  AVG FULL GPUs
+site-2  32m3s*  29.5039*                 —                     182.0156*    3.6880*
 
-Other recorded participant totals
-SITE    MESSAGE TRAFFIC STATUS  MESSAGE PAYLOAD SENT GiB  MESSAGE PAYLOAD SENT TO SITE GiB
-site-2  REPORTED                137.5567                  137.5567 (partial)
+Recorded files and message payload
+SITE    PAYLOAD SENT GiB  PAYLOAD SENT TO SITE GiB
+site-2  137.5567          137.5567*
+
+Data gaps:
+  site-2: visible capacity partial (observation incomplete); CPU time used partial (observation incomplete); run-dir files unavailable (not collected)
 
 Notes:
-  PARTIAL means at least one expected report or observation was incomplete.
-  Each average is resource-time divided by that row's measured interval.
-  Totals add participant reports; overlapping resources can be counted more than once.
-  Message payload sent to a site is sender-confirmed; it is not proof of receipt.
+  * = incomplete number; — = no usable value. See --format json for details.
+  CPU visible is capacity; CPU used is process CPU time divided by a complete measured interval, not host utilization %.
+  CPU used may miss child-process work; known gaps are marked *.
+  Sums add participant values; physically shared resources may be counted more than once.
+  Payload sent to a site is sender-confirmed, not proof of receipt.
 
 Hardware detail for site-2
 Model metadata is optional and does not change numeric totals.
 
 CPU: Intel Xeon Platinum 8480+ (x86_64); 29.5039 average visible units
-GPU (full GPU): NVIDIA A100 80GB, 80 GiB per instance; 3.6880 average visible instances
+GPU: NVIDIA A100 80GB, 80.0000 GiB per instance; 3.6880 average visible instances
 Visible workspace-filesystem capacity at reporting time: 2048.0000 GiB

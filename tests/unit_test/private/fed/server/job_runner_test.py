@@ -1080,7 +1080,6 @@ def test_job_complete_process_contains_resource_stats_finalization_write_failure
     runner.resource_stats.discard_job_artifacts = MagicMock()
     runner.f3_counters.close_and_freeze = MagicMock(
         return_value={
-            "status": "reported",
             "sent_to": [],
         }
     )
@@ -1504,7 +1503,6 @@ def test_zero_traffic_job_f3_counter_is_reported_not_missing():
     snapshot = runner.f3_counters.close_and_freeze("job-1")
 
     assert snapshot == {
-        "status": "reported",
         "sent_to": [],
     }
 
@@ -1522,14 +1520,13 @@ def test_server_handoff_is_bound_and_accepted_before_finalization(tmp_path):
         "job-1",
         fl_ctx,
         parent_f3={
-            "status": "reported",
             "sent_to": [],
         },
     )
     summary = runner.resource_stats.finalize_job("job-1")
 
     server = next(entry for entry in summary["participants"] if entry["participant_name"] == "server")
-    assert server["status"] == "accepted"
+    assert "status" not in server
     assert server["resource_time"] == {"status": "unavailable", "issues": ["observation_incomplete"]}
     assert server["message_traffic"] == {
         "status": "partial",
@@ -1561,11 +1558,13 @@ def test_restore_running_job_registers_resource_participants_before_server_start
 
     engine.start_app_on_server.side_effect = assert_registered_before_start
 
-    runner.restore_running_job("job-1", {"token-1": client}, MagicMock(), fl_ctx)
+    runner.restore_running_job("job-1", {"token-1": client}, None, fl_ctx)
 
     assert runner.resource_stats.accept_resource_report("job-1", "site-1", {"participant_summary": b"{}"}) == "invalid"
     summary = runner.resource_stats.finalize_job("job-1")
     assert summary["job_id"] == "job-1"
     site2 = next(entry for entry in summary["participants"] if entry["participant_name"] == "site-2")
     assert site2["status"] == "missing"
+    assert engine.start_app_on_server.call_args.kwargs["restored_attempt"] is True
+    assert engine.start_app_on_server.call_args.kwargs["snapshot"] is None
     runner.scheduler.restore_scheduled_job.assert_called_once_with("job-1")

@@ -35,6 +35,7 @@ def _participant_record(f3):
         "participant_name": "site-1",
         "reported_at": "2026-09-17T12:00:00Z",
         "resource_time": {"status": "unavailable", "issues": ["observation_incomplete"]},
+        "cpu_consumed": {"status": "unavailable", "issues": ["observation_incomplete"]},
         "workspace_filesystem": {"status": "unavailable", "issues": ["observation_incomplete"]},
         "retained_content": {"status": "unavailable", "issues": ["not_bound"]},
         "message_traffic": f3,
@@ -44,7 +45,7 @@ def _participant_record(f3):
 def test_zero_traffic_counter_is_a_reported_value():
     snapshot = F3Counter().freeze()
 
-    assert snapshot == {"status": "reported", "sent_to": []}
+    assert snapshot == {"sent_to": []}
     validate_record(_participant_record(snapshot))
 
 
@@ -56,10 +57,7 @@ def test_completion_counts_main_and_out_of_band_bytes_as_one_message():
     assert counter.add_accepted_payload_bytes(admission, 2048)
     assert counter.complete_remote_accepted(admission, 128)
 
-    assert counter.freeze() == {
-        "status": "reported",
-        "sent_to": [_sent_group(6272, 1)],
-    }
+    assert counter.freeze() == {"sent_to": [_sent_group(6272, 1)]}
 
 
 def test_abandoned_operation_is_not_counted_or_reported_as_a_gap():
@@ -70,7 +68,7 @@ def test_abandoned_operation_is_not_counted_or_reported_as_a_gap():
     assert counter.abandon(admission)
 
     assert counter.pending_count == 0
-    assert counter.freeze() == {"status": "reported", "sent_to": []}
+    assert counter.freeze() == {"sent_to": []}
 
 
 def test_incomplete_operation_is_released_and_reported_as_a_gap():
@@ -126,10 +124,7 @@ def test_recipient_groups_are_merged_and_sorted():
             counter.try_begin(F3TrafficClass.TASK_RESPONSE, recipient_name), payload_bytes
         )
 
-    assert counter.freeze() == {
-        "status": "reported",
-        "sent_to": [_sent_group(5, 1, "site-1"), _sent_group(10, 2, "site-2")],
-    }
+    assert counter.freeze() == {"sent_to": [_sent_group(5, 1, "site-1"), _sent_group(10, 2, "site-2")]}
 
 
 def test_recipient_group_limit_keeps_prior_subtotal_and_marks_gap():
@@ -157,7 +152,7 @@ def test_close_stops_admission_without_affecting_caller_work():
 
     assert admission is None
     assert caller_work == ["sent"]
-    assert counter.freeze()["status"] == "reported"
+    assert "status" not in counter.freeze()
 
 
 def test_operation_admitted_before_close_can_complete_while_closing():
@@ -219,8 +214,8 @@ def test_snapshot_reports_in_flight_work_without_fixing_the_cutoff():
 
     assert counter.snapshot()["issues"] == ["counter_gap"]
     assert counter.complete_remote_accepted(admission, 5)
-    assert counter.snapshot() == {"status": "reported", "sent_to": [_sent_group(5, 1)]}
-    assert counter.freeze()["status"] == "reported"
+    assert counter.snapshot() == {"sent_to": [_sent_group(5, 1)]}
+    assert "status" not in counter.freeze()
 
 
 def test_duplicate_completion_is_ignored_without_raising_or_double_counting():
@@ -230,7 +225,7 @@ def test_duplicate_completion_is_ignored_without_raising_or_double_counting():
     assert counter.complete_remote_accepted(admission, 10)
     assert not counter.complete_remote_accepted(admission, 10)
 
-    assert counter.freeze() == {"status": "reported", "sent_to": [_sent_group(10, 1)]}
+    assert counter.freeze() == {"sent_to": [_sent_group(10, 1)]}
 
 
 def test_foreign_admission_is_ignored_without_mutating_either_counter():
@@ -239,7 +234,7 @@ def test_foreign_admission_is_ignored_without_mutating_either_counter():
     admission = owner.try_begin(F3TrafficClass.TASK_RESULT, "site-1")
 
     assert not other.complete_remote_accepted(admission, 10)
-    assert other.freeze()["status"] == "reported"
+    assert "status" not in other.freeze()
     assert owner.abandon(admission)
 
 
@@ -322,10 +317,7 @@ def test_concurrent_completions_are_accounted_exactly():
     for thread in threads:
         thread.join()
 
-    assert counter.freeze() == {
-        "status": "reported",
-        "sent_to": [_sent_group(100 * thread_count, thread_count)],
-    }
+    assert counter.freeze() == {"sent_to": [_sent_group(100 * thread_count, thread_count)]}
 
 
 def test_condition_drain_waits_for_an_admitted_operation():
@@ -338,7 +330,7 @@ def test_condition_drain_waits_for_an_admitted_operation():
     finally:
         timer.join()
 
-    assert counter.freeze()["status"] == "reported"
+    assert "status" not in counter.freeze()
 
 
 def test_condition_drain_timeout_leaves_freeze_to_report_the_gap():

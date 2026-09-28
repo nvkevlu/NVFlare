@@ -87,6 +87,7 @@ class TestReviewContractFixtures(unittest.TestCase):
             self.assertNotIn("start", report)
             self.assertNotIn("final", report)
             self.assertEqual("900", report["resource_time"]["measured_seconds"])
+            self.assertEqual({"seconds": "100"}, report["cpu_consumed"])
             self.assertEqual("1200", report["resource_time"]["gpu"]["groups"][0]["instance_seconds"])
 
             handoff = json.loads((root / "terminal_handoff.json").read_text())

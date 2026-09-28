@@ -29,6 +29,8 @@ The catalogs below are lookup material for exact field and validation rules.
 
 1. Each client or server job process observes its visible CPU, memory, and GPU
    capacity before custom job imports and accumulates capacity-time in memory.
+   It also takes a CPU-consumption baseline for the job process and its
+   waited descendants.
 2. When that process finishes, cleanup stops new application commands, lets
    already-admitted callbacks and F3 sends settle within fixed bounds, scans
    regular files in the participant's run directory, and writes one private
@@ -53,6 +55,13 @@ The catalogs below are lookup material for exact field and validation rules.
    every study row has separate `JOB ID` and `NAME` fields. No separate
    `RESOURCE_STATS` store exists.
 
+The stored records keep only exception statuses. In `resource_summary.json`,
+an expected participant with a validated report has no `status`; missing,
+invalid, and disabled entries say so explicitly. In typed measurements and
+derived totals, no `status` or `issues` means complete, while partial,
+unavailable, and error states retain their reasons. This unreleased v1 design
+does not need to read older public archives.
+
 `job_id` remains the unique reconciliation, lookup, and sort key. `job_name` is
 a human-facing label and may be repeated by different jobs, but is not copied
 into the archived resource summary. For display, the server can resolve it
@@ -60,7 +69,7 @@ from existing metadata, falling back to the persisted job-folder name and then
 the ID. This adds no participant wire field, privilege, configuration,
 transport, or new resource-probe privacy category.
 
-CPU, memory, GPU resource time, workspace-filesystem capacity, retained
+CPU, memory, GPU resource time, CPU consumed, workspace-filesystem capacity, retained
 run-directory content, and `message_traffic` are bound in production. `retained_content` is a
 terminal best-effort participant self-report, not a curated result inventory or
 the centrally retained archive size. Public `message_traffic.sent_to` groups
@@ -89,7 +98,8 @@ The implementation and its supporting prototype contain:
   lookup, and optional NVML enrichment;
 - a closed JSON Schema and semantic validator;
 - one terminal site report containing internally accumulated CPU, memory, and
-  GPU resource time, a final workspace-filesystem observation, a typed
+  GPU resource time, independently typed CPU consumed seconds, a final
+  workspace-filesystem observation, a typed
   run-directory file-size observation, and typed `message_traffic.sent_to`
   entries;
 - production F3 ownership, trusted bindings for deployment, real task

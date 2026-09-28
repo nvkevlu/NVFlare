@@ -106,12 +106,13 @@ def _validate_handoff(value: Mapping[str, Any]) -> dict[str, Any]:
         "internal_version",
         "kind",
         "resource_time",
+        "cpu_consumed",
         "workspace_filesystem",
         "retained_content",
         "child_f3",
     }
     if not isinstance(value, Mapping) or set(value) != required:
-        raise InvalidTerminalHandoff(f"terminal handoff fields must be exactly {sorted(required)}")
+        raise InvalidTerminalHandoff(f"terminal handoff fields must be {sorted(required)}")
     if value["internal_version"] != INTERNAL_HANDOFF_VERSION or value["kind"] != INTERNAL_HANDOFF_KIND:
         raise InvalidTerminalHandoff("terminal handoff has an unsupported version or kind")
     probe = {
@@ -121,6 +122,7 @@ def _validate_handoff(value: Mapping[str, Any]) -> dict[str, Any]:
         "participant_name": "handoff-validation",
         "reported_at": "1970-01-01T00:00:00Z",
         "resource_time": deepcopy(value["resource_time"]),
+        "cpu_consumed": deepcopy(value["cpu_consumed"]),
         "workspace_filesystem": deepcopy(value["workspace_filesystem"]),
         "retained_content": deepcopy(value["retained_content"]),
         "message_traffic": deepcopy(value["child_f3"]),
@@ -128,8 +130,16 @@ def _validate_handoff(value: Mapping[str, Any]) -> dict[str, Any]:
     try:
         validate_record(probe)
     except ContractError as exc:
-        raise InvalidTerminalHandoff(f"terminal handoff is invalid: {exc}") from exc
-    return {name: deepcopy(value[name]) for name in required}
+        # CPU accounting is independent: a broken CPU observation must
+        # not erase otherwise valid capacity, filesystem, retained, or F3 data.
+        probe["cpu_consumed"] = {"status": "error", "issues": ["malformed_source"]}
+        try:
+            validate_record(probe)
+        except ContractError:
+            raise InvalidTerminalHandoff(f"terminal handoff is invalid: {exc}") from exc
+    result = {name: deepcopy(value[name]) for name in required}
+    result["cpu_consumed"] = deepcopy(probe["cpu_consumed"])
+    return result
 
 
 def write_terminal_handoff(run_dir: str | Path, handoff: Mapping[str, Any]) -> Path:

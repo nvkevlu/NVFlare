@@ -1,16 +1,23 @@
 Resources recorded for finalized jobs in study cancer-research.
-4 jobs found | 3 finalized | 2 valid summaries | 1 unavailable | 1 still running (excluded)
+Jobs: 4 found | 2 with resource data | 1 without | 1 still running (excluded)
 
-JOB ID            NAME                                 JOB STATUS          RESOURCE DATA  QUALITY   FULL GPU h  CPU unit h  MEM GiB h  RUN-DIR STATUS  RUN-DIR FILES GiB  MESSAGE TRAFFIC STATUS  MESSAGE PAYLOAD SENT GiB
-job-20260909-001  qwen2.5-14b-federated-qualification  FINISHED:COMPLETED  included       PARTIAL   4.4400      40.4600     255.3067   PARTIAL         27.5115            PARTIAL                 550.2266
-job-20260910-002  qwen2.5-14b-h100-qualification       FINISHED:COMPLETED  included       COMPLETE  32.0000     512.0000    2048.0000  REPORTED        55.0230            REPORTED                0.0000
-job-20260911-003  qwen2.5-14b-followup                 FINISHED:COMPLETED  unavailable    —         N/A         N/A         N/A        N/A             N/A                N/A                     N/A
-job-20260912-004  qwen2.5-14b-evaluation               RUNNING             nonterminal    —         N/A         N/A         N/A        N/A             N/A                N/A                     N/A
+JOB ID            NAME                                 JOB STATUS          FULL GPU-h  CPU VISIBLE core-h  MEM VISIBLE GiB-h  CPU USED core-h  RUN-DIR GiB  PAYLOAD SENT GiB
+job-20260909-001  qwen2.5-14b-federated-qualification  FINISHED:COMPLETED  4.4400*     40.4600*            255.3067*          0.8500*          27.5115*     550.2266*
+job-20260910-002  qwen2.5-14b-h100-qualification       FINISHED:COMPLETED  32.0000     512.0000            2048.0000          2.0000           55.0230      0.0000
+job-20260911-003  qwen2.5-14b-followup                 FINISHED:COMPLETED  —           —                   —                  —                —            —
+job-20260912-004  qwen2.5-14b-evaluation               RUNNING             —           —                   —                  —                —            —
 
-Study totals from 2 valid job summaries | coverage: PARTIAL
-  Additive participant resource-time: FULL GPUs 36.4400 instance h | CPU 552.4600 unit h | MEMORY 2303.3067 GiB h
-  Other additive totals: RUN-DIR STATUS PARTIAL | RUN-DIR FILES 82.5346 GiB | MESSAGE TRAFFIC STATUS PARTIAL | MESSAGE PAYLOAD SENT 550.2266 GiB
+Sum from 2 jobs with resource data
+  CPU visible 552.4600* core-h | Memory visible 2303.3067* GiB-h | Full GPUs visible 36.4400* GPU-h
+  CPU time used 2.8500* core-h | Run-dir files 82.5346* GiB | Message payload sent 550.2266* GiB
+
+Data gaps:
+  job-20260909-001: visible capacity incomplete, CPU time used incomplete, run-dir files incomplete, message traffic incomplete
+  job-20260911-003: no valid resource summary
+  job-20260912-004: still running (excluded)
 
 Notes:
-  Totals include only finalized jobs with valid resource summaries.
+  * = incomplete number; — = no usable value. See --format json for details.
+  Sums include only finalized jobs with valid resource summaries and may count shared resources more than once.
+  CPU used is process CPU time, not visible CPU capacity or host utilization %.
   This view includes only jobs still retained by the job store.

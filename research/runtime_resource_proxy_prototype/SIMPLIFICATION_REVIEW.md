@@ -27,8 +27,8 @@ archived.
 This simplifies both the wire contract and review:
 
 - one canonical report per participant;
-- one compute status instead of separate CPU, memory, GPU, start, and final
-  statuses;
+- one compute completeness decision instead of separate CPU, memory, GPU,
+  start, and final statuses; complete data needs no status field;
 - no interval identity, ordering, overlap, or lifecycle reconciliation rules;
 - no status propagation caused only by a missing final stability sample; and
 - a much smaller participant payload.
@@ -87,10 +87,18 @@ server accepts them.
 
 ## Status reduction
 
-`resource_time` has one status for compute accounting as a whole:
+Because v1 has not shipped, this is an in-place contract correction, not a
+migration. Accepted participant entries omit `status`. Every complete typed
+measurement and derived total omits both `status` and `issues`; the required
+numeric facts establish success. Explicit states and issues remain for
+partial, unavailable, and error measurements, and explicit participant states
+remain for missing, invalid, and disabled reports. New reports always include
+`cpu_consumed`; there is no earlier-v1 archive exception.
 
-- `reported`: measured time plus CPU, memory, and GPU resource time are all
-  complete;
+`resource_time` has one completeness decision for compute accounting as a whole:
+
+- no `status` or `issues`: measured time plus CPU, memory, and GPU resource
+  time are all complete;
 - `partial`: at least one numeric compute value is useful, but compute
   coverage is incomplete; or
 - `unavailable`: no usable compute resource-time value exists.
@@ -98,7 +106,7 @@ server accepts them.
 Its one issue list explains `partial` or `unavailable`. CPU, memory, and GPU do
 not repeat status or issue fields.
 
-Three other terminal facts keep separate statuses because they come from
+Other terminal facts keep independent exception statuses because they come from
 independent sources and can fail independently:
 
 - `workspace_filesystem` is one point-in-time observation;
@@ -107,12 +115,13 @@ independent sources and can fail independently:
 - `message_traffic` depends on platform-owned message classification and
   internal F3 counters.
 
-The server's expected-participant state remains `accepted`, `missing`,
-`invalid`, or `disabled`. Job and study aggregate statuses are derived from
-participant/job coverage and their typed statuses rather than copied into an
+The server's expected-participant state is accepted when `status` is omitted;
+`missing`, `invalid`, or `disabled` is explicit. Job and study totals also omit
+status and issues when complete. Partial/unavailable totals are derived from
+participant/job coverage and their typed values rather than copied into an
 extra warning list.
 
-The key numeric distinctions remain: `reported` means a complete value,
+The key numeric distinctions remain: omitted status means a complete value,
 `partial` means a useful subtotal, and `unavailable` means no usable value.
 Missing data is never zero. A further simplification is proposed for review,
 not yet implemented: fold the no-value measurement `error` into `unavailable`
@@ -160,7 +169,7 @@ GPU time    += visible GPU instances × elapsed seconds
 
 Products use exact decimal arithmetic and the v1 rounding rule. The final
 `measured_seconds` states how much time the accumulator covered. Missing
-coverage changes the single `resource_time.status` to `partial`; it does not
+coverage adds `resource_time.status: partial`; it does not
 create a public gap or end-reason record.
 
 ## Workspace filesystem and run-directory content
@@ -222,9 +231,10 @@ spoofable marker.
 ## Server, storage, and query decisions
 
 The root server reconciles terminal reports against the participants it already
-expects. It marks each participant accepted, missing, invalid, or disabled at
-the cutoff, validates and copies accepted terminal values, and aggregates the
-job summary. The summary stores the job ID alone; an authorized CLI resolves
+expects. At cutoff, it leaves `status` absent for an accepted participant and
+explicitly marks missing, invalid, or disabled participants. It validates and
+copies accepted terminal values, then builds the job summary. The summary
+stores the job ID alone; an authorized CLI resolves
 the trusted metadata name for display. Participant reports cannot provide or
 override it. The server cannot reconstruct private resource-time intervals.
 

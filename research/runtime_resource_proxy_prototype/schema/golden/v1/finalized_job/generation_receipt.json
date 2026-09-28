@@ -13,7 +13,7 @@
   "scenario_basis": {
     "description": "Illustrative values scaled to completed Qwen2.5-14B qualification jobs.",
     "reference_label": "Five-round 14B full-model qualification, 2026-07-31",
-    "scope_note": "The A100 model, four-GPU baseline, runtime scale, and model-state size are evidence-based; CPU, memory, run-directory file bytes, workspace-filesystem capacity, and observation changes are illustrative.",
+    "scope_note": "The A100 model, four-GPU baseline, runtime scale, and model-state size are evidence-based; CPU capacity, CPU consumed time, memory, run-directory file bytes, workspace-filesystem capacity, and observation changes are illustrative.",
     "reference_runtime_seconds": "2223",
     "reference_model_state_bytes": "29540067328",
     "reference_logical_state_directions": "20",
@@ -27,8 +27,10 @@
     "server_measured_seconds": "2223",
     "accepted_measured_seconds": "6369",
     "job_cpu_unit_seconds": "145656",
+    "job_cpu_consumed_seconds": "3060",
     "job_gpu_instance_seconds": "15984",
     "study_cpu_unit_seconds": "1988856",
+    "study_cpu_consumed_seconds": "10260",
     "study_gpu_instance_seconds": "131184",
     "large_memory_byte_seconds": "9010000000000901"
   }

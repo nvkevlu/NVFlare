@@ -1,19 +1,19 @@
 Recorded resources for job hello-pt (ID: job-20260917-001).
-Job coverage: COMPLETE (2 accepted / 2 expected) | selected site: site-1
+Participants with data: 2/2 | showing site-1
 
-Recorded average visible capacity over each measured interval
-SITE    ROLE    REPORT    COMPUTE   MEASURED TIME  CPU UNITS  MEM GiB   FULL GPUs
-site-1  client  accepted  REPORTED  37m3s          32.0000    192.0000  4.0000
+Average resources per participant (CPU in cores)
+SITE    TIME   AVG CPU VISIBLE (cores)  AVG CPU USED (cores)  AVG MEM GiB  AVG FULL GPUs
+site-1  37m3s  32.0000                  0.6206                192.0000     4.0000
 
-Other recorded participant totals
-SITE    RUN-DIR STATUS  RUN-DIR FILES GiB  MESSAGE TRAFFIC STATUS  MESSAGE PAYLOAD SENT GiB  MESSAGE PAYLOAD SENT TO SITE GiB
-site-1  REPORTED        0.0000             REPORTED                4.5000                    4.5411
+Recorded files and message payload
+SITE    RUN-DIR FILES GiB  PAYLOAD SENT GiB  PAYLOAD SENT TO SITE GiB
+site-1  0.0000             4.5000            4.5411
 
 Notes:
-  PARTIAL means at least one expected report or observation was incomplete.
-  Each average is resource-time divided by that row's measured interval.
-  Totals add participant reports; overlapping resources can be counted more than once.
-  Message payload sent to a site is sender-confirmed; it is not proof of receipt.
+  CPU visible is capacity; CPU used is process CPU time divided by a complete measured interval, not host utilization %.
+  CPU used may miss child-process work; known gaps are marked *.
+  Sums add participant values; physically shared resources may be counted more than once.
+  Payload sent to a site is sender-confirmed, not proof of receipt.
 
 Hardware detail for site-1
 Model metadata is optional and does not change numeric totals.

@@ -10,6 +10,7 @@
   ],
   "x-nvflare-units": {
     "measured_seconds": "seconds",
+    "cpu_consumed.seconds": "user plus system CPU seconds consumed by observed job execution processes",
     "unit_seconds": "CPU-unit seconds",
     "instance_seconds": "GPU- or MIG-instance seconds",
     "byte_seconds": "byte-seconds",
@@ -21,15 +22,18 @@
   "x-nvflare-cross-record-invariants": [
     "each participant emits one terminal participant_summary; v1 has no separate start, final, attempt, or environment records",
     "resource_time is the reporter's final measured total; the server validates and aggregates it but does not reconstruct it from timestamps or point-in-time capacity",
-    "resource_time has one status covering CPU, memory, and GPU together",
-    "a reported resource_time contains measured_seconds and all three numeric resources; a partial resource_time contains issues and at least one numeric member; an unavailable resource_time contains issues and no numeric members",
+    "resource_time has one exception status covering CPU, memory, and GPU together; omitted status means a complete report",
+    "cpu_consumed has its own exception status and is independent of CPU capacity-time, memory, GPU, and message traffic; omitted status means a complete report",
+    "a complete resource_time omits status and issues and contains measured_seconds and all three numeric resources; a partial resource_time contains status, issues, and at least one numeric member; an unavailable resource_time contains status and issues but no numeric members",
     "raw CUDA_VISIBLE_DEVICES text is never numeric authority; GPU instance-seconds require successful CUDA-runtime enumeration by the collector",
     "full GPUs and MIG compute instances remain separate groups; an empty groups array means observed zero",
     "workspace_filesystem is a point-in-time observation of the total visible capacity of exactly the filesystem containing the existing NVFlare job workspace; it is not usage, allocation, billable storage, or storage owned by the job",
-    "accepted participant entries copy resource_time, retained_content, and message_traffic exactly from the accepted participant_summary",
-    "reported or partial participant message_traffic.sent_to contains 0..2048 entries sorted by unique participant_name, each with positive messages; each destination must be another expected participant in an accepted resource_summary; job and study totals derive a scalar sent counter by summing these destination entries",
+    "accepted participant entries omit status and copy resource_time, cpu_consumed, retained_content, and message_traffic exactly from the accepted participant_summary; exception entries retain explicit status",
+    "complete or partial participant message_traffic.sent_to contains 0..2048 entries sorted by unique participant_name, each with positive messages; each destination must be another expected participant in an accepted resource_summary; job and study totals derive a scalar sent counter by summing these destination entries",
     "the server obtains its expected participant list independently of report arrival and classifies every participant at the cutoff",
     "job totals are derived on demand as deterministic sums of accepted terminal reports and are not stored in resource_summary; resource_time is partial whenever any expected participant report or resource_time is incomplete",
+    "cpu_consumed is required in every participant report and accepted entry; its totals are partial when numeric inputs coexist with a missing, partial, unavailable, or error input, and unavailable when no numeric input exists",
+    "all complete typed measurements, workspace-filesystem observations, and job/study totals omit both status and issues; explicit reported or accepted statuses are invalid in v1",
     "a study_summary is a transient view; job_status is the underlying NVFlare lifecycle value while resource_data says whether that job contributes totals",
     "job_name is obtained from existing job metadata for study rows and CLI display; it is not duplicated in resource_summary, while job_id remains the unique identity and sort key",
     "study totals are deterministic sums of rows whose resource_data is included",
@@ -121,16 +125,15 @@
         "issues": {"type": "array", "minItems": 1, "maxItems": 4, "uniqueItems": true, "items": {"$ref": "#/$defs/source_error_issue"}}
       }
     },
-    "workspace_filesystem_reported": {
-      "type": "object", "additionalProperties": false, "required": ["status", "capacity_bytes"],
+    "workspace_filesystem_complete": {
+      "type": "object", "additionalProperties": false, "required": ["capacity_bytes"],
       "properties": {
-        "status": {"const": "reported"},
         "capacity_bytes": {"$ref": "#/$defs/positive_unsigned", "description": "Final visible capacity of the filesystem containing the existing NVFlare job workspace."}
       }
     },
     "workspace_filesystem": {
       "oneOf": [
-        {"$ref": "#/$defs/workspace_filesystem_reported"},
+        {"$ref": "#/$defs/workspace_filesystem_complete"},
         {"$ref": "#/$defs/capacity_unavailable"},
         {"$ref": "#/$defs/source_error"}
       ]
@@ -181,10 +184,9 @@
         }
       }
     },
-    "resource_time_reported": {
-      "type": "object", "additionalProperties": false, "required": ["status", "measured_seconds", "cpu", "memory", "gpu"],
+    "resource_time_complete": {
+      "type": "object", "additionalProperties": false, "required": ["measured_seconds", "cpu", "memory", "gpu"],
       "properties": {
-        "status": {"const": "reported"},
         "measured_seconds": {"$ref": "#/$defs/decimal"},
         "cpu": {"$ref": "#/$defs/cpu_time"},
         "memory": {"$ref": "#/$defs/memory_time"},
@@ -217,14 +219,47 @@
     },
     "resource_time": {
       "oneOf": [
-        {"$ref": "#/$defs/resource_time_reported"},
+        {"$ref": "#/$defs/resource_time_complete"},
         {"$ref": "#/$defs/resource_time_partial"},
         {"$ref": "#/$defs/resource_time_unavailable"}
       ]
     },
+    "cpu_consumed_complete": {
+      "type": "object", "additionalProperties": false, "required": ["seconds"],
+      "properties": {"seconds": {"$ref": "#/$defs/decimal"}}
+    },
+    "cpu_consumed_partial": {
+      "type": "object", "additionalProperties": false, "required": ["status", "issues", "seconds"],
+      "properties": {
+        "status": {"const": "partial"},
+        "issues": {"type": "array", "minItems": 1, "maxItems": 4, "uniqueItems": true, "items": {"enum": ["attribution_incomplete", "observation_incomplete"]}},
+        "seconds": {"$ref": "#/$defs/decimal"}
+      }
+    },
+    "cpu_consumed": {
+      "oneOf": [
+        {"$ref": "#/$defs/cpu_consumed_complete"},
+        {"$ref": "#/$defs/cpu_consumed_partial"},
+        {"$ref": "#/$defs/source_unavailable"},
+        {"$ref": "#/$defs/source_error"}
+      ]
+    },
+    "cpu_consumed_total": {
+      "oneOf": [
+        {
+          "type": "object", "additionalProperties": false, "required": ["seconds"],
+          "properties": {"seconds": {"$ref": "#/$defs/decimal"}}
+        },
+        {
+          "type": "object", "additionalProperties": false, "required": ["status", "seconds"],
+          "properties": {"status": {"const": "partial"}, "seconds": {"$ref": "#/$defs/decimal"}}
+        },
+        {"type": "object", "additionalProperties": false, "required": ["status"], "properties": {"status": {"const": "unavailable"}}}
+      ]
+    },
     "retained_numeric": {
-      "type": "object", "additionalProperties": false, "required": ["status", "bytes"],
-      "properties": {"status": {"const": "reported"}, "bytes": {"$ref": "#/$defs/unsigned"}}
+      "type": "object", "additionalProperties": false, "required": ["bytes"],
+      "properties": {"bytes": {"$ref": "#/$defs/unsigned"}}
     },
     "retained_partial": {
       "type": "object", "additionalProperties": false, "required": ["status", "issues", "bytes"],
@@ -255,11 +290,10 @@
         "messages": {"$ref": "#/$defs/positive_unsigned"}
       }
     },
-    "message_traffic_reported": {
+    "message_traffic_complete": {
       "type": "object", "additionalProperties": false,
-      "required": ["status", "sent_to"],
+      "required": ["sent_to"],
       "properties": {
-        "status": {"const": "reported"},
         "sent_to": {"type": "array", "maxItems": 2048, "items": {"$ref": "#/$defs/sent_to_entry"}}
       }
     },
@@ -274,7 +308,7 @@
     },
     "message_traffic": {
       "oneOf": [
-        {"$ref": "#/$defs/message_traffic_reported"},
+        {"$ref": "#/$defs/message_traffic_complete"},
         {"$ref": "#/$defs/message_traffic_partial"},
         {"$ref": "#/$defs/source_unavailable"},
         {"$ref": "#/$defs/source_error"}
@@ -283,8 +317,12 @@
     "retained_total": {
       "oneOf": [
         {
+          "type": "object", "additionalProperties": false, "required": ["bytes"],
+          "properties": {"bytes": {"$ref": "#/$defs/unsigned"}}
+        },
+        {
           "type": "object", "additionalProperties": false, "required": ["status", "bytes"],
-          "properties": {"status": {"enum": ["reported", "partial"]}, "bytes": {"$ref": "#/$defs/unsigned"}}
+          "properties": {"status": {"const": "partial"}, "bytes": {"$ref": "#/$defs/unsigned"}}
         },
         {"type": "object", "additionalProperties": false, "required": ["status"], "properties": {"status": {"const": "unavailable"}}}
       ]
@@ -292,29 +330,34 @@
     "message_traffic_total": {
       "oneOf": [
         {
+          "type": "object", "additionalProperties": false, "required": ["sent"],
+          "properties": {"sent": {"$ref": "#/$defs/counter"}}
+        },
+        {
           "type": "object", "additionalProperties": false, "required": ["status", "sent"],
-          "properties": {"status": {"enum": ["reported", "partial"]}, "sent": {"$ref": "#/$defs/counter"}}
+          "properties": {"status": {"const": "partial"}, "sent": {"$ref": "#/$defs/counter"}}
         },
         {"type": "object", "additionalProperties": false, "required": ["status"], "properties": {"status": {"const": "unavailable"}}}
       ]
     },
     "totals": {
-      "type": "object", "additionalProperties": false, "required": ["resource_time", "retained_content", "message_traffic"],
+      "type": "object", "additionalProperties": false, "required": ["resource_time", "cpu_consumed", "retained_content", "message_traffic"],
       "properties": {
         "resource_time": {"$ref": "#/$defs/resource_time"},
+        "cpu_consumed": {"$ref": "#/$defs/cpu_consumed_total"},
         "retained_content": {"$ref": "#/$defs/retained_total"},
         "message_traffic": {"$ref": "#/$defs/message_traffic_total"}
       }
     },
     "accepted_participant_entry": {
       "type": "object", "additionalProperties": false,
-      "required": ["participant_name", "role", "status", "received_at", "resource_time", "retained_content", "message_traffic"],
+      "required": ["participant_name", "role", "received_at", "resource_time", "cpu_consumed", "retained_content", "message_traffic"],
       "properties": {
         "participant_name": {"$ref": "#/$defs/participant_name"},
         "role": {"enum": ["client", "server"]},
-        "status": {"const": "accepted"},
         "received_at": {"$ref": "#/$defs/timestamp"},
         "resource_time": {"$ref": "#/$defs/resource_time"},
+        "cpu_consumed": {"$ref": "#/$defs/cpu_consumed"},
         "retained_content": {"$ref": "#/$defs/retained_content"},
         "message_traffic": {"$ref": "#/$defs/message_traffic"}
       }
@@ -410,7 +453,7 @@
     "study_job_row": {"oneOf": [{"$ref": "#/$defs/included_job_row"}, {"$ref": "#/$defs/excluded_job_row"}]},
     "participant_summary": {
       "type": "object", "additionalProperties": false,
-      "required": ["schema_version", "kind", "job_id", "participant_name", "reported_at", "resource_time", "workspace_filesystem", "retained_content", "message_traffic"],
+      "required": ["schema_version", "kind", "job_id", "participant_name", "reported_at", "resource_time", "cpu_consumed", "workspace_filesystem", "retained_content", "message_traffic"],
       "properties": {
         "schema_version": {"$ref": "#/$defs/schema_version"},
         "kind": {"const": "nvflare.resource_stats.participant_summary"},
@@ -418,6 +461,7 @@
         "participant_name": {"$ref": "#/$defs/participant_name"},
         "reported_at": {"$ref": "#/$defs/timestamp"},
         "resource_time": {"$ref": "#/$defs/resource_time"},
+        "cpu_consumed": {"$ref": "#/$defs/cpu_consumed"},
         "workspace_filesystem": {"$ref": "#/$defs/workspace_filesystem"},
         "retained_content": {"$ref": "#/$defs/retained_content"},
         "message_traffic": {"$ref": "#/$defs/message_traffic"}

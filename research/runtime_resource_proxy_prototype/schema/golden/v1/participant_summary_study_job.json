@@ -5,7 +5,6 @@
   "participant_name": "site-4",
   "reported_at": "2026-09-10T18:00:00Z",
   "resource_time": {
-    "status": "reported",
     "measured_seconds": "14400",
     "cpu": {
       "groups": [
@@ -30,16 +29,16 @@
       ]
     }
   },
+  "cpu_consumed": {
+    "seconds": "7200"
+  },
   "workspace_filesystem": {
-    "status": "reported",
     "capacity_bytes": "4398046511104"
   },
   "retained_content": {
-    "status": "reported",
     "bytes": "59080532226"
   },
   "message_traffic": {
-    "status": "reported",
     "sent_to": []
   }
 }

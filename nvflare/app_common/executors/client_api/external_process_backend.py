@@ -66,6 +66,7 @@ from nvflare.fuel.f3.drivers.net_utils import parse_url
 from nvflare.fuel.f3.streaming.download_service import DownloadService
 from nvflare.fuel.utils.fobs import FOBSContextKey
 from nvflare.fuel.utils.fobs.decomposers.via_downloader import RESULT_UPLOAD_TX_CREATED_CB_CTX_KEY, LazyDownloadRef
+from nvflare.private.fed.resource_stats.cpu_consumed import register_managed_child
 from nvflare.security.logging import secure_format_exception, secure_format_traceback
 from nvflare.utils.job_launcher_utils import add_custom_dir_to_path
 from nvflare.utils.process_utils import log_subprocess_output, prepare_subprocess_command
@@ -496,6 +497,7 @@ class ExternalProcessBackend(CellBackendBase):
                         start_new_session=(os.name == "posix"),
                     )
                     trainer.process = process
+                    register_managed_child(process, descendants_may_be_unwaited=True)
                     if os.name == "posix":
                         # start_new_session made the child its own group leader (pgid == pid)
                         trainer.pgid = process.pid

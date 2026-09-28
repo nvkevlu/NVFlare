@@ -40,6 +40,8 @@ from contract_v1 import (
     validate_bundle,
 )
 
+from nvflare.tool.job.job_resources import render_job_resources, render_study_resources
+
 SCHEMA_ROOT = Path(__file__).resolve().parent
 GOLDEN_ROOT = SCHEMA_ROOT / "golden" / "v1"
 DEFAULT_OUTPUT = GOLDEN_ROOT / "finalized_job"
@@ -86,7 +88,6 @@ def _f3(
     sent_to: tuple[tuple[str, str, str], ...] = (),
 ) -> dict[str, Any]:
     return {
-        "status": "reported",
         "sent_to": [
             {"participant_name": name, **_counter(payload_bytes, messages)} for name, payload_bytes, messages in sent_to
         ],
@@ -99,6 +100,7 @@ def _participant(
     participant_name: str,
     reported_at: str,
     resource_time: dict[str, Any],
+    cpu_consumed: dict[str, Any],
     workspace_capacity_bytes: str,
     retained_content: dict[str, Any],
     f3: dict[str, Any],
@@ -110,8 +112,8 @@ def _participant(
         "participant_name": participant_name,
         "reported_at": reported_at,
         "resource_time": resource_time,
+        "cpu_consumed": cpu_consumed,
         "workspace_filesystem": {
-            "status": "reported",
             "capacity_bytes": workspace_capacity_bytes,
         },
         "retained_content": retained_content,
@@ -125,7 +127,6 @@ def _main_participant() -> dict[str, Any]:
         participant_name=SITE_1_NAME,
         reported_at="2026-09-09T14:37:03Z",
         resource_time={
-            "status": "reported",
             "measured_seconds": "2223",
             "cpu": {
                 "groups": [
@@ -148,8 +149,9 @@ def _main_participant() -> dict[str, Any]:
                 ]
             },
         },
+        cpu_consumed={"seconds": "1800"},
         workspace_capacity_bytes="1099511627776",
-        retained_content={"status": "reported", "bytes": "0"},
+        retained_content={"bytes": "0"},
         f3=_f3(sent_to=((SERVER_NAME, CLIENT_F3_BYTES, "5"),)),
     )
 
@@ -184,6 +186,7 @@ def _partial_participant() -> dict[str, Any]:
                 ]
             },
         },
+        cpu_consumed={"status": "partial", "issues": ["observation_incomplete"], "seconds": "900"},
         workspace_capacity_bytes="2199023255552",
         retained_content={
             "status": "unavailable",
@@ -199,7 +202,6 @@ def _server_participant() -> dict[str, Any]:
         participant_name=SERVER_NAME,
         reported_at="2026-09-09T14:37:03Z",
         resource_time={
-            "status": "reported",
             "measured_seconds": "2223",
             "cpu": {
                 "groups": [
@@ -213,8 +215,9 @@ def _server_participant() -> dict[str, Any]:
             "memory": {"byte_seconds": "152763396784128"},
             "gpu": {"groups": []},
         },
+        cpu_consumed={"seconds": "360"},
         workspace_capacity_bytes="1099511627776",
-        retained_content={"status": "reported", "bytes": RUN_DIR_FILE_BYTES},
+        retained_content={"bytes": RUN_DIR_FILE_BYTES},
         f3=_f3(
             sent_to=(
                 (SITE_1_NAME, CLIENT_F3_BYTES, "5"),
@@ -230,7 +233,6 @@ def _study_job_participant() -> dict[str, Any]:
         participant_name=STUDY_SITE_NAME,
         reported_at="2026-09-10T18:00:00Z",
         resource_time={
-            "status": "reported",
             "measured_seconds": "14400",
             "cpu": {
                 "groups": [
@@ -253,8 +255,9 @@ def _study_job_participant() -> dict[str, Any]:
                 ]
             },
         },
+        cpu_consumed={"seconds": "7200"},
         workspace_capacity_bytes="4398046511104",
-        retained_content={"status": "reported", "bytes": "59080532226"},
+        retained_content={"bytes": "59080532226"},
         f3=_f3(),
     )
 
@@ -265,7 +268,6 @@ def _large_participant() -> dict[str, Any]:
         participant_name="site-large",
         reported_at="2026-09-09T00:15:01Z",
         resource_time={
-            "status": "reported",
             "measured_seconds": "901",
             "cpu": {
                 "groups": [
@@ -279,8 +281,9 @@ def _large_participant() -> dict[str, Any]:
             "memory": {"byte_seconds": "9010000000000901"},
             "gpu": {"groups": []},
         },
+        cpu_consumed={"status": "unavailable", "issues": ["observation_incomplete"]},
         workspace_capacity_bytes="10000000000001",
-        retained_content={"status": "reported", "bytes": "0"},
+        retained_content={"bytes": "0"},
         f3=_f3(),
     )
 
@@ -295,9 +298,9 @@ def _accepted_entry(
     return {
         "participant_name": participant_name,
         "role": role,
-        "status": "accepted",
         "received_at": received_at,
         "resource_time": deepcopy(participant["resource_time"]),
+        "cpu_consumed": deepcopy(participant["cpu_consumed"]),
         "retained_content": deepcopy(participant["retained_content"]),
         "message_traffic": deepcopy(participant["message_traffic"]),
     }
@@ -320,296 +323,6 @@ def _decimal_sum(groups: list[dict[str, Any]], field: str) -> Decimal:
     return sum((Decimal(group[field]) for group in groups), Decimal(0))
 
 
-def _hours(value: Decimal | None, divisor: Decimal = Decimal(3600)) -> str:
-    return "N/A" if value is None else f"{value / divisor:.4f}"
-
-
-def _duration(value: str) -> str:
-    seconds = Decimal(value)
-    hours = int(seconds // Decimal(3600))
-    after_hours = seconds - Decimal(hours * 3600)
-    minutes = int(after_hours // Decimal(60))
-    remainder = after_hours - Decimal(minutes * 60)
-    text = format(remainder, "f").rstrip("0").rstrip(".")
-    prefix = f"{hours}h" if hours else ""
-    return f"{prefix}{minutes}m{text or '0'}s"
-
-
-def _gpu_time(resource_time: dict[str, Any], kind: str) -> Decimal | None:
-    if "gpu" not in resource_time:
-        return None
-    return sum(
-        (Decimal(group["instance_seconds"]) for group in resource_time["gpu"]["groups"] if group["kind"] == kind),
-        Decimal(0),
-    )
-
-
-def _cpu_time(resource_time: dict[str, Any]) -> Decimal | None:
-    if "cpu" not in resource_time:
-        return None
-    return _decimal_sum(resource_time["cpu"]["groups"], "unit_seconds")
-
-
-def _memory_time(resource_time: dict[str, Any]) -> Decimal | None:
-    if "memory" not in resource_time:
-        return None
-    return Decimal(resource_time["memory"]["byte_seconds"])
-
-
-def _retained_bytes(value: dict[str, Any]) -> Decimal | None:
-    return Decimal(value["bytes"]) if "bytes" in value else None
-
-
-def _f3_bytes(value: dict[str, Any]) -> Decimal | None:
-    if "sent" in value:
-        return Decimal(value["sent"]["payload_bytes"])
-    if "sent_to" in value:
-        return sum((Decimal(entry["payload_bytes"]) for entry in value["sent_to"]), Decimal(0))
-    return None
-
-
-def _average(value: Decimal | None, measured_seconds: str | None, divisor: Decimal = Decimal(1)) -> str:
-    if value is None or measured_seconds is None:
-        return "N/A"
-    measured = Decimal(measured_seconds)
-    if measured <= 0:
-        return "N/A"
-    return f"{value / measured / divisor:.4f}"
-
-
-def _has_retained_content(value: dict[str, Any]) -> bool:
-    return _retained_bytes(value["retained_content"]) is not None
-
-
-def _has_f3(value: dict[str, Any]) -> bool:
-    return _f3_bytes(value["message_traffic"]) is not None
-
-
-def _sent_to_site(summary: dict[str, Any], participant_name: str) -> str:
-    entries = summary["participants"]
-    numeric_sources = [
-        entry for entry in entries if entry["status"] == "accepted" and "sent_to" in entry["message_traffic"]
-    ]
-    if not numeric_sources:
-        return "N/A"
-    amount = sum(
-        Decimal(group["payload_bytes"])
-        for source in numeric_sources
-        for group in source["message_traffic"]["sent_to"]
-        if group["participant_name"] == participant_name
-    )
-    shown = _hours(amount, Decimal(2**30))
-    complete = all(
-        source["status"] == "accepted" and source["message_traffic"]["status"] == "reported"
-        for source in entries
-        if source["participant_name"] != participant_name
-    )
-    return shown if complete else f"{shown} (partial)"
-
-
-def _quantity(label: str, value: str, unit: str) -> str:
-    return f"{label} {value}" if value == "N/A" else f"{label} {value} {unit}"
-
-
-def _table(headers: list[str], rows: list[list[str]]) -> list[str]:
-    values = [headers] + rows
-    widths = [max(len(row[index]) for row in values) for index in range(len(headers))]
-    return ["  ".join(value.ljust(widths[index]) for index, value in enumerate(row)).rstrip() for row in values]
-
-
-def _show_mig(entries: list[dict[str, Any]]) -> bool:
-    return any(
-        entry["status"] == "accepted"
-        and any(
-            group["kind"] == "mig_compute_instance" for group in entry["resource_time"].get("gpu", {}).get("groups", [])
-        )
-        for entry in entries
-    )
-
-
-def _human_cli(summary: dict[str, Any], job_name: str, selected_site: str | None = None) -> str:
-    accepted = sum(entry["status"] == "accepted" for entry in summary["participants"])
-    expected = len(summary["participants"])
-    coverage = "COMPLETE" if accepted == expected else "PARTIAL"
-    entries = (
-        summary["participants"]
-        if selected_site is None
-        else [entry for entry in summary["participants"] if entry["participant_name"] == selected_site]
-    )
-    if not entries:
-        raise ValueError(f"unknown site '{selected_site}'")
-    show_mig = _show_mig(entries)
-    show_retained = any(entry["status"] == "accepted" and _has_retained_content(entry) for entry in entries)
-    show_f3 = any(entry["status"] == "accepted" and _has_f3(entry) for entry in summary["participants"])
-    selection = "" if selected_site is None else f" | selected site: {selected_site}"
-    lines = [
-        f"Recorded resources for job {job_name} (ID: {summary['job_id']}).",
-        f"Job coverage: {coverage} ({accepted} accepted / {expected} expected){selection}",
-        "",
-        "Recorded average visible capacity over each measured interval",
-    ]
-    rows = []
-    for entry in entries:
-        if entry["status"] != "accepted":
-            metrics = ["—", "—", "N/A", "N/A", "N/A"]
-            if show_mig:
-                metrics.append("N/A")
-            rows.append([entry["participant_name"], entry["role"], entry["status"], *metrics])
-            continue
-        resource_time = entry["resource_time"]
-        measured = resource_time.get("measured_seconds")
-        metrics = [
-            resource_time["status"].upper(),
-            _duration(measured) if measured is not None else "N/A",
-            _average(_cpu_time(resource_time), measured),
-            _average(_memory_time(resource_time), measured, Decimal(2**30)),
-            _average(_gpu_time(resource_time, "full_gpu"), measured),
-        ]
-        if show_mig:
-            metrics.append(_average(_gpu_time(resource_time, "mig_compute_instance"), measured))
-        rows.append([entry["participant_name"], entry["role"], entry["status"], *metrics])
-    headers = ["SITE", "ROLE", "REPORT", "COMPUTE", "MEASURED TIME", "CPU UNITS", "MEM GiB", "FULL GPUs"]
-    if show_mig:
-        headers.append("MIG INSTANCES")
-    lines.extend(_table(headers, rows))
-    if show_retained or show_f3:
-        other_headers = ["SITE"]
-        if show_retained:
-            other_headers.extend(["RUN-DIR STATUS", "RUN-DIR FILES GiB"])
-        if show_f3:
-            other_headers.extend(
-                ["MESSAGE TRAFFIC STATUS", "MESSAGE PAYLOAD SENT GiB", "MESSAGE PAYLOAD SENT TO SITE GiB"]
-            )
-        other_rows = []
-        for entry in entries:
-            values = []
-            if show_retained:
-                values.extend(
-                    [
-                        entry["retained_content"]["status"].upper(),
-                        _hours(_retained_bytes(entry["retained_content"]), Decimal(2**30)),
-                    ]
-                    if entry["status"] == "accepted"
-                    else ["N/A", "N/A"]
-                )
-            if show_f3:
-                values.extend(
-                    [
-                        entry["message_traffic"]["status"].upper(),
-                        _hours(_f3_bytes(entry["message_traffic"]), Decimal(2**30)),
-                    ]
-                    if entry["status"] == "accepted"
-                    else ["N/A", "N/A"]
-                )
-                values.append(_sent_to_site(summary, entry["participant_name"]))
-            other_rows.append([entry["participant_name"], *values])
-        lines.extend(["", "Other recorded participant totals", *_table(other_headers, other_rows)])
-    if selected_site is None:
-        totals = derive_job_totals(summary["participants"])
-        resource_time = totals["resource_time"]
-        measured_time = _duration(resource_time["measured_seconds"]) if "measured_seconds" in resource_time else "N/A"
-        resource_totals = [
-            _quantity("CPU", _hours(_cpu_time(resource_time)), "unit h"),
-            _quantity("MEMORY", _hours(_memory_time(resource_time), Decimal(2**30 * 3600)), "GiB h"),
-            _quantity("FULL GPUs", _hours(_gpu_time(resource_time, "full_gpu")), "instance h"),
-        ]
-        if show_mig:
-            resource_totals.append(
-                _quantity("MIG INSTANCES", _hours(_gpu_time(resource_time, "mig_compute_instance")), "instance h")
-            )
-        lines.extend(
-            [
-                "",
-                f"Additive participant resource-time from accepted reports | compute: {resource_time['status'].upper()}",
-                f"  Summed measured participant time: {measured_time}",
-                "  " + " | ".join(resource_totals),
-            ]
-        )
-        other_totals = []
-        if show_retained:
-            other_totals.extend(
-                [
-                    f"RUN-DIR STATUS {totals['retained_content']['status'].upper()}",
-                    _quantity(
-                        "RUN-DIR FILES",
-                        _hours(_retained_bytes(totals["retained_content"]), Decimal(2**30)),
-                        "GiB",
-                    ),
-                ]
-            )
-        if show_f3:
-            other_totals.extend(
-                [
-                    f"MESSAGE TRAFFIC STATUS {totals['message_traffic']['status'].upper()}",
-                    _quantity(
-                        "MESSAGE PAYLOAD SENT",
-                        _hours(_f3_bytes(totals["message_traffic"]), Decimal(2**30)),
-                        "GiB",
-                    ),
-                ]
-            )
-        if other_totals:
-            lines.append("  Other additive totals: " + " | ".join(other_totals))
-    lines.extend(
-        [
-            "",
-            "Notes:",
-            "  PARTIAL means at least one expected report or observation was incomplete.",
-            "  Each average is resource-time divided by that row's measured interval.",
-            "  Totals add participant reports; overlapping resources can be counted more than once.",
-            "  Message payload sent to a site is sender-confirmed; it is not proof of receipt.",
-        ]
-    )
-    if selected_site is None:
-        lines.append("  Use --site SITE or --format json to see hardware model details.")
-    lines.append("")
-    return "\n".join(lines)
-
-
-def _hardware_details(
-    summary: dict[str, Any],
-    participant_name: str,
-    participant_records: dict[str, dict[str, Any]] | None = None,
-) -> str:
-    entry = next(item for item in summary["participants"] if item["participant_name"] == participant_name)
-    if entry["status"] != "accepted":
-        return f"No accepted resource report for {participant_name}.\n"
-    resource_time = entry["resource_time"]
-    lines = [
-        f"Hardware detail for {participant_name}",
-        "Model metadata is optional and does not change numeric totals.",
-        "",
-    ]
-    for group in resource_time.get("cpu", {}).get("groups", []):
-        model = group.get("model", "model not reported")
-        architecture = f" ({group['architecture']})" if "architecture" in group else ""
-        lines.append(
-            f"CPU: {model}{architecture}; "
-            f"{_average(Decimal(group['unit_seconds']), resource_time.get('measured_seconds'))} average visible units"
-        )
-    for group in resource_time.get("gpu", {}).get("groups", []):
-        label = "full GPU" if group["kind"] == "full_gpu" else "MIG compute instance"
-        model = group.get("model", "model not reported")
-        memory = (
-            f", {Decimal(group['memory_bytes']) / Decimal(2**30):.0f} GiB per instance"
-            if "memory_bytes" in group
-            else ""
-        )
-        lines.append(
-            f"GPU ({label}): {model}{memory}; "
-            f"{_average(Decimal(group['instance_seconds']), resource_time.get('measured_seconds'))} "
-            "average visible instances"
-        )
-    if participant_records is not None:
-        participant = participant_records[entry["participant_name"]]
-        workspace = participant["workspace_filesystem"]
-        if workspace["status"] == "reported":
-            gib = Decimal(workspace["capacity_bytes"]) / Decimal(2**30)
-            lines.append(f"Visible workspace-filesystem capacity at reporting time: {gib:.4f} GiB")
-    lines.append("")
-    return "\n".join(lines)
-
-
 def _study_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
     rows.sort(key=lambda row: row["job_id"])
     return {
@@ -626,155 +339,6 @@ def _study_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "jobs": rows,
         "totals": derive_study_totals(rows),
     }
-
-
-def _aggregate_quality(totals: dict[str, Any]) -> str:
-    statuses = {
-        totals["resource_time"]["status"],
-        totals["retained_content"]["status"],
-        totals["message_traffic"]["status"],
-    }
-    if statuses == {"reported"}:
-        return "COMPLETE"
-    if statuses == {"unavailable"}:
-        return "UNAVAILABLE"
-    return "PARTIAL"
-
-
-def _human_study_cli(summary: dict[str, Any]) -> str:
-    coverage = summary["coverage"]
-    show_mig = any(
-        row["resource_data"] == "included"
-        and any(
-            group["kind"] == "mig_compute_instance"
-            for group in row["totals"]["resource_time"].get("gpu", {}).get("groups", [])
-        )
-        for row in summary["jobs"]
-    )
-    show_retained = any(
-        row["resource_data"] == "included" and _has_retained_content(row["totals"]) for row in summary["jobs"]
-    )
-    show_f3 = any(row["resource_data"] == "included" and _has_f3(row["totals"]) for row in summary["jobs"])
-    lines = [
-        f"Resources recorded for finalized jobs in study {summary['selection']['study_name']}.",
-        (
-            f"{coverage['selected_jobs']} jobs found | "
-            f"{int(coverage['included_jobs']) + int(coverage['unavailable_jobs'])} finalized | "
-            f"{coverage['included_jobs']} valid summaries | "
-            f"{coverage['unavailable_jobs']} unavailable | "
-            f"{coverage['nonterminal_jobs']} still running (excluded)"
-        ),
-        "",
-    ]
-    rows = []
-    for row in summary["jobs"]:
-        if row["resource_data"] != "included":
-            metrics = ["—", "N/A", "N/A", "N/A"]
-            if show_mig:
-                metrics.insert(2, "N/A")
-            if show_retained:
-                metrics.extend(["N/A", "N/A"])
-            if show_f3:
-                metrics.extend(["N/A", "N/A"])
-            rows.append([row["job_id"], row["job_name"], row["job_status"], row["resource_data"], *metrics])
-            continue
-        totals = row["totals"]
-        resource_time = totals["resource_time"]
-        quality = _aggregate_quality(totals)
-        metrics = [quality, _hours(_gpu_time(resource_time, "full_gpu"))]
-        if show_mig:
-            metrics.append(_hours(_gpu_time(resource_time, "mig_compute_instance")))
-        metrics.extend(
-            [
-                _hours(_cpu_time(resource_time)),
-                _hours(_memory_time(resource_time), Decimal(2**30 * 3600)),
-            ]
-        )
-        if show_retained:
-            metrics.extend(
-                [
-                    totals["retained_content"]["status"].upper(),
-                    _hours(_retained_bytes(totals["retained_content"]), Decimal(2**30)),
-                ]
-            )
-        if show_f3:
-            metrics.extend(
-                [
-                    totals["message_traffic"]["status"].upper(),
-                    _hours(_f3_bytes(totals["message_traffic"]), Decimal(2**30)),
-                ]
-            )
-        rows.append([row["job_id"], row["job_name"], row["job_status"], row["resource_data"], *metrics])
-    headers = ["JOB ID", "NAME", "JOB STATUS", "RESOURCE DATA", "QUALITY", "FULL GPU h"]
-    if show_mig:
-        headers.append("MIG h")
-    headers.extend(["CPU unit h", "MEM GiB h"])
-    if show_retained:
-        headers.extend(["RUN-DIR STATUS", "RUN-DIR FILES GiB"])
-    if show_f3:
-        headers.extend(["MESSAGE TRAFFIC STATUS", "MESSAGE PAYLOAD SENT GiB"])
-    lines.extend(_table(headers, rows))
-    totals = summary["totals"]
-    resource_time = totals["resource_time"]
-    total_quality = _aggregate_quality(totals)
-    if total_quality == "UNAVAILABLE":
-        coverage_label = "UNAVAILABLE"
-    elif coverage["unavailable_jobs"] == "0" and coverage["nonterminal_jobs"] == "0" and total_quality == "COMPLETE":
-        coverage_label = "COMPLETE"
-    else:
-        coverage_label = "PARTIAL"
-    resource_totals = [
-        _quantity("FULL GPUs", _hours(_gpu_time(resource_time, "full_gpu")), "instance h"),
-        _quantity("CPU", _hours(_cpu_time(resource_time)), "unit h"),
-        _quantity("MEMORY", _hours(_memory_time(resource_time), Decimal(2**30 * 3600)), "GiB h"),
-    ]
-    if show_mig:
-        resource_totals.insert(
-            1,
-            _quantity("MIG INSTANCES", _hours(_gpu_time(resource_time, "mig_compute_instance")), "instance h"),
-        )
-    lines.extend(
-        [
-            "",
-            f"Study totals from {coverage['included_jobs']} valid job summaries | coverage: {coverage_label}",
-            "  Additive participant resource-time: " + " | ".join(resource_totals),
-        ]
-    )
-    other_totals = []
-    if show_retained:
-        other_totals.extend(
-            [
-                f"RUN-DIR STATUS {totals['retained_content']['status'].upper()}",
-                _quantity(
-                    "RUN-DIR FILES",
-                    _hours(_retained_bytes(totals["retained_content"]), Decimal(2**30)),
-                    "GiB",
-                ),
-            ]
-        )
-    if show_f3:
-        other_totals.extend(
-            [
-                f"MESSAGE TRAFFIC STATUS {totals['message_traffic']['status'].upper()}",
-                _quantity(
-                    "MESSAGE PAYLOAD SENT",
-                    _hours(_f3_bytes(totals["message_traffic"]), Decimal(2**30)),
-                    "GiB",
-                ),
-            ]
-        )
-    if other_totals:
-        lines.append("  Other additive totals: " + " | ".join(other_totals))
-    lines.extend(
-        [
-            "",
-            "Notes:",
-            "  Totals include only finalized jobs with valid resource summaries.",
-            "  This view includes only jobs still retained by the job store.",
-            "",
-        ]
-    )
-    return "\n".join(lines)
 
 
 def _workspace_members(
@@ -949,18 +513,17 @@ def build(output_root: Path = DEFAULT_OUTPUT) -> dict[str, Any]:
         SERVER_NAME: server,
     }
     _write(output_root / "cli" / "resources-all.json", _json_bytes(cli_json))
-    _write(output_root / "cli" / "resources-all.txt", _human_cli(summary, JOB_NAME).encode("utf-8"))
+    _write(
+        output_root / "cli" / "resources-all.txt",
+        (render_job_resources(summary, job_name=JOB_NAME) + "\n").encode("utf-8"),
+    )
     _write(
         output_root / "cli" / "resources-site-1-details.txt",
-        (_human_cli(summary, JOB_NAME, "site-1") + "\n" + _hardware_details(summary, "site-1", site_records)).encode(
-            "utf-8"
-        ),
+        (render_job_resources(summary, site_records[SITE_1_NAME], job_name=JOB_NAME) + "\n").encode("utf-8"),
     )
     _write(
         output_root / "cli" / "resources-site-2-details.txt",
-        (_human_cli(summary, JOB_NAME, "site-2") + "\n" + _hardware_details(summary, "site-2", site_records)).encode(
-            "utf-8"
-        ),
+        (render_job_resources(summary, site_records[SITE_2_NAME], job_name=JOB_NAME) + "\n").encode("utf-8"),
     )
     study_cli_json = {
         "schema_version": "1",
@@ -972,7 +535,7 @@ def build(output_root: Path = DEFAULT_OUTPUT) -> dict[str, Any]:
         },
     }
     _write(output_root / "cli" / "resources-study.json", _json_bytes(study_cli_json))
-    _write(output_root / "cli" / "resources-study.txt", _human_study_cli(study).encode("utf-8"))
+    _write(output_root / "cli" / "resources-study.txt", (render_study_resources(study) + "\n").encode("utf-8"))
 
     with ZipFile(workspace_archive, "r") as archive:
         workspace_summary_matches = archive.read("resource_stats/resource_summary.json") == summary_bytes
@@ -998,8 +561,8 @@ def build(output_root: Path = DEFAULT_OUTPUT) -> dict[str, Any]:
             "reference_label": "Five-round 14B full-model qualification, 2026-07-31",
             "scope_note": (
                 "The A100 model, four-GPU baseline, runtime scale, and model-state size are evidence-based; "
-                "CPU, memory, run-directory file bytes, workspace-filesystem capacity, and observation "
-                "changes are illustrative."
+                "CPU capacity, CPU consumed time, memory, run-directory file bytes, workspace-filesystem "
+                "capacity, and observation changes are illustrative."
             ),
             "reference_runtime_seconds": "2223",
             "reference_model_state_bytes": "29540067328",
@@ -1017,12 +580,14 @@ def build(output_root: Path = DEFAULT_OUTPUT) -> dict[str, Any]:
             "server_measured_seconds": server["resource_time"]["measured_seconds"],
             "accepted_measured_seconds": job_totals["resource_time"]["measured_seconds"],
             "job_cpu_unit_seconds": str(_decimal_sum(job_totals["resource_time"]["cpu"]["groups"], "unit_seconds")),
+            "job_cpu_consumed_seconds": job_totals["cpu_consumed"]["seconds"],
             "job_gpu_instance_seconds": str(
                 _decimal_sum(job_totals["resource_time"]["gpu"]["groups"], "instance_seconds")
             ),
             "study_cpu_unit_seconds": str(
                 _decimal_sum(study["totals"]["resource_time"]["cpu"]["groups"], "unit_seconds")
             ),
+            "study_cpu_consumed_seconds": study["totals"]["cpu_consumed"]["seconds"],
             "study_gpu_instance_seconds": str(
                 _decimal_sum(study["totals"]["resource_time"]["gpu"]["groups"], "instance_seconds")
             ),

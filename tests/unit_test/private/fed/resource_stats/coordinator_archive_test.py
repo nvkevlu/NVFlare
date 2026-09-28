@@ -44,6 +44,7 @@ def _participant(job_id="job-1", participant_name="site-1", reported_at="2026-09
         "participant_name": participant_name,
         "reported_at": reported_at,
         "resource_time": {"status": "unavailable", "issues": ["observation_incomplete"]},
+        "cpu_consumed": {"status": "unavailable", "issues": ["observation_incomplete"]},
         "workspace_filesystem": {"status": "unavailable", "issues": ["observation_incomplete"]},
         "retained_content": {"status": "unavailable", "issues": ["not_bound"]},
         "message_traffic": {"status": "unavailable", "issues": ["not_bound"]},
@@ -92,8 +93,8 @@ def test_accept_is_idempotent_and_finalized_bundle_reads_from_workspace(tmp_path
 
     summary = coordinator.finalize_job("job-1")
     assert summary["job_id"] == "job-1"
-    assert [(entry["participant_name"], entry["status"]) for entry in summary["participants"]] == [
-        ("site-1", "accepted"),
+    assert [(entry["participant_name"], entry.get("status")) for entry in summary["participants"]] == [
+        ("site-1", None),
         ("server", "missing"),
     ]
     assert participant_path.read_bytes() == data
@@ -215,7 +216,7 @@ def test_disable_clients_is_a_no_op_for_unknown_or_already_accepted_participants
 
     summary = coordinator.finalize_job("job-1")
     site = next(entry for entry in summary["participants"] if entry["participant_name"] == "site-1")
-    assert site["status"] == "accepted"
+    assert "status" not in site
 
 
 def test_forget_job_removes_registration_and_is_a_no_op_for_unknown_job(tmp_path):
@@ -387,7 +388,8 @@ def test_reader_rejects_duplicate_resource_member(tmp_path):
         WorkspaceResourceStatsReader(workspace.getvalue()).read_resource_summary()
 
 
-def test_reader_rejects_participant_values_that_disagree_with_resource_summary(tmp_path):
+@pytest.mark.parametrize("field", ["cpu_consumed", "message_traffic"])
+def test_reader_rejects_participant_values_that_disagree_with_resource_summary(tmp_path, field):
     run_dir = tmp_path / "run_job-1"
     coordinator = ResourceStatsCoordinator()
     coordinator.start_job("job-1", ["site-1"], run_dir)
@@ -396,7 +398,7 @@ def test_reader_rejects_participant_values_that_disagree_with_resource_summary(t
 
     participant_path = run_dir / "resource_stats" / "participants" / "site-1.json"
     participant = _participant()
-    participant["message_traffic"] = {"status": "unavailable", "issues": ["unsupported"]}
+    participant[field] = {"status": "unavailable", "issues": ["unsupported"]}
     participant_data = canonical_json_bytes(participant)
     participant_path.write_bytes(participant_data)
 
@@ -424,8 +426,8 @@ def test_accept_rejects_report_that_would_exceed_per_job_payload_cap(tmp_path):
         )
 
     summary = coordinator.finalize_job("job-1")
-    statuses = {entry["participant_name"]: entry["status"] for entry in summary["participants"]}
-    assert statuses["site-1"] == "accepted"
+    statuses = {entry["participant_name"]: entry.get("status") for entry in summary["participants"]}
+    assert statuses["site-1"] is None
     assert statuses["site-2"] == "missing"
 
 

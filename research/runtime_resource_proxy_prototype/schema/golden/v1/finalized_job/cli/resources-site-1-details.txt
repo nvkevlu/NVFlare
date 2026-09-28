@@ -1,23 +1,24 @@
 Recorded resources for job qwen2.5-14b-federated-qualification (ID: job-20260909-001).
-Job coverage: PARTIAL (3 accepted / 4 expected) | selected site: site-1
+Participants with data: 3/4 | showing site-1
 
-Recorded average visible capacity over each measured interval
-SITE    ROLE    REPORT    COMPUTE   MEASURED TIME  CPU UNITS  MEM GiB   FULL GPUs
-site-1  client  accepted  REPORTED  37m3s          32.0000    192.0000  4.0000
+Average resources per participant (CPU in cores)
+SITE    TIME   AVG CPU VISIBLE (cores)  AVG CPU USED (cores)  AVG MEM GiB  AVG FULL GPUs
+site-1  37m3s  32.0000                  0.8097                192.0000     4.0000
 
-Other recorded participant totals
-SITE    RUN-DIR STATUS  RUN-DIR FILES GiB  MESSAGE TRAFFIC STATUS  MESSAGE PAYLOAD SENT GiB  MESSAGE PAYLOAD SENT TO SITE GiB
-site-1  REPORTED        0.0000             REPORTED                137.5567                  137.5567 (partial)
+Recorded files and message payload
+SITE    RUN-DIR FILES GiB  PAYLOAD SENT GiB  PAYLOAD SENT TO SITE GiB
+site-1  0.0000             137.5567          137.5567*
 
 Notes:
-  PARTIAL means at least one expected report or observation was incomplete.
-  Each average is resource-time divided by that row's measured interval.
-  Totals add participant reports; overlapping resources can be counted more than once.
-  Message payload sent to a site is sender-confirmed; it is not proof of receipt.
+  * = incomplete number; — = no usable value. See --format json for details.
+  CPU visible is capacity; CPU used is process CPU time divided by a complete measured interval, not host utilization %.
+  CPU used may miss child-process work; known gaps are marked *.
+  Sums add participant values; physically shared resources may be counted more than once.
+  Payload sent to a site is sender-confirmed, not proof of receipt.
 
 Hardware detail for site-1
 Model metadata is optional and does not change numeric totals.
 
 CPU: AMD EPYC 9654 (x86_64); 32.0000 average visible units
-GPU (full GPU): NVIDIA A100 80GB, 80 GiB per instance; 4.0000 average visible instances
+GPU: NVIDIA A100 80GB, 80.0000 GiB per instance; 4.0000 average visible instances
 Visible workspace-filesystem capacity at reporting time: 1024.0000 GiB

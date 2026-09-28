@@ -5,7 +5,6 @@
   "participant_name": "site-large",
   "reported_at": "2026-09-09T00:15:01Z",
   "resource_time": {
-    "status": "reported",
     "measured_seconds": "901",
     "cpu": {
       "groups": [
@@ -23,16 +22,19 @@
       "groups": []
     }
   },
+  "cpu_consumed": {
+    "status": "unavailable",
+    "issues": [
+      "observation_incomplete"
+    ]
+  },
   "workspace_filesystem": {
-    "status": "reported",
     "capacity_bytes": "10000000000001"
   },
   "retained_content": {
-    "status": "reported",
     "bytes": "0"
   },
   "message_traffic": {
-    "status": "reported",
     "sent_to": []
   }
 }

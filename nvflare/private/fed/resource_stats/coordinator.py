@@ -327,7 +327,6 @@ class ResourceStatsCoordinator:
                     participants.append(
                         {
                             **base,
-                            "status": "accepted",
                             "received_at": accepted.received_at,
                             **derive_participant_totals(record),
                         }
@@ -373,7 +372,8 @@ class ResourceStatsCoordinator:
             state.finalized = True
             status_counts: dict[str, int] = {}
             for participant in participants:
-                status_counts[participant["status"]] = status_counts.get(participant["status"], 0) + 1
+                status = participant.get("status", "accepted")
+                status_counts[status] = status_counts.get(status, 0) + 1
             _logger.info(f"job {job_id}: resource statistics finalized, participants by status: {status_counts}")
             return summary
 

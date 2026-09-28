@@ -46,6 +46,7 @@ from nvflare.private.fed.resource_stats.collector import (
     read_terminal_handoff,
     remove_terminal_handoff,
 )
+from nvflare.private.fed.resource_stats.contract import validate_record
 from nvflare.private.fed.resource_stats.f3_counter import F3_PARENT_DRAIN_TIMEOUT_SECONDS
 from nvflare.private.fed.resource_stats.f3_registry import F3CounterRegistry
 from nvflare.private.fed.utils.fed_utils import get_job_launcher, get_return_code
@@ -62,6 +63,7 @@ REPORTABLE_JOB_FAILURES = {
 }
 
 _ABORT_REQUESTED_KEY = "_abort_requested"
+_CPU_ATTEMPT_DIR = ".resource_stats_cpu_attempts"
 
 
 def _log_resource_warning(logger, message: str) -> None:
@@ -71,12 +73,61 @@ def _log_resource_warning(logger, message: str) -> None:
         pass
 
 
+def _record_client_cpu_attempt(workspace: Workspace, job_id: str, logger) -> bool:
+    """Persist launch evidence outside the run directory, which redeployment removes.
+
+    Return whether an earlier attempt may have consumed CPU. A marker write
+    failure is conservatively incomplete, but never prevents the job launch.
+    """
+
+    try:
+        checked_job_id = Workspace._check_job_id(job_id)
+        marker_dir = Workspace._join_under_root(workspace.root_dir, _CPU_ATTEMPT_DIR)
+        marker_dir_created = False
+        try:
+            os.mkdir(marker_dir, 0o700)
+            marker_dir_created = True
+        except FileExistsError:
+            pass
+        marker_path = Workspace._join_under_root(workspace.root_dir, _CPU_ATTEMPT_DIR, checked_job_id)
+        try:
+            marker_fd = os.open(marker_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError:
+            return True
+        try:
+            os.fsync(marker_fd)
+        finally:
+            os.close(marker_fd)
+
+        # Commit the directory entry before launching the worker. If this
+        # fails, the current CPU subtotal must not be labeled complete.
+        dir_fd = os.open(marker_dir, os.O_RDONLY)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
+        if marker_dir_created:
+            root_fd = os.open(workspace.root_dir, os.O_RDONLY)
+            try:
+                os.fsync(root_fd)
+            finally:
+                os.close(root_fd)
+        return False
+    except Exception as e:
+        _log_resource_warning(
+            logger,
+            f"could not persist CPU attempt history for job {job_id}: {secure_format_exception(e)}",
+        )
+        return True
+
+
 def _build_participant_resource_report(
     job_id: str,
     participant_name: str,
     workspace: str,
     logger,
     parent_f3=None,
+    prior_attempt_incomplete: bool = False,
 ) -> bytes | None:
     """Read the private child handoff and build the public report.
 
@@ -106,6 +157,11 @@ def _build_participant_resource_report(
             child_handoff=handoff,
             parent_f3=parent_f3,
         )
+        if prior_attempt_incomplete and report["cpu_consumed"].get("status", "reported") in {"reported", "partial"}:
+            consumed = report["cpu_consumed"]
+            consumed["status"] = "partial"
+            consumed["issues"] = sorted(set(consumed.get("issues", [])) | {"observation_incomplete"})
+            validate_record(report)
         return canonical_json_bytes(report)
     except Exception as e:
         _log_resource_warning(
@@ -264,6 +320,7 @@ class JobExecutor(ClientExecutor):
         self.logger = get_obj_logger(self)
         self.startup = startup
         self.run_processes = {}
+        self._cpu_seen_job_launches: set[str] = set()
         self.lock = threading.Lock()
         # Client-parent (CP) F3 sender counters, one per running job. Phase 1
         # has no positive CP-owned traffic class, but the explicit zero-valued
@@ -392,11 +449,20 @@ class JobExecutor(ClientExecutor):
         with self.lock:
             if job_id in self.run_processes:
                 raise RuntimeError(f"client app for job '{job_id}' is still registered")
+            schedule_count = job_meta.get(JobMetaKey.SCHEDULE_COUNT.value)
+            prior_attempt_incomplete = job_id in self._cpu_seen_job_launches or (
+                isinstance(schedule_count, int) and not isinstance(schedule_count, bool) and schedule_count > 1
+            )
+            self._cpu_seen_job_launches.add(job_id)
             self.run_processes[job_id] = {
                 RunProcessKey.JOB_HANDLE: pending_handle,
                 RunProcessKey.STATUS: ClientStatus.STARTING,
                 _ABORT_REQUESTED_KEY: False,
             }
+        # Record before launch so a fresh site parent cannot mistake a
+        # relaunched job for its first process after redeployment/restart.
+        # Keep filesystem sync outside the shared process-state lock.
+        prior_attempt_incomplete |= _record_client_cpu_attempt(workspace, job_id, self.logger)
         try:
             job_handle = job_launcher.launch_job(job_meta, fl_ctx)
             if job_handle is None:
@@ -422,7 +488,16 @@ class JobExecutor(ClientExecutor):
 
         thread = threading.Thread(
             target=self._wait_child_process_finish,
-            args=(client, job_id, allocated_resource, token, resource_manager, args.workspace, fl_ctx),
+            args=(
+                client,
+                job_id,
+                allocated_resource,
+                token,
+                resource_manager,
+                args.workspace,
+                fl_ctx,
+                prior_attempt_incomplete,
+            ),
         )
         thread.start()
 
@@ -713,7 +788,15 @@ class JobExecutor(ClientExecutor):
             self.logger.debug("abort_task sent")
 
     def _wait_child_process_finish(
-        self, client, job_id, allocated_resource, token, resource_manager, workspace, fl_ctx
+        self,
+        client,
+        job_id,
+        allocated_resource,
+        token,
+        resource_manager,
+        workspace,
+        fl_ctx,
+        prior_attempt_incomplete=False,
     ):
         self.logger.info(f"run ({job_id}): waiting for child worker process to finish.")
         job_handle = self.run_processes.get(job_id, {}).get(RunProcessKey.JOB_HANDLE)
@@ -765,6 +848,7 @@ class JobExecutor(ClientExecutor):
                             workspace=workspace,
                             logger=self.logger,
                             parent_f3=parent_f3,
+                            prior_attempt_incomplete=prior_attempt_incomplete,
                         )
                     except Exception as e:
                         _log_resource_warning(

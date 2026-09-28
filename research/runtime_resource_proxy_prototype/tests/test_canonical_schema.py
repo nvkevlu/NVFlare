@@ -73,7 +73,6 @@ def _resource_time(
     gpu_model="NVIDIA A100 80GB",
 ):
     return {
-        "status": "reported",
         "measured_seconds": seconds,
         "cpu": {
             "groups": [
@@ -106,10 +105,10 @@ def _participant(name=NAME_A, *, resource_time=None):
         "participant_name": name,
         "reported_at": "2026-09-09T14:37:03Z",
         "resource_time": resource_time or _resource_time(),
-        "workspace_filesystem": {"status": "reported", "capacity_bytes": "1099511627776"},
-        "retained_content": {"status": "reported", "bytes": "29540266113"},
+        "cpu_consumed": {"seconds": "30.25"},
+        "workspace_filesystem": {"capacity_bytes": "1099511627776"},
+        "retained_content": {"bytes": "29540266113"},
         "message_traffic": {
-            "status": "reported",
             "sent_to": [],
         },
     }
@@ -119,7 +118,6 @@ def _accepted(record, participant_name, role="client"):
     return {
         "participant_name": participant_name,
         "role": role,
-        "status": "accepted",
         "received_at": "2026-09-09T14:38:00Z",
         **derive_participant_totals(record),
     }
@@ -196,6 +194,7 @@ class TestCanonicalFinalOnlyV1Contract(unittest.TestCase):
                 "participant_name",
                 "reported_at",
                 "resource_time",
+                "cpu_consumed",
                 "workspace_filesystem",
                 "retained_content",
                 "message_traffic",
@@ -208,10 +207,11 @@ class TestCanonicalFinalOnlyV1Contract(unittest.TestCase):
         old_field["attempts"] = []
         self._assert_invalid_both(old_field)
 
-    def test_resource_time_uses_one_status_for_all_three_resources(self):
+    def test_resource_time_uses_one_exception_status_for_all_three_resources(self):
         participant = _participant()
         validate_record(participant)
-        self.assertEqual("reported", participant["resource_time"]["status"])
+        self.assertNotIn("status", participant["resource_time"])
+        self.assertNotIn("issues", participant["resource_time"])
         self.assertFalse(any("status" in participant["resource_time"][name] for name in ("cpu", "memory", "gpu")))
 
         per_resource_status = copy.deepcopy(participant)
@@ -221,6 +221,77 @@ class TestCanonicalFinalOnlyV1Contract(unittest.TestCase):
         error = copy.deepcopy(participant)
         error["resource_time"] = {"status": "error", "issues": ["malformed_source"]}
         self._assert_invalid_both(error)
+
+    def test_success_omits_status_and_issues_everywhere(self):
+        participant = _participant()
+        summary = _summary([_accepted(participant, NAME_A)])
+        validate_record(participant)
+        validate_record(summary)
+        for field in ("resource_time", "cpu_consumed", "workspace_filesystem", "retained_content", "message_traffic"):
+            self.assertNotIn("status", participant[field])
+            self.assertNotIn("issues", participant[field])
+            explicit = copy.deepcopy(participant)
+            explicit[field]["status"] = "reported"
+            self._assert_invalid_both(explicit)
+            spurious_issue = copy.deepcopy(participant)
+            spurious_issue[field]["issues"] = ["observation_incomplete"]
+            self._assert_invalid_both(spurious_issue)
+
+        entry = summary["participants"][0]
+        self.assertNotIn("status", entry)
+        self.assertNotIn("issues", entry)
+        explicit_entry = copy.deepcopy(summary)
+        explicit_entry["participants"][0]["status"] = "accepted"
+        self._assert_invalid_both(explicit_entry)
+        for field in ("resource_time", "cpu_consumed", "retained_content", "message_traffic"):
+            explicit_total = copy.deepcopy(summary)
+            explicit_total["participants"][0][field]["status"] = "reported"
+            self._assert_invalid_both(explicit_total)
+
+        totals = derive_job_totals(summary["participants"])
+        for field in ("resource_time", "cpu_consumed", "retained_content", "message_traffic"):
+            self.assertNotIn("status", totals[field])
+            self.assertNotIn("issues", totals[field])
+
+    def test_cpu_consumed_is_independent_and_closed(self):
+        participant = _participant()
+        participant["cpu_consumed"] = {"status": "partial", "issues": ["observation_incomplete"], "seconds": "0"}
+        validate_record(participant)
+        self.assertNotIn("status", participant["resource_time"])
+
+        for value in (
+            {"status": "unavailable", "issues": ["unsupported"]},
+            {"status": "error", "issues": ["permission_denied"]},
+        ):
+            with self.subTest(status=value["status"]):
+                participant["cpu_consumed"] = value
+                validate_record(participant)
+
+        for value in (
+            {"status": "reported", "seconds": "1"},
+            {"status": "reported", "seconds": "01"},
+            {"seconds": "1.0000000001"},
+            {"status": "partial", "seconds": "1"},
+            {"status": "unavailable", "issues": ["unsupported"], "seconds": "0"},
+            {"status": "error", "issues": ["malformed_source"], "seconds": "0"},
+        ):
+            with self.subTest(value=value):
+                malformed = _participant()
+                malformed["cpu_consumed"] = value
+                self._assert_invalid_both(malformed)
+
+    def test_cpu_consumed_is_required_and_unavailable_is_not_zero(self):
+        missing = _participant()
+        missing.pop("cpu_consumed")
+        self._assert_invalid_both(missing)
+        accepted = _accepted(_participant(), NAME_A)
+        accepted.pop("cpu_consumed")
+        self._assert_invalid_both(_summary([accepted]))
+        failed = _participant()
+        failed["cpu_consumed"] = {"status": "error", "issues": ["malformed_source"]}
+        failed_totals = derive_job_totals([_accepted(failed, NAME_A)])
+        self.assertEqual({"status": "unavailable"}, failed_totals["cpu_consumed"])
+        self.assertNotIn("status", failed_totals["resource_time"])
 
     def test_partial_requires_generic_issues_and_one_numeric_member(self):
         participant = _participant(
@@ -286,12 +357,15 @@ class TestCanonicalFinalOnlyV1Contract(unittest.TestCase):
         participant = _participant()
         copied = derive_participant_totals(participant)
         self.assertEqual(
-            {"resource_time", "retained_content", "message_traffic"},
+            {"resource_time", "cpu_consumed", "retained_content", "message_traffic"},
             set(copied),
         )
         self.assertEqual(participant["resource_time"], copied["resource_time"])
+        self.assertEqual(participant["cpu_consumed"], copied["cpu_consumed"])
         copied["resource_time"]["measured_seconds"] = "1"
+        copied["cpu_consumed"]["seconds"] = "1"
         self.assertEqual("120", participant["resource_time"]["measured_seconds"])
+        self.assertEqual("30.25", participant["cpu_consumed"]["seconds"])
 
     def test_message_traffic_public_shape_has_destination_groups(self):
         participant = _participant()
@@ -392,11 +466,12 @@ class TestCanonicalFinalOnlyV1Contract(unittest.TestCase):
         second["message_traffic"]["sent_to"] = [{"participant_name": NAME_A, **_counter("147700336640", "23500")}]
         participants = [_accepted(first, "site-a"), _accepted(second, "site-b")]
         totals = derive_job_totals(participants)
-        self.assertEqual("reported", totals["resource_time"]["status"])
+        self.assertNotIn("status", totals["resource_time"])
         self.assertEqual("180", totals["resource_time"]["measured_seconds"])
         self.assertEqual("32985348833280", totals["resource_time"]["memory"]["byte_seconds"])
         self.assertEqual(2, len(totals["resource_time"]["cpu"]["groups"]))
         self.assertEqual(2, len(totals["resource_time"]["gpu"]["groups"]))
+        self.assertEqual({"seconds": "60.5"}, totals["cpu_consumed"])
         self.assertEqual("59080532226", totals["retained_content"]["bytes"])
         self.assertEqual("295400673280", totals["message_traffic"]["sent"]["payload_bytes"])
 
@@ -412,6 +487,7 @@ class TestCanonicalFinalOnlyV1Contract(unittest.TestCase):
         ]
         totals = derive_job_totals(participants)
         self.assertEqual("partial", totals["resource_time"]["status"])
+        self.assertEqual({"status": "partial", "seconds": "30.25"}, totals["cpu_consumed"])
         self.assertEqual(["observation_incomplete"], totals["resource_time"]["issues"])
         self.assertEqual("partial", totals["retained_content"]["status"])
         self.assertEqual("partial", totals["message_traffic"]["status"])
@@ -501,6 +577,7 @@ class TestCanonicalFinalOnlyV1Contract(unittest.TestCase):
         }
         validate_record(study)
         self.assertEqual("partial", study["totals"]["resource_time"]["status"])
+        self.assertEqual({"status": "partial", "seconds": "30.25"}, study["totals"]["cpu_consumed"])
         self.assertEqual("partial", study["totals"]["retained_content"]["status"])
         self.assertNotEqual(jobs[0]["job_status"], jobs[0]["resource_data"])
 
@@ -752,6 +829,14 @@ class TestCanonicalFinalOnlyV1Contract(unittest.TestCase):
         for record in (participant, summary, study):
             with self.subTest(kind=record["kind"]):
                 self.assertEqual([], list(self.json_validator.iter_errors(record)))
+
+        for target in ("job", "study"):
+            for field in ("resource_time", "cpu_consumed", "retained_content", "message_traffic"):
+                with self.subTest(target=target, field=field):
+                    explicit = copy.deepcopy(study)
+                    totals = explicit["jobs"][0]["totals"] if target == "job" else explicit["totals"]
+                    totals[field]["status"] = "reported"
+                    self._assert_invalid_both(explicit)
 
 
 if __name__ == "__main__":

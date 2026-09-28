@@ -149,11 +149,14 @@ def _finish_local_report(
         }
     else:
         workspace_filesystem = {
-            "status": "reported",
             "capacity_bytes": str(storage_metric["value"]),
         }
     handoff = accumulator.finish_measurements(
         finished,
+        # This older local-probe demonstrator does not track child launch and
+        # wait boundaries. Do not convert the missing CPU observation to zero
+        # or imply that a self-only counter covers managed workers.
+        cpu_consumed={"status": "unavailable", "issues": ["unsupported"]},
         workspace_filesystem=workspace_filesystem,
         retained_content=observe_retained_content(workspace),
         child_f3={
@@ -162,7 +165,7 @@ def _finish_local_report(
         },
     )
     resource_time = handoff["resource_time"]
-    if resource_time["status"] == "reported" and not _compute_probe_coverage_complete(evidence):
+    if "status" not in resource_time and not _compute_probe_coverage_complete(evidence):
         # Keep useful numeric totals from partial probes, but do not promote
         # their coverage to a fully reported terminal measurement.
         resource_time["status"] = "partial"
@@ -188,9 +191,9 @@ def _accepted_entry(
     return {
         "participant_name": participant_name,
         "role": role,
-        "status": "accepted",
         "received_at": report["reported_at"],
         "resource_time": deepcopy(report["resource_time"]),
+        "cpu_consumed": deepcopy(report["cpu_consumed"]),
         "retained_content": deepcopy(report["retained_content"]),
         "message_traffic": deepcopy(report["message_traffic"]),
     }

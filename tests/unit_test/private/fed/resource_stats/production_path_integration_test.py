@@ -118,7 +118,6 @@ def _terminal_handoff(
         run_dir,
         collector.finish(
             child_f3={
-                "status": "reported",
                 "sent_to": (
                     [{"participant_name": recipient_name, "payload_bytes": str(f3_bytes), "messages": str(f3_messages)}]
                     if f3_messages
@@ -150,7 +149,6 @@ def test_authenticated_report_to_workspace_query_and_human_output(tmp_path):
             f3_messages=4,
         ),
         parent_f3={
-            "status": "reported",
             "sent_to": [{"participant_name": "server", "payload_bytes": "1000000", "messages": "1"}],
         },
     )
@@ -209,7 +207,6 @@ def test_authenticated_report_to_workspace_query_and_human_output(tmp_path):
         job_id,
         fl_ctx,
         parent_f3={
-            "status": "reported",
             "sent_to": [{"participant_name": "site-1", "payload_bytes": "500000", "messages": "1"}],
         },
     )
@@ -252,6 +249,7 @@ def test_authenticated_report_to_workspace_query_and_human_output(tmp_path):
     assert "job_name" not in result["resource_summary"]
     assert result["job_name"] == "hello-pt"
     assert result["participant_summary"] == client_report
+    assert "status" not in client_report["cpu_consumed"]
 
     mismatch_connection = _Connection(engine, job_id)
     mismatch_connection._props[JobCommandModule.JOB].meta[JobMetaKey.JOB_NAME.value] = "renamed-job"
@@ -266,17 +264,18 @@ def test_authenticated_report_to_workspace_query_and_human_output(tmp_path):
     assert [item["participant_name"] for item in finalized["participants"]] == [participant_name, "server"]
     totals = derive_job_totals(finalized["participants"])
     assert totals["resource_time"]["measured_seconds"] == "4463.5"
+    assert all("status" not in entry["cpu_consumed"] for entry in finalized["participants"])
+    assert "status" not in totals["cpu_consumed"]
     assert client_report["message_traffic"] == {
-        "status": "reported",
         "sent_to": [{"participant_name": "server", "payload_bytes": "6000000", "messages": "5"}],
     }
     assert totals["message_traffic"] == {
-        "status": "reported",
         "sent": {"payload_bytes": "9500000", "messages": "8"},
     }
 
     output = render_job_resources(finalized, result["participant_summary"], job_name=result["job_name"])
-    assert "selected site: site-1" in output
+    assert "showing site-1" in output
+    assert "AVG CPU USED (cores)" in output
     assert "AMD EPYC 9654 (x86_64)" in output
     assert "NVIDIA A100 80GB" in output
     assert "8000000000000000000" not in participant_bytes.decode()

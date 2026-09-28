@@ -636,7 +636,7 @@ def test_gpu_less_host_reaches_reported_status_end_to_end(monkeypatch):
     accumulator.observe(capacity)
     result = accumulator.finish()
 
-    assert result["status"] == "reported"
+    assert "status" not in result
     assert "issues" not in result
 
 
@@ -656,7 +656,6 @@ def test_handoff_to_public_report_round_trip(tmp_path):
         tmp_path,
         job_collector.finish(
             child_f3={
-                "status": "reported",
                 "sent_to": [{"participant_name": "server", "payload_bytes": "1200", "messages": "2"}],
             }
         ),
@@ -668,7 +667,6 @@ def test_handoff_to_public_report_round_trip(tmp_path):
         participant_name="site-1",
         child_handoff=handoff,
         parent_f3={
-            "status": "reported",
             "sent_to": [{"participant_name": "server", "payload_bytes": "300", "messages": "1"}],
         },
     )
@@ -676,10 +674,9 @@ def test_handoff_to_public_report_round_trip(tmp_path):
 
     assert load_and_validate(encoded)["participant_name"] == "site-1"
     assert report["resource_time"]["measured_seconds"] == "2"
-    assert report["workspace_filesystem"]["status"] == "reported"
-    assert report["retained_content"] == {"status": "reported", "bytes": "0"}
+    assert "status" not in report["workspace_filesystem"]
+    assert report["retained_content"] == {"bytes": "0"}
     assert report["message_traffic"] == {
-        "status": "reported",
         "sent_to": [{"participant_name": "server", "payload_bytes": "1500", "messages": "3"}],
     }
     assert "participant_key" not in encoded.decode()
@@ -691,7 +688,7 @@ def test_observe_retained_content_sums_regular_files_under_the_run_dir(tmp_path)
     nested.mkdir(parents=True)
     (nested / "model.pt").write_bytes(b"y" * 250)
 
-    assert observe_retained_content(tmp_path) == {"status": "reported", "bytes": "350"}
+    assert observe_retained_content(tmp_path) == {"bytes": "350"}
 
 
 def test_observe_retained_content_excludes_only_the_resource_stats_directory(tmp_path):
@@ -700,7 +697,7 @@ def test_observe_retained_content_excludes_only_the_resource_stats_directory(tmp
     stats_dir.mkdir(parents=True)
     (stats_dir / "site-1.json").write_bytes(b"z" * 900)
 
-    assert observe_retained_content(tmp_path) == {"status": "reported", "bytes": "100"}
+    assert observe_retained_content(tmp_path) == {"bytes": "100"}
 
 
 def test_observe_retained_content_does_not_exclude_a_nested_directory_of_the_same_name(tmp_path):
@@ -711,11 +708,11 @@ def test_observe_retained_content_does_not_exclude_a_nested_directory_of_the_sam
     nested_same_name.mkdir(parents=True)
     (nested_same_name / "custom_output.bin").write_bytes(b"w" * 40)
 
-    assert observe_retained_content(tmp_path) == {"status": "reported", "bytes": "40"}
+    assert observe_retained_content(tmp_path) == {"bytes": "40"}
 
 
 def test_observe_retained_content_is_reported_zero_for_an_empty_directory(tmp_path):
-    assert observe_retained_content(tmp_path) == {"status": "reported", "bytes": "0"}
+    assert observe_retained_content(tmp_path) == {"bytes": "0"}
 
 
 def test_observe_retained_content_is_unavailable_when_run_dir_does_not_exist(tmp_path):
@@ -743,7 +740,7 @@ def test_observe_retained_content_ignores_a_symlinked_file_without_following_it(
 
         result = observe_retained_content(run_dir)
 
-        assert result == {"status": "reported", "bytes": "0"}
+        assert result == {"bytes": "0"}
     finally:
         outside.unlink()
 
@@ -757,7 +754,7 @@ def test_observe_retained_content_ignores_a_symlinked_directory_without_followin
         run_dir.mkdir()
         (run_dir / "linked-directory").symlink_to(outside, target_is_directory=True)
 
-        assert observe_retained_content(run_dir) == {"status": "reported", "bytes": "0"}
+        assert observe_retained_content(run_dir) == {"bytes": "0"}
     finally:
         (outside / "large.bin").unlink()
         outside.rmdir()
@@ -877,7 +874,6 @@ def test_missing_handoff_is_explicitly_unavailable():
         participant_name="site-1",
         child_handoff=None,
         parent_f3={
-            "status": "reported",
             "sent_to": [{"participant_name": "server", "payload_bytes": "300", "messages": "1"}],
         },
     )
@@ -901,7 +897,6 @@ def test_merge_f3_snapshots_preserves_partial_issues_and_checks_u128():
             "sent_to": [{"participant_name": "server", "payload_bytes": "5", "messages": "1"}],
         },
         {
-            "status": "reported",
             "sent_to": [{"participant_name": "server", "payload_bytes": "7", "messages": "2"}],
         },
     ) == {
@@ -912,11 +907,9 @@ def test_merge_f3_snapshots_preserves_partial_issues_and_checks_u128():
 
     assert merge_f3_snapshots(
         {
-            "status": "reported",
             "sent_to": [{"participant_name": "server", "payload_bytes": str(2**128 - 1), "messages": "1"}],
         },
         {
-            "status": "reported",
             "sent_to": [{"participant_name": "server", "payload_bytes": "1", "messages": "1"}],
         },
     ) == {"status": "error", "issues": ["malformed_source"]}
@@ -924,19 +917,16 @@ def test_merge_f3_snapshots_preserves_partial_issues_and_checks_u128():
 
 def test_merge_f3_snapshots_keeps_distinct_recipients_sorted_and_rejects_duplicate_source_groups():
     child = {
-        "status": "reported",
         "sent_to": [
             {"participant_name": "site-1", "payload_bytes": "5", "messages": "1"},
             {"participant_name": "site-2", "payload_bytes": "7", "messages": "2"},
         ],
     }
     parent = {
-        "status": "reported",
         "sent_to": [{"participant_name": "site-2", "payload_bytes": "3", "messages": "1"}],
     }
 
     assert merge_f3_snapshots(child, parent) == {
-        "status": "reported",
         "sent_to": [
             {"participant_name": "site-1", "payload_bytes": "5", "messages": "1"},
             {"participant_name": "site-2", "payload_bytes": "10", "messages": "3"},
@@ -950,6 +940,10 @@ def test_merge_f3_snapshots_keeps_distinct_recipients_sorted_and_rejects_duplica
         "status": "error",
         "issues": ["malformed_source"],
     }
+    assert merge_f3_snapshots({**child, "status": "reported"}, parent) == {
+        "status": "error",
+        "issues": ["malformed_source"],
+    }
 
 
 def _minimal_handoff():
@@ -957,10 +951,31 @@ def _minimal_handoff():
         "internal_version": collector.INTERNAL_HANDOFF_VERSION,
         "kind": collector.INTERNAL_HANDOFF_KIND,
         "resource_time": {"status": "unavailable", "issues": ["observation_incomplete"]},
+        "cpu_consumed": {"status": "unavailable", "issues": ["observation_incomplete"]},
         "workspace_filesystem": {"status": "unavailable", "issues": ["observation_incomplete"]},
         "retained_content": {"status": "unavailable", "issues": ["not_bound"]},
         "child_f3": {"status": "unavailable", "issues": ["observation_incomplete"]},
     }
+
+
+def test_bad_cpu_consumed_handoff_does_not_erase_other_dimensions(tmp_path):
+    handoff = _minimal_handoff()
+    handoff["workspace_filesystem"] = {"capacity_bytes": "1024"}
+    handoff["cpu_consumed"] = {"seconds": "NaN"}
+    write_terminal_handoff(tmp_path, handoff)
+    report = assemble_participant_summary(
+        job_id="job-1", participant_name="site-1", child_handoff=read_terminal_handoff(tmp_path)
+    )
+    assert report["cpu_consumed"] == {"status": "error", "issues": ["malformed_source"]}
+    assert report["workspace_filesystem"] == {"capacity_bytes": "1024"}
+
+
+def test_terminal_handoff_requires_cpu_consumed_in_unpublished_v1(tmp_path):
+    handoff = _minimal_handoff()
+    del handoff["cpu_consumed"]
+
+    with pytest.raises(collector.InvalidTerminalHandoff, match="terminal handoff fields"):
+        write_terminal_handoff(tmp_path, handoff)
 
 
 def test_handoff_reader_rejects_symlink(tmp_path):

@@ -60,6 +60,10 @@
                 ]
               }
             },
+            "cpu_consumed": {
+              "status": "partial",
+              "seconds": "3060"
+            },
             "retained_content": {
               "status": "partial",
               "bytes": "29540266113"
@@ -80,7 +84,6 @@
           "resource_data": "included",
           "totals": {
             "resource_time": {
-              "status": "reported",
               "measured_seconds": "14400",
               "cpu": {
                 "groups": [
@@ -105,12 +108,13 @@
                 ]
               }
             },
+            "cpu_consumed": {
+              "seconds": "7200"
+            },
             "retained_content": {
-              "status": "reported",
               "bytes": "59080532226"
             },
             "message_traffic": {
-              "status": "reported",
               "sent": {
                 "payload_bytes": "0",
                 "messages": "0"
@@ -171,6 +175,10 @@
               }
             ]
           }
+        },
+        "cpu_consumed": {
+          "status": "partial",
+          "seconds": "10260"
         },
         "retained_content": {
           "status": "partial",

@@ -942,7 +942,9 @@ class JobRunner(FLComponent):
                     fl_ctx,
                     f"F3 statistics are unavailable for restored job ({job_id}): {secure_format_exception(e)}",
                 )
-            err = engine.start_app_on_server(fl_ctx, job=job, job_clients=job_clients, snapshot=snapshot)
+            err = engine.start_app_on_server(
+                fl_ctx, job=job, job_clients=job_clients, snapshot=snapshot, restored_attempt=True
+            )
             if err:
                 raise RuntimeError(f"Could not restore the server App for job: {job_id}.")
             with self.lock:

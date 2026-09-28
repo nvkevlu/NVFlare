@@ -43,12 +43,13 @@ def test_fixed_colossus_run_reconciles_as_a_pre_job_name_capture():
     with pytest.raises(ContractError):
         validate_record(site_report)
 
-    # This immutable September 21 capture predates the required v1 job_name
-    # field. It remains useful measurement evidence, but it must not be
-    # mistaken for a record produced by the current contract or renderer.
+    # This immutable September 21 capture predates the current summary shape.
+    # It remains measurement evidence, not a record produced by today's
+    # contract or renderer; do not rewrite it to look current.
     assert "job_name" not in job_summary
     assert all("job_name" not in row for row in study_summary["jobs"])
-    with pytest.raises(ContractError, match="missing required fields: job_name"):
+    assert {"finalized_at", "report_cutoff_at", "totals"} <= set(job_summary)
+    with pytest.raises(ContractError, match="unexpected fields"):
         validate_record(job_summary)
     with pytest.raises(ContractError, match="missing required fields: job_name"):
         validate_record(study_summary)

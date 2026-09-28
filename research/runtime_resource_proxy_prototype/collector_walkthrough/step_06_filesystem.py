@@ -33,9 +33,7 @@ def main() -> None:
                 "source_calls": [f"os.statvfs({str(workspace)!r})"],
                 "raw": {"f_blocks": stats.f_blocks, "f_frsize": stats.f_frsize},
                 "calculation": f"{stats.f_blocks} x {stats.f_frsize} = {capacity_bytes}",
-                "production_value": {
-                    "workspace_filesystem": {"status": "reported", "capacity_bytes": str(capacity_bytes)}
-                },
+                "production_value": {"workspace_filesystem": {"capacity_bytes": str(capacity_bytes)}},
                 "maps_to": "visible capacity of the filesystem containing this path; not job usage",
             },
             indent=2,

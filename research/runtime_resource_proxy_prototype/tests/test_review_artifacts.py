@@ -28,6 +28,8 @@ sys.path.insert(0, str(SCHEMA_ROOT))
 import build_review_artifacts as artifacts  # noqa: E402
 from contract_v1 import derive_job_totals, derive_study_totals, load_and_validate, validate_bundle  # noqa: E402
 
+from nvflare.tool.job.job_resources import render_job_resources, render_study_resources  # noqa: E402
+
 
 class TestCanonicalReviewArtifacts(unittest.TestCase):
     def test_committed_tree_is_coherent_and_reproducible(self):
@@ -69,8 +71,10 @@ class TestCanonicalReviewArtifacts(unittest.TestCase):
             self.assertEqual("2223", receipt["derived_examples"]["server_measured_seconds"])
             self.assertEqual("6369", receipt["derived_examples"]["accepted_measured_seconds"])
             self.assertEqual("145656", receipt["derived_examples"]["job_cpu_unit_seconds"])
+            self.assertEqual("3060", receipt["derived_examples"]["job_cpu_consumed_seconds"])
             self.assertEqual("15984", receipt["derived_examples"]["job_gpu_instance_seconds"])
             self.assertEqual("1988856", receipt["derived_examples"]["study_cpu_unit_seconds"])
+            self.assertEqual("10260", receipt["derived_examples"]["study_cpu_consumed_seconds"])
             self.assertEqual("131184", receipt["derived_examples"]["study_gpu_instance_seconds"])
             self.assertEqual("9010000000000901", receipt["derived_examples"]["large_memory_byte_seconds"])
 
@@ -123,6 +127,7 @@ class TestCanonicalReviewArtifacts(unittest.TestCase):
                 "participant_name",
                 "reported_at",
                 "resource_time",
+                "cpu_consumed",
                 "workspace_filesystem",
                 "retained_content",
                 "message_traffic",
@@ -134,29 +139,33 @@ class TestCanonicalReviewArtifacts(unittest.TestCase):
         self.assertNotIn("final", participant)
 
         summary = json.loads((COMMITTED_ROOT / "server_run/resource_stats/resource_summary.json").read_text())
-        human = artifacts._human_cli(summary, artifacts.JOB_NAME)
-        detail = artifacts._hardware_details(summary, "site-1")
+        site_report = json.loads((standalone_root / "participant_summary.json").read_text())
+        human = render_job_resources(summary, job_name=artifacts.JOB_NAME)
+        detail = render_job_resources(summary, site_report, job_name=artifacts.JOB_NAME)
         envelope = json.loads((COMMITTED_ROOT / "cli/resources-all.json").read_text())
 
         self.assertNotIn("job_name", summary)
         self.assertTrue(human.startswith(f"Recorded resources for job {artifacts.JOB_NAME} (ID: {artifacts.JOB_ID})."))
-        self.assertIn("Job coverage: PARTIAL (3 accepted / 4 expected)", human)
         self.assertIn("site-1", human)
         self.assertIn("site-2", human)
         self.assertIn("site-3", human)
         self.assertIn("server", human)
-        self.assertIn("Recorded average visible capacity over each measured interval", human)
-        self.assertIn("CPU UNITS", human)
+        self.assertIn("Average resources per participant", human)
+        capacity_header = next(line for line in human.splitlines() if "AVG CPU VISIBLE" in line)
+        self.assertIn("AVG CPU USED", capacity_header)
+        self.assertLess(capacity_header.index("AVG CPU VISIBLE"), capacity_header.index("AVG CPU USED"))
         self.assertIn("MEM GiB", human)
         self.assertIn("FULL GPUs", human)
-        self.assertIn("Summed measured participant time: 1h46m9s", human)
-        self.assertIn("FULL GPUs 4.4400 instance h", human)
-        self.assertIn("CPU 40.4600 unit h", human)
-        self.assertIn("MEMORY 255.3067 GiB h", human)
-        self.assertIn("RUN-DIR STATUS PARTIAL", human)
-        self.assertIn("RUN-DIR FILES 27.5115 GiB", human)
-        self.assertIn("MESSAGE TRAFFIC STATUS PARTIAL", human)
-        self.assertIn("MESSAGE PAYLOAD SENT 550.2266 GiB", human)
+        for expected in ("4.4400", "40.4600", "0.8500", "255.3067", "27.5115", "550.2266"):
+            self.assertIn(expected, human)
+        self.assertIn("Data gaps:", human)
+        partial_site = next(line for line in human.splitlines() if line.startswith("site-2  "))
+        missing_site = next(line for line in human.splitlines() if line.startswith("site-3  "))
+        self.assertIn("*", partial_site)
+        self.assertIn("—", missing_site)
+        for redundant_heading in ("CPU CONSUMED STATUS", "RUN-DIR STATUS", "MESSAGE TRAFFIC STATUS"):
+            self.assertNotIn(redundant_heading, human)
+        self.assertNotIn("compute: PARTIAL", human)
         self.assertNotIn("STORAGE", human)
         self.assertNotIn("not utilization", human)
         self.assertNotIn("reserved capacity", human)
@@ -165,10 +174,12 @@ class TestCanonicalReviewArtifacts(unittest.TestCase):
         self.assertIn("AMD EPYC 9654 (x86_64)", detail)
         self.assertIn("NVIDIA A100 80GB", detail)
         selected = (COMMITTED_ROOT / "cli/resources-site-1-details.txt").read_text()
-        self.assertIn("selected site: site-1", selected)
+        self.assertIn("site-1", selected)
         self.assertIn("Hardware detail for site-1", selected)
         self.assertIn("Visible workspace-filesystem capacity at reporting time", selected)
         self.assertEqual(summary, envelope["data"]["summary"])
+        self.assertEqual("partial", summary["participants"][1]["cpu_consumed"]["status"])
+        self.assertEqual("missing", summary["participants"][2]["status"])
         self.assertEqual({"job_id": summary["job_id"], "site": "all"}, envelope["data"]["selection"])
         self.assertNotIn("totals", summary)
         self.assertNotIn("workspace_filesystem", derive_job_totals(summary["participants"]))
@@ -176,7 +187,7 @@ class TestCanonicalReviewArtifacts(unittest.TestCase):
 
     def test_cli_shows_mig_only_when_a_group_is_applicable(self):
         summary = json.loads((SCHEMA_ROOT / "golden/v1/resource_summary.json").read_text())
-        self.assertNotIn("MIG", artifacts._human_cli(summary, artifacts.JOB_NAME))
+        self.assertNotIn("MIG", render_job_resources(summary, job_name=artifacts.JOB_NAME))
 
         positive_mig = {
             "kind": "mig_compute_instance",
@@ -186,10 +197,12 @@ class TestCanonicalReviewArtifacts(unittest.TestCase):
             "instance_seconds": "3600",
         }
         summary["participants"][0]["resource_time"]["gpu"]["groups"].append(positive_mig)
-        human = artifacts._human_cli(summary, artifacts.JOB_NAME)
+        human = render_job_resources(summary, job_name=artifacts.JOB_NAME)
         self.assertIn("MIG INSTANCES", human)
         self.assertIn("1.6194", human)
-        detail = artifacts._hardware_details(summary, "site-1")
+        site_report = json.loads((SCHEMA_ROOT / "golden/v1/participant_summary.json").read_text())
+        site_report["resource_time"]["gpu"]["groups"].append(positive_mig)
+        detail = render_job_resources(summary, site_report, job_name=artifacts.JOB_NAME)
         self.assertIn("MIG compute instance", detail)
 
     def test_study_cli_reconciles_selected_jobs_and_additive_totals(self):
@@ -220,13 +233,17 @@ class TestCanonicalReviewArtifacts(unittest.TestCase):
         human = (COMMITTED_ROOT / "cli/resources-study.txt").read_text()
         envelope = json.loads((COMMITTED_ROOT / "cli/resources-study.json").read_text())
         self.assertIn("Resources recorded for finalized jobs in study cancer-research", human)
-        self.assertIn("4 jobs found | 3 finalized | 2 valid summaries", human)
-        self.assertIn("1 unavailable | 1 still running (excluded)", human)
-        self.assertIn("Study totals from 2 valid job summaries | coverage: PARTIAL", human)
-        self.assertIn("FULL GPUs 36.4400 instance h", human)
-        self.assertIn("CPU 552.4600 unit h", human)
-        self.assertIn("MEMORY 2303.3067 GiB h", human)
-        self.assertIn("MESSAGE TRAFFIC STATUS PARTIAL", human)
+        for expected in ("Jobs: 4 found", "2 with resource data", "36.4400", "552.4600", "2303.3067", "2.8500"):
+            self.assertIn(expected, human)
+        self.assertIn("Data gaps:", human)
+        for redundant_heading in (
+            "QUALITY",
+            "RESOURCE DATA",
+            "CPU CONSUMED STATUS",
+            "RUN-DIR STATUS",
+            "MESSAGE TRAFFIC STATUS",
+        ):
+            self.assertNotIn(redundant_heading, human)
         self.assertNotIn("MIG", human)
         self.assertEqual({"study": "cancer-research"}, envelope["data"]["selection"])
         self.assertEqual(study, envelope["data"]["summary"])
@@ -241,9 +258,9 @@ class TestCanonicalReviewArtifacts(unittest.TestCase):
         }
         with_mig["jobs"][0]["totals"]["resource_time"]["gpu"]["groups"].append(mig_group)
         with_mig["totals"]["resource_time"]["gpu"]["groups"].append(mig_group)
-        mig_human = artifacts._human_study_cli(with_mig)
-        self.assertIn("MIG h", mig_human)
-        self.assertIn("MIG INSTANCES 2.0000 instance h", mig_human)
+        mig_human = render_study_resources(with_mig)
+        self.assertIn("MIG instance-h", mig_human)
+        self.assertIn("MIG instances visible 2.0000* instance-h", mig_human)
 
         partial_saved = json.loads(json.dumps(study))
         included_row = partial_saved["jobs"][1]
@@ -256,11 +273,10 @@ class TestCanonicalReviewArtifacts(unittest.TestCase):
         }
         included_row["totals"]["retained_content"]["status"] = "partial"
         partial_saved["totals"] = json.loads(json.dumps(included_row["totals"]))
-        partial_human = artifacts._human_study_cli(partial_saved)
-        self.assertIn("RESOURCE DATA  QUALITY", partial_human)
-        self.assertIn("included       PARTIAL", partial_human)
-        self.assertIn("RUN-DIR STATUS PARTIAL", partial_human)
-        self.assertIn("coverage: PARTIAL", partial_human)
+        partial_human = render_study_resources(partial_saved)
+        self.assertIn("Data gaps:", partial_human)
+        self.assertIn("*", partial_human)
+        self.assertNotIn("RUN-DIR STATUS", partial_human)
 
     def test_message_traffic_job_total_keeps_only_the_additive_sent_counter(self):
         summary = json.loads((SCHEMA_ROOT / "golden/v1/resource_summary.json").read_text())
@@ -269,7 +285,7 @@ class TestCanonicalReviewArtifacts(unittest.TestCase):
             [{"participant_name": "server", "payload_bytes": "147700336640", "messages": "5"}],
             accepted["message_traffic"]["sent_to"],
         )
-        self.assertEqual({"status", "sent_to"}, set(accepted["message_traffic"]))
+        self.assertEqual({"sent_to"}, set(accepted["message_traffic"]))
         self.assertEqual(
             {"status", "sent"},
             set(derive_job_totals(summary["participants"])["message_traffic"]),
