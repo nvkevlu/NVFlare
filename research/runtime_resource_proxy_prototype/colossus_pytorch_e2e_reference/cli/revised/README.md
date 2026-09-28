@@ -8,6 +8,11 @@ The files in this directory render those same archived JSON records with the
 revised CLI. No measurements were added or changed. The revision makes the
 directly understandable values prominent:
 
+This is also a historical snapshot: it predates the required v1 `job_name`
+field. The checked-in text shows the renderer used at that time; the archived
+resource and study summaries must not be passed to the current renderer or
+treated as current-contract records.
+
 - CPU resource-time divided by measured seconds is shown as average visible
   CPU units;
 - memory byte-seconds divided by measured seconds is shown as average visible

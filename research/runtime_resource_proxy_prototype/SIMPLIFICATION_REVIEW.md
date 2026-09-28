@@ -41,6 +41,26 @@ child-derived fields unavailable and any usable parent F3 marked partial. The
 site collector must therefore use exact arithmetic and freeze its internal
 accumulator before producing its private handoff.
 
+## Job name from existing metadata, not the archived summary
+
+Design review requires the resource view to show the job's human-facing name
+beside its ID. A later review clarified that it need not be duplicated in
+`resource_summary`: the authorized CLI can get it from existing persisted job
+metadata, with the persisted job-folder name and then `job_id` as legacy
+fallbacks. On-demand study rows still carry that metadata-derived name.
+
+Neither the participant record, completion message, nor archived job summary
+needs a name field; each keeps `job_id`.
+`job_id` remains the unique reconciliation, archive lookup, and deterministic
+sort key because different jobs may use the same name. The CLI shows
+`Recorded resources for job NAME (ID: JOB_ID).` for one job and separate
+`JOB ID` and `NAME` study columns.
+
+The design is not yet released, so this is a correction to v1 rather than a
+schema-version bump. It reuses existing server-owned identity and adds
+no privilege, configuration, transport mechanism, or resource-probe privacy
+category.
+
 ## Current code and future execution work
 
 Today's adapter starts a private accumulator at the existing client/server job
@@ -82,13 +102,24 @@ Three other terminal facts keep separate statuses because they come from
 independent sources and can fail independently:
 
 - `workspace_filesystem` is one point-in-time observation;
-- `retained_content` depends on an authoritative bounded saved-result set; and
-- `f3` depends on platform-owned message classification and counters.
+- `retained_content` is a terminal best-effort run-directory file-size
+  observation; and
+- `message_traffic` depends on platform-owned message classification and
+  internal F3 counters.
 
 The server's expected-participant state remains `accepted`, `missing`,
 `invalid`, or `disabled`. Job and study aggregate statuses are derived from
 participant/job coverage and their typed statuses rather than copied into an
 extra warning list.
+
+The key numeric distinctions remain: `reported` means a complete value,
+`partial` means a useful subtotal, and `unavailable` means no usable value.
+Missing data is never zero. A further simplification is proposed for review,
+not yet implemented: fold the no-value measurement `error` into `unavailable`
+while retaining its cause in `issues`; also remove the fixed
+`["malformed_source"]` issue on an `invalid` participant because that status
+already states the outcome. This would not collapse independent measurements
+or treat a useful subtotal as complete.
 
 ## Hardware fields
 
@@ -132,25 +163,35 @@ Products use exact decimal arithmetic and the v1 rounding rule. The final
 coverage changes the single `resource_time.status` to `partial`; it does not
 create a public gap or end-reason record.
 
-## Workspace filesystem and saved results
+## Workspace filesystem and run-directory content
 
-Visible workspace-filesystem capacity and saved-result bytes are different
+Visible workspace-filesystem capacity and run-directory file bytes are different
 facts.
 
 - `workspace_filesystem` is observed once, during terminal finalization, for
   only the filesystem containing the existing NVFlare job workspace. Other
   mounted filesystems are not enumerated or summed.
-- `retained_content` is the exact sum for a complete bounded result set already
-  known to NVFlare, or a separately statused partial/unavailable result.
+- `retained_content` recursively sums logical `st_size` for regular files in
+  one participant's run directory, excluding top-level `resource_stats/`.
+  Symlinks and non-regular entries are ignored, hard links count per path, and
+  sparse files contribute logical rather than allocated size. A scan error is
+  partial when a useful subtotal exists, otherwise unavailable.
 
 Workspace capacity is not usage, allocation, billable storage, storage owned
 by the job, or a time-based measure. It is never added across participants or
-jobs. Saved-result bytes are additive and remain in participant, job, and
-study totals.
+jobs. Run-directory byte observations are additive and remain in participant,
+job, and study totals, but those sums are not unique retained storage or
+archive size because content can overlap and repeat.
 
-## F3 decisions
+The file traversal is a non-atomic participant self-report taken before the
+private handoff, stats-pool files, optional workspace upload, and later
+cleanup/log growth. Only the run directory is observed; separately configured
+result, log, and audit roots are a known coverage gap.
 
-Keep only one final counter: remote accepted. Exact final delivery to an
+## Message-traffic decisions (internal F3)
+
+Keep only one final public measurement: sender-confirmed outgoing payload and
+message counts grouped by named remote recipient. Exact final delivery to an
 in-process logical destination and failed send attempts are outside the v1
 public metric.
 
@@ -183,7 +224,9 @@ spoofable marker.
 The root server reconciles terminal reports against the participants it already
 expects. It marks each participant accepted, missing, invalid, or disabled at
 the cutoff, validates and copies accepted terminal values, and aggregates the
-job summary. It cannot reconstruct private resource-time intervals.
+job summary. The summary stores the job ID alone; an authorized CLI resolves
+the trusted metadata name for display. Participant reports cannot provide or
+override it. The server cannot reconstruct private resource-time intervals.
 
 The bundle lives only in the job's existing `WORKSPACE` archive. The query
 handler reads fixed `resource_stats/...` members and never accepts a
@@ -201,7 +244,9 @@ archived summaries, and computes a response on demand. It adds only resource
 time, retained-content bytes, and the primary F3 accepted-remote counter. It
 does not add workspace capacity and does not persist a study total. Jobs
 removed by normal retention are outside the result, so this is not permanent
-historical accounting.
+historical accounting. Every study row keeps both job ID and trusted name;
+included archives must match that metadata, and duplicate names remain
+distinct by ID.
 
 ## Earlier reductions retained
 
@@ -210,7 +255,7 @@ The final-only change preserves the previously approved reductions:
 - role appears once in each expected-participant entry;
 - report acceptance and measurement completeness are distinct;
 - missing data is never encoded as zero;
-- saved results have no per-file names or content hashes;
+- retained-content observations expose no per-file names, paths, or hashes;
 - model files are not guessed or hashed;
 - no resource-specific checksum or separate archive index is retained;
 - summary warnings are derived rather than stored twice;

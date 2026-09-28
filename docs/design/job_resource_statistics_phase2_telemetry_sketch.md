@@ -44,8 +44,8 @@ Phase 1 values have a different meaning:
 - accumulated CPU, memory, and GPU resource time;
 - one terminal visible workspace-filesystem capacity observation in each
   participant report;
-- one saved-result byte total; and
-- F3 payload counters.
+- one run-directory regular-file byte total; and
+- sender-confirmed `message_traffic.sent_to` payload counters.
 
 Phase 2 may use JobStatsReporter to publish Phase 1 facts, but it must
 keep the two kinds of data separate. Utilization samples must never fill a
@@ -74,21 +74,29 @@ The first version should publish a small job-level summary:
 | --- | --- |
 | Schema version | resource summary schema_version |
 | Job ID | resource summary job_id |
-| Finalization time | finalized_at |
+| Job name | existing server-owned job metadata at publication time; not stored in `resource_summary` |
 | Expected participants | number of entries in `participants` |
 | Accepted reports | `participants` entries with status `accepted` |
 | Missing reports | `participants` entries with status `missing` |
 | Invalid reports | `participants` entries with status `invalid` |
 | Disabled reports | `participants` entries with status `disabled` |
-| Compute status | totals.resource_time.status |
-| Measured seconds | totals.resource_time.measured_seconds, when present |
-| CPU-unit-seconds | totals.resource_time.cpu groups |
-| Memory byte-seconds | totals.resource_time.memory |
-| Full-GPU instance-seconds | totals.resource_time.gpu full_gpu groups |
-| MIG instance-seconds | totals.resource_time.gpu MIG groups, only when present |
-| Saved-result bytes | totals.retained_content |
-| Accepted remote F3 payload bytes/messages | totals.f3.remote_accepted |
+| Compute status | derived from participant coverage and accepted `resource_time` values |
+| Measured seconds | sum of accepted participants' `resource_time.measured_seconds`, when present |
+| CPU-unit-seconds | sum of accepted participants' `resource_time.cpu` groups |
+| Memory byte-seconds | sum of accepted participants' `resource_time.memory` values |
+| Full-GPU instance-seconds | sum of accepted participants' `resource_time.gpu` full_gpu groups |
+| MIG instance-seconds | sum of accepted participants' `resource_time.gpu` MIG groups, only when present |
+| Run-directory file status and bytes | derived from participant coverage and accepted `retained_content` values |
+| Message payload sent bytes/messages | sum of accepted participants' `message_traffic.sent_to` entries, grouped as on-demand `message_traffic.sent` |
 | Overall quality | derived from the stored statuses |
+
+Phase 1 does not persist job totals or a finalization timestamp in
+`resource_summary`. This adapter calculates totals at publication time from
+the validated participant entries. A recipient-specific “sent to site” fact,
+if later selected for publication, likewise sums sender-side `sent_to` entries
+addressed to that site; it is not measured receipt or guaranteed delivery.
+A reporter event timestamp, if exposed,
+describes publication rather than job finalization.
 
 The first version does not publish participant-level hardware models. Model
 metadata may identify infrastructure. Adding it later requires a separate
@@ -103,6 +111,7 @@ Example names:
 
 ~~~text
 resource_proxy.schema_version
+resource_proxy.job_name
 resource_proxy.expected_reports
 resource_proxy.accepted_reports
 resource_proxy.compute_status
@@ -110,12 +119,14 @@ resource_proxy.measured_seconds
 resource_proxy.cpu_unit_seconds
 resource_proxy.memory_byte_seconds
 resource_proxy.full_gpu_instance_seconds
-resource_proxy.saved_result_bytes
-resource_proxy.f3_remote_payload_bytes
+resource_proxy.run_directory_file_bytes
+resource_proxy.message_payload_sent_bytes
 resource_proxy.quality
 ~~~
 
-These names are proposed, not final.
+These names are proposed, not final. Message bytes mean sender-confirmed
+payload accepted for a named destination, summed across participants; they
+are not receiver-measured bytes.
 
 There is no job-level storage-capacity or storage-time field. Each participant's
 single terminal visible workspace-filesystem observation remains in its
@@ -162,8 +173,7 @@ archived workspace and never changes Phase 1 bytes.
 Use a stable event ID based on:
 
 - job ID;
-- Phase 1 schema version; and
-- the summary's `finalized_at` value.
+- Phase 1 schema version.
 
 A repeated publication with the same event ID is a retry, not a new
 measurement.
@@ -176,7 +186,7 @@ be documented. The stored Phase 1 record remains the source of truth.
 Phase 2 preserves Phase 1 status.
 
 - the one `resource_time.status` stays reported, partial, or unavailable;
-- retained-content and F3 statuses remain separate; and
+- retained-content and `message_traffic` statuses remain separate; and
 - missing or invalid participant reports remain visible in counts.
 
 Do not convert unavailable to zero. Do not remove the partial label because
@@ -196,8 +206,9 @@ nvflare job resources --study NAME
 ~~~
 
 builds an on-demand view from matching jobs still retained by the normal job
-store. It adds resource time, saved-result bytes, and the primary F3
-accepted-remote counter, but never workspace-filesystem capacity. Jobs already
+store. It adds resource time, run-directory file bytes, and on-demand
+`message_traffic.sent` from participant `sent_to` entries, but never
+workspace-filesystem capacity. Jobs already
 removed by retention are not in that view. Sending job facts through
 JobStatsReporter does not turn the CLI view into permanent history or a
 billing ledger.
@@ -215,7 +226,7 @@ It must not publish:
 - raw cpuinfo, CPU flags, or topology;
 - workspace paths;
 - raw probe errors;
-- individual F3 messages; or
+- individual message-traffic events; or
 - job custom configuration.
 
 The adapter uses the permissions JobStatsReporter and NVFlare already have. It
@@ -240,7 +251,7 @@ Do not add or average them together. For example, GPU utilization percentage
 cannot be combined with GPU instance-seconds.
 
 The existing StatsPool transport histograms are also separate. They do not
-replace the exact per-job F3 counters.
+replace the exact per-job sender-confirmed message-traffic counters.
 
 ### 11.1 Deferred periodic capacity snapshots
 
@@ -300,8 +311,8 @@ Tests should cover:
 - refusal for a missing or invalid publication marker, an unexpected resource
   namespace, or inconsistent participant records;
 - exact field mapping;
-- preservation of the single compute status and the separate saved-result and
-  F3 statuses;
+- preservation of the single compute status and the separate run-directory-file and
+  `message_traffic` statuses;
 - omission of absent MIG groups;
 - privacy-field rejection;
 - stable retry IDs;

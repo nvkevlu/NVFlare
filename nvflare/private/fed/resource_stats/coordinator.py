@@ -38,7 +38,6 @@ from .contract import (
     SCHEMA_VERSION,
     ContractError,
     canonical_json_bytes,
-    derive_job_totals,
     derive_participant_totals,
     load_and_validate,
     utc_timestamp,
@@ -105,7 +104,7 @@ class ResourceStatsCoordinator:
     def __init__(self):
         self._jobs: dict[str, _JobState] = {}
         # This lock protects only the job-state registry.  Each state has its
-        # own lock for acceptance, cutoff, and filesystem publication so I/O
+        # own lock for acceptance, closure, and filesystem publication so I/O
         # for one job never blocks reports for an unrelated job.
         self._jobs_lock = threading.Lock()
 
@@ -316,10 +315,6 @@ class ResourceStatsCoordinator:
             if state.finalized:
                 return self._read_resource_file(state.run_dir, RESOURCE_SUMMARY_FILE, MAX_RESOURCE_SUMMARY_BYTES)
             state.closed = True
-            observed_times = [utc_timestamp()]
-            observed_times.extend(report.received_at for report in state.accepted.values())
-            observed_times.extend(state.invalid_at.values())
-            cutoff = max(observed_times)
             participants = []
             for participant_name, role in state.expected.items():
                 base = {"participant_name": participant_name, "role": role}
@@ -355,10 +350,7 @@ class ResourceStatsCoordinator:
                 "schema_version": SCHEMA_VERSION,
                 "kind": KIND_RESOURCE_SUMMARY,
                 "job_id": job_id,
-                "report_cutoff_at": cutoff,
-                "finalized_at": max(cutoff, utc_timestamp()),
                 "participants": participants,
-                "totals": derive_job_totals(participants),
             }
             validate_record(summary)
             summary_data = canonical_json_bytes(summary)

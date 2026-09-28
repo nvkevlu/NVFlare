@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -79,7 +80,7 @@ def _run_get_task_command(task_name, monkeypatch):
     cell = MagicMock()
     cell.get_fqcn.return_value = "server/job-1"
     agent = ServerCommandAgent(engine=engine, cell=cell)
-    monkeypatch.setattr(agent, "_get_client", lambda _token: MagicMock())
+    monkeypatch.setattr(agent, "_get_client", lambda _token: SimpleNamespace(name="site-1"))
     monkeypatch.setattr(
         "nvflare.private.fed.server.server_command_agent.ServerCommands.get_command",
         lambda _command_name: command,
@@ -107,19 +108,21 @@ def test_real_task_response_is_classified_at_server_job_origin(monkeypatch):
     assert context is not None
     assert context._accounting is counter
     assert context._traffic_class is F3TrafficClass.TASK_RESPONSE
+    assert context._recipient_name == "site-1"
     assert counter.pending_count == 1
 
     attempt = context.try_begin("server/job-1", "site-1/job-1")
     assert attempt is not None
     attempt.accepted(10)
-    assert counter.freeze()["remote_accepted"] == {"payload_bytes": "10", "messages": "1"}
+    assert counter.freeze()["sent_to"] == [{"participant_name": "site-1", "payload_bytes": "10", "messages": "1"}]
 
 
 def test_real_task_response_pre_admits_while_callback_is_active(monkeypatch):
     observed = {}
 
-    def observe_attach(_message, _counter, _traffic_class, *, pre_admit=None):
+    def observe_attach(_message, _counter, _traffic_class, *, recipient_name, pre_admit=None):
         observed["callback_drained"] = agent.wait_for_callbacks(0.0)
+        observed["recipient_name"] = recipient_name
         observed["pre_admit"] = pre_admit
         return True
 
@@ -133,7 +136,7 @@ def test_real_task_response_pre_admits_while_callback_is_active(monkeypatch):
     cell = MagicMock()
     cell.get_fqcn.return_value = "server/job-1"
     agent = ServerCommandAgent(engine=engine, cell=cell)
-    monkeypatch.setattr(agent, "_get_client", lambda _token: MagicMock())
+    monkeypatch.setattr(agent, "_get_client", lambda _token: SimpleNamespace(name="site-1"))
     monkeypatch.setattr(
         "nvflare.private.fed.server.server_command_agent.ServerCommands.get_command",
         lambda _command_name: command,
@@ -156,6 +159,7 @@ def test_real_task_response_pre_admits_while_callback_is_active(monkeypatch):
 
     assert observed == {
         "callback_drained": False,
+        "recipient_name": "site-1",
         "pre_admit": ("server/job-1", "site-1/job-1"),
     }
 

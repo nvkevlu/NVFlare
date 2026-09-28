@@ -1,0 +1,1 @@
+{"schema_version": "1", "status": "ok", "exit_code": 0, "data": [{"job_id": "64b20e29-7f08-4eeb-bdd6-8303be37dae8", "job_name": "hello-pt", "status": "FINISHED:COMPLETED", "submit_time": "2026-09-22T16:56:10.014609+00:00", "duration": "0:00:32.863584", "study": "retained-validation"}]}

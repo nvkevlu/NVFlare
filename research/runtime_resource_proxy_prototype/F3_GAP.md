@@ -1,8 +1,8 @@
-# F3 implementation and validation status
+# Message traffic implementation and validation status
 
-This document defines the Phase 1 `f3` value and maps it to the implementation
-in this branch. The filename is retained because earlier reviews linked to it,
-but F3 is no longer only a proposed gap.
+This document defines the Phase 1 public `message_traffic` value and maps it
+to the internal F3 implementation in this branch. The filename is retained
+because earlier reviews linked to it.
 
 The implementation uses existing NVFlare processes and messages. It adds no
 privilege, service, mount, launcher argument, environment variable, job
@@ -10,29 +10,46 @@ setting, or operator configuration.
 
 ## The public value
 
-A participant reports one counter pair:
+A participant reports a sender-confirmed counter pair for each named remote
+recipient:
 
 ```json
 {
   "status": "reported",
-  "remote_accepted": {
-    "payload_bytes": "12582912",
-    "messages": "3"
-  }
+  "sent_to": [
+    {
+      "participant_name": "site-1",
+      "payload_bytes": "12582912",
+      "messages": "3"
+    }
+  ]
 }
 ```
 
-`remote_accepted` means that the local transport accepted an included logical
-send to a remote destination. It does not mean that the receiver processed or
-durably stored the message.
+Each `sent_to` entry means the sender's local transport accepted an included
+logical send addressed to that participant. It is not a receiver-observed byte
+count and does not prove the recipient received, processed, or durably stored
+the message. There is no participant-level `sent` scalar or measured
+`received` field. The CLI may sum a sender's entries for outgoing traffic and
+sum entries addressed to a site for “sent to site”; neither sum is confirmed
+receipt.
 
-Both counters are canonical unsigned decimal strings bounded to U128.
-`messages` counts logical operations, not Cell frames or stream chunks. A
-reported zero message count therefore requires zero payload bytes.
+A true receiver-observed counter would need receiver-side correlation of the
+trusted logical operation across ordinary Cell sends, streams, and
+`DownloadService` transfers, including relays and failures. That is a
+different measurement and is not supplied by the existing sender-completion
+callbacks in Phase 1.
+
+Both counters in each entry are canonical unsigned decimal strings bounded to U128.
+`messages` counts logical operations, not Cell frames or stream chunks. Listed
+recipients have a positive message count; a participant with no accepted
+included sends reports an empty `sent_to` list.
 
 A final in-process delivery to the logical destination and a send that fails
 before local transport acceptance do not enter the public value. They are also
-not published as separate diagnostic buckets.
+not published as separate diagnostic buckets. A `partial` value retains only
+bounded known `sent_to` entries and the applicable issues; `unavailable` and
+`error` do not invent recipient amounts.
 
 ## Exactly what is counted
 
@@ -76,7 +93,9 @@ count another send. The accounting context is a local Python object and is
 never serialized as a header, so it cannot grant authority to a remote or
 forwarding process. If the remote logical destination is reached through a
 local first-hop relay, the origin still counts its logical send once; only the
-relay's duplicate contribution is excluded.
+relay's duplicate contribution is excluded. The recipient name is resolved
+from trusted participant identity, not parsed from a relay hop or supplied by
+job code.
 
 ## Explicit exclusions
 
@@ -265,9 +284,9 @@ sender counter:
 - Prototype `JobTrafficEvent` objects are test inputs, not NVFlare events or
   CellNet messages.
 
-CellNet is the communication layer used by the selected operations. The F3
-field counts only the three semantic operations above, not all CellNet or
-event traffic.
+CellNet is the communication layer used by the selected operations. Public
+`message_traffic.sent_to` counts only the three semantic operations above,
+not all CellNet or event traffic.
 
 ## Validation status
 
@@ -278,14 +297,20 @@ pre-encryption sizing, streamed terminal success/failure, `DownloadService`
 folding and retry suppression, exact final-local versus local-relay behavior,
 child callback pre-drain, cutoff, restore, and terminal-report self-exclusion.
 
-The remaining evidence is a new process-mode end-to-end run. That run should
-replace the earlier historical `unavailable/not_bound` F3 artifact with a live
-reported result; it does not require another schema redesign.
+The
+[historical Colossus run](colossus_pytorch_job_name_e2e_reference/README.md)
+provides the process-mode evidence. One server and two clients completed three
+rounds with 14 accepted logical messages: two deployments, six real task
+responses, and six task results. All three old participant F3 objects were
+`reported`, and their historical rollup reconciled with job and study output.
 
-The checked-in Colossus runs predate this implementation. Their exact
-`unavailable/not_bound` F3 values remain useful historical evidence and are
-intentionally unchanged. No new process-mode or Colossus live F3 reference has
-yet replaced them.
+The older Colossus captures still contain exact historical
+`unavailable/not_bound` values and remain useful evidence of the earlier code.
+The preceding reported-F3 capture predates the required server-side `job_name`
+summary field. Both captures predate the current `message_traffic.sent_to`
+contract, so they remain historical measurement evidence, not current-schema
+fixtures. The [deterministic production reference](production_reference/README.md)
+shows the current contract.
 
 An uncovered runtime path must produce `partial` or `unavailable` data. It
 must not fall back to generic network statistics or claim a complete zero.

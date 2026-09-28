@@ -94,7 +94,9 @@ def send_requests(
 
         cell_message = new_cell_message({}, req)
         if logical_send_accounting is not None and logical_send_traffic_class is not None:
-            attach_f3_context(cell_message, logical_send_accounting, logical_send_traffic_class)
+            attach_f3_context(
+                cell_message, logical_send_accounting, logical_send_traffic_class, recipient_name=client.name
+            )
         target_msgs[fqcn] = TargetMessage(target=fqcn, channel=channel, topic=command, message=cell_message)
 
         fqcn_to_client[fqcn] = client

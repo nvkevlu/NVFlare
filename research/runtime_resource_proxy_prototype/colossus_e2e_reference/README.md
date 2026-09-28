@@ -3,9 +3,19 @@
 Status: captured evidence from one successful run on September 18, 2026. These
 are real outputs, not deterministic golden fixtures.
 
-For the primary live evidence, including a real PyTorch/CIFAR-10 workload and
-the framework-bundled CUDA Runtime gap it exposed, see the complete
-[PyTorch Colossus E2E reference](../colossus_pytorch_e2e_reference/README.md).
+Historical contract note: this capture predates the required pre-release v1
+`job_name` field in server-created job and study summaries. It remains runtime
+evidence, but those summaries do not validate against the current contract.
+Participant summaries remain current in this respect because their wire shape
+still carries only `job_id`.
+
+For the current primary live evidence, including the required job-name fields
+and current CLI output from a real PyTorch/CIFAR-10 workload, see the
+[current-schema Colossus reference](../colossus_pytorch_job_name_e2e_reference/README.md).
+The older
+[PyTorch Colossus E2E reference](../colossus_pytorch_e2e_reference/README.md)
+preserves the framework-bundled CUDA Runtime gap that the current collector
+later fixed.
 
 This run installed a wheel built from this worktree into a fresh Python 3.14
 virtual environment on Colossus host `ipp2-2159`, then ran NVFlare's normal
@@ -30,8 +40,8 @@ installed Python -I worker bootstrap
 
 Job `84722338-787a-41b0-8132-6de19bb89c92` completed successfully. The server,
 `site-1`, and `site-2` reports were all accepted. The production bundle
-validator accepts the four archived JSON records and confirms that the job
-totals exactly reconcile with the participant records.
+validator current at capture time accepted the four archived JSON records and
+confirmed that the job totals exactly reconciled with the participant records.
 
 The normal `WORKSPACE` contains exactly these resource-statistics records:
 
@@ -69,7 +79,7 @@ GPU time is deliberately counted more than once. The total is participant
 resource-time, not physical cluster capacity.
 
 `retained_content` and F3 are `unavailable/not_bound` because this historical
-run predates the current F3 bindings and a retained-result owner. The run
+run predates the current F3 bindings and terminal run-directory scan. The run
 proves the Linux Process-launch path at the time with an
 unconstrained cgroup and one full GPU. It does not prove Docker, Kubernetes,
 Slurm, constrained-cgroup, multi-GPU, or MIG behavior.

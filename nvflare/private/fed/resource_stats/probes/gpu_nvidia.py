@@ -22,7 +22,8 @@ bootstrap (``job_process_bootstrap.py``) is the first and only thing that
 imports the resource-stats collector, before any job/site custom path is
 added to ``sys.path``.
 """
-
+# Evaluate against nvidia-smi.
+# For multi-node runs, measure from inside each execution environment.
 from __future__ import annotations
 
 import ctypes

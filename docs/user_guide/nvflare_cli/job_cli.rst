@@ -589,22 +589,26 @@ so specifying ``--site all`` explicitly is equivalent to omitting it.
 It also supports ``--schema``.
 
 **********************
-Resource Utilization
+Job Resources
 **********************
 
-``nvflare job resources`` reports how much CPU, memory, and GPU time a
-finished job's participants used, tracked as capacity-time totals over the
-life of the job. This is a utilization-accounting view, not a live monitor:
-data is only available once a job has finished and each participant's final
-report has been finalized on the server. It is unrelated to ``nvflare job
+``nvflare job resources`` reports the CPU, memory, and GPU capacity visible to
+each finished job participant, integrated over its measured interval. It is
+not a live monitor: data is available once the job has finished and the server
+has finalized the participant reports. It is unrelated to ``nvflare job
 stats``, which shows a running job's live training statistics.
 
-Show resource utilization for one job:
+Show recorded resources for one job:
 
 .. code-block:: shell
 
    nvflare job resources --job <job_id>
    nvflare job resources --job <job_id> --study cancer_research
+
+The first line of the human-readable result identifies both values, for
+example ``Recorded resources for job hello-pt (ID: abc123).`` The job name is
+the existing server-owned job metadata; the ID remains the unique lookup and
+reconciliation key.
 
 Add ``--site`` to also include one participant's own report, including
 hardware model details:
@@ -619,45 +623,75 @@ Show the rollup across every retained, finalized job in a study:
 
    nvflare job resources --study cancer_research
 
+The study table has separate ``JOB ID`` and ``NAME`` columns. Job names are
+labels and can repeat, so rows remain distinct and deterministically ordered by
+job ID.
+
 ``job resources`` accepts:
 
 - ``--job``: job ID to inspect. Uses the default study unless ``--study`` is
   also given.
 - ``--study``: study containing the job (with ``--job``), or the study to roll
   up (without ``--job``). If omitted with ``--job``, the default study is used.
-- ``--site``: also return one participant's own report and hardware model
-  detail. Requires ``--job``.
+- ``--site``: also return one participant's own report, hardware model detail,
+  and the payload other participants reported sending to that site. Requires
+  ``--job``.
 - ``job resources`` also supports ``--schema``.
 
 Reported fields
 ================
 
-- **CPU / memory / GPU time**: capacity-time totals (e.g. GPU-hours,
-  CPU-unit-hours, GiB-hours), not point-in-time usage. Each participant's
-  report also carries a status of ``REPORTED`` (fully measured), ``PARTIAL``
-  (at least one dimension could not be measured for part of the run), or
-  ``UNAVAILABLE`` (no participant report was received or it could not be
-  validated).
+- **Job identity**: the archived resource summary contains ``job_id``, not a
+  duplicated ``job_name``. The authorized CLI reads the existing server-owned
+  job metadata for a display name; if needed, it falls back to job-folder name
+  and then job ID. Every on-demand study row currently includes both ID and
+  metadata-derived name, even when resource data is unavailable. Participant
+  summaries and their terminal wire reports do not carry ``job_name``. No new
+  privilege or configuration is required for this lookup.
+- **CPU / memory / GPU time**: the table shows average visible capacity over
+  each measured interval; job and study totals derive capacity-time (e.g.
+  GPU-hours, CPU-unit-hours, GiB-hours) from participant reports. Each participant's
+  accepted report also carries a compute status of ``REPORTED`` (complete),
+  ``PARTIAL`` (a useful but incomplete measurement), or ``UNAVAILABLE`` (no
+  usable compute measurement). A participant whose report was not accepted is
+  shown separately as ``missing`` or ``invalid``; missing data is never zero.
 - **Workspace filesystem capacity**: a one-time snapshot taken when the
   participant's report was assembled, shown only with ``--site``.
-- **Saved content**: the total size of the participant's job run directory
-  (excluding the platform's own resource-stats bookkeeping). This is a
-  workspace-size measurement, not a curated "just the model/result" figure --
-  it also includes logs, configuration, and job inputs.
-- **F3 network traffic**: accepted send bytes for job deployment, real task
-  responses, and submitted task results. It excludes acknowledgements, empty
-  task polling, and traffic outside those three operations.
+- **Run-directory files**: a terminal best-effort sum of logical file sizes for
+  regular files in the participant's job run directory, excluding top-level
+  ``resource_stats/``. Symlinks and non-regular entries are ignored; hard
+  links count per path and sparse files count logical rather than allocated
+  size. This is not a curated "just the model/result" figure -- it can include
+  logs, configuration, temporary files, and job inputs. A useful subtotal
+  after a scan error is ``partial`` in JSON. Separately configured result, log,
+  and audit roots are not currently included.
+- **Message traffic**: payload bytes the sender's transport accepted for job
+  deployment, real task responses, and submitted task results, grouped by
+  destination participant. The per-site ``sent to site`` figure is derived
+  from other participants' reports. It is not a measurement by the receiving
+  process or proof of delivery. Acknowledgements, empty task polling, and
+  traffic outside those three operations are excluded.
 
 Totals are **additive across participants**: if participants share physical
 hardware (for example, a proof-of-concept deployment running multiple sites on
 one machine), the sum can exceed that machine's actual capacity. This is
 expected utilization accounting, not a substitute for cluster capacity or
-billing data.
+billing data. Run-directory-file totals can likewise count repeated files
+across participants; they are not unique retained storage, archive size,
+allocated disk usage, or billable storage. The file walk is a non-atomic
+participant self-report taken before handoff creation, stats-pool files,
+optional workspace upload, and later cleanup or log growth.
 
 A job's ``COMPLETE``/``PARTIAL`` coverage in the human-readable output
 reflects how many expected participants' reports were actually accepted (a
 participant that never reports still shows as ``missing``); it does not by
 itself indicate whether training succeeded.
+
+These status fields answer different questions: report acceptance, compute
+measurement completeness, run-directory scan completeness, and message-counter
+completeness. The last three may differ for one participant. The essential
+numeric meanings are complete value, useful subtotal, and no usable value;
+they keep an incomplete subtotal from being shown as a complete total.
 
 Study-level errors
 ====================
@@ -669,7 +703,12 @@ Study-level errors
   finishes.
 - Use ``--format json`` to retrieve the full structured envelope
   (``resource_summary``, and ``participant_summary`` when ``--site`` is given,
-  or ``summary`` for a study rollup) for automation.
+  or ``summary`` for a study rollup) for automation. ``resource_summary`` has
+  ``job_id`` and the expected participant entries, but no ``job_name`` or
+  derived totals. Study ``jobs`` rows have both
+  identity fields and computed totals where data is available. The participant
+  record remains keyed only by ``job_id``; the server resolves the display
+  name from existing metadata when handling the CLI query.
 
 The same data is available programmatically through the FLARE API; see
 :ref:`flare_api_resource_utilization`.

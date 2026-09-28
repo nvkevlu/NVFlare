@@ -35,7 +35,9 @@ from zipfile import ZIP_STORED, ZipFile, ZipInfo
 from prototype_contract import ResourceTimeAccumulator, assemble_participant_summary
 from review_contract_fixtures import write_review_contract_fixtures
 from runtime_probe import probe_cpu, probe_gpu_records, probe_memory, probe_storage
+from schema.contract_v1 import derive_job_totals, derive_study_totals
 
+from nvflare.private.fed.resource_stats.collector import observe_retained_content
 from nvflare.tool.job.job_resources import render_job_resources, render_study_resources
 
 PARTICIPANT_KIND = "nvflare.resource_stats.participant_summary"
@@ -153,7 +155,7 @@ def _finish_local_report(
     handoff = accumulator.finish_measurements(
         finished,
         workspace_filesystem=workspace_filesystem,
-        retained_content={"status": "unavailable", "issues": ["not_bound"]},
+        retained_content=observe_retained_content(workspace),
         child_f3={
             "status": "unavailable",
             "issues": ["observation_incomplete"],
@@ -190,42 +192,19 @@ def _accepted_entry(
         "received_at": report["reported_at"],
         "resource_time": deepcopy(report["resource_time"]),
         "retained_content": deepcopy(report["retained_content"]),
-        "f3": deepcopy(report["f3"]),
+        "message_traffic": deepcopy(report["message_traffic"]),
     }
 
 
 def _resource_summary(
     job_id: str,
     accepted_entry: dict[str, Any],
-    finalized_at: str,
 ) -> dict[str, Any]:
-    retained = accepted_entry["retained_content"]
-    retained_total = (
-        {"status": retained["status"], "bytes": retained["bytes"]}
-        if retained["status"] in {"reported", "partial"}
-        else {"status": "unavailable"}
-    )
-    f3 = accepted_entry["f3"]
-    f3_total = (
-        {
-            "status": f3["status"],
-            "remote_accepted": deepcopy(f3["remote_accepted"]),
-        }
-        if f3["status"] in {"reported", "partial"}
-        else {"status": "unavailable"}
-    )
     return {
         "schema_version": "1.0",
         "kind": RESOURCE_SUMMARY_KIND,
         "job_id": job_id,
-        "report_cutoff_at": finalized_at,
-        "finalized_at": finalized_at,
         "participants": [accepted_entry],
-        "totals": {
-            "resource_time": deepcopy(accepted_entry["resource_time"]),
-            "retained_content": retained_total,
-            "f3": f3_total,
-        },
     }
 
 
@@ -240,62 +219,17 @@ def _write_workspace_archive(path: Path, members: dict[str, bytes]) -> None:
             archive.writestr(info, data)
 
 
-def _sum_groups(resource_time: dict[str, Any], resource: str, field: str, kind: str | None = None) -> Decimal | None:
-    if resource not in resource_time:
-        return None
-    groups = resource_time[resource]["groups"]
-    return sum(
-        (Decimal(group[field]) for group in groups if kind is None or group.get("kind") == kind),
-        Decimal(0),
-    )
-
-
-def _hours(value: Decimal | None, divisor: Decimal = Decimal(3600)) -> str:
-    return "N/A" if value is None else f"{value / divisor:.4f}"
-
-
-def _memory_time(resource_time: dict[str, Any]) -> Decimal | None:
-    return Decimal(resource_time["memory"]["byte_seconds"]) if "memory" in resource_time else None
-
-
-def _retained_bytes(value: dict[str, Any]) -> Decimal | None:
-    return Decimal(value["bytes"]) if "bytes" in value else None
-
-
-def _f3_bytes(value: dict[str, Any]) -> Decimal | None:
-    return Decimal(value["remote_accepted"]["payload_bytes"]) if "remote_accepted" in value else None
-
-
-def _human_job(summary: dict[str, Any]) -> str:
-    entry = summary["participants"][0]
-    totals = entry["resource_time"]
-    cpu = _sum_groups(totals, "cpu", "unit_seconds")
-    gpu = _sum_groups(totals, "gpu", "instance_seconds", "full_gpu")
-    memory = Decimal(totals["memory"]["byte_seconds"]) if "memory" in totals else None
-    retained = (
-        Decimal(entry["retained_content"]["bytes"]) if entry["retained_content"]["status"] != "unavailable" else None
-    )
-    f3 = Decimal(entry["f3"]["remote_accepted"]["payload_bytes"]) if entry["f3"]["status"] != "unavailable" else None
-    return "\n".join(
-        [
-            f"Resources recorded for job {summary['job_id']}.",
-            "The participant sent one terminal report; resource-time was accumulated while it ran.",
-            "",
-            "SITE                    STATUS    QUALITY       FULL GPU h   CPU h   "
-            "MEM GiB h   SAVED GiB   F3 REMOTE GiB",
-            (
-                f"{entry['participant_name']:<23} {entry['status']:<9} {totals['status'].upper():<13} "
-                f"{_hours(gpu):>10} {_hours(cpu):>8} "
-                f"{_hours(memory, Decimal(2**30 * 3600)):>11} "
-                f"{_hours(retained, Decimal(2**30)):>11} "
-                f"{_hours(f3, Decimal(2**30)):>8}"
-            ),
-            "",
-        ]
-    )
-
-
-def _study_summary(study: str, job_summary: dict[str, Any]) -> dict[str, Any]:
+def _study_summary(study: str, job_name: str, job_summary: dict[str, Any]) -> dict[str, Any]:
+    job_totals = derive_job_totals(job_summary["participants"])
+    rows = [
+        {
+            "job_id": job_summary["job_id"],
+            "job_name": job_name,
+            "job_status": "FINISHED:COMPLETED",
+            "resource_data": "included",
+            "totals": job_totals,
+        }
+    ]
     return {
         "schema_version": "1.0",
         "kind": STUDY_SUMMARY_KIND,
@@ -307,126 +241,9 @@ def _study_summary(study: str, job_summary: dict[str, Any]) -> dict[str, Any]:
             "unavailable_jobs": "0",
             "nonterminal_jobs": "0",
         },
-        "jobs": [
-            {
-                "job_id": job_summary["job_id"],
-                "job_status": "FINISHED:COMPLETED",
-                "resource_data": "included",
-                "totals": deepcopy(job_summary["totals"]),
-            }
-        ],
-        "totals": deepcopy(job_summary["totals"]),
+        "jobs": rows,
+        "totals": derive_study_totals(rows),
     }
-
-
-def _aggregate_quality(totals: dict[str, Any]) -> str:
-    statuses = {
-        totals["resource_time"]["status"],
-        totals["retained_content"]["status"],
-        totals["f3"]["status"],
-    }
-    if statuses == {"reported"}:
-        return "COMPLETE"
-    if statuses == {"unavailable"}:
-        return "UNAVAILABLE"
-    return "PARTIAL"
-
-
-def _human_study(study_summary: dict[str, Any]) -> str:
-    coverage = study_summary["coverage"]
-    show_mig = any(
-        row["resource_data"] == "included"
-        and (
-            _sum_groups(
-                row["totals"]["resource_time"],
-                "gpu",
-                "instance_seconds",
-                "mig_compute_instance",
-            )
-            or Decimal(0)
-        )
-        > Decimal(0)
-        for row in study_summary["jobs"]
-    )
-    header = "JOB                  JOB STATUS           RESOURCE DATA  QUALITY       FULL GPU h"
-    if show_mig:
-        header += "  MIG CI h"
-    header += "      CPU h      MEM GiB h  SAVED GiB  F3 REMOTE GiB"
-    lines = [
-        f"Resources recorded for finalized jobs in study {study_summary['selection']['study_name']}.",
-        (
-            f"{coverage['selected_jobs']} jobs found | "
-            f"{int(coverage['included_jobs']) + int(coverage['unavailable_jobs'])} finalized | "
-            f"{coverage['included_jobs']} valid summaries | "
-            f"{coverage['unavailable_jobs']} unavailable | "
-            f"{coverage['nonterminal_jobs']} still running (excluded)"
-        ),
-        "",
-        header,
-    ]
-    for row in study_summary["jobs"]:
-        if row["resource_data"] != "included":
-            mig = f"{'N/A':>8} " if show_mig else ""
-            lines.append(
-                f"{row['job_id']:<20} {row['job_status']:<20} {row['resource_data']:<14} "
-                f"{'—':<13} {'N/A':>10} {mig}{'N/A':>10} {'N/A':>12} {'N/A':>10} {'N/A':>7}"
-            )
-            continue
-        totals = row["totals"]
-        resource_time = totals["resource_time"]
-        retained = totals["retained_content"]
-        f3 = totals["f3"]
-        quality = _aggregate_quality(totals)
-        mig = (
-            f"{_hours(_sum_groups(resource_time, 'gpu', 'instance_seconds', 'mig_compute_instance')):>8} "
-            if show_mig
-            else ""
-        )
-        lines.append(
-            f"{row['job_id']:<20} {row['job_status']:<20} {row['resource_data']:<14} "
-            f"{quality:<13} "
-            f"{_hours(_sum_groups(resource_time, 'gpu', 'instance_seconds', 'full_gpu')):>10} {mig}"
-            f"{_hours(_sum_groups(resource_time, 'cpu', 'unit_seconds')):>10} "
-            f"{_hours(_memory_time(resource_time), Decimal(2**30 * 3600)):>12} "
-            f"{_hours(_retained_bytes(retained), Decimal(2**30)):>10} "
-            f"{_hours(_f3_bytes(f3), Decimal(2**30)):>7}"
-        )
-    totals = study_summary["totals"]
-    resource_time = totals["resource_time"]
-    retained = totals["retained_content"]
-    f3 = totals["f3"]
-    total_quality = _aggregate_quality(totals)
-    if total_quality == "UNAVAILABLE":
-        coverage_label = "UNAVAILABLE"
-    elif coverage["unavailable_jobs"] == "0" and coverage["nonterminal_jobs"] == "0" and total_quality == "COMPLETE":
-        coverage_label = "COMPLETE"
-    else:
-        coverage_label = "PARTIAL"
-    lines.extend(
-        [
-            "",
-            f"Study totals from {coverage['included_jobs']} valid job summaries | coverage: {coverage_label}",
-            (
-                f"  FULL GPU {_hours(_sum_groups(resource_time, 'gpu', 'instance_seconds', 'full_gpu'))} h | "
-                + (
-                    "MIG CI "
-                    f"{_hours(_sum_groups(resource_time, 'gpu', 'instance_seconds', 'mig_compute_instance'))} h | "
-                    if show_mig
-                    else ""
-                )
-                + f"CPU {_hours(_sum_groups(resource_time, 'cpu', 'unit_seconds'))} h | "
-                f"MEM {_hours(_memory_time(resource_time), Decimal(2**30 * 3600))} GiB h | "
-                f"SAVED {_hours(_retained_bytes(retained), Decimal(2**30))} GiB | "
-                f"F3 REMOTE {_hours(_f3_bytes(f3), Decimal(2**30))} GiB"
-            ),
-            "",
-            "Notes:",
-            "  Totals include only finalized jobs with valid resource summaries.",
-            "  This view includes only jobs still retained by the job store.",
-            "",
-        ]
-    )
-    return "\n".join(lines)
 
 
 def _cli_envelope(selection: dict[str, Any], summary: dict[str, Any]) -> dict[str, Any]:
@@ -438,7 +255,7 @@ def _cli_envelope(selection: dict[str, Any], summary: dict[str, Any]) -> dict[st
     }
 
 
-def generate(output_dir: Path, job_id: str, study: str, observation_seconds: float) -> dict[str, Any]:
+def generate(output_dir: Path, job_id: str, job_name: str, study: str, observation_seconds: float) -> dict[str, Any]:
     output_dir = Path(output_dir)
     participant_name = "local-prototype-client"
     child_staging_dir = output_dir / "client_child" / "resource_stats" / "staging"
@@ -457,8 +274,7 @@ def generate(output_dir: Path, job_id: str, study: str, observation_seconds: flo
     _write(parent_resource_dir / "participant_summary.json", participant_bytes)
 
     accepted = _accepted_entry(participant_name, "client", participant)
-    finalized_at = _utc_now()
-    summary = _resource_summary(job_id, accepted, finalized_at)
+    summary = _resource_summary(job_id, accepted)
     summary_bytes = _json_bytes(summary)
 
     server_resource_dir = output_dir / "server_run" / "resource_stats"
@@ -478,8 +294,8 @@ def generate(output_dir: Path, job_id: str, study: str, observation_seconds: flo
         cli_dir / "resources-all.json",
         _json_bytes(_cli_envelope({"job_id": job_id, "site": "all"}, summary)),
     )
-    _write(cli_dir / "resources-all.txt", (render_job_resources(summary) + "\n").encode("utf-8"))
-    study_summary = _study_summary(study, summary)
+    _write(cli_dir / "resources-all.txt", (render_job_resources(summary, job_name=job_name) + "\n").encode("utf-8"))
+    study_summary = _study_summary(study, job_name, summary)
     _write(
         cli_dir / "resources-study.json",
         _json_bytes(_cli_envelope({"study": study}, study_summary)),
@@ -500,6 +316,7 @@ def generate(output_dir: Path, job_id: str, study: str, observation_seconds: flo
     receipt = {
         "schema_version": "prototype-0.4",
         "job_id": job_id,
+        "job_name": job_name,
         "study": study,
         "public_participant_reports": 1,
         "public_start_or_final_fragments": 0,
@@ -520,6 +337,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", "--output-dir", dest="output_dir", type=Path, default=Path("generated"))
     parser.add_argument("--job-id", default="prototype-job")
+    parser.add_argument("--job-name", default="prototype-resource-job")
     parser.add_argument("--study", default="prototype-study")
     parser.add_argument(
         "--observation-seconds",
@@ -528,7 +346,12 @@ def main() -> None:
         help="time for which the first real resource observation remains active",
     )
     args = parser.parse_args()
-    print(json.dumps(generate(args.output_dir, args.job_id, args.study, args.observation_seconds), indent=2))
+    print(
+        json.dumps(
+            generate(args.output_dir, args.job_id, args.job_name, args.study, args.observation_seconds),
+            indent=2,
+        )
+    )
 
 
 if __name__ == "__main__":

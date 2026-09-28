@@ -1,0 +1,210 @@
+{
+  "checks": {
+    "archive_participants_match_site_cli": true,
+    "archive_summary_matches_cli": true,
+    "contract_validation": true,
+    "f3_expected_message_counts": true,
+    "human_cli_labels_match": true,
+    "job_retained_exact_sum": true,
+    "participants_exact": true,
+    "retained_all_reported_positive": true,
+    "study_single_job_totals_match": true
+  },
+  "f3": {
+    "job_total": {
+      "remote_accepted": {
+        "messages": "14",
+        "payload_bytes": "3080186"
+      },
+      "status": "reported"
+    },
+    "participants": {
+      "server": {
+        "remote_accepted": {
+          "messages": "8",
+          "payload_bytes": "1559780"
+        },
+        "status": "reported"
+      },
+      "site-1": {
+        "remote_accepted": {
+          "messages": "3",
+          "payload_bytes": "760203"
+        },
+        "status": "reported"
+      },
+      "site-2": {
+        "remote_accepted": {
+          "messages": "3",
+          "payload_bytes": "760203"
+        },
+        "status": "reported"
+      }
+    }
+  },
+  "job_id": "64b20e29-7f08-4eeb-bdd6-8303be37dae8",
+  "retained_content": {
+    "client_post_job_comparison": {
+      "site-1": {
+        "largest_files": [
+          {
+            "bytes": 37731,
+            "path": "stats_pool_summary.json"
+          },
+          {
+            "bytes": 30349,
+            "path": "log.json"
+          },
+          {
+            "bytes": 16436,
+            "path": "log.txt"
+          },
+          {
+            "bytes": 6951,
+            "path": "app_site-1/custom/client.py"
+          },
+          {
+            "bytes": 5306,
+            "path": "log_fl.txt"
+          },
+          {
+            "bytes": 2138,
+            "path": "app_site-1/custom/__pycache__/model.cpython-312.pyc"
+          },
+          {
+            "bytes": 1878,
+            "path": "audit.log"
+          },
+          {
+            "bytes": 1506,
+            "path": "app_site-1/config/config_fed_server.json"
+          }
+        ],
+        "post_job_delta_bytes": 38639,
+        "post_job_regular_file_bytes": 111551,
+        "post_job_scan_ms": 0.339,
+        "regular_file_count": 19,
+        "reported_bytes": 72912
+      },
+      "site-2": {
+        "largest_files": [
+          {
+            "bytes": 38393,
+            "path": "stats_pool_summary.json"
+          },
+          {
+            "bytes": 30349,
+            "path": "log.json"
+          },
+          {
+            "bytes": 16436,
+            "path": "log.txt"
+          },
+          {
+            "bytes": 6951,
+            "path": "app_site-2/custom/client.py"
+          },
+          {
+            "bytes": 5306,
+            "path": "log_fl.txt"
+          },
+          {
+            "bytes": 2138,
+            "path": "app_site-2/custom/__pycache__/model.cpython-312.pyc"
+          },
+          {
+            "bytes": 1878,
+            "path": "audit.log"
+          },
+          {
+            "bytes": 1506,
+            "path": "app_site-2/config/config_fed_server.json"
+          }
+        ],
+        "post_job_delta_bytes": 39301,
+        "post_job_regular_file_bytes": 112213,
+        "post_job_scan_ms": 0.316,
+        "regular_file_count": 19,
+        "reported_bytes": 72912
+      }
+    },
+    "job_total": {
+      "bytes": "762003",
+      "status": "reported"
+    },
+    "participants": {
+      "server": {
+        "bytes": "616179",
+        "status": "reported"
+      },
+      "site-1": {
+        "bytes": "72912",
+        "status": "reported"
+      },
+      "site-2": {
+        "bytes": "72912",
+        "status": "reported"
+      }
+    },
+    "server_archive_comparison": {
+      "archive_delta_bytes": 34407,
+      "archive_non_resource_stats_bytes": 650586,
+      "archive_without_stats_pool_bytes": 616710,
+      "largest_files": [
+        {
+          "bytes": 252165,
+          "path": "app_server/FL_global_model.pt"
+        },
+        {
+          "bytes": 252165,
+          "path": "app_server/best_FL_global_model.pt"
+        },
+        {
+          "bytes": 46198,
+          "path": "log.json"
+        },
+        {
+          "bytes": 33876,
+          "path": "stats_pool_summary.json"
+        },
+        {
+          "bytes": 29283,
+          "path": "log.txt"
+        },
+        {
+          "bytes": 12366,
+          "path": "log_fl.txt"
+        },
+        {
+          "bytes": 6951,
+          "path": "app_server/custom/client.py"
+        },
+        {
+          "bytes": 2508,
+          "path": "audit.log"
+        },
+        {
+          "bytes": 2138,
+          "path": "app_server/custom/__pycache__/model.cpython-312.pyc"
+        },
+        {
+          "bytes": 1715,
+          "path": "metrics/round_metrics.jsonl"
+        }
+      ],
+      "model_files": [
+        {
+          "bytes": 252165,
+          "path": "app_server/FL_global_model.pt"
+        },
+        {
+          "bytes": 252165,
+          "path": "app_server/best_FL_global_model.pt"
+        }
+      ],
+      "regular_file_count": 24,
+      "reported_bytes": 616179
+    }
+  },
+  "status": "passed"
+}

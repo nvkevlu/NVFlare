@@ -9,8 +9,8 @@ are canonical decimal strings rather than JSON numbers.
 
 | Record | Required members | Purpose |
 | --- | --- | --- |
-| `participant_summary` | schema_version, kind, job_id, participant_name, reported_at, resource_time, workspace_filesystem, retained_content, f3 | One terminal report from one participant. |
-| `resource_summary` | schema_version, kind, job_id, report_cutoff_at, finalized_at, participants, totals | Final server result for one job. |
+| `participant_summary` | schema_version, kind, job_id, participant_name, reported_at, resource_time, workspace_filesystem, retained_content, message_traffic | One terminal report from one participant. |
+| `resource_summary` | schema_version, kind, job_id, participants | Final server result for one job. |
 | `study_summary` | schema_version, kind, selection, generated_at, coverage, jobs, totals | On-demand view over matching retained jobs; never archived as the study's history. |
 
 Stored records use exact `schema_version: "1.0"` and their namespaced
@@ -40,11 +40,10 @@ numeric values.
 | Field | Type and serialized rule | Purpose |
 | --- | --- | --- |
 | job_id | 1–128 ASCII characters; alphanumeric first, then alphanumeric, dot, underscore, or hyphen | Authenticated job identity. |
+| job_name | 1–255 ASCII characters; alphanumeric first, then alphanumeric, dot, underscore, or hyphen | Server-owned persisted job label in the on-demand study view; not copied into `resource_summary`. It does not replace `job_id`. |
 | participant_name | 1–128 ASCII characters; first character is alphanumeric, underscore, or hyphen; remaining characters are alphanumeric, underscore, dot, or hyphen | Existing trusted client-site or server participant identity and participant archive filename stem. |
 | reported_at | calendar-valid UTC RFC 3339 ending in `Z`, with zero to nine fractional digits | Participant terminal serialization time. |
-| report_cutoff_at | same timestamp form | Fixed last acceptance point for participant reports. |
-| received_at | same timestamp form, no later than cutoff | Trusted server receipt time. |
-| finalized_at | same timestamp form, not earlier than cutoff | Job-summary construction time. |
+| received_at | same timestamp form | Trusted server receipt time. |
 | generated_at | same timestamp form | Study-response generation time. |
 
 The server records the existing registered site name for a client and the
@@ -73,8 +72,8 @@ written once when that participant's part of the job ends.
 | reported_at | Terminal report time. |
 | resource_time | One compute status and accumulated numeric values. |
 | workspace_filesystem | One independent terminal point observation. |
-| retained_content | One independent terminal saved-result observation. |
-| f3 | One independent set of finalized message counters. |
+| retained_content | One independent terminal best-effort run-directory file-size observation. |
+| message_traffic | One independent set of finalized message counters. |
 
 The report has no role; the server supplies it from trusted
 expected-participant state. It has no attempt list, start/final pair, raw
@@ -179,29 +178,38 @@ participant, job, or study additive totals.
 
 | Field | Presence | Type/bound | Rule |
 | --- | --- | --- | --- |
-| status | required | reported, partial, unavailable, error | Independent saved-result state. |
-| bytes | reported/partial only | U128 integer string | Complete total or exact observed subtotal. |
+| status | required | reported, partial, unavailable, error | Independent run-directory observation state. |
+| bytes | reported/partial only | U128 integer string | Cleanly observed total or useful observed subtotal. |
 | issues | partial/unavailable/error only | 1–4 sorted unique issue codes | Cause in this typed context. |
 
-Reported bytes require a complete bounded result set already known to NVFlare;
-reported zero means that known set is empty. Partial bytes are only the exact
-subtotal for the successfully observed subset. `unavailable/not_bound` is used
-when no authoritative bounded set exists. Filenames and content hashes are not
-stored.
+The collector recursively sums logical `st_size` for regular files in the
+participant's run directory, excluding its top-level `resource_stats/`
+subtree. Symlinks and other non-regular entries are ignored; hard links count
+once per path, and sparse files count their logical length. A clean empty scan
+reports zero. A scan error produces `partial/observation_incomplete` when a
+useful subtotal exists, otherwise unavailable. Filenames, paths, and content
+hashes are not stored.
 
-## F3
+The observation is non-atomic and occurs before the private handoff,
+stats-pool-file creation, optional workspace upload, and later cleanup/log
+growth. It is a participant self-report, not an attested archive inventory.
+Separately configured result, log, and audit roots are not currently included.
 
-Reported/partial F3 requires exactly one counter pair. The pair contains U128
-integer strings `payload_bytes` and `messages`; zero messages requires zero
-bytes.
+## Message traffic
 
-| Counter | Meaning |
+Reported/partial participant `message_traffic` requires `sent_to`, a list of
+zero to 2,048 remote destinations sorted by unique `participant_name`. Each
+entry contains U128 integer strings `payload_bytes` and positive `messages`.
+An empty list means no included sends. A participant cannot send to itself;
+accepted summary destinations must name another expected participant.
+
+| Field | Meaning |
 | --- | --- |
-| remote_accepted | Included payload that the originating process's local transport accepted for a remote logical destination before counters closed; primary F3 total. It does not assert receiver processing or durable storage. |
+| sent_to | Included payload that the originating process's local transport accepted for each remote logical destination before counters closed. It does not assert receiver processing or durable storage. |
 
 `status` is reported, partial, unavailable, or error. Reported forbids issues;
 partial requires counters and issues; unavailable/error requires issues and
-forbids counters. Platform code closes all counters before terminal report
+forbids `sent_to`. Platform code closes all counters before terminal report
 serialization. Later callbacks do not alter the record.
 
 Included classes are exactly job application, real task response, and task
@@ -216,13 +224,23 @@ measured after FOBS encoding and before optional encryption. See
 
 ## Resource summary and expected participants
 
+The resource summary contains `job_id`, the unique identity used for lookup,
+matching, and sorting. It does not copy `job_name`: the authorized CLI already
+has the server's persisted job metadata and can resolve the display name when
+needed. This requires no new privilege or configuration. Participant reports
+do not supply a job name.
+
+The on-demand study view still includes a metadata-derived `job_name` per row
+for display. For legacy metadata only, resolution falls back from `JOB_NAME`
+to `JOB_FOLDER_NAME` and finally `job_id`; names need not be unique.
+
 `participants` is the full expected set, not the set that reported. It has
 1–10,000 unique entries sorted by role, then participant name. Every entry
 contains `participant_name`, `role`, and `status`.
 
 | Participant status | Additional fields |
 | --- | --- |
-| accepted | received_at, resource_time, retained_content, f3 |
+| accepted | received_at, resource_time, retained_content, message_traffic |
 | invalid | received_at, issues |
 | missing | none |
 | disabled | none |
@@ -233,23 +251,26 @@ late arrival, omission, and server faults do not become participant-invalid.
 Accepted participant values are validated and copied from the exact accepted
 terminal report. The server cannot reconstruct `resource_time` because private
 intervals are not public. Workspace-filesystem capacity is deliberately not
-copied into the expected-participant entry or job totals; it remains available
+copied into the expected-participant entry or derived job totals; it remains available
 in the participant file for site detail.
 
-Job `totals` contains:
+The archived `resource_summary` contains no totals. The CLI and study query
+derive job totals from accepted participant entries when requested:
 
 | Member | Numeric content |
 | --- | --- |
 | resource_time | measured_seconds, CPU unit-seconds groups, memory byte-seconds, GPU instance-seconds groups |
-| retained_content | saved-result bytes |
-| f3 | additive `remote_accepted` counter pair |
+| retained_content | additive participant run-directory file bytes; not unique storage or archive size |
+| message_traffic | additive `sent` counter pair derived by summing all accepted participants' `sent_to` entries |
 
 Aggregate statuses are reported, partial, or unavailable. Aggregate
 `resource_time` uses the same one issue list when partial/unavailable;
-retained-content and F3 totals contain no issues. The server sums accepted
+retained-content and message-traffic totals contain no issues. The server sums accepted
 numeric contributions and derives status from expected-participant coverage
 and accepted typed statuses. CPU/GPU groups are consolidated and sorted.
-Missing data is not zero.
+Missing data is not zero. A participant's sender-confirmed inbound amount can
+be calculated by summing entries whose `sent_to.participant_name` is that
+participant; this is not proof of receiver processing or durable storage.
 
 ## Study query response
 
@@ -262,7 +283,7 @@ The JSON response contains:
 | generated_at | Server response-generation time. |
 | coverage | selected_jobs, included_jobs, unavailable_jobs, and nonterminal_jobs counts. |
 | jobs | Zero to 10,000 rows, unique and sorted by `job_id`, one for every retained job returned by the query's one job-store scan. |
-| totals | Additive resource_time, retained_content, and F3 totals only. |
+| totals | Additive resource_time, retained_content, and message_traffic totals only. |
 
 `selection.study_name` reuses NVFlare's existing study-name rule: 1–63
 lowercase ASCII characters, alphanumeric at both ends, with lowercase
@@ -274,8 +295,9 @@ Each coverage count is a U128 integer string. The semantic contract requires
 `selected_jobs` to equal the number of rows and the other three counts to be a
 complete partition of those rows.
 
-Each job row has the job ID, bounded underlying NVFlare `job_status`, and
-`resource_data` classification:
+Each job row has the job ID, persisted job name, bounded underlying NVFlare
+`job_status`, and `resource_data` classification. Rows remain unique and
+sorted by `job_id`; names are display metadata and need not be unique.
 
 `job_status` is 1–64 display-safe ASCII characters, begins alphanumeric, and
 then permits alphanumeric, space, dot, underscore, colon, slash, plus, or
@@ -328,6 +350,7 @@ resource_stats/resource_summary.json
 | JSON nesting | 32 levels |
 | CPU groups per CPU object | 1–4,096 |
 | GPU groups per GPU object | 0–4,096 |
+| Message destinations per participant | 0–2,048 |
 | Expected participants | 1–10,000 |
 | Study job rows | 0–10,000 |
 | Issues per list | 1–4 when present |

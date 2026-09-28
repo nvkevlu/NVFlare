@@ -15,8 +15,8 @@ again.
 | --- | --- | --- |
 | Participant `resource_time` | reported, partial, unavailable | Complete compute resource time; at least one usable numeric member with incomplete coverage; or no usable compute resource-time value. |
 | Participant `workspace_filesystem` | reported, unavailable, error | One valid terminal capacity observation; no usable observation; or collection/integrity failure. |
-| Participant `retained_content` and `f3` | reported, partial, unavailable, error | Complete facts; useful incomplete facts; no usable facts; or collection/integrity failure. |
-| Job/study `resource_time`, `retained_content`, and `f3` totals | reported, partial, unavailable | Complete additive contributions; at least one numeric contribution with incomplete coverage; or no numeric contribution. `resource_time` retains one issue list when not reported; retained/F3 totals do not. |
+| Participant `retained_content` and `message_traffic` | reported, partial, unavailable, error | Complete facts; useful incomplete facts; no usable facts; or collection/integrity failure. |
+| Job/study `resource_time`, `retained_content`, and `message_traffic` totals | reported, partial, unavailable | Complete additive contributions; at least one numeric contribution with incomplete coverage; or no numeric contribution. `resource_time` retains one issue list when not reported; retained/message-traffic totals do not. |
 
 `resource_time` has exactly one status for measured time, CPU, memory, and GPU.
 Those nested members never carry their own statuses. This is intentional: v1
@@ -27,8 +27,26 @@ and forbids issues. `partial` requires numeric facts plus applicable issues.
 `unavailable` and `error` contain no numeric facts and require issues. The
 workspace-filesystem point observation cannot be partial.
 
+In plain language, `reported` means the value is complete, `partial` means a
+useful but incomplete number, and `unavailable` means there is no number to
+show. These three meanings must stay distinct: a partial subtotal is not a
+complete total, and missing data must not look like zero. Separate statuses
+remain for compute time, workspace capacity, run-directory files, and message
+traffic because any one observation can fail while the others succeed. The
+participant status answers a different question: whether its report was
+accepted at all.
+
+**Proposed simplification, not yet part of v1:** fold measurement `error` into
+`unavailable` and retain its cause as an issue such as `malformed_source` or
+`permission_denied`. Both states carry no numeric value, so this would reduce
+one public status without hiding the failure. The fixed
+`invalid`-participant `issues: ["malformed_source"]` is also redundant with
+`status: invalid` and could be removed in the same reviewed schema change.
+Until that change is approved and implemented, the allowlists below remain
+authoritative; these fields and `error` are still valid.
+
 An observed zero is explicit: a decimal string `"0"`, an empty reported GPU
-group array, a reported retained-content value of `"0"`, or zeroed reported F3
+group array, a reported retained-content value of `"0"`, or zeroed reported message-traffic
 counters. Missing, invalid, disabled, unbound, or nonterminal data is never
 encoded as zero.
 
@@ -41,7 +59,7 @@ Aggregate status is derived:
 
 Aggregate `resource_time` keeps one derived issue list on
 partial/unavailable because it uses the same closed object as a participant.
-Retained-content and F3 totals do not repeat issue lists. None of the totals
+Retained-content and message-traffic totals do not repeat issue lists. None of the totals
 stores a second warning or caveat array.
 
 ## Expected participant state
@@ -97,10 +115,12 @@ and nonterminal jobs separately.
 | malformed_source | A source failed parsing, range, or consistency validation. |
 
 `issues` is a sorted, unique array of one to four values. The containing object
-provides context. For example, `not_bound` on retained content means there is
-no authoritative bounded result set. F3 counters are now bound at the three
-trusted semantic origins; runtime coverage failures use the applicable gap or
-incomplete-attribution code rather than a clean zero.
+provides context. Current retained-content collection normally uses
+`observation_incomplete` for run-directory scan failures; `not_bound` remains
+valid for older reports and another typed source that has no implementation.
+F3 counters are now bound at the three trusted semantic origins; runtime
+coverage failures use the applicable gap or incomplete-attribution code rather
+than a clean zero.
 
 | Context/status | Allowed issues |
 | --- | --- |
@@ -111,9 +131,9 @@ incomplete-attribution code rather than a clean zero.
 | Retained content partial | observation_incomplete, attribution_incomplete |
 | Retained content unavailable | not_bound, observation_incomplete, attribution_incomplete, unsupported, dependency_missing |
 | Retained content error | permission_denied, malformed_source |
-| F3 partial | counter_gap, observation_incomplete, attribution_incomplete |
-| F3 unavailable | not_bound, observation_incomplete, attribution_incomplete, unsupported, dependency_missing |
-| F3 error | permission_denied, malformed_source |
+| Message traffic partial | counter_gap, observation_incomplete, attribution_incomplete |
+| Message traffic unavailable | not_bound, observation_incomplete, attribution_incomplete, unsupported, dependency_missing |
+| Message traffic error | permission_denied, malformed_source |
 | Invalid participant report | malformed_source |
 
 Reported objects never carry issues. A missing/invalid participant or an
@@ -136,14 +156,19 @@ empty reported group array means authoritative total GPU resource time of
 zero. `mig_profile` is legal only on a MIG group. Full-GPU and MIG time remain
 separate through participant, job, and study reduction.
 
-## F3 counter
+## Message traffic counters
 
 | Field | Included fact |
 | --- | --- |
-| remote_accepted | Included payload that the originating process's local transport accepted for a remote logical destination before counters closed; the primary total. It does not assert receiver processing or durable storage. |
+| sent_to | Participant list of included payload by remote logical destination, accepted by the originating process's local transport before counters closed. It does not assert receiver processing or durable storage. |
 
-Reported/partial participant F3 contains this counter pair;
-unavailable/error has no counter. Zero messages requires zero bytes. NVFlare
+Reported/partial participant `message_traffic` contains zero to 2,048
+`sent_to` entries sorted by unique `participant_name`; each entry has a
+payload-byte/positive-message pair. A destination cannot be the sender, and
+accepted summary destinations must name another expected participant.
+Unavailable/error has no `sent_to`. Zero included messages use an empty list.
+Transient job and study totals sum destination entries
+into one `sent` pair. NVFlare
 closes the counters once before terminal report serialization. Later callbacks
 do not alter canonical totals. Platform code excludes the resource report;
 job code cannot request that exclusion.
@@ -164,7 +189,7 @@ compression, and retransmissions. Fan-out counts one logical message per
 destination. Only the trusted semantic origin counts; the process-local
 context is not serialized, so relays and forwarders do not count the payload
 again. A remote logical destination routed through a local first-hop relay is
-still counted once at that origin. A send increments `remote_accepted` only
+still counted once at that origin. A send increments its `sent_to` destination only
 after local transport acceptance. Exact final delivery to an in-process
 logical destination and failed send attempts do not contribute. A streamed
 send remains pending until its `StreamFuture` ends successfully; asynchronous

@@ -1,4 +1,4 @@
-Recorded resources for job job-20260909-001.
+Recorded resources for job qwen2.5-14b-federated-qualification (ID: job-20260909-001).
 Job coverage: PARTIAL (3 accepted / 4 expected) | selected site: site-1
 
 Recorded average visible capacity over each measured interval
@@ -6,13 +6,14 @@ SITE    ROLE    REPORT    COMPUTE   MEASURED TIME  CPU UNITS  MEM GiB   FULL GPU
 site-1  client  accepted  REPORTED  37m3s          32.0000    192.0000  4.0000
 
 Other recorded participant totals
-SITE    SAVED CONTENT GiB  F3 STATUS  F3 REMOTE ACCEPTED GiB
-site-1  0.0000             REPORTED   137.5567
+SITE    RUN-DIR STATUS  RUN-DIR FILES GiB  MESSAGE TRAFFIC STATUS  MESSAGE PAYLOAD SENT GiB  MESSAGE PAYLOAD SENT TO SITE GiB
+site-1  REPORTED        0.0000             REPORTED                137.5567                  137.5567 (partial)
 
 Notes:
   PARTIAL means at least one expected report or observation was incomplete.
   Each average is resource-time divided by that row's measured interval.
   Totals add participant reports; overlapping resources can be counted more than once.
+  Message payload sent to a site is sender-confirmed; it is not proof of receipt.
 
 Hardware detail for site-1
 Model metadata is optional and does not change numeric totals.

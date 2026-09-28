@@ -33,6 +33,7 @@ from contract_v1 import (  # noqa: E402
     KIND_PARTICIPANT_SUMMARY,
     KIND_RESOURCE_SUMMARY,
     KIND_STUDY_SUMMARY,
+    MAX_MESSAGE_DESTINATIONS,
     MAX_RECORD_BYTES,
     MAX_STUDY_JOBS,
     RECORD_KINDS,
@@ -49,6 +50,7 @@ from contract_v1 import (  # noqa: E402
 )
 
 JOB_ID = "job-20260909-001"
+JOB_NAME = "hello-pt"
 NAME_A = "site-a"
 NAME_B = "site-b"
 
@@ -106,9 +108,9 @@ def _participant(name=NAME_A, *, resource_time=None):
         "resource_time": resource_time or _resource_time(),
         "workspace_filesystem": {"status": "reported", "capacity_bytes": "1099511627776"},
         "retained_content": {"status": "reported", "bytes": "29540266113"},
-        "f3": {
+        "message_traffic": {
             "status": "reported",
-            "remote_accepted": _counter("147700336640", "23500"),
+            "sent_to": [],
         },
     }
 
@@ -132,10 +134,7 @@ def _summary(participants):
         "schema_version": SCHEMA_VERSION,
         "kind": KIND_RESOURCE_SUMMARY,
         "job_id": JOB_ID,
-        "report_cutoff_at": "2026-09-09T14:40:00Z",
-        "finalized_at": "2026-09-09T14:40:00.1Z",
         "participants": participants,
-        "totals": derive_job_totals(participants),
     }
 
 
@@ -199,7 +198,7 @@ class TestCanonicalFinalOnlyV1Contract(unittest.TestCase):
                 "resource_time",
                 "workspace_filesystem",
                 "retained_content",
-                "f3",
+                "message_traffic",
             },
             set(participant),
         )
@@ -287,43 +286,98 @@ class TestCanonicalFinalOnlyV1Contract(unittest.TestCase):
         participant = _participant()
         copied = derive_participant_totals(participant)
         self.assertEqual(
-            {"resource_time", "retained_content", "f3"},
+            {"resource_time", "retained_content", "message_traffic"},
             set(copied),
         )
         self.assertEqual(participant["resource_time"], copied["resource_time"])
         copied["resource_time"]["measured_seconds"] = "1"
         self.assertEqual("120", participant["resource_time"]["measured_seconds"])
 
-    def test_f3_public_shape_is_remote_accepted_only(self):
+    def test_message_traffic_public_shape_has_destination_groups(self):
         participant = _participant()
         validate_record(participant)
 
         partial = copy.deepcopy(participant)
-        partial["f3"] = {
+        partial["message_traffic"] = {
             "status": "partial",
             "issues": ["counter_gap"],
-            "remote_accepted": _counter(str(2**128 - 1), "1"),
+            "sent_to": [{"participant_name": "server", **_counter(str(2**128 - 1), "1")}],
         }
         validate_record(partial)
 
+        zero_message_group = copy.deepcopy(partial)
+        zero_message_group["message_traffic"]["sent_to"][0].update(_counter("0", "0"))
+        self._assert_invalid_both(zero_message_group)
+
+        self_target = copy.deepcopy(partial)
+        self_target["message_traffic"]["sent_to"][0]["participant_name"] = NAME_A
+        self._assert_invalid(self_target, "cannot include the sending participant")
+
         old_bucket = copy.deepcopy(participant)
-        old_bucket["f3"]["local_delivered"] = _counter("0", "0")
+        old_bucket["message_traffic"]["local_delivered"] = _counter("0", "0")
         self._assert_invalid_both(old_bucket)
 
+        redundant_sent = copy.deepcopy(participant)
+        redundant_sent["message_traffic"]["sent"] = _counter("147700336640", "23500")
+        self._assert_invalid_both(redundant_sent)
+
         missing_issue = copy.deepcopy(partial)
-        del missing_issue["f3"]["issues"]
+        del missing_issue["message_traffic"]["issues"]
         self._assert_invalid_both(missing_issue)
 
         too_large = copy.deepcopy(partial)
-        too_large["f3"]["remote_accepted"]["payload_bytes"] = str(2**128)
+        too_large["message_traffic"]["sent_to"][0]["payload_bytes"] = str(2**128)
         self._assert_invalid(too_large)
 
         error = copy.deepcopy(participant)
-        error["f3"] = {"status": "error", "issues": ["malformed_source"]}
+        error["message_traffic"] = {"status": "error", "issues": ["malformed_source"]}
         validate_record(error)
+
+        no_sends = copy.deepcopy(participant)
+        no_sends["message_traffic"]["sent_to"] = []
+        validate_record(no_sends)
+        self.assertEqual(
+            _counter("0", "0"),
+            derive_job_totals([_accepted(no_sends, NAME_A)])["message_traffic"]["sent"],
+        )
+
+    def test_message_traffic_destination_groups_are_sorted_unique_and_bounded(self):
+        participant = _participant()
+        participant["message_traffic"]["sent_to"] = [
+            {"participant_name": "site-b", **_counter("7", "1")},
+            {"participant_name": "server", **_counter("3", "1")},
+        ]
+        self._assert_invalid(participant, "sorted by unique participant_name")
+
+        participant["message_traffic"]["sent_to"].reverse()
+        validate_record(participant)
+        self.assertEqual(
+            _counter("10", "2"),
+            derive_job_totals(
+                _summary(
+                    [
+                        _accepted(participant, NAME_A),
+                        {"participant_name": NAME_B, "role": "client", "status": "missing"},
+                        {"participant_name": "server", "role": "server", "status": "missing"},
+                    ]
+                )["participants"]
+            )["message_traffic"]["sent"],
+        )
+
+        duplicate = copy.deepcopy(participant)
+        duplicate["message_traffic"]["sent_to"][1]["participant_name"] = "server"
+        self._assert_invalid(duplicate, "sorted by unique participant_name")
+
+        over_limit = _participant()
+        over_limit["message_traffic"]["sent_to"] = [
+            {"participant_name": f"site-{index:04d}", **_counter("0", "0")}
+            for index in range(MAX_MESSAGE_DESTINATIONS + 1)
+        ]
+        self._assert_invalid(over_limit, "destination entries")
 
     def test_job_totals_sum_final_values_and_keep_hardware_groups(self):
         first = _participant(NAME_A)
+        first["message_traffic"]["sent_to"] = [{"participant_name": NAME_B, **_counter("147700336640", "23500")}]
         second = _participant(
             NAME_B,
             resource_time=_resource_time(
@@ -335,6 +389,7 @@ class TestCanonicalFinalOnlyV1Contract(unittest.TestCase):
                 gpu_model="NVIDIA H100 80GB HBM3",
             ),
         )
+        second["message_traffic"]["sent_to"] = [{"participant_name": NAME_A, **_counter("147700336640", "23500")}]
         participants = [_accepted(first, "site-a"), _accepted(second, "site-b")]
         totals = derive_job_totals(participants)
         self.assertEqual("reported", totals["resource_time"]["status"])
@@ -343,7 +398,7 @@ class TestCanonicalFinalOnlyV1Contract(unittest.TestCase):
         self.assertEqual(2, len(totals["resource_time"]["cpu"]["groups"]))
         self.assertEqual(2, len(totals["resource_time"]["gpu"]["groups"]))
         self.assertEqual("59080532226", totals["retained_content"]["bytes"])
-        self.assertEqual("295400673280", totals["f3"]["remote_accepted"]["payload_bytes"])
+        self.assertEqual("295400673280", totals["message_traffic"]["sent"]["payload_bytes"])
 
     def test_missing_expected_report_makes_numeric_totals_partial(self):
         first = _participant()
@@ -359,19 +414,38 @@ class TestCanonicalFinalOnlyV1Contract(unittest.TestCase):
         self.assertEqual("partial", totals["resource_time"]["status"])
         self.assertEqual(["observation_incomplete"], totals["resource_time"]["issues"])
         self.assertEqual("partial", totals["retained_content"]["status"])
-        self.assertEqual("partial", totals["f3"]["status"])
+        self.assertEqual("partial", totals["message_traffic"]["status"])
 
-    def test_resource_summary_requires_exact_derived_totals_and_cutoff(self):
+    def test_resource_summary_contains_only_participant_values(self):
         summary = _summary([_accepted(_participant(), "site-a")])
         validate_record(summary)
+        self.assertEqual(
+            {"schema_version", "kind", "job_id", "participants"},
+            set(summary),
+        )
 
-        wrong = copy.deepcopy(summary)
-        wrong["totals"]["resource_time"]["memory"]["byte_seconds"] = "1"
-        self._assert_invalid(wrong, "deterministic sum")
+        for field in ("totals", "report_cutoff_at", "finalized_at", "job_name"):
+            with self.subTest(field=field):
+                extra = copy.deepcopy(summary)
+                extra[field] = "unused"
+                self._assert_invalid_both(extra)
 
-        late = copy.deepcopy(summary)
-        late["participants"][0]["received_at"] = "2026-09-09T14:40:01Z"
-        self._assert_invalid(late, "report_cutoff_at")
+        malformed = copy.deepcopy(summary)
+        malformed["participants"][0]["received_at"] = "not-a-timestamp"
+        self._assert_invalid_both(malformed)
+
+    def test_resource_summary_destinations_name_other_expected_participants(self):
+        participant = _participant()
+        participant["message_traffic"]["sent_to"] = [{"participant_name": NAME_B, **_counter("1", "1")}]
+        accepted = _accepted(participant, NAME_A)
+        self._assert_invalid(_summary([accepted]), "destinations must name another expected participant")
+
+        expected = {"participant_name": NAME_B, "role": "client", "status": "missing"}
+        validate_record(_summary([accepted, expected]))
+
+        self_target = copy.deepcopy(accepted)
+        self_target["message_traffic"]["sent_to"][0]["participant_name"] = NAME_A
+        self._assert_invalid(_summary([self_target, expected]), "destinations must name another expected participant")
 
     def test_invalid_participant_is_only_a_malformed_report(self):
         invalid_entry = {
@@ -389,16 +463,27 @@ class TestCanonicalFinalOnlyV1Contract(unittest.TestCase):
         self._assert_invalid_both(permission_denied)
 
     def test_study_summary_distinguishes_job_status_from_resource_data(self):
-        job_totals = _summary([_accepted(_participant(), "site-a")])["totals"]
+        job_totals = derive_job_totals(_summary([_accepted(_participant(), "site-a")])["participants"])
         jobs = [
             {
                 "job_id": "job-a",
+                "job_name": "hello-pt",
                 "job_status": "FINISHED:COMPLETED",
                 "resource_data": "included",
                 "totals": job_totals,
             },
-            {"job_id": "job-b", "job_status": "FINISHED:FAILED", "resource_data": "unavailable"},
-            {"job_id": "job-c", "job_status": "RUNNING", "resource_data": "nonterminal"},
+            {
+                "job_id": "job-b",
+                "job_name": "hello-pt-retry",
+                "job_status": "FINISHED:FAILED",
+                "resource_data": "unavailable",
+            },
+            {
+                "job_id": "job-c",
+                "job_name": "hello-pt-next",
+                "job_status": "RUNNING",
+                "resource_data": "nonterminal",
+            },
         ]
         study = {
             "schema_version": SCHEMA_VERSION,
@@ -471,7 +556,7 @@ class TestCanonicalFinalOnlyV1Contract(unittest.TestCase):
         self._assert_invalid(wrong_coverage, "must equal 0")
 
     def test_study_terminal_classification_reuses_current_cli_predicate(self):
-        job_totals = _summary([_accepted(_participant(), "site-a")])["totals"]
+        job_totals = derive_job_totals(_summary([_accepted(_participant(), "site-a")])["participants"])
         terminal_states = (
             "FINISHED:COMPLETED",
             "FINISHED:",
@@ -485,6 +570,7 @@ class TestCanonicalFinalOnlyV1Contract(unittest.TestCase):
             with self.subTest(job_status=job_status):
                 included = {
                     "job_id": f"job-{index}",
+                    "job_name": "hello-pt",
                     "job_status": job_status,
                     "resource_data": "included",
                     "totals": job_totals,
@@ -493,6 +579,7 @@ class TestCanonicalFinalOnlyV1Contract(unittest.TestCase):
 
                 unavailable = {
                     "job_id": f"job-{index}",
+                    "job_name": "hello-pt",
                     "job_status": job_status,
                     "resource_data": "unavailable",
                 }
@@ -504,6 +591,7 @@ class TestCanonicalFinalOnlyV1Contract(unittest.TestCase):
 
         running_included = {
             "job_id": "job-running",
+            "job_name": "hello-pt",
             "job_status": "RUNNING",
             "resource_data": "included",
             "totals": job_totals,
@@ -512,7 +600,16 @@ class TestCanonicalFinalOnlyV1Contract(unittest.TestCase):
             derive_study_totals([running_included])
 
         # FINISHED without the current CLI's colon is not terminal.
-        derive_study_totals([{"job_id": "job-finished", "job_status": "FINISHED", "resource_data": "nonterminal"}])
+        derive_study_totals(
+            [
+                {
+                    "job_id": "job-finished",
+                    "job_name": "hello-pt",
+                    "job_status": "FINISHED",
+                    "resource_data": "nonterminal",
+                }
+            ]
+        )
 
     def test_bundle_checks_exact_inventory_bytes_and_copied_values(self):
         participant = _participant()
@@ -527,7 +624,6 @@ class TestCanonicalFinalOnlyV1Contract(unittest.TestCase):
 
         changed = copy.deepcopy(summary)
         changed["participants"][0]["resource_time"]["measured_seconds"] = "1"
-        changed["totals"] = derive_job_totals(changed["participants"])
         with self.assertRaisesRegex(ContractError, "does not equal the exact decoded"):
             validate_bundle(changed, {NAME_A: participant}, files)
 
@@ -605,6 +701,19 @@ class TestCanonicalFinalOnlyV1Contract(unittest.TestCase):
         huge_b["resource_time"]["memory"]["byte_seconds"] = "1"
         with self.assertRaisesRegex(ContractError, "aggregate exceeds"):
             derive_job_totals([_accepted(huge_a, "a"), _accepted(huge_b, "b")])
+        self._assert_invalid(
+            _summary([_accepted(huge_a, NAME_A), _accepted(huge_b, NAME_B)]),
+            "aggregate exceeds",
+        )
+
+        traffic_a = _participant(NAME_A)
+        traffic_b = _participant(NAME_B)
+        traffic_a["message_traffic"]["sent_to"] = [{"participant_name": NAME_B, **_counter(str(U128_MAX), "1")}]
+        traffic_b["message_traffic"]["sent_to"] = [{"participant_name": NAME_A, **_counter("1", "1")}]
+        self._assert_invalid(
+            _summary([_accepted(traffic_a, NAME_A), _accepted(traffic_b, NAME_B)]),
+            "aggregate exceeds",
+        )
 
     def test_quota_normalization_remains_an_exact_collector_helper(self):
         self.assertEqual("1.5", normalize_quota_units(150_000, 100_000))
@@ -620,9 +729,10 @@ class TestCanonicalFinalOnlyV1Contract(unittest.TestCase):
         jobs = [
             {
                 "job_id": JOB_ID,
+                "job_name": JOB_NAME,
                 "job_status": "FINISHED:COMPLETED",
                 "resource_data": "included",
-                "totals": summary["totals"],
+                "totals": derive_job_totals(summary["participants"]),
             }
         ]
         study = {

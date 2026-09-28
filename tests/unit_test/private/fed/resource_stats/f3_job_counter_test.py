@@ -42,14 +42,14 @@ def test_start_creates_a_counter_reachable_from_anywhere():
 
 def test_start_is_idempotent_and_preserves_prior_observations():
     first = start_job_f3_counter()
-    admission = first.try_begin(F3TrafficClass.TASK_RESULT)
+    admission = first.try_begin(F3TrafficClass.TASK_RESULT, "server")
     assert first.complete_remote_accepted(admission, 10)
 
     second = start_job_f3_counter()
 
     assert first is second
     assert get_job_f3_counter() is first
-    assert second.freeze()["remote_accepted"] == {"payload_bytes": "10", "messages": "1"}
+    assert second.freeze()["sent_to"] == [{"participant_name": "server", "payload_bytes": "10", "messages": "1"}]
 
 
 def test_clear_drops_the_reference():

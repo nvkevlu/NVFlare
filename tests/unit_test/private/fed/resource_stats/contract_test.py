@@ -56,7 +56,7 @@ def _participant_summary(job_id="job-1", participant_name="site-1", reported_at=
         },
         "workspace_filesystem": {"status": "reported", "capacity_bytes": "1024"},
         "retained_content": {"status": "unavailable", "issues": ["not_bound"]},
-        "f3": {"status": "unavailable", "issues": ["not_bound"]},
+        "message_traffic": {"status": "unavailable", "issues": ["not_bound"]},
     }
 
 
@@ -77,10 +77,7 @@ def _resource_summary(job_id="job-1", participants=None):
         "schema_version": "1.0",
         "kind": KIND_RESOURCE_SUMMARY,
         "job_id": job_id,
-        "report_cutoff_at": "2026-09-17T12:00:01Z",
-        "finalized_at": "2026-09-17T12:00:01Z",
         "participants": participants,
-        "totals": derive_job_totals(participants),
     }
 
 
@@ -88,24 +85,24 @@ def test_validate_record_accepts_well_formed_participant_summary():
     validate_record(_participant_summary())
 
 
-def test_validate_record_accepts_only_the_remote_f3_counter():
+def test_validate_record_accepts_only_sender_confirmed_destination_groups():
     reported = _participant_summary()
-    reported["f3"] = {
+    reported["message_traffic"] = {
         "status": "reported",
-        "remote_accepted": {"payload_bytes": str(2**128 - 1), "messages": "1"},
+        "sent_to": [{"participant_name": "server", "payload_bytes": str(2**128 - 1), "messages": "1"}],
     }
     validate_record(reported)
 
     partial = _participant_summary()
-    partial["f3"] = {
+    partial["message_traffic"] = {
         "status": "partial",
         "issues": ["counter_gap"],
-        "remote_accepted": {"payload_bytes": "1", "messages": "1"},
+        "sent_to": [{"participant_name": "server", "payload_bytes": "1", "messages": "1"}],
     }
     validate_record(partial)
 
     old_bucket = _participant_summary()
-    old_bucket["f3"] = {
+    old_bucket["message_traffic"] = {
         "status": "reported",
         "remote_accepted": {"payload_bytes": "1", "messages": "1"},
         "local_delivered": {"payload_bytes": "0", "messages": "0"},
@@ -114,24 +111,73 @@ def test_validate_record_accepts_only_the_remote_f3_counter():
         validate_record(old_bucket)
 
     missing_issue = _participant_summary()
-    missing_issue["f3"] = {
+    missing_issue["message_traffic"] = {
         "status": "partial",
-        "remote_accepted": {"payload_bytes": "1", "messages": "1"},
+        "sent_to": [{"participant_name": "server", "payload_bytes": "1", "messages": "1"}],
     }
     with pytest.raises(ContractError):
         validate_record(missing_issue)
 
     too_large = _participant_summary()
-    too_large["f3"] = {
+    too_large["message_traffic"] = {
         "status": "reported",
-        "remote_accepted": {"payload_bytes": str(2**128), "messages": "1"},
+        "sent_to": [{"participant_name": "server", "payload_bytes": str(2**128), "messages": "1"}],
     }
     with pytest.raises(ContractError):
         validate_record(too_large)
 
     error = _participant_summary()
-    error["f3"] = {"status": "error", "issues": ["malformed_source"]}
+    error["message_traffic"] = {"status": "error", "issues": ["malformed_source"]}
     validate_record(error)
+
+
+def test_validate_record_rejects_unordered_duplicate_or_self_destinations():
+    report = _participant_summary()
+    report["message_traffic"] = {
+        "status": "reported",
+        "sent_to": [
+            {"participant_name": "server", "payload_bytes": "1", "messages": "1"},
+            {"participant_name": "site-2", "payload_bytes": "2", "messages": "1"},
+        ],
+    }
+    validate_record(report)
+
+    report["message_traffic"]["sent_to"].reverse()
+    with pytest.raises(ContractError, match="sorted"):
+        validate_record(report)
+
+    report["message_traffic"]["sent_to"] = [
+        {"participant_name": "server", "payload_bytes": "1", "messages": "1"},
+        {"participant_name": "server", "payload_bytes": "2", "messages": "1"},
+    ]
+    with pytest.raises(ContractError, match="unique"):
+        validate_record(report)
+
+    report["message_traffic"]["sent_to"] = [{"participant_name": "site-1", "payload_bytes": "1", "messages": "1"}]
+    with pytest.raises(ContractError, match="sending participant"):
+        validate_record(report)
+
+
+def test_derive_job_totals_rejects_unknown_destination_and_sums_known_destinations():
+    site = _accepted_entry(participant_name="site-1")
+    site["message_traffic"] = {
+        "status": "reported",
+        "sent_to": [{"participant_name": "server", "payload_bytes": "100", "messages": "2"}],
+    }
+    server = _accepted_entry(participant_name="server", role="server")
+    server["message_traffic"] = {
+        "status": "reported",
+        "sent_to": [{"participant_name": "site-1", "payload_bytes": "200", "messages": "3"}],
+    }
+    totals = derive_job_totals([site, server])
+    assert totals["message_traffic"] == {
+        "status": "reported",
+        "sent": {"payload_bytes": "300", "messages": "5"},
+    }
+
+    site["message_traffic"]["sent_to"][0]["participant_name"] = "site-unknown"
+    with pytest.raises(ContractError, match="expected participant"):
+        derive_job_totals([site, server])
 
 
 def test_validate_record_rejects_unknown_kind():
@@ -241,7 +287,7 @@ def test_derive_participant_totals_copies_exactly_the_three_reportable_fields():
 
     totals = derive_participant_totals(record)
 
-    assert set(totals) == {"resource_time", "retained_content", "f3"}
+    assert set(totals) == {"resource_time", "retained_content", "message_traffic"}
     assert totals["resource_time"] == record["resource_time"]
     # Must be a copy, not the same object the caller can still mutate.
     totals["resource_time"]["status"] = "mutated"
@@ -283,12 +329,14 @@ def test_derive_job_totals_rejects_unsorted_or_duplicate_participant_names():
 def test_derive_study_totals_aggregates_across_jobs_and_flags_incompleteness():
     job_row_included = {
         "job_id": "job-1",
+        "job_name": "hello-pt",
         "job_status": "FINISHED:COMPLETED",
         "resource_data": "included",
         "totals": derive_job_totals([_accepted_entry(participant_name="site-1")]),
     }
     job_row_nonterminal = {
         "job_id": "job-2",
+        "job_name": "hello-pt-next",
         "job_status": "RUNNING",
         "resource_data": "nonterminal",
     }
@@ -305,6 +353,7 @@ def test_derive_study_totals_aggregates_across_jobs_and_flags_incompleteness():
 def test_derive_study_totals_is_reported_when_every_job_row_is_included():
     job_row = {
         "job_id": "job-1",
+        "job_name": "hello-pt",
         "job_status": "FINISHED:COMPLETED",
         "resource_data": "included",
         "totals": derive_job_totals([_accepted_entry(participant_name="site-1")]),
@@ -316,9 +365,28 @@ def test_derive_study_totals_is_reported_when_every_job_row_is_included():
     assert totals["resource_time"]["measured_seconds"] == "2"
 
 
+def test_derive_study_totals_allows_duplicate_display_names_for_distinct_job_ids():
+    rows = []
+    for job_id in ("job-1", "job-2"):
+        rows.append(
+            {
+                "job_id": job_id,
+                "job_name": "hello-pt",
+                "job_status": "FINISHED:COMPLETED",
+                "resource_data": "included",
+                "totals": derive_job_totals([_accepted_entry(participant_name="site-1")]),
+            }
+        )
+
+    totals = derive_study_totals(rows)
+
+    assert totals["resource_time"]["measured_seconds"] == "4"
+
+
 def test_validate_study_job_rejects_nonterminal_status_with_included_data():
     job_row = {
         "job_id": "job-1",
+        "job_name": "hello-pt",
         "job_status": "RUNNING",
         "resource_data": "included",
         "totals": derive_job_totals([_accepted_entry(participant_name="site-1")]),
@@ -332,9 +400,25 @@ def test_validate_record_accepts_well_formed_resource_summary():
     validate_record(_resource_summary())
 
 
-def test_validate_record_rejects_resource_summary_totals_that_do_not_match_participants():
+def test_validate_record_rejects_job_name_in_resource_summary():
     summary = _resource_summary()
-    summary["totals"]["resource_time"] = {"status": "unavailable", "issues": ["observation_incomplete"]}
+    summary["job_name"] = "hello-pt"
 
-    with pytest.raises(ContractError):
+    with pytest.raises(ContractError, match="unexpected fields"):
         validate_record(summary)
+
+
+@pytest.mark.parametrize("removed_field", ["report_cutoff_at", "finalized_at", "totals"])
+def test_validate_record_rejects_removed_resource_summary_fields(removed_field):
+    summary = _resource_summary()
+    summary[removed_field] = "unexpected"
+
+    with pytest.raises(ContractError, match="unexpected fields"):
+        validate_record(summary)
+
+
+def test_validate_record_accepts_receipt_after_report_time_without_stored_cutoff():
+    summary = _resource_summary(participants=[_accepted_entry(received_at="2026-09-18T12:00:00Z")])
+
+    validate_record(summary)
+    assert summary["participants"][0]["received_at"] == "2026-09-18T12:00:00Z"

@@ -90,7 +90,9 @@ class WorkspaceResourceStatsReader:
         if record["job_id"] != summary["job_id"] or record["participant_name"] != participant_name:
             raise WorkspaceResourceStatsError("participant summary identity does not match its archive slot")
         copied = derive_participant_totals(record)
-        if any(summary_entry[field] != copied[field] for field in ("resource_time", "retained_content", "f3")):
+        if any(
+            summary_entry[field] != copied[field] for field in ("resource_time", "retained_content", "message_traffic")
+        ):
             raise WorkspaceResourceStatsError("participant summary values do not match the resource summary")
         return record
 

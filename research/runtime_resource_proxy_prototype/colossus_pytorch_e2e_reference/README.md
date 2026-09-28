@@ -2,6 +2,13 @@
 
 Status: complete evidence recovered from a real run on September 21, 2026.
 
+Historical contract note: this immutable capture predates the required v1
+`job_name` field. Its resource and study summaries therefore do not validate
+against the current v1 contract and must not be rendered with the current CLI.
+The participant summaries remain current-contract records because `job_name`
+belongs only to the server-owned resource and study summaries. The bundle is
+kept unchanged as measurement and before/after evidence.
+
 This bundle shows what the current production prototype actually records for a
 real CUDA workload. It is intentionally not a polished golden example. The run
 completed successfully, all three resource reports reached the server, and the
@@ -74,7 +81,8 @@ omits process identifiers and executable paths.
 ## What the resource-statistics path produced
 
 The server accepted exactly three reports: `server`, `site-1`, and `site-2`.
-Job coverage is therefore complete. The production bundle validator passed,
+Job coverage is therefore complete. The production bundle validator available
+at capture time passed,
 the job totals equal a fresh derivation from the three participant records,
 each site JSON view equals its archived record, the job JSON view equals the
 archived summary, and the one-job study total equals the job total. See
@@ -177,7 +185,9 @@ virtual environment. The exact
 NVIDIA L40 with 48,305,799,168 device-memory bytes before PyTorch was imported.
 PyTorch again initialized and completed the CUDA matrix multiply.
 
-Finally, the same real federated PyTorch job was run again. The
+Finally, the same real federated PyTorch job was run again. That follow-up also
+predates the intermediate, now-reversed decision to store `job_name` in the
+archived summary. The
 [fixed end-to-end run](fixed_run/README.md) contains its exact job, site, and
 two-job study output. All three participants now report one visible NVIDIA L40
 and complete resource time; the original run remains unchanged for comparison.

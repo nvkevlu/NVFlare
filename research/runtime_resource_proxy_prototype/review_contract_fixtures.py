@@ -120,31 +120,34 @@ def _f3_fixture() -> dict[str, Any]:
     def canonical_counter(bucket: dict[str, int]) -> dict[str, str]:
         return {"payload_bytes": str(bucket["payload_bytes"]), "messages": str(bucket["message_count"])}
 
-    canonical_f3 = {
-        "status": "reported",
-        "remote_accepted": canonical_counter(frozen["outcomes"]["remote_transport_accepted"]),
+    internal_f3_snapshot = {
+        "remote_transport_accepted": canonical_counter(frozen["outcomes"]["remote_transport_accepted"]),
     }
     return {
         "schema_version": "prototype-0.3",
         "kind": "nvflare.resource_stats.f3_finalization_fixture",
         "provenance": "synthetic_contract_fixture",
+        "public_contract_note": (
+            "This legacy internal fixture has no named-recipient dimension and is not a public "
+            "message_traffic value."
+        ),
         "primary_metrics": [
             {
-                "name": "f3_payload_bytes_sent",
-                "value": canonical_f3["remote_accepted"]["payload_bytes"],
+                "name": "internal_f3_transport_accepted_payload_bytes",
+                "value": internal_f3_snapshot["remote_transport_accepted"]["payload_bytes"],
                 "unit": "bytes",
-                "scope": "outbound_sender_hop",
+                "scope": "internal_sender_transport_acceptance",
                 "status": "reported",
             },
             {
-                "name": "f3_message_count_sent",
-                "value": canonical_f3["remote_accepted"]["messages"],
+                "name": "internal_f3_transport_accepted_message_count",
+                "value": internal_f3_snapshot["remote_transport_accepted"]["messages"],
                 "unit": "messages",
-                "scope": "outbound_sender_hop",
+                "scope": "internal_sender_transport_acceptance",
                 "status": "reported",
             },
         ],
-        "canonical_f3": canonical_f3,
+        "internal_f3_snapshot": internal_f3_snapshot,
         "included_traffic_classes": frozen["included_traffic_classes"],
         "post_cutoff_diagnostics_not_embedded_in_summary": post_cutoff["diagnostics"],
     }
@@ -183,7 +186,7 @@ def _accumulator_fixture(job_id: str) -> tuple[dict[str, Any], dict[str, Any]]:
         retained_content={"status": "reported", "bytes": "0"},
         child_f3={
             "status": "reported",
-            "remote_accepted": {"payload_bytes": "0", "messages": "0"},
+            "sent_to": [],
         },
     )
     report = assemble_participant_summary(
@@ -193,7 +196,7 @@ def _accumulator_fixture(job_id: str) -> tuple[dict[str, Any], dict[str, Any]]:
         child_handoff=handoff,
         parent_f3={
             "status": "reported",
-            "remote_accepted": {"payload_bytes": "0", "messages": "0"},
+            "sent_to": [],
         },
     )
     return (

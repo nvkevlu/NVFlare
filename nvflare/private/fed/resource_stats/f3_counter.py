@@ -34,7 +34,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Optional
 
-from .contract import U128_MAX
+from .contract import PARTICIPANT_NAME_PATTERN, U128_MAX
 
 _COLLECTING = "collecting"
 _CLOSING = "closing"
@@ -53,6 +53,11 @@ F3_DRAIN_TIMEOUT_SECONDS = 5.0
 # deployment. A parent admission still pending at terminal cleanup is therefore
 # an accounting gap, not useful work for terminal cleanup to wait on.
 F3_PARENT_DRAIN_TIMEOUT_SECONDS = 0.0
+
+# A participant report is capped at 1 MiB. Bound distinct recipient groups so
+# a large fanout can degrade to a partial subtotal instead of growing without
+# limit or making the terminal report unpublishable.
+MAX_F3_SENT_TO_GROUPS = 2048
 
 
 class F3TrafficClass(str, Enum):
@@ -77,27 +82,27 @@ class _FrozenState:
 
     status: str
     issues: tuple[str, ...]
-    payload_bytes: int
-    messages: int
+    sent_to: tuple[tuple[str, int, int], ...]
 
     def as_dict(self) -> dict[str, Any]:
         result: dict[str, Any] = {"status": self.status}
         if self.issues:
             result["issues"] = list(self.issues)
-        result["remote_accepted"] = {
-            "payload_bytes": str(self.payload_bytes),
-            "messages": str(self.messages),
-        }
+        result["sent_to"] = [
+            {"participant_name": name, "payload_bytes": str(payload_bytes), "messages": str(messages)}
+            for name, payload_bytes, messages in self.sent_to
+        ]
         return result
 
 
 class F3Admission:
     """Opaque token for one originating logical send."""
 
-    __slots__ = ("_completed", "_extra_payload_bytes", "_invalid", "_owner", "_traffic_class")
+    __slots__ = ("_completed", "_extra_payload_bytes", "_invalid", "_owner", "_recipient_name", "_traffic_class")
 
-    def __init__(self, owner: object, traffic_class: F3TrafficClass):
+    def __init__(self, owner: object, traffic_class: F3TrafficClass, recipient_name: str):
         self._owner = owner
+        self._recipient_name = recipient_name
         self._traffic_class = traffic_class
         self._completed = False
         self._extra_payload_bytes = 0
@@ -134,6 +139,7 @@ class F3Counter:
         self._pending = 0
         self._payload_bytes = 0
         self._messages = 0
+        self._sent_to: dict[str, tuple[int, int]] = {}
         self._issues: set[str] = set()
         self._frozen_state: Optional[_FrozenState] = None
 
@@ -149,7 +155,7 @@ class F3Counter:
         with self._condition:
             return self._pending
 
-    def try_begin(self, traffic_class: F3TrafficClass) -> Optional[F3Admission]:
+    def try_begin(self, traffic_class: F3TrafficClass, recipient_name: str) -> Optional[F3Admission]:
         """Try to admit one originating logical send.
 
         ``None`` means the observation was not admitted. This is expected
@@ -164,8 +170,11 @@ class F3Counter:
             if not isinstance(traffic_class, F3TrafficClass) or traffic_class not in INCLUDED_F3_TRAFFIC_CLASSES:
                 self._issues.add(_ISSUE_COUNTER_GAP)
                 return None
+            if not isinstance(recipient_name, str) or not PARTICIPANT_NAME_PATTERN.fullmatch(recipient_name):
+                self._issues.add(_ISSUE_COUNTER_GAP)
+                return None
             self._pending += 1
-            return F3Admission(self._owner, traffic_class)
+            return F3Admission(self._owner, traffic_class, recipient_name)
 
     def add_accepted_payload_bytes(self, admission: Optional[F3Admission], payload_bytes: int) -> bool:
         """Add accepted out-of-band bytes to a pending logical operation.
@@ -231,8 +240,15 @@ class F3Counter:
                 self._issues.add(_ISSUE_COUNTER_GAP)
                 return False
 
+            recipient_name = admission._recipient_name
+            if recipient_name not in self._sent_to and len(self._sent_to) >= MAX_F3_SENT_TO_GROUPS:
+                self._issues.add(_ISSUE_COUNTER_GAP)
+                return False
+            recipient_bytes, recipient_messages = self._sent_to.get(recipient_name, (0, 0))
+
             self._payload_bytes += operation_bytes
             self._messages += 1
+            self._sent_to[recipient_name] = (recipient_bytes + operation_bytes, recipient_messages + 1)
             return True
 
     def abandon(self, admission: Optional[F3Admission]) -> bool:
@@ -349,6 +365,5 @@ class F3Counter:
         return _FrozenState(
             status="partial" if ordered_issues else "reported",
             issues=ordered_issues,
-            payload_bytes=self._payload_bytes,
-            messages=self._messages,
+            sent_to=tuple((name, *self._sent_to[name]) for name in sorted(self._sent_to)),
         )

@@ -12,8 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from copy import deepcopy
-
+from nvflare.private.fed.resource_stats.contract import derive_job_totals
 from nvflare.tool.job.job_resources import render_job_resources, render_study_resources
 
 
@@ -38,7 +37,7 @@ def _participant():
             },
         },
         "retained_content": {"status": "unavailable", "issues": ["not_bound"]},
-        "f3": {"status": "unavailable", "issues": ["not_bound"]},
+        "message_traffic": {"status": "unavailable", "issues": ["not_bound"]},
         "workspace_filesystem": {"status": "reported", "capacity_bytes": str(2 * 2**40)},
     }
 
@@ -46,20 +45,31 @@ def _participant():
 def _job_summary(participant):
     return {
         "job_id": "job-1",
-        "participants": [participant],
-        "totals": {
-            "resource_time": deepcopy(participant["resource_time"]),
-            "retained_content": deepcopy(participant["retained_content"]),
-            "f3": deepcopy(participant["f3"]),
-        },
+        "participants": [
+            {
+                "participant_name": participant["participant_name"],
+                "role": participant["role"],
+                "status": participant["status"],
+                "received_at": "2026-09-17T12:00:00Z",
+                "resource_time": participant["resource_time"],
+                "retained_content": participant["retained_content"],
+                "message_traffic": participant["message_traffic"],
+            }
+        ],
     }
+
+
+def _with_missing_server(summary):
+    summary["participants"].append({"participant_name": "server", "role": "server", "status": "missing"})
+    return summary
 
 
 def test_mig_column_is_hidden_when_no_participant_reports_mig():
     participant = _participant()
 
-    output = render_job_resources(_job_summary(participant))
+    output = render_job_resources(_job_summary(participant), job_name="hello-pt")
 
+    assert output.startswith("Recorded resources for job hello-pt (ID: job-1).")
     assert "Recorded average visible capacity over each measured interval" in output
     assert "CPU UNITS" in output
     assert "MEM GiB" in output
@@ -68,11 +78,16 @@ def test_mig_column_is_hidden_when_no_participant_reports_mig():
     assert "8.0000" in output
     assert "64.0000" in output
     assert "2.0000" in output
-    assert "SAVED CONTENT" not in output
-    assert "F3 REMOTE" not in output
+    assert "RUN-DIR FILES" not in output
+    assert "MESSAGE PAYLOAD SENT" not in output
     assert "CPU 8.0000 unit h" in output
     assert "MEMORY 64.0000 GiB h" in output
     assert "FULL GPUs 2.0000 instance h" in output
+
+
+def test_job_header_falls_back_to_id_when_name_metadata_is_not_supplied():
+    output = render_job_resources(_job_summary(_participant()))
+    assert output.startswith("Recorded resources for job ID job-1.")
 
 
 def test_mig_column_and_site_detail_are_shown_only_when_applicable():
@@ -96,34 +111,60 @@ def test_mig_column_and_site_detail_are_shown_only_when_applicable():
     assert "1.0000 average visible instances" in site_output
 
 
-def test_saved_content_and_f3_columns_are_only_shown_when_bound():
+def test_run_directory_files_and_message_traffic_columns_are_only_shown_when_bound():
     participant = _participant()
     summary = _job_summary(participant)
 
     assert "Other recorded participant totals" not in render_job_resources(summary)
 
     participant["retained_content"] = {"status": "reported", "bytes": str(3 * 2**30)}
-    participant["f3"] = {
+    participant["message_traffic"] = {
         "status": "partial",
         "issues": ["counter_gap"],
-        "remote_accepted": {"payload_bytes": str(5 * 2**30), "messages": "10"},
+        "sent_to": [{"participant_name": "server", "payload_bytes": str(5 * 2**30), "messages": "10"}],
     }
-    summary = _job_summary(participant)
+    summary = _with_missing_server(_job_summary(participant))
     output = render_job_resources(summary)
 
     assert "Other recorded participant totals" in output
-    assert "SAVED CONTENT GiB" in output
-    assert "F3 STATUS" in output
+    assert "RUN-DIR FILES GiB" in output
+    assert "RUN-DIR STATUS" in output
+    assert "MESSAGE TRAFFIC STATUS" in output
     assert "PARTIAL" in output
-    assert "F3 REMOTE ACCEPTED GiB" in output
-    assert "SAVED CONTENT 3.0000 GiB" in output
-    assert "F3 STATUS PARTIAL" in output
-    assert "F3 REMOTE ACCEPTED 5.0000 GiB" in output
+    assert "MESSAGE PAYLOAD SENT GiB" in output
+    assert "MESSAGE PAYLOAD SENT TO SITE GiB" in output
+    assert "RUN-DIR FILES 3.0000 GiB" in output
+    assert "RUN-DIR STATUS PARTIAL" in output
+    assert "MESSAGE TRAFFIC STATUS PARTIAL" in output
+    assert "MESSAGE PAYLOAD SENT 5.0000 GiB" in output
+
+    participant["retained_content"] = {
+        "status": "partial",
+        "issues": ["observation_incomplete"],
+        "bytes": str(2 * 2**30),
+    }
+    partial_output = render_job_resources(_with_missing_server(_job_summary(participant)))
+    assert "RUN-DIR STATUS PARTIAL" in partial_output
+
+
+def test_sender_confirmed_inbound_remains_visible_when_destination_report_is_missing():
+    site = _participant()
+    site["message_traffic"] = {
+        "status": "reported",
+        "sent_to": [{"participant_name": "server", "payload_bytes": str(2**30), "messages": "2"}],
+    }
+    summary = _with_missing_server(_job_summary(site))
+
+    output = render_job_resources(summary)
+    server_row = next(line for line in output.splitlines() if line.startswith("server") and "1.0000" in line)
+    assert "N/A" in server_row
+    assert "1.0000" in server_row
+    assert "sender-confirmed" in output
 
 
 def test_study_mig_column_is_shown_only_when_an_included_job_reports_mig():
     participant = _participant()
-    job_totals = _job_summary(participant)["totals"]
+    job_totals = derive_job_totals(_job_summary(participant)["participants"])
     study = {
         "selection": {"study_name": "default"},
         "coverage": {
@@ -135,6 +176,7 @@ def test_study_mig_column_is_shown_only_when_an_included_job_reports_mig():
         "jobs": [
             {
                 "job_id": "job-1",
+                "job_name": "hello-pt",
                 "job_status": "FINISHED_COMPLETED",
                 "resource_data": "included",
                 "totals": job_totals,
@@ -144,9 +186,12 @@ def test_study_mig_column_is_shown_only_when_an_included_job_reports_mig():
     }
 
     initial_output = render_study_resources(study)
+    assert "JOB ID" in initial_output
+    assert "NAME" in initial_output
+    assert "hello-pt" in initial_output
     assert "MIG h" not in initial_output
-    assert "SAVED CONTENT" not in initial_output
-    assert "F3 REMOTE" not in initial_output
+    assert "RUN-DIR FILES" not in initial_output
+    assert "MESSAGE PAYLOAD SENT" not in initial_output
 
     mig_group = {
         "kind": "mig_compute_instance",
@@ -159,11 +204,11 @@ def test_study_mig_column_is_shown_only_when_an_included_job_reports_mig():
     assert "MIG h" in output
     assert "MIG INSTANCES 1.0000 instance h" in output
 
-    job_totals["f3"] = {
+    job_totals["message_traffic"] = {
         "status": "partial",
-        "remote_accepted": {"payload_bytes": str(5 * 2**30), "messages": "10"},
+        "sent": {"payload_bytes": str(5 * 2**30), "messages": "10"},
     }
     output = render_study_resources(study)
-    assert "F3 STATUS" in output
-    assert "F3 STATUS PARTIAL" in output
-    assert "F3 REMOTE ACCEPTED 5.0000 GiB" in output
+    assert "MESSAGE TRAFFIC STATUS" in output
+    assert "MESSAGE TRAFFIC STATUS PARTIAL" in output
+    assert "MESSAGE PAYLOAD SENT 5.0000 GiB" in output

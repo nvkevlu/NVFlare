@@ -25,7 +25,6 @@ observations. Only job and transient study sums are derived here.
 
 from __future__ import annotations
 
-import calendar
 import json
 import re
 from collections import defaultdict
@@ -90,6 +89,7 @@ LEGACY_TERMINAL_JOB_STATES = frozenset({"FINISHED_OK", "FINISHED_EXCEPTION", "AB
 
 MAX_ISSUES = 4
 MAX_PARTICIPANTS = 10_000
+MAX_MESSAGE_DESTINATIONS = 2_048
 MAX_STUDY_JOBS = 10_000
 MAX_GPU_GROUPS = 4_096
 MAX_JSON_DEPTH = 32
@@ -108,6 +108,7 @@ INTEGER_PATTERN = re.compile(r"^(?:0|[1-9][0-9]{0,38})$")
 DECIMAL_PATTERN = re.compile(r"^(?:0|[1-9][0-9]{0,38})(?:\.[0-9]{0,8}[1-9])?$")
 TIMESTAMP_PATTERN = re.compile(r"^([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2})(?:\.([0-9]{1,9}))?Z$")
 JOB_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+JOB_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$")
 PARTICIPANT_NAME_PATTERN = re.compile(r"^[A-Za-z0-9_-][A-Za-z0-9_.-]{0,127}$")
 MODEL_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._()+/@-]{0,127}$")
 ARCHITECTURE_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,31}$")
@@ -187,14 +188,6 @@ def _timestamp(value: Any, path: str) -> str:
     except ValueError:
         _fail(path, "is not a valid calendar timestamp")
     return value
-
-
-def _timestamp_nanoseconds(value: str) -> int:
-    match = TIMESTAMP_PATTERN.fullmatch(value)
-    assert match
-    parsed = datetime.strptime(match.group(1), "%Y-%m-%dT%H:%M:%S")
-    fractional = (match.group(2) or "").ljust(9, "0")
-    return calendar.timegm(parsed.timetuple()) * 1_000_000_000 + int(fractional or "0")
 
 
 def _decimal(value: Any, path: str, *, maximum: int | Decimal = U128_MAX, positive: bool = False) -> Decimal:
@@ -418,26 +411,45 @@ def _validate_counter(value: Any, path: str) -> None:
         _fail(path, "payload_bytes must be zero when messages is zero")
 
 
+def _validate_sent_to(value: Any, path: str) -> None:
+    if not isinstance(value, list) or len(value) > MAX_MESSAGE_DESTINATIONS:
+        _fail(path, f"must contain 0..{MAX_MESSAGE_DESTINATIONS} destination entries")
+    names = []
+    for index, item in enumerate(value):
+        entry_path = f"{path}[{index}]"
+        entry = _mapping(item, entry_path)
+        _exact_keys(entry, {"participant_name", "payload_bytes", "messages"}, set(), entry_path)
+        names.append(_identifier(entry["participant_name"], PARTICIPANT_NAME_PATTERN, f"{entry_path}.participant_name"))
+        _validate_counter(
+            {"payload_bytes": entry["payload_bytes"], "messages": entry["messages"]},
+            entry_path,
+        )
+        if int(entry["messages"]) == 0:
+            _fail(f"{entry_path}.messages", "must be positive for a listed destination")
+    if names != sorted(set(names)):
+        _fail(path, "must be sorted by unique participant_name")
+
+
 def _validate_f3(value: Any, path: str, *, aggregate: bool = False) -> None:
     f3 = _mapping(value, path)
     statuses = TOTAL_STATUSES if aggregate else MEASUREMENT_STATUSES
     status = _enum(f3.get("status"), statuses, f"{path}.status")
     if aggregate:
         if status in {"reported", "partial"}:
-            _exact_keys(f3, {"status", "remote_accepted"}, set(), path)
-            _validate_counter(f3["remote_accepted"], f"{path}.remote_accepted")
+            _exact_keys(f3, {"status", "sent"}, set(), path)
+            _validate_counter(f3["sent"], f"{path}.sent")
         else:
             _exact_keys(f3, {"status"}, set(), path)
         return
 
     if status in {"reported", "partial"}:
-        required = {"status", "remote_accepted"}
+        required = {"status", "sent_to"}
         if status == "partial":
             required.add("issues")
         _exact_keys(f3, required, set(), path)
         if status == "partial":
             _issues(f3["issues"], PARTIAL_ISSUES, f"{path}.issues")
-        _validate_counter(f3["remote_accepted"], f"{path}.remote_accepted")
+        _validate_sent_to(f3["sent_to"], f"{path}.sent_to")
     else:
         _exact_keys(f3, {"status", "issues"}, set(), path)
         allowed = SOURCE_UNAVAILABLE_ISSUES if status == "unavailable" else SOURCE_ERROR_ISSUES
@@ -446,10 +458,10 @@ def _validate_f3(value: Any, path: str, *, aggregate: bool = False) -> None:
 
 def _validate_totals(value: Any, path: str) -> None:
     totals = _mapping(value, path)
-    _exact_keys(totals, {"resource_time", "retained_content", "f3"}, set(), path)
+    _exact_keys(totals, {"resource_time", "retained_content", "message_traffic"}, set(), path)
     _validate_resource_time(totals["resource_time"], f"{path}.resource_time")
     _validate_retained_content(totals["retained_content"], f"{path}.retained_content", aggregate=True)
-    _validate_f3(totals["f3"], f"{path}.f3", aggregate=True)
+    _validate_f3(totals["message_traffic"], f"{path}.message_traffic", aggregate=True)
 
 
 def _canonical_decimal(value: Decimal) -> str:
@@ -595,19 +607,25 @@ def _aggregate_f3(
     values: Sequence[Mapping[str, Any]],
     *,
     complete: bool,
+    aggregate_input: bool,
     path: str,
 ) -> dict[str, Any]:
     numeric = [value for value in values if value["status"] in {"reported", "partial"}]
     if not numeric:
         return {"status": "unavailable"}
-    payload = sum(int(value["remote_accepted"]["payload_bytes"]) for value in numeric)
-    messages = sum(int(value["remote_accepted"]["messages"]) for value in numeric)
+    counters = (
+        [value["sent"] for value in numeric]
+        if aggregate_input
+        else [entry for value in numeric for entry in value["sent_to"]]
+    )
+    payload = sum(int(counter["payload_bytes"]) for counter in counters)
+    messages = sum(int(counter["messages"]) for counter in counters)
     if payload > U128_MAX or messages > U128_MAX:
-        _fail(f"{path}.remote_accepted", "aggregate exceeds the unsigned 128-bit bound")
+        _fail(f"{path}.sent", "aggregate exceeds the unsigned 128-bit bound")
     reported = complete and len(numeric) == len(values) and all(value["status"] == "reported" for value in values)
     return {
         "status": "reported" if reported else "partial",
-        "remote_accepted": {"payload_bytes": str(payload), "messages": str(messages)},
+        "sent": {"payload_bytes": str(payload), "messages": str(messages)},
     }
 
 
@@ -617,12 +635,18 @@ def _aggregate_totals(
     f3_values: Sequence[Mapping[str, Any]],
     *,
     complete: bool,
+    traffic_is_aggregate: bool,
     path: str,
 ) -> dict[str, Any]:
     totals = {
         "resource_time": _resource_time_aggregate(resource_times, complete=complete, path=f"{path}.resource_time"),
         "retained_content": _aggregate_retained(retained_values, complete=complete, path=f"{path}.retained_content"),
-        "f3": _aggregate_f3(f3_values, complete=complete, path=f"{path}.f3"),
+        "message_traffic": _aggregate_f3(
+            f3_values,
+            complete=complete,
+            aggregate_input=traffic_is_aggregate,
+            path=f"{path}.message_traffic",
+        ),
     }
     _validate_totals(totals, path)
     return totals
@@ -640,7 +664,7 @@ def _validate_participant_summary(record: Mapping[str, Any], path: str) -> None:
             "resource_time",
             "workspace_filesystem",
             "retained_content",
-            "f3",
+            "message_traffic",
         },
         set(),
         path,
@@ -653,7 +677,10 @@ def _validate_participant_summary(record: Mapping[str, Any], path: str) -> None:
     _validate_resource_time(record["resource_time"], f"{path}.resource_time")
     _validate_workspace_filesystem(record["workspace_filesystem"], f"{path}.workspace_filesystem")
     _validate_retained_content(record["retained_content"], f"{path}.retained_content")
-    _validate_f3(record["f3"], f"{path}.f3")
+    _validate_f3(record["message_traffic"], f"{path}.message_traffic")
+    for destination in record["message_traffic"].get("sent_to", []):
+        if destination["participant_name"] == record["participant_name"]:
+            _fail(f"{path}.message_traffic.sent_to", "cannot include the sending participant")
 
 
 def derive_participant_totals(participant_record: Mapping[str, Any]) -> dict[str, Any]:
@@ -665,11 +692,11 @@ def derive_participant_totals(participant_record: Mapping[str, Any]) -> dict[str
     return {
         "resource_time": deepcopy(participant_record["resource_time"]),
         "retained_content": deepcopy(participant_record["retained_content"]),
-        "f3": deepcopy(participant_record["f3"]),
+        "message_traffic": deepcopy(participant_record["message_traffic"]),
     }
 
 
-def _validate_participant_entry(value: Any, path: str, cutoff_ns: int) -> None:
+def _validate_participant_entry(value: Any, path: str) -> None:
     entry = _mapping(value, path)
     status = _enum(entry.get("status"), PARTICIPANT_STATUSES, f"{path}.status")
     base = {"participant_name", "role", "status"}
@@ -681,22 +708,18 @@ def _validate_participant_entry(value: Any, path: str, cutoff_ns: int) -> None:
                 "received_at",
                 "resource_time",
                 "retained_content",
-                "f3",
+                "message_traffic",
             },
             set(),
             path,
         )
-        received_at = _timestamp(entry["received_at"], f"{path}.received_at")
-        if _timestamp_nanoseconds(received_at) > cutoff_ns:
-            _fail(f"{path}.received_at", "must not be later than report_cutoff_at")
+        _timestamp(entry["received_at"], f"{path}.received_at")
         _validate_resource_time(entry["resource_time"], f"{path}.resource_time")
         _validate_retained_content(entry["retained_content"], f"{path}.retained_content")
-        _validate_f3(entry["f3"], f"{path}.f3")
+        _validate_f3(entry["message_traffic"], f"{path}.message_traffic")
     elif status == "invalid":
         _exact_keys(entry, base | {"received_at", "issues"}, set(), path)
-        received_at = _timestamp(entry["received_at"], f"{path}.received_at")
-        if _timestamp_nanoseconds(received_at) > cutoff_ns:
-            _fail(f"{path}.received_at", "must not be later than report_cutoff_at")
+        _timestamp(entry["received_at"], f"{path}.received_at")
         _issues(entry["issues"], INVALID_REPORT_ISSUES, f"{path}.issues")
     else:
         _exact_keys(entry, base, set(), path)
@@ -707,32 +730,42 @@ def _validate_participant_entry(value: Any, path: str, cutoff_ns: int) -> None:
 def _validate_participant_list(
     participants: Sequence[Mapping[str, Any]],
     *,
-    cutoff_ns: int,
     path: str,
 ) -> None:
     if not isinstance(participants, list) or not 1 <= len(participants) <= MAX_PARTICIPANTS:
         _fail(path, f"must contain 1..{MAX_PARTICIPANTS} entries")
     ordering: list[tuple[str, str]] = []
     for index, entry in enumerate(participants):
-        _validate_participant_entry(entry, f"{path}[{index}]", cutoff_ns)
+        _validate_participant_entry(entry, f"{path}[{index}]")
         ordering.append((entry["role"], entry["participant_name"]))
     if ordering != sorted(ordering):
         _fail(path, "must be sorted by role, then participant_name")
     if len({item[1] for item in ordering}) != len(ordering):
         _fail(path, "participant_name values must be unique")
+    known_names = {item[1] for item in ordering}
+    for index, entry in enumerate(participants):
+        if entry["status"] != "accepted":
+            continue
+        for destination in entry["message_traffic"].get("sent_to", []):
+            name = destination["participant_name"]
+            if name not in known_names or name == entry["participant_name"]:
+                _fail(
+                    f"{path}[{index}].message_traffic.sent_to",
+                    "destinations must name another expected participant",
+                )
 
 
 def derive_job_totals(participants: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     """Derive job totals from one complete expected-participant list."""
 
-    maximum_timestamp = _timestamp_nanoseconds("9999-12-31T23:59:59.999999999Z")
-    _validate_participant_list(participants, cutoff_ns=maximum_timestamp, path="participants")
+    _validate_participant_list(participants, path="participants")
     accepted = [entry for entry in participants if entry["status"] == "accepted"]
     return _aggregate_totals(
         [entry["resource_time"] for entry in accepted],
         [entry["retained_content"] for entry in accepted],
-        [entry["f3"] for entry in accepted],
+        [entry["message_traffic"] for entry in accepted],
         complete=len(accepted) == len(participants),
+        traffic_is_aggregate=False,
         path="totals",
     )
 
@@ -740,23 +773,21 @@ def derive_job_totals(participants: Sequence[Mapping[str, Any]]) -> dict[str, An
 def _validate_resource_summary(record: Mapping[str, Any], path: str) -> None:
     _exact_keys(
         record,
-        {"schema_version", "kind", "job_id", "report_cutoff_at", "finalized_at", "participants", "totals"},
+        {
+            "schema_version",
+            "kind",
+            "job_id",
+            "participants",
+        },
         set(),
         path,
     )
     if record["schema_version"] != SCHEMA_VERSION:
         _fail(f"{path}.schema_version", f"must equal {SCHEMA_VERSION}")
     _identifier(record["job_id"], JOB_ID_PATTERN, f"{path}.job_id")
-    cutoff = _timestamp(record["report_cutoff_at"], f"{path}.report_cutoff_at")
-    finalized = _timestamp(record["finalized_at"], f"{path}.finalized_at")
-    cutoff_ns = _timestamp_nanoseconds(cutoff)
-    if _timestamp_nanoseconds(finalized) < cutoff_ns:
-        _fail(f"{path}.finalized_at", "must not precede report_cutoff_at")
-    _validate_participant_list(record["participants"], cutoff_ns=cutoff_ns, path=f"{path}.participants")
-    _validate_totals(record["totals"], f"{path}.totals")
-    expected = derive_job_totals(record["participants"])
-    if record["totals"] != expected:
-        _fail(f"{path}.totals", "must exactly equal the deterministic sum and coverage of participants")
+    # Derivation validates the participant list and aggregate numeric bounds.
+    # The resulting totals are not stored in the summary.
+    derive_job_totals(record["participants"])
 
 
 def _validate_study_job(value: Any, path: str) -> None:
@@ -765,14 +796,15 @@ def _validate_study_job(value: Any, path: str) -> None:
     if resource_data == "included":
         _exact_keys(
             job,
-            {"job_id", "job_status", "resource_data", "totals"},
+            {"job_id", "job_name", "job_status", "resource_data", "totals"},
             set(),
             path,
         )
         _validate_totals(job["totals"], f"{path}.totals")
     else:
-        _exact_keys(job, {"job_id", "job_status", "resource_data"}, set(), path)
+        _exact_keys(job, {"job_id", "job_name", "job_status", "resource_data"}, set(), path)
     _identifier(job["job_id"], JOB_ID_PATTERN, f"{path}.job_id")
+    _identifier(job["job_name"], JOB_NAME_PATTERN, f"{path}.job_name")
     job_status = _identifier(job["job_status"], JOB_STATUS_PATTERN, f"{path}.job_status")
     terminal = job_status.startswith("FINISHED:") or job_status in LEGACY_TERMINAL_JOB_STATES
     if resource_data in {"included", "unavailable"} and not terminal:
@@ -800,8 +832,9 @@ def derive_study_totals(job_rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]
     return _aggregate_totals(
         [job["totals"]["resource_time"] for job in included],
         [job["totals"]["retained_content"] for job in included],
-        [job["totals"]["f3"] for job in included],
+        [job["totals"]["message_traffic"] for job in included],
         complete=len(included) == len(job_rows),
+        traffic_is_aggregate=True,
         path="totals",
     )
 
@@ -962,7 +995,7 @@ def validate_bundle(
         relative_path = f"participants/{participant_name}.json"
         entry = accepted[participant_name]
         copied = derive_participant_totals(record)
-        for field in ("resource_time", "retained_content", "f3"):
+        for field in ("resource_time", "retained_content", "message_traffic"):
             if entry[field] != copied[field]:
                 _fail(
                     f"resource_summary.participants[{participant_name!r}].{field}",

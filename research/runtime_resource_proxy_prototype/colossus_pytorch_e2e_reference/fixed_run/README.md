@@ -6,6 +6,12 @@ Process POC, exported `hello-pt` job, CIFAR-10 data, and NVIDIA L40. The only
 relevant implementation change was the collector's trusted absolute-path CUDA
 Runtime fallback; the revised human renderer was also present.
 
+Historical contract note: this immutable capture predates the required v1
+`job_name` field. Its resource and study summaries therefore do not validate
+against the current v1 contract and must not be rendered with the current CLI.
+Its participant summaries remain current-contract records. The JSON and text
+are intentionally preserved as exact evidence from that run.
+
 Job `534b4073-9f7b-41ef-99fd-c4a0abd4229b` reached
 `FINISHED:COMPLETED` in 81.0 seconds. See the exact [submit](run/job-submit.txt)
 and [wait](run/job-wait.txt) transcripts. The POC was stopped after the output

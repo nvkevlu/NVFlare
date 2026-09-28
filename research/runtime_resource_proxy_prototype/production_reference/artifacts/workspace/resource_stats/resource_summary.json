@@ -2,8 +2,6 @@
   "schema_version": "1.0",
   "kind": "nvflare.resource_stats.resource_summary",
   "job_id": "job-20260917-001",
-  "report_cutoff_at": "2026-09-17T14:37:21.000000Z",
-  "finalized_at": "2026-09-17T14:37:21.005000Z",
   "participants": [
     {
       "participant_name": "site-1",
@@ -37,17 +35,18 @@
         }
       },
       "retained_content": {
-        "status": "unavailable",
-        "issues": [
-          "not_bound"
-        ]
-      },
-      "f3": {
         "status": "reported",
-        "remote_accepted": {
-          "payload_bytes": "4831875120",
-          "messages": "3"
-        }
+        "bytes": "0"
+      },
+      "message_traffic": {
+        "status": "reported",
+        "sent_to": [
+          {
+            "participant_name": "server",
+            "payload_bytes": "4831875120",
+            "messages": "3"
+          }
+        ]
       }
     },
     {
@@ -75,61 +74,19 @@
         }
       },
       "retained_content": {
-        "status": "unavailable",
-        "issues": [
-          "not_bound"
-        ]
-      },
-      "f3": {
         "status": "reported",
-        "remote_accepted": {
-          "payload_bytes": "4875921456",
-          "messages": "4"
-        }
-      }
-    }
-  ],
-  "totals": {
-    "resource_time": {
-      "status": "reported",
-      "measured_seconds": "4463.5",
-      "cpu": {
-        "groups": [
-          {
-            "model": "AMD EPYC 9654",
-            "architecture": "x86_64",
-            "unit_seconds": "71152"
-          },
-          {
-            "model": "Intel Xeon Gold 6338",
-            "architecture": "x86_64",
-            "unit_seconds": "17920"
-          }
-        ]
+        "bytes": "0"
       },
-      "memory": {
-        "byte_seconds": "612324897456128"
-      },
-      "gpu": {
-        "groups": [
+      "message_traffic": {
+        "status": "reported",
+        "sent_to": [
           {
-            "kind": "full_gpu",
-            "model": "NVIDIA A100 80GB",
-            "memory_bytes": "85899345920",
-            "instance_seconds": "8894"
+            "participant_name": "site-1",
+            "payload_bytes": "4875921456",
+            "messages": "4"
           }
         ]
       }
-    },
-    "retained_content": {
-      "status": "unavailable"
-    },
-    "f3": {
-      "status": "reported",
-      "remote_accepted": {
-        "payload_bytes": "9707796576",
-        "messages": "7"
-      }
     }
-  }
+  ]
 }

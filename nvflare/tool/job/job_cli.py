@@ -1992,7 +1992,7 @@ def cmd_job_resources(cmd_args):
         if is_json_mode():
             output_ok(data)
         else:
-            print_human(render_job_resources(summary, participant))
+            print_human(render_job_resources(summary, participant, job_name=result.get("job_name")))
     else:
         data = {"selection": {"study": study}, "summary": result}
         if is_json_mode():

@@ -44,7 +44,9 @@ SCHEMA_ROOT = Path(__file__).resolve().parent
 GOLDEN_ROOT = SCHEMA_ROOT / "golden" / "v1"
 DEFAULT_OUTPUT = GOLDEN_ROOT / "finalized_job"
 JOB_ID = "job-20260909-001"
+JOB_NAME = "qwen2.5-14b-federated-qualification"
 STUDY_JOB_ID = "job-20260910-002"
+STUDY_JOB_NAME = "qwen2.5-14b-h100-qualification"
 STUDY_NAME = "cancer-research"
 SITE_1_NAME = "site-1"
 SITE_2_NAME = "site-2"
@@ -52,8 +54,7 @@ SITE_3_NAME = "site-3"
 SERVER_NAME = "server"
 STUDY_SITE_NAME = "site-4"
 CLIENT_F3_BYTES = "147700336640"
-SERVER_F3_BYTES = "295400673280"
-SAVED_RESULT_BYTES = "29540266113"
+RUN_DIR_FILE_BYTES = "29540266113"
 
 
 def _json_bytes(value: Any) -> bytes:
@@ -82,12 +83,13 @@ def _counter(payload_bytes: str = "0", messages: str = "0") -> dict[str, str]:
 
 def _f3(
     *,
-    remote_payload_bytes: str = "0",
-    remote_messages: str = "0",
+    sent_to: tuple[tuple[str, str, str], ...] = (),
 ) -> dict[str, Any]:
     return {
         "status": "reported",
-        "remote_accepted": _counter(remote_payload_bytes, remote_messages),
+        "sent_to": [
+            {"participant_name": name, **_counter(payload_bytes, messages)} for name, payload_bytes, messages in sent_to
+        ],
     }
 
 
@@ -113,7 +115,7 @@ def _participant(
             "capacity_bytes": workspace_capacity_bytes,
         },
         "retained_content": retained_content,
-        "f3": f3,
+        "message_traffic": f3,
     }
 
 
@@ -148,7 +150,7 @@ def _main_participant() -> dict[str, Any]:
         },
         workspace_capacity_bytes="1099511627776",
         retained_content={"status": "reported", "bytes": "0"},
-        f3=_f3(remote_payload_bytes=CLIENT_F3_BYTES, remote_messages="5"),
+        f3=_f3(sent_to=((SERVER_NAME, CLIENT_F3_BYTES, "5"),)),
     )
 
 
@@ -187,7 +189,7 @@ def _partial_participant() -> dict[str, Any]:
             "status": "unavailable",
             "issues": ["not_bound"],
         },
-        f3=_f3(remote_payload_bytes=CLIENT_F3_BYTES, remote_messages="5"),
+        f3=_f3(sent_to=((SERVER_NAME, CLIENT_F3_BYTES, "5"),)),
     )
 
 
@@ -212,8 +214,13 @@ def _server_participant() -> dict[str, Any]:
             "gpu": {"groups": []},
         },
         workspace_capacity_bytes="1099511627776",
-        retained_content={"status": "reported", "bytes": SAVED_RESULT_BYTES},
-        f3=_f3(remote_payload_bytes=SERVER_F3_BYTES, remote_messages="10"),
+        retained_content={"status": "reported", "bytes": RUN_DIR_FILE_BYTES},
+        f3=_f3(
+            sent_to=(
+                (SITE_1_NAME, CLIENT_F3_BYTES, "5"),
+                (SITE_2_NAME, CLIENT_F3_BYTES, "5"),
+            )
+        ),
     )
 
 
@@ -248,7 +255,7 @@ def _study_job_participant() -> dict[str, Any]:
         },
         workspace_capacity_bytes="4398046511104",
         retained_content={"status": "reported", "bytes": "59080532226"},
-        f3=_f3(remote_payload_bytes="2363205386240", remote_messages="40"),
+        f3=_f3(),
     )
 
 
@@ -292,26 +299,20 @@ def _accepted_entry(
         "received_at": received_at,
         "resource_time": deepcopy(participant["resource_time"]),
         "retained_content": deepcopy(participant["retained_content"]),
-        "f3": deepcopy(participant["f3"]),
+        "message_traffic": deepcopy(participant["message_traffic"]),
     }
 
 
 def _resource_summary(
     job_id: str,
     participants: list[dict[str, Any]],
-    *,
-    cutoff: str,
-    finalized: str,
 ) -> dict[str, Any]:
     participants.sort(key=lambda item: (item["role"], item["participant_name"]))
     return {
         "schema_version": "1.0",
         "kind": KIND_RESOURCE_SUMMARY,
         "job_id": job_id,
-        "report_cutoff_at": cutoff,
-        "finalized_at": finalized,
         "participants": participants,
-        "totals": derive_job_totals(participants),
     }
 
 
@@ -360,7 +361,11 @@ def _retained_bytes(value: dict[str, Any]) -> Decimal | None:
 
 
 def _f3_bytes(value: dict[str, Any]) -> Decimal | None:
-    return Decimal(value["remote_accepted"]["payload_bytes"]) if "remote_accepted" in value else None
+    if "sent" in value:
+        return Decimal(value["sent"]["payload_bytes"])
+    if "sent_to" in value:
+        return sum((Decimal(entry["payload_bytes"]) for entry in value["sent_to"]), Decimal(0))
+    return None
 
 
 def _average(value: Decimal | None, measured_seconds: str | None, divisor: Decimal = Decimal(1)) -> str:
@@ -377,7 +382,29 @@ def _has_retained_content(value: dict[str, Any]) -> bool:
 
 
 def _has_f3(value: dict[str, Any]) -> bool:
-    return _f3_bytes(value["f3"]) is not None
+    return _f3_bytes(value["message_traffic"]) is not None
+
+
+def _sent_to_site(summary: dict[str, Any], participant_name: str) -> str:
+    entries = summary["participants"]
+    numeric_sources = [
+        entry for entry in entries if entry["status"] == "accepted" and "sent_to" in entry["message_traffic"]
+    ]
+    if not numeric_sources:
+        return "N/A"
+    amount = sum(
+        Decimal(group["payload_bytes"])
+        for source in numeric_sources
+        for group in source["message_traffic"]["sent_to"]
+        if group["participant_name"] == participant_name
+    )
+    shown = _hours(amount, Decimal(2**30))
+    complete = all(
+        source["status"] == "accepted" and source["message_traffic"]["status"] == "reported"
+        for source in entries
+        if source["participant_name"] != participant_name
+    )
+    return shown if complete else f"{shown} (partial)"
 
 
 def _quantity(label: str, value: str, unit: str) -> str:
@@ -400,7 +427,7 @@ def _show_mig(entries: list[dict[str, Any]]) -> bool:
     )
 
 
-def _human_cli(summary: dict[str, Any], selected_site: str | None = None) -> str:
+def _human_cli(summary: dict[str, Any], job_name: str, selected_site: str | None = None) -> str:
     accepted = sum(entry["status"] == "accepted" for entry in summary["participants"])
     expected = len(summary["participants"])
     coverage = "COMPLETE" if accepted == expected else "PARTIAL"
@@ -413,10 +440,10 @@ def _human_cli(summary: dict[str, Any], selected_site: str | None = None) -> str
         raise ValueError(f"unknown site '{selected_site}'")
     show_mig = _show_mig(entries)
     show_retained = any(entry["status"] == "accepted" and _has_retained_content(entry) for entry in entries)
-    show_f3 = any(entry["status"] == "accepted" and _has_f3(entry) for entry in entries)
+    show_f3 = any(entry["status"] == "accepted" and _has_f3(entry) for entry in summary["participants"])
     selection = "" if selected_site is None else f" | selected site: {selected_site}"
     lines = [
-        f"Recorded resources for job {summary['job_id']}.",
+        f"Recorded resources for job {job_name} (ID: {summary['job_id']}).",
         f"Job coverage: {coverage} ({accepted} accepted / {expected} expected){selection}",
         "",
         "Recorded average visible capacity over each measured interval",
@@ -448,23 +475,37 @@ def _human_cli(summary: dict[str, Any], selected_site: str | None = None) -> str
     if show_retained or show_f3:
         other_headers = ["SITE"]
         if show_retained:
-            other_headers.append("SAVED CONTENT GiB")
+            other_headers.extend(["RUN-DIR STATUS", "RUN-DIR FILES GiB"])
         if show_f3:
-            other_headers.extend(["F3 STATUS", "F3 REMOTE ACCEPTED GiB"])
+            other_headers.extend(
+                ["MESSAGE TRAFFIC STATUS", "MESSAGE PAYLOAD SENT GiB", "MESSAGE PAYLOAD SENT TO SITE GiB"]
+            )
         other_rows = []
         for entry in entries:
-            if entry["status"] != "accepted":
-                values = ["N/A"] * (len(other_headers) - 1)
-            else:
-                values = []
-                if show_retained:
-                    values.append(_hours(_retained_bytes(entry["retained_content"]), Decimal(2**30)))
-                if show_f3:
-                    values.extend([entry["f3"]["status"].upper(), _hours(_f3_bytes(entry["f3"]), Decimal(2**30))])
+            values = []
+            if show_retained:
+                values.extend(
+                    [
+                        entry["retained_content"]["status"].upper(),
+                        _hours(_retained_bytes(entry["retained_content"]), Decimal(2**30)),
+                    ]
+                    if entry["status"] == "accepted"
+                    else ["N/A", "N/A"]
+                )
+            if show_f3:
+                values.extend(
+                    [
+                        entry["message_traffic"]["status"].upper(),
+                        _hours(_f3_bytes(entry["message_traffic"]), Decimal(2**30)),
+                    ]
+                    if entry["status"] == "accepted"
+                    else ["N/A", "N/A"]
+                )
+                values.append(_sent_to_site(summary, entry["participant_name"]))
             other_rows.append([entry["participant_name"], *values])
         lines.extend(["", "Other recorded participant totals", *_table(other_headers, other_rows)])
     if selected_site is None:
-        totals = summary["totals"]
+        totals = derive_job_totals(summary["participants"])
         resource_time = totals["resource_time"]
         measured_time = _duration(resource_time["measured_seconds"]) if "measured_seconds" in resource_time else "N/A"
         resource_totals = [
@@ -486,14 +527,25 @@ def _human_cli(summary: dict[str, Any], selected_site: str | None = None) -> str
         )
         other_totals = []
         if show_retained:
-            other_totals.append(
-                _quantity("SAVED CONTENT", _hours(_retained_bytes(totals["retained_content"]), Decimal(2**30)), "GiB")
+            other_totals.extend(
+                [
+                    f"RUN-DIR STATUS {totals['retained_content']['status'].upper()}",
+                    _quantity(
+                        "RUN-DIR FILES",
+                        _hours(_retained_bytes(totals["retained_content"]), Decimal(2**30)),
+                        "GiB",
+                    ),
+                ]
             )
         if show_f3:
             other_totals.extend(
                 [
-                    f"F3 STATUS {totals['f3']['status'].upper()}",
-                    _quantity("F3 REMOTE ACCEPTED", _hours(_f3_bytes(totals["f3"]), Decimal(2**30)), "GiB"),
+                    f"MESSAGE TRAFFIC STATUS {totals['message_traffic']['status'].upper()}",
+                    _quantity(
+                        "MESSAGE PAYLOAD SENT",
+                        _hours(_f3_bytes(totals["message_traffic"]), Decimal(2**30)),
+                        "GiB",
+                    ),
                 ]
             )
         if other_totals:
@@ -505,6 +557,7 @@ def _human_cli(summary: dict[str, Any], selected_site: str | None = None) -> str
             "  PARTIAL means at least one expected report or observation was incomplete.",
             "  Each average is resource-time divided by that row's measured interval.",
             "  Totals add participant reports; overlapping resources can be counted more than once.",
+            "  Message payload sent to a site is sender-confirmed; it is not proof of receipt.",
         ]
     )
     if selected_site is None:
@@ -579,7 +632,7 @@ def _aggregate_quality(totals: dict[str, Any]) -> str:
     statuses = {
         totals["resource_time"]["status"],
         totals["retained_content"]["status"],
-        totals["f3"]["status"],
+        totals["message_traffic"]["status"],
     }
     if statuses == {"reported"}:
         return "COMPLETE"
@@ -620,10 +673,10 @@ def _human_study_cli(summary: dict[str, Any]) -> str:
             if show_mig:
                 metrics.insert(2, "N/A")
             if show_retained:
-                metrics.append("N/A")
+                metrics.extend(["N/A", "N/A"])
             if show_f3:
                 metrics.extend(["N/A", "N/A"])
-            rows.append([row["job_id"], row["job_status"], row["resource_data"], *metrics])
+            rows.append([row["job_id"], row["job_name"], row["job_status"], row["resource_data"], *metrics])
             continue
         totals = row["totals"]
         resource_time = totals["resource_time"]
@@ -638,18 +691,28 @@ def _human_study_cli(summary: dict[str, Any]) -> str:
             ]
         )
         if show_retained:
-            metrics.append(_hours(_retained_bytes(totals["retained_content"]), Decimal(2**30)))
+            metrics.extend(
+                [
+                    totals["retained_content"]["status"].upper(),
+                    _hours(_retained_bytes(totals["retained_content"]), Decimal(2**30)),
+                ]
+            )
         if show_f3:
-            metrics.extend([totals["f3"]["status"].upper(), _hours(_f3_bytes(totals["f3"]), Decimal(2**30))])
-        rows.append([row["job_id"], row["job_status"], row["resource_data"], *metrics])
-    headers = ["JOB", "JOB STATUS", "RESOURCE DATA", "QUALITY", "FULL GPU h"]
+            metrics.extend(
+                [
+                    totals["message_traffic"]["status"].upper(),
+                    _hours(_f3_bytes(totals["message_traffic"]), Decimal(2**30)),
+                ]
+            )
+        rows.append([row["job_id"], row["job_name"], row["job_status"], row["resource_data"], *metrics])
+    headers = ["JOB ID", "NAME", "JOB STATUS", "RESOURCE DATA", "QUALITY", "FULL GPU h"]
     if show_mig:
         headers.append("MIG h")
     headers.extend(["CPU unit h", "MEM GiB h"])
     if show_retained:
-        headers.append("SAVED CONTENT GiB")
+        headers.extend(["RUN-DIR STATUS", "RUN-DIR FILES GiB"])
     if show_f3:
-        headers.extend(["F3 STATUS", "F3 REMOTE ACCEPTED GiB"])
+        headers.extend(["MESSAGE TRAFFIC STATUS", "MESSAGE PAYLOAD SENT GiB"])
     lines.extend(_table(headers, rows))
     totals = summary["totals"]
     resource_time = totals["resource_time"]
@@ -679,14 +742,25 @@ def _human_study_cli(summary: dict[str, Any]) -> str:
     )
     other_totals = []
     if show_retained:
-        other_totals.append(
-            _quantity("SAVED CONTENT", _hours(_retained_bytes(totals["retained_content"]), Decimal(2**30)), "GiB")
+        other_totals.extend(
+            [
+                f"RUN-DIR STATUS {totals['retained_content']['status'].upper()}",
+                _quantity(
+                    "RUN-DIR FILES",
+                    _hours(_retained_bytes(totals["retained_content"]), Decimal(2**30)),
+                    "GiB",
+                ),
+            ]
         )
     if show_f3:
         other_totals.extend(
             [
-                f"F3 STATUS {totals['f3']['status'].upper()}",
-                _quantity("F3 REMOTE ACCEPTED", _hours(_f3_bytes(totals["f3"]), Decimal(2**30)), "GiB"),
+                f"MESSAGE TRAFFIC STATUS {totals['message_traffic']['status'].upper()}",
+                _quantity(
+                    "MESSAGE PAYLOAD SENT",
+                    _hours(_f3_bytes(totals["message_traffic"]), Decimal(2**30)),
+                    "GiB",
+                ),
             ]
         )
     if other_totals:
@@ -751,12 +825,8 @@ def build(output_root: Path = DEFAULT_OUTPUT) -> dict[str, Any]:
             received_at="2026-09-09T14:37:03.3Z",
         ),
     ]
-    summary = _resource_summary(
-        JOB_ID,
-        participants,
-        cutoff="2026-09-09T14:37:04Z",
-        finalized="2026-09-09T14:37:04.1Z",
-    )
+    summary = _resource_summary(JOB_ID, participants)
+    job_totals = derive_job_totals(summary["participants"])
     summary_bytes = _json_bytes(summary)
 
     study_participant = _study_job_participant()
@@ -767,12 +837,7 @@ def build(output_root: Path = DEFAULT_OUTPUT) -> dict[str, Any]:
         role="client",
         received_at="2026-09-10T18:00:00.1Z",
     )
-    study_job_summary = _resource_summary(
-        STUDY_JOB_ID,
-        [study_entry],
-        cutoff="2026-09-10T18:00:01Z",
-        finalized="2026-09-10T18:00:01.1Z",
-    )
+    study_job_summary = _resource_summary(STUDY_JOB_ID, [study_entry])
     study_job_summary_bytes = _json_bytes(study_job_summary)
     study_participant_files = {STUDY_SITE_NAME: study_participant_bytes}
 
@@ -780,23 +845,27 @@ def build(output_root: Path = DEFAULT_OUTPUT) -> dict[str, Any]:
         [
             {
                 "job_id": JOB_ID,
+                "job_name": JOB_NAME,
                 "job_status": "FINISHED:COMPLETED",
                 "resource_data": "included",
-                "totals": deepcopy(summary["totals"]),
+                "totals": deepcopy(job_totals),
             },
             {
                 "job_id": STUDY_JOB_ID,
+                "job_name": STUDY_JOB_NAME,
                 "job_status": "FINISHED:COMPLETED",
                 "resource_data": "included",
-                "totals": deepcopy(study_job_summary["totals"]),
+                "totals": derive_job_totals(study_job_summary["participants"]),
             },
             {
                 "job_id": "job-20260911-003",
+                "job_name": "qwen2.5-14b-followup",
                 "job_status": "FINISHED:COMPLETED",
                 "resource_data": "unavailable",
             },
             {
                 "job_id": "job-20260912-004",
+                "job_name": "qwen2.5-14b-evaluation",
                 "job_status": "RUNNING",
                 "resource_data": "nonterminal",
             },
@@ -810,12 +879,8 @@ def build(output_root: Path = DEFAULT_OUTPUT) -> dict[str, Any]:
         role="client",
         received_at="2026-09-09T00:15:01.2Z",
     )
-    large_summary = _resource_summary(
-        large_participant["job_id"],
-        [large_entry],
-        cutoff="2026-09-09T00:15:02Z",
-        finalized="2026-09-09T00:15:02.1Z",
-    )
+    large_summary = _resource_summary(large_participant["job_id"], [large_entry])
+    large_totals = derive_job_totals(large_summary["participants"])
 
     records = {
         "participant_summary.json": site_1,
@@ -884,14 +949,18 @@ def build(output_root: Path = DEFAULT_OUTPUT) -> dict[str, Any]:
         SERVER_NAME: server,
     }
     _write(output_root / "cli" / "resources-all.json", _json_bytes(cli_json))
-    _write(output_root / "cli" / "resources-all.txt", _human_cli(summary).encode("utf-8"))
+    _write(output_root / "cli" / "resources-all.txt", _human_cli(summary, JOB_NAME).encode("utf-8"))
     _write(
         output_root / "cli" / "resources-site-1-details.txt",
-        (_human_cli(summary, "site-1") + "\n" + _hardware_details(summary, "site-1", site_records)).encode("utf-8"),
+        (_human_cli(summary, JOB_NAME, "site-1") + "\n" + _hardware_details(summary, "site-1", site_records)).encode(
+            "utf-8"
+        ),
     )
     _write(
         output_root / "cli" / "resources-site-2-details.txt",
-        (_human_cli(summary, "site-2") + "\n" + _hardware_details(summary, "site-2", site_records)).encode("utf-8"),
+        (_human_cli(summary, JOB_NAME, "site-2") + "\n" + _hardware_details(summary, "site-2", site_records)).encode(
+            "utf-8"
+        ),
     )
     study_cli_json = {
         "schema_version": "1",
@@ -916,6 +985,7 @@ def build(output_root: Path = DEFAULT_OUTPUT) -> dict[str, Any]:
         "generator": Path(__file__).name,
         "schema_version": "1.0",
         "job_id": JOB_ID,
+        "job_name": JOB_NAME,
         "study": STUDY_NAME,
         "public_participant_reports": len(accepted_records),
         "public_start_or_final_fragments": 0,
@@ -927,30 +997,28 @@ def build(output_root: Path = DEFAULT_OUTPUT) -> dict[str, Any]:
             "description": "Illustrative values scaled to completed Qwen2.5-14B qualification jobs.",
             "reference_label": "Five-round 14B full-model qualification, 2026-07-31",
             "scope_note": (
-                "The A100 model, four-GPU baseline, runtime scale, model-state size, and saved-result size "
-                "are evidence-based; CPU, memory, workspace-filesystem capacity, and observation changes "
-                "are illustrative."
+                "The A100 model, four-GPU baseline, runtime scale, and model-state size are evidence-based; "
+                "CPU, memory, run-directory file bytes, workspace-filesystem capacity, and observation "
+                "changes are illustrative."
             ),
             "reference_runtime_seconds": "2223",
             "reference_model_state_bytes": "29540067328",
             "reference_logical_state_directions": "20",
             "reference_logical_state_bytes": "590801346560",
-            "reference_saved_result_bytes": SAVED_RESULT_BYTES,
-            "f3_note": (
+            "illustrative_run_directory_file_bytes": RUN_DIR_FILE_BYTES,
+            "message_traffic_note": (
                 "The historical run recorded model-state size; its logical volume was derived, and it did "
-                "not measure the proposed post-encoding F3 counter."
+                "not measure sender-confirmed post-encoding message payloads."
             ),
         },
         "derived_examples": {
             "site_1_measured_seconds": site_1["resource_time"]["measured_seconds"],
             "site_2_measured_seconds": site_2["resource_time"]["measured_seconds"],
             "server_measured_seconds": server["resource_time"]["measured_seconds"],
-            "accepted_measured_seconds": summary["totals"]["resource_time"]["measured_seconds"],
-            "job_cpu_unit_seconds": str(
-                _decimal_sum(summary["totals"]["resource_time"]["cpu"]["groups"], "unit_seconds")
-            ),
+            "accepted_measured_seconds": job_totals["resource_time"]["measured_seconds"],
+            "job_cpu_unit_seconds": str(_decimal_sum(job_totals["resource_time"]["cpu"]["groups"], "unit_seconds")),
             "job_gpu_instance_seconds": str(
-                _decimal_sum(summary["totals"]["resource_time"]["gpu"]["groups"], "instance_seconds")
+                _decimal_sum(job_totals["resource_time"]["gpu"]["groups"], "instance_seconds")
             ),
             "study_cpu_unit_seconds": str(
                 _decimal_sum(study["totals"]["resource_time"]["cpu"]["groups"], "unit_seconds")
@@ -958,7 +1026,7 @@ def build(output_root: Path = DEFAULT_OUTPUT) -> dict[str, Any]:
             "study_gpu_instance_seconds": str(
                 _decimal_sum(study["totals"]["resource_time"]["gpu"]["groups"], "instance_seconds")
             ),
-            "large_memory_byte_seconds": large_summary["totals"]["resource_time"]["memory"]["byte_seconds"],
+            "large_memory_byte_seconds": large_totals["resource_time"]["memory"]["byte_seconds"],
         },
     }
     _write(output_root / "generation_receipt.json", _json_bytes(receipt))

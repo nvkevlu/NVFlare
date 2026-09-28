@@ -1,0 +1,12 @@
+2026-09-22 16:56:17,304 - TaskScriptRunner - INFO - Accuracy of the network on 10000 test images: 10 %
+2026-09-22 16:56:21,019 - TaskScriptRunner - INFO - Finished Training for site-1
+2026-09-22 16:56:24,328 - TaskScriptRunner - INFO - Accuracy of the network on 10000 test images: 44 %
+2026-09-22 16:56:27,977 - TaskScriptRunner - INFO - Finished Training for site-1
+2026-09-22 16:56:31,282 - TaskScriptRunner - INFO - Accuracy of the network on 10000 test images: 53 %
+2026-09-22 16:56:34,935 - TaskScriptRunner - INFO - Finished Training for site-1
+2026-09-22 16:56:17,322 - TaskScriptRunner - INFO - Accuracy of the network on 10000 test images: 10 %
+2026-09-22 16:56:20,966 - TaskScriptRunner - INFO - Finished Training for site-2
+2026-09-22 16:56:24,790 - TaskScriptRunner - INFO - Accuracy of the network on 10000 test images: 44 %
+2026-09-22 16:56:28,404 - TaskScriptRunner - INFO - Finished Training for site-2
+2026-09-22 16:56:31,728 - TaskScriptRunner - INFO - Accuracy of the network on 10000 test images: 53 %
+2026-09-22 16:56:35,430 - TaskScriptRunner - INFO - Finished Training for site-2

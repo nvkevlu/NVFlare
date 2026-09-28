@@ -3,9 +3,9 @@
 This directory is reserved for temporary local probe runs. Its contents are
 ignored by Git because machine values and timestamps vary.
 
-The old local captures were removed: they predated canonical v1 and contained
-superseded design experiments. Do not use a newly generated local capture as a
-schema example.
+An ignored local capture may remain from an older prototype and need not match
+the current schema. It is machine-specific probe evidence, not a review or
+schema example; use the reproducible artifacts below for the current design.
 
 ## Current review artifacts
 

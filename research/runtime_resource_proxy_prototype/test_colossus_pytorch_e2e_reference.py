@@ -13,10 +13,12 @@
 # limitations under the License.
 
 import json
+from decimal import Decimal
 from pathlib import Path
 
-from nvflare.private.fed.resource_stats.contract import derive_job_totals, derive_study_totals, validate_record
-from nvflare.tool.job.job_resources import render_job_resources, render_study_resources
+import pytest
+
+from nvflare.private.fed.resource_stats.contract import ContractError, validate_record
 
 _FIXED_RUN = Path(__file__).parent / "colossus_pytorch_e2e_reference" / "fixed_run" / "cli"
 
@@ -29,7 +31,7 @@ def _read_envelope(name: str) -> dict:
     return value["data"]
 
 
-def test_fixed_colossus_run_reconciles_and_matches_current_human_renderer():
+def test_fixed_colossus_run_reconciles_as_a_pre_job_name_capture():
     job_data = _read_envelope("resources-job.json")
     site_data = _read_envelope("resources-site-1.json")
     study_data = _read_envelope("resources-study.json")
@@ -37,12 +39,30 @@ def test_fixed_colossus_run_reconciles_and_matches_current_human_renderer():
     job_summary = job_data["summary"]
     site_report = site_data["participant"]
     study_summary = study_data["summary"]
-    validate_record(job_summary)
-    validate_record(site_report)
-    validate_record(study_summary)
+    assert "f3" in site_report
+    with pytest.raises(ContractError):
+        validate_record(site_report)
 
-    assert job_summary["totals"] == derive_job_totals(job_summary["participants"])
-    assert study_summary["totals"] == derive_study_totals(study_summary["jobs"])
+    # This immutable September 21 capture predates the required v1 job_name
+    # field. It remains useful measurement evidence, but it must not be
+    # mistaken for a record produced by the current contract or renderer.
+    assert "job_name" not in job_summary
+    assert all("job_name" not in row for row in study_summary["jobs"])
+    with pytest.raises(ContractError, match="missing required fields: job_name"):
+        validate_record(job_summary)
+    with pytest.raises(ContractError, match="missing required fields: job_name"):
+        validate_record(study_summary)
+
+    assert Decimal(job_summary["totals"]["resource_time"]["measured_seconds"]) == sum(
+        Decimal(entry["resource_time"]["measured_seconds"])
+        for entry in job_summary["participants"]
+        if entry["status"] == "accepted"
+    )
+    assert Decimal(study_summary["totals"]["resource_time"]["measured_seconds"]) == sum(
+        Decimal(row["totals"]["resource_time"]["measured_seconds"])
+        for row in study_summary["jobs"]
+        if row["resource_data"] == "included"
+    )
     assert site_data["summary"] == job_summary
     assert site_report["participant_name"] == "site-1"
     assert site_report["workspace_filesystem"] == {
@@ -64,13 +84,12 @@ def test_fixed_colossus_run_reconciles_and_matches_current_human_renderer():
         assert entry["retained_content"] == {"status": "unavailable", "issues": ["not_bound"]}
         assert entry["f3"] == {"status": "unavailable", "issues": ["not_bound"]}
 
-    connection_prefix = "Connecting to FLARE ...\n"
-    assert (_FIXED_RUN / "resources-job.txt").read_text(encoding="utf-8") == (
-        connection_prefix + render_job_resources(job_summary) + "\n"
-    )
-    assert (_FIXED_RUN / "resources-site-1.txt").read_text(encoding="utf-8") == (
-        connection_prefix + render_job_resources(job_summary, site_report) + "\n"
-    )
-    assert (_FIXED_RUN / "resources-study.txt").read_text(encoding="utf-8") == (
-        connection_prefix + render_study_resources(study_summary) + "\n"
-    )
+    job_text = (_FIXED_RUN / "resources-job.txt").read_text(encoding="utf-8")
+    site_text = (_FIXED_RUN / "resources-site-1.txt").read_text(encoding="utf-8")
+    study_text = (_FIXED_RUN / "resources-study.txt").read_text(encoding="utf-8")
+    assert f'Recorded resources for job {job_summary["job_id"]}.' in job_text
+    assert "CPU 2.0314 unit h | MEMORY 7.9765 GiB h | FULL GPUs 0.0635 instance h" in job_text
+    assert "| selected site: site-1" in site_text
+    assert "NVIDIA L40" in site_text
+    for row in study_summary["jobs"]:
+        assert row["job_id"] in study_text

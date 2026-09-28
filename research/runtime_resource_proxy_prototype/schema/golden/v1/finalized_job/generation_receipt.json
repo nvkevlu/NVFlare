@@ -2,6 +2,7 @@
   "generator": "build_review_artifacts.py",
   "schema_version": "1.0",
   "job_id": "job-20260909-001",
+  "job_name": "qwen2.5-14b-federated-qualification",
   "study": "cancer-research",
   "public_participant_reports": 3,
   "public_start_or_final_fragments": 0,
@@ -12,13 +13,13 @@
   "scenario_basis": {
     "description": "Illustrative values scaled to completed Qwen2.5-14B qualification jobs.",
     "reference_label": "Five-round 14B full-model qualification, 2026-07-31",
-    "scope_note": "The A100 model, four-GPU baseline, runtime scale, model-state size, and saved-result size are evidence-based; CPU, memory, workspace-filesystem capacity, and observation changes are illustrative.",
+    "scope_note": "The A100 model, four-GPU baseline, runtime scale, and model-state size are evidence-based; CPU, memory, run-directory file bytes, workspace-filesystem capacity, and observation changes are illustrative.",
     "reference_runtime_seconds": "2223",
     "reference_model_state_bytes": "29540067328",
     "reference_logical_state_directions": "20",
     "reference_logical_state_bytes": "590801346560",
-    "reference_saved_result_bytes": "29540266113",
-    "f3_note": "The historical run recorded model-state size; its logical volume was derived, and it did not measure the proposed post-encoding F3 counter."
+    "illustrative_run_directory_file_bytes": "29540266113",
+    "message_traffic_note": "The historical run recorded model-state size; its logical volume was derived, and it did not measure sender-confirmed post-encoding message payloads."
   },
   "derived_examples": {
     "site_1_measured_seconds": "2223",

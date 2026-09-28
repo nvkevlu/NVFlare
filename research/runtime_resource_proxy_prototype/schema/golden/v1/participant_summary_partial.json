@@ -43,11 +43,14 @@
       "not_bound"
     ]
   },
-  "f3": {
+  "message_traffic": {
     "status": "reported",
-    "remote_accepted": {
-      "payload_bytes": "147700336640",
-      "messages": "5"
-    }
+    "sent_to": [
+      {
+        "participant_name": "server",
+        "payload_bytes": "147700336640",
+        "messages": "5"
+      }
+    ]
   }
 }

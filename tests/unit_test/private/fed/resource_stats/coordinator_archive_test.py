@@ -46,7 +46,7 @@ def _participant(job_id="job-1", participant_name="site-1", reported_at="2026-09
         "resource_time": {"status": "unavailable", "issues": ["observation_incomplete"]},
         "workspace_filesystem": {"status": "unavailable", "issues": ["observation_incomplete"]},
         "retained_content": {"status": "unavailable", "issues": ["not_bound"]},
-        "f3": {"status": "unavailable", "issues": ["not_bound"]},
+        "message_traffic": {"status": "unavailable", "issues": ["not_bound"]},
     }
 
 
@@ -91,6 +91,7 @@ def test_accept_is_idempotent_and_finalized_bundle_reads_from_workspace(tmp_path
     participant_path.write_bytes(b"child-side mutation")
 
     summary = coordinator.finalize_job("job-1")
+    assert summary["job_id"] == "job-1"
     assert [(entry["participant_name"], entry["status"]) for entry in summary["participants"]] == [
         ("site-1", "accepted"),
         ("server", "missing"),
@@ -267,6 +268,15 @@ def test_restore_registration_replaces_existing_in_memory_ledger(tmp_path):
     assert site["status"] == "missing"
 
 
+def test_duplicate_registration_rejects_different_expected_participants(tmp_path):
+    run_dir = tmp_path / "run_job-1"
+    coordinator = ResourceStatsCoordinator()
+    coordinator.start_job("job-1", ["site-1"], run_dir)
+
+    with pytest.raises(RuntimeError, match="registered differently"):
+        coordinator.start_job("job-1", ["site-2"], run_dir)
+
+
 def test_start_job_enforces_schema_identity_and_total_participant_bounds(tmp_path, monkeypatch):
     coordinator = ResourceStatsCoordinator()
 
@@ -280,7 +290,7 @@ def test_start_job_enforces_schema_identity_and_total_participant_bounds(tmp_pat
         coordinator.start_job("job-1", ["site-1", "site-2"], tmp_path / "too-many")
 
 
-def test_finalization_clamps_cutoff_and_finalized_time_when_clock_moves_backward(tmp_path):
+def test_finalization_preserves_receipt_time_without_stored_summary_times(tmp_path):
     coordinator = ResourceStatsCoordinator()
     run_dir = tmp_path / "run_job-1"
     coordinator.start_job("job-1", ["site-1"], run_dir)
@@ -289,11 +299,7 @@ def test_finalization_clamps_cutoff_and_finalized_time_when_clock_moves_backward
     with patch.object(
         coordinator_module,
         "utc_timestamp",
-        side_effect=[
-            "2026-09-17T12:00:01.000000Z",
-            "2026-09-17T12:00:00.000000Z",
-            "2026-09-17T11:59:59.000000Z",
-        ],
+        return_value="2026-09-17T12:00:01.000000Z",
     ):
         assert (
             coordinator.accept_resource_report("job-1", "site-1", {"participant_summary": report})
@@ -301,8 +307,9 @@ def test_finalization_clamps_cutoff_and_finalized_time_when_clock_moves_backward
         )
         summary = coordinator.finalize_job("job-1")
 
-    assert summary["report_cutoff_at"] == "2026-09-17T12:00:01.000000Z"
-    assert summary["finalized_at"] == "2026-09-17T12:00:01.000000Z"
+    accepted = next(entry for entry in summary["participants"] if entry["participant_name"] == "site-1")
+    assert accepted["received_at"] == "2026-09-17T12:00:01.000000Z"
+    assert set(summary) == {"schema_version", "kind", "job_id", "participants"}
 
 
 def test_finalize_job_is_idempotent_and_rereads_the_published_summary(tmp_path):
@@ -389,7 +396,7 @@ def test_reader_rejects_participant_values_that_disagree_with_resource_summary(t
 
     participant_path = run_dir / "resource_stats" / "participants" / "site-1.json"
     participant = _participant()
-    participant["f3"] = {"status": "unavailable", "issues": ["unsupported"]}
+    participant["message_traffic"] = {"status": "unavailable", "issues": ["unsupported"]}
     participant_data = canonical_json_bytes(participant)
     participant_path.write_bytes(participant_data)
 

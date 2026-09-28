@@ -118,6 +118,7 @@ class ServerCommandAgent(object):
                                         return_message,
                                         counter,
                                         F3TrafficClass.TASK_RESPONSE,
+                                        recipient_name=client.name,
                                         # CellNet transports the returned reply only
                                         # after this callback exits. Admit its known
                                         # origin/destination pair now so cleanup cannot

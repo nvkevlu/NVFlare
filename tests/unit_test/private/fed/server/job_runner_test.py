@@ -65,7 +65,7 @@ def _make_runner_inputs(num_clients=1):
 
     job = MagicMock()
     job.job_id = "job-1"
-    job.meta = {}
+    job.meta = {JobMetaKey.JOB_NAME.value: "hello-pt"}
     job.min_sites = 0  # no minimum by default
     job.required_sites = None  # no required sites by default
 
@@ -1081,7 +1081,7 @@ def test_job_complete_process_contains_resource_stats_finalization_write_failure
     runner.f3_counters.close_and_freeze = MagicMock(
         return_value={
             "status": "reported",
-            "remote_accepted": {"payload_bytes": "0", "messages": "0"},
+            "sent_to": [],
         }
     )
 
@@ -1426,6 +1426,17 @@ def test_start_run_continues_when_resource_stats_setup_fails(mock_get_bool, mock
 
 @patch("nvflare.private.fed.server.job_runner.check_client_replies", return_value=[])
 @patch("nvflare.private.fed.server.job_runner.ConfigService.get_bool_var", return_value=True)
+def test_start_run_registers_resource_participants_without_copying_job_name(mock_get_bool, mock_check_replies):
+    runner, fl_ctx, _engine, job, client_sites = _make_runner_inputs()
+    fl_ctx.get_workspace.return_value.get_run_dir.return_value = "/tmp/run_job-1"
+
+    runner._start_run(job_id=job.job_id, job=job, client_sites=client_sites, fl_ctx=fl_ctx)
+
+    runner.resource_stats.start_job.assert_called_once_with("job-1", ["site-1"], "/tmp/run_job-1")
+
+
+@patch("nvflare.private.fed.server.job_runner.check_client_replies", return_value=[])
+@patch("nvflare.private.fed.server.job_runner.ConfigService.get_bool_var", return_value=True)
 def test_start_run_keeps_selected_but_not_deployable_client_missing(mock_get_bool, mock_check_replies, tmp_path):
     runner, fl_ctx, engine, job, client_sites = _make_runner_inputs()
     runner.resource_stats = type(runner.resource_stats)()
@@ -1494,7 +1505,7 @@ def test_zero_traffic_job_f3_counter_is_reported_not_missing():
 
     assert snapshot == {
         "status": "reported",
-        "remote_accepted": {"payload_bytes": "0", "messages": "0"},
+        "sent_to": [],
     }
 
 
@@ -1512,7 +1523,7 @@ def test_server_handoff_is_bound_and_accepted_before_finalization(tmp_path):
         fl_ctx,
         parent_f3={
             "status": "reported",
-            "remote_accepted": {"payload_bytes": "0", "messages": "0"},
+            "sent_to": [],
         },
     )
     summary = runner.resource_stats.finalize_job("job-1")
@@ -1520,10 +1531,10 @@ def test_server_handoff_is_bound_and_accepted_before_finalization(tmp_path):
     server = next(entry for entry in summary["participants"] if entry["participant_name"] == "server")
     assert server["status"] == "accepted"
     assert server["resource_time"] == {"status": "unavailable", "issues": ["observation_incomplete"]}
-    assert server["f3"] == {
+    assert server["message_traffic"] == {
         "status": "partial",
         "issues": ["attribution_incomplete"],
-        "remote_accepted": {"payload_bytes": "0", "messages": "0"},
+        "sent_to": [],
     }
 
 
@@ -1536,7 +1547,10 @@ def test_restore_running_job_registers_resource_participants_before_server_start
     fl_ctx.get_workspace.return_value = workspace
     engine = fl_ctx.get_engine.return_value
     job = MagicMock()
-    job.meta = {JobMetaKey.RESOURCE_PARTICIPANTS.value: ["site-1", "site-2"]}
+    job.meta = {
+        JobMetaKey.JOB_NAME.value: "hello-pt",
+        JobMetaKey.RESOURCE_PARTICIPANTS.value: ["site-1", "site-2"],
+    }
     engine.get_component.return_value.get_job.return_value = job
     client = MagicMock()
     client.name = "site-1"
@@ -1551,6 +1565,7 @@ def test_restore_running_job_registers_resource_participants_before_server_start
 
     assert runner.resource_stats.accept_resource_report("job-1", "site-1", {"participant_summary": b"{}"}) == "invalid"
     summary = runner.resource_stats.finalize_job("job-1")
+    assert summary["job_id"] == "job-1"
     site2 = next(entry for entry in summary["participants"] if entry["participant_name"] == "site-2")
     assert site2["status"] == "missing"
     runner.scheduler.restore_scheduled_job.assert_called_once_with("job-1")

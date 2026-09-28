@@ -26,12 +26,13 @@ the job ends. The report contains:
 - one `resource_time` object for accumulated CPU, memory, and GPU time;
 - one final `workspace_filesystem` capacity observation;
 - one `retained_content` observation; and
-- one final F3 observation.
+- one final `message_traffic` observation.
 
 The root server authenticates and validates reports, reconciles them against
-the participants expected for the job, and writes one `resource_summary`. It
-writes that summary last as the live run-directory publication marker. These
-are the only persistent resource-statistics records:
+the participants expected for the job, and writes one `resource_summary` with
+the job ID and participant entries. It writes that summary last as the live
+run-directory publication marker. These are the only
+persistent resource-statistics records:
 
 | Kind suffix | Purpose |
 | --- | --- |
@@ -95,6 +96,18 @@ multiply it by the whole duration.
 
 ## Identity
 
+`job_id` remains the unique lookup, matching, and sort identity. Neither the
+participant report nor archived `resource_summary` stores `job_name`. The
+authorized job CLI resolves the display name from existing server-owned job
+metadata when requested; the on-demand study view still includes that name
+beside each job ID. This adds no privilege, configuration, or wire field.
+Names are 1–255 ASCII characters, begin alphanumeric, and then permit
+alphanumeric, dot, underscore, or hyphen.
+
+New jobs use `JobMetaKey.JOB_NAME`. When reading legacy metadata, the root
+server falls back to `JOB_FOLDER_NAME` and then `job_id`; the resolved value is
+still server-owned and must satisfy the same field rule.
+
 `participant_name` is the existing configured product identity: the
 registered site name for a client and the configured server participant name
 for SP. It appears in the participant report, expected-participant row, and
@@ -142,9 +155,17 @@ CPU, memory, and GPU do not have nested statuses or issue arrays. This makes
 the completeness statement intentionally coarse but removes contradictory
 per-resource/start/final status combinations.
 
-`workspace_filesystem`, `retained_content`, and `f3` keep separate statuses.
+`workspace_filesystem`, `retained_content`, and `message_traffic` keep separate statuses.
 They use independent sources and can fail even when compute resource time is
 complete.
+
+The three essential numeric meanings are complete value (`reported`), useful
+subtotal (`partial`), and no usable value (`unavailable`). They distinguish an
+actual zero from absent evidence. Participant `accepted`/`missing`/`invalid`/
+`disabled` instead describes whether a terminal report made it into the job
+summary. The current schema also permits `error` on some measurements; see the
+[status catalog](CODE_CATALOG.md#typed-object-statuses) for a proposed
+consolidation that has **not** changed the v1 contract.
 
 ## Internal resource-time accounting
 
@@ -215,22 +236,42 @@ participants or jobs.
 
 ## Retained content
 
-`retained_content` has its own status and optional byte value. `reported` is
-the exact sum of a complete bounded result-file set already known to NVFlare;
-reported zero means that known set is empty. A partial value is only the exact
-subtotal for the observed part of an intended bounded set. If no authoritative
-set exists, use `unavailable/not_bound`.
+In v1, `retained_content` is a terminal, best-effort observation of one
+participant's NVFlare run directory. The collector recursively adds the logical
+`st_size` of regular files and excludes the top-level `resource_stats/`
+subtree. It does not identify models or distinguish outputs from the deployed
+application, configuration, logs, temporary files, or inputs.
 
-The collector does not scan the workspace, guess model filenames, or expose
-per-file paths or hashes.
+Symlinks and other non-regular entries are ignored, and symlink targets are not
+followed. Hard-linked files are counted once per directory entry. Sparse files
+contribute their logical length rather than allocated blocks. A clean traversal
+reports the observed total, including `bytes: "0"` for an empty directory. If
+an entry or directory cannot be observed, a useful subtotal is
+`partial/observation_incomplete`; if no useful observation can be made, the
+value is unavailable.
 
-## F3 counters
+The traversal is not an atomic filesystem snapshot. It runs after application
+execution returns and before the private handoff, stats-pool files, optional
+workspace upload, and later cleanup/log growth. It is also a participant
+self-report: the parent validates the typed value but does not attest the files
+or remeasure them. Participant, job, and study totals are additive observations,
+not unique retained storage, archive size, allocation, usage, or billable
+storage.
 
-The terminal F3 object has one status and one counter pair:
+Only the run directory is observed. A separately configured result, log, or
+audit root is currently outside this value; covering those roots without
+double-counting is a known implementation gap.
 
-- `remote_accepted`.
+## Message traffic counters
 
-Each pair contains payload bytes and messages. Counters freeze in one atomic
+The terminal `message_traffic` object has one status and a `sent_to` list of
+destination counters:
+
+- `sent_to`: up to 2,048 entries sorted by unique `participant_name`, each with
+  `payload_bytes` and positive `messages`. Destinations cannot be the sender;
+  accepted summary destinations name another expected participant.
+
+An empty list represents no included sends. Counters freeze in one atomic
 operation before the report is serialized. A callback contributes only if it
 linearizes before that cutoff; later callbacks cannot change canonical values.
 If the platform cannot stop new included traffic and drain already admitted
@@ -276,17 +317,19 @@ one of:
 - `disabled`.
 
 An accepted entry includes the trusted participant name and role, receipt
-time, and the validated terminal `resource_time`, `retained_content`, and `f3`
+time, and the validated terminal `resource_time`, `retained_content`, and `message_traffic`
 objects. Workspace-filesystem capacity remains only in the archived
 participant report. A retry with identical bytes is idempotent; different
 bytes cannot replace the first accepted report. The server compares the exact
 accepted bytes directly; the accepted summary row does not add a receipt token.
 
-Job `totals` contain only `resource_time`, `retained_content`, and the primary
-F3 `remote_accepted` pair. The server adds numeric contributions from accepted
-reports and derives aggregate status from expected-participant coverage and
-typed status. It never creates a workspace-capacity total. Missing data is not
-zero.
+The archived job summary contains participant entries and no aggregate
+`totals`. The CLI and study query derive job totals from accepted reports when
+requested. The derived values contain only `resource_time`,
+`retained_content`, and a message-traffic `sent` pair summed from participant
+`sent_to` entries. Aggregate status
+reflects expected-participant coverage and typed status. There is no
+workspace-capacity total. Missing data is not zero.
 
 ## Server files
 
@@ -327,6 +370,11 @@ nvflare job resources --job JOB_ID --study NAME --site SITE_NAME
 `--study` reads one job from the named study, which supplies the existing
 authorization/selection context. `--site` requires `--job`.
 
+The one-job heading shows the metadata name followed by `ID: JOB_ID`; the
+study table uses separate `JOB ID` and `NAME` columns. The archived resource
+summary has only `job_id`; the on-demand study JSON includes `job_name` in
+each job row.
+
 The command does not search across studies. NVFlare binds job visibility to
 the authenticated session's study, so a job in another study intentionally
 appears not found, matching the other job commands.
@@ -342,9 +390,9 @@ nvflare job resources --study NAME --format json
 bare `nvflare job resources` command shows help.
 
 For a study query, the server authorizes the active study and materializes job
-IDs and statuses from one scan of matching jobs still retained by the normal
-job store. It keeps that list fixed while reading archives and classifies each
-row as:
+IDs, persisted names, and statuses from one scan of matching jobs still
+retained by the normal job store. It keeps that list fixed while reading
+archives and classifies each row as:
 
 - `included`: terminal job with a valid resource summary;
 - `unavailable`: terminal job whose valid resource summary cannot be read; or
@@ -359,7 +407,7 @@ archives are being read.
 
 The response keeps coverage counts and per-job state so missing summaries are
 not mistaken for zero. It adds only resource time, retained-content bytes, and
-the primary F3 `remote_accepted` pair. Workspace-filesystem capacity is never
+the message-traffic `sent` pair. Workspace-filesystem capacity is never
 included. Only `included` rows contribute numbers; any unavailable or
 nonterminal row makes an otherwise numeric aggregate partial. The response is
 not stored, does not include jobs already removed by retention, and is not a

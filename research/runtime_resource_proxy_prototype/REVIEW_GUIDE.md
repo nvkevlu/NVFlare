@@ -16,29 +16,35 @@ The detailed implementation plan can be used to answer field, hook, or failure
 questions without reading it linearly during the meeting.
 
 For steps 3 through 5, use the
-[real PyTorch Colossus run](colossus_pytorch_e2e_reference/README.md). It puts
-the exact archived records beside the job/site/study CLI and external GPU
-evidence. Its archived report demonstrates the earlier honest partial result:
-PyTorch used the L40, but the collector then could not resolve the CUDA Runtime
-outside the system loader path, so the report contains no GPU total. The
-current implementation closes that specific discovery gap through installed
-NVIDIA distribution metadata while leaving the historical artifact unchanged.
+[deterministic production reference](production_reference/README.md) for the
+current stored contract and CLI output. The
+[historical PyTorch Colossus run](colossus_pytorch_job_name_e2e_reference/README.md)
+puts its archived records beside job/site/study CLI output, includes reported
+values for the measurements captured then, and exercises the job-name field
+and both human identity displays. The earlier
+[retained-content/F3 run](colossus_pytorch_retained_content_e2e_reference/README.md)
+predates that metadata field, while the still earlier
+[PyTorch run](colossus_pytorch_e2e_reference/README.md) preserves the CUDA
+Runtime discovery failure that the current implementation fixed.
 
 ## The idea in one paragraph
 
 Each NVFlare client and server job process keeps CPU, memory, and GPU
 capacity-time in memory while it runs. At finalization it writes one bounded
 private handoff containing those totals, one workspace-filesystem capacity
-observation, and typed retained-result/F3 results. Retained-result ownership is
-not yet bound for every workflow, so that value remains unavailable rather
-than guessed. F3 now has platform-owned counters for deployment, real task
+observation, one best-effort run-directory file-size observation, and typed
+message-traffic results. The file-size observation sums regular files in that
+participant's run directory; it is not a curated or attested result inventory.
+Internal F3 counters cover deployment, real task
 responses, and task results. The parent validates the handoff, merges its own
 F3 contribution with the child's, and builds the participant's only public
 report. The client parent sends that report once on the existing
 terminal-outcome request; a newly named versioned completion request remains a
-fallback design, not implemented code. The server adds accepted participant
-totals, stores everything in the normal archived job workspace, and serves
-either one job or all retained jobs in a study through the CLI.
+fallback design, not implemented code. The server copies accepted participant
+values, stores an ID-keyed summary with them in the normal archived job
+workspace, and serves either one job or
+all retained jobs in a study through the CLI. The participant report carries
+only the job ID; it never supplies the name.
 
 ## What changed after review
 
@@ -58,11 +64,14 @@ participant_summary
 ├── one resource_time result
 ├── one final workspace-filesystem capacity observation
 ├── retained_content
-└── F3 counters
+└── message_traffic.sent_to[] (sender-confirmed, by recipient)
 ```
 
 CPU, memory, and GPU share one `resource_time.status`. Separate measurement
 status fields are not repeated under every resource.
+The stored `resource_summary` also omits job totals and cutoff/finalization
+timestamps. Job and study views derive additive totals when requested; the
+server keeps the acceptance cutoff in its private coordinator state.
 
 ## What the feature measures
 
@@ -71,8 +80,9 @@ It measures capacity-time visible inside the NVFlare job environment:
 - CPU unit-seconds;
 - memory byte-seconds;
 - GPU instance-seconds, grouped by device kind and model;
-- selected job-scoped F3 bytes; and
-- bytes in an authoritative retained-result set.
+- selected job-scoped message payload bytes sent to named recipients; and
+- the logical size of regular files observed in each participant's run
+  directory at terminal finalization.
 
 It also records one point-in-time capacity value for the filesystem containing
 the job workspace. That last value is shown only as a site observation and is
@@ -155,7 +165,7 @@ Tradeoffs:
 - loss of the participant parent or its connection before delivery leaves no
   participant report;
 - loss of only the job child still yields a parent-built report, but its
-  child-derived measurements are unavailable and F3 can be partial;
+  child-derived measurements are unavailable and message traffic can be partial;
 - the server can validate final totals and bounds but cannot recompute them
   without raw periods;
 - current code assumes the initially visible capacity remains until finish;
@@ -183,7 +193,7 @@ The remaining top-level facts are:
 
 - the final observed capacity of the workspace filesystem;
 - retained-content status and bytes; and
-- F3 status and sender counters.
+- `message_traffic` status and sender-confirmed `sent_to` entries.
 
 There are no model filenames or `model.pt` hash fields. NVFlare does not assume
 which files are models.
@@ -194,10 +204,11 @@ The concise source, hook, and readiness table is in the
 [operational collection map](ROLLUP_FLOW.md#operational-collection-map).
 Production collection uses native APIs and direct kernel-interface parsing;
 the shell commands in the implementation plan are operator diagnostics only.
-CPU, memory, CUDA/NVML, workspace-filesystem, and F3 collection are implemented
-in the production path. The current focused and socket-backed F3 suites pass;
-a new live process-mode reference remains. Authoritative retained-result sets
-remain open and report unavailable until implemented.
+CPU, memory, CUDA/NVML, workspace-filesystem, run-directory content, and
+message-traffic collection are implemented in the production path. The focused and
+socket-backed F3 suites pass, and a Process-launch Colossus run supplies live
+F3 evidence. The retained-content implementation still needs bounded traversal
+and coverage of separately configured result, log, and audit roots.
 
 ### CPU
 
@@ -265,17 +276,27 @@ NVFlare job workspace. Record `f_blocks × f_frsize` once.
 Do not enumerate other mounts, compute storage-time, or total this value. It
 is visible workspace-filesystem capacity, not job storage usage or allocation.
 
-### Saved results
+### Retained run-directory content
 
-Count only a bounded result set that NVFlare already identifies as retained.
-Do not scan the whole workspace or guess model filenames. If no authoritative
-result set exists for a workflow, saved-result bytes are unavailable. The
-required owner/provider boundary and failure behavior are detailed in
+At terminal finalization, recursively sum logical `st_size` for regular files
+in the participant's run directory, excluding its top-level
+`resource_stats/` subtree. Ignore symlinks and non-regular entries; count hard
+links once per path and sparse files by logical length. A clean empty scan is
+reported zero. A traversal error makes a useful subtotal partial and otherwise
+makes the observation unavailable.
+
+This is a non-atomic participant self-report taken before the private handoff,
+stats-pool-file creation, optional workspace upload, and later cleanup/log
+growth. It includes app/config/input/log files found in the run directory and
+does not cover separately configured result, log, or audit roots. Additive job
+and study totals are not unique retained storage, archive size, or billable
+storage. Exact implementation limitations are tracked in
 [Remaining implementation gaps](GAPS.md#2-retained-result-bytes).
 
-### F3
+### Message traffic (internal F3 counter)
 
-F3 publishes one `remote_accepted` counter pair. It includes exactly three
+Public `message_traffic.sent_to` publishes one sender-confirmed counter pair
+per named remote recipient. It includes exactly three
 platform-classified operations: job application deployment, a response that
 contains a real task, and a submitted task result. It does not include task
 poll requests, acknowledgements, final in-process delivery, failed sends, an
@@ -292,7 +313,10 @@ Only the trusted semantic origin counts. The accounting context stays inside
 the originating process and is not serialized, so a relay cannot count the
 operation a second time. A remote logical destination routed through a local
 first-hop relay is still counted once by the origin; it is not mistaken for a
-final local delivery.
+final local delivery. Trusted participant identity supplies the recipient name;
+a relay hop or job-supplied value does not. This is not receiver-observed
+traffic: sender-side local acceptance does not prove the destination received,
+processed, or durably stored anything.
 
 For a real task response, the server-job callback knows both endpoints before
 it returns the response to CellNet. It pre-admits that pair so cleanup cannot
@@ -322,10 +346,10 @@ abandons it. If a drain cannot complete, useful numeric data is retained as
 `partial/attribution_incomplete`. The parent freezes before constructing the
 terminal report, so the report cannot count itself.
 
-The production hooks are present, and the current focused and socket-backed
-suites pass. A new process-mode
-or Colossus live F3 reference has not yet replaced the older `not_bound`
-artifact. See [F3 implementation status](F3_GAP.md).
+The production hooks are present, the focused and socket-backed suites pass,
+and the historical Process-launch Colossus run reports the expected 14
+origin-only messages for its two-client, three-round topology. See
+[message-traffic implementation status](F3_GAP.md).
 
 ## How completion and the report reach the server
 
@@ -406,14 +430,16 @@ The server:
 6. treats a byte-for-byte retry as a duplicate and different valid bytes as a
    conflict;
 7. closes acceptance at the selected completion-request cutoff;
-8. adds accepted totals, then writes and fsyncs accepted participant files; and
-9. writes and fsyncs `resource_summary.json` last in the parent-owned local
-   construction directory as the publication marker.
+8. copies accepted values, then writes and fsyncs accepted participant files; and
+9. writes and fsyncs the ID-keyed `resource_summary.json` last in the
+   parent-owned local construction directory as the publication marker.
 
 The server acknowledges `accepted` after live-ledger insertion, before any
 participant file is written. Each report is capped at 1 MiB and the accepted
 canonical bytes held for one job are capped at 64 MiB. The acknowledgement is
 therefore not restart-durable.
+The persisted summary contains participant coverage and accepted values, with
+no aggregate totals or cutoff/finalization timestamps.
 
 The server persists the originally selected client names in
 `JobMetaKey.RESOURCE_PARTICIPANTS`, so a root-parent restart can rebuild the
@@ -485,7 +511,19 @@ appears not found, matching the other job commands.
 
 The default view shows the job rollup and participant coverage. `--site` adds
 one participant's final report details. JSON uses base units; text may show
-CPU-hours, GiB-hours, GPU-hours, GiB, and F3 byte units.
+CPU-hours, GiB-hours, GPU-hours, GiB, and message payload byte units.
+The job rollup is calculated from accepted summary entries on demand.
+
+The site text labels the derived figures `MESSAGE PAYLOAD SENT GiB` (that
+site's outgoing entries) and `MESSAGE PAYLOAD SENT TO SITE GiB` (other accepted
+participants' entries addressed to it). The second label must not be read as
+confirmed receipt; missing or partial sender reports limit its coverage.
+
+The job header is `Recorded resources for job NAME (ID: JOB_ID).` The server
+gets `NAME` from persisted job metadata, falling back to the persisted folder
+name and then the ID for a legacy job. The archived summary has no name to
+compare. IDs remain the unique lookup and reconciliation key; names are display
+labels and may repeat.
 
 The authenticated `GET_JOB_RESOURCES` server handler applies normal job/study
 authorization, stages the existing `WORKSPACE`, validates the published
@@ -511,8 +549,9 @@ nvflare job resources --study STUDY_NAME --format json
 
 The authenticated `GET_STUDY_RESOURCES` handler uses current active-study
 authorization and makes one pass over retained jobs visible to the caller. It
-materializes the IDs and statuses from that pass and does not reclassify them
-while reading archives. It stages, reads, and removes one terminal job's
+materializes the IDs, trusted names, and statuses from that pass and does not
+reclassify them while reading archives. It stages, reads, and removes one
+terminal job's
 `WORKSPACE` at a time, so it never holds every study archive or full archive
 byte strings in memory.
 
@@ -522,10 +561,12 @@ resource report.
 For that fixed list:
 
 - nonterminal jobs are excluded and counted;
-- terminal jobs with valid resource summaries are included;
+- terminal jobs with valid resource summaries are included; the displayed
+  name comes separately from trusted job metadata;
 - terminal jobs with absent or invalid summaries are marked unavailable; and
 - valid jobs contribute measured time, CPU, memory, GPU, retained-content, and
-  F3 remote-accepted totals.
+  on-demand `message_traffic.sent` totals derived from participant `sent_to`
+  entries.
 
 For this contract, terminal uses the existing job-CLI predicate: a status
 beginning `FINISHED:`, or the retained legacy values `FINISHED_OK`,
@@ -537,6 +578,10 @@ Workspace-filesystem capacity is never aggregated.
 The response shows per-job status and included/unavailable/excluded counts, so
 users can judge coverage. The view is calculated on demand from retained
 archives. It is not a billing ledger and cannot include deleted jobs.
+
+Every row has both `job_id` and `job_name`, including unavailable and
+nonterminal rows. Human output uses separate `JOB ID` and `NAME` columns.
+Duplicate names are allowed; ID remains the deterministic row key.
 
 The handler rejects more than 10,000 retained jobs. It also charges every
 prospective canonical job row against a cumulative 64 MiB budget before
@@ -555,14 +600,14 @@ Generated examples:
 | --- | --- |
 | Normal job end | One final report is produced and delivered. |
 | Application exception reaches finalization | Report is still attempted; job failure remains separate. |
-| Child process exits without a valid handoff | Parent sends one report with child-derived fields unavailable and any usable parent F3 marked partial. |
+| Child process exits without a valid handoff | Parent sends one report with child-derived fields unavailable and any usable parent message traffic marked partial. |
 | Parent/site/connection is lost before delivery | No accepted report; participant is missing. |
 | Initial probe is partly unavailable | One final report may have partial resource time. |
 | Applicable cgroup CPU or memory data is unreadable or malformed | That dimension fails closed instead of falling back to a wider value. |
 | Server job process is restored | The new interval is numeric where possible but marked `partial/observation_incomplete`. |
-| Server parent F3 history is restored | Keep the new subtotal and mark F3 `partial/attribution_incomplete`. |
-| An admitted F3 operation does not settle before the fixed cutoff | Keep the bounded subtotal as `partial/counter_gap`; do not delay finalization indefinitely. |
-| An F3 route loses trusted attribution or large-object completion evidence | Report partial or unavailable F3; do not substitute generic CellNet totals. |
+| Server parent F3 history is restored | Keep the new subtotal and mark message traffic `partial/attribution_incomplete`. |
+| An admitted F3 operation does not settle before the fixed cutoff | Keep the bounded message-traffic subtotal as `partial/counter_gap`; do not delay finalization indefinitely. |
+| An F3 route loses trusted attribution or large-object completion evidence | Report partial or unavailable message traffic; do not substitute generic CellNet totals. |
 | Completion request is lost | Client does not retry; the participant can be missing. |
 | Completion reply is lost | Server may already have accepted the report, but the client does not retry or learn that status. |
 | Root parent restarts after accepting a report | Expected names are restored, but accepted reports are not; a pre-restart report normally becomes missing. |
@@ -585,6 +630,12 @@ Generated examples:
   hardware-attestation claim.
 - The server binds the existing participant name and role from trusted
   expected state. A name inside the report never authenticates itself.
+- The archived summary stores only `job_id`; the authorized CLI resolves a
+  display name from existing persisted metadata, falling back from normal name
+  to folder name to ID for legacy metadata. On-demand study rows include that
+  metadata-derived label. Participant summaries and their wire envelope do
+  not carry it. This needs no new privilege or configuration and adds no new
+  resource-probe privacy category.
 - No resource-specific pseudonym, attempt ID, or environment key exists in the
   public contract.
 - The registered participant name is used directly. Duplicate/conflict
@@ -625,13 +676,21 @@ Generated examples:
   compare canonical bytes directly; archived inventory comes from the final
   summary.
 - Job and study query source: existing archived `WORKSPACE`.
+- Job identity in the resource view: both ID and name. ID remains unique;
+  names may repeat. The current pre-release v1 contract requires the field
+  without a version bump.
 - Storage byte-seconds or workspace-capacity totals: no.
+- Persisted job totals or cutoff/finalization timestamps: no. The coordinator
+  retains the cutoff privately and CLI totals are derived on demand.
 - Study view: on demand over retained terminal jobs, with visible coverage.
 - Official launcher bootstrap: a fixed NVFlare bootstrap and selector, Python
   `-I`, and snapshot before workspace download/custom activation, with no user
   setting.
 - New privileges or deployment configuration: no.
-- F3 public value: remote accepted only.
+- Message-traffic public value: `sent_to` per named recipient, accepted by the
+  sender's local transport only. No measured `received` value or participant
+  scalar `sent` is stored. The CLI derives outgoing and “sent to site” amounts
+  on demand; the latter is not confirmed receipt or guaranteed delivery.
 - F3 classes: job application, real task response, and task result only.
 - F3 byte boundary: after FOBS encoding and before optional encryption.
 - F3 ownership: trusted semantic origin only; a local first-hop relay does not
@@ -644,9 +703,8 @@ Generated examples:
 - broader platform/version and packaging validation for the implemented CUDA
   Runtime discovery and CUDA/NVML model matching, including device subsets,
   multi-GPU, MIG, legacy `torch`-owned runtimes, and conda-only layouts;
-- a new process-mode F3 run to replace the historical `not_bound` live
-  artifact; the current focused and socket-backed suites already pass;
-- authoritative retained-result sets for supported workflows;
+- bounded retained-content traversal and a decision on separately configured
+  result/log/audit roots;
 - root-parent restart recovery for accepted report bytes, invalid history,
   and cutoff state if required (expected names are already restored);
 - supported OS/container/scheduler matrix;
@@ -663,6 +721,8 @@ end-of-job capacity snapshot.
 
 | File | Purpose |
 | --- | --- |
+| [Deterministic production reference](production_reference/README.md) | Current stored contract and CLI output. |
+| [Historical live reference](colossus_pytorch_job_name_e2e_reference/README.md) | Real PyTorch collection, transport, archive, job-name, and CLI evidence captured under the earlier schema. |
 | [Implementation plan](../../docs/design/job_resource_statistics_implementation_plan.md) | Full selected contract, collection rules, transport, CLI, tests, and code map. |
 | [Current-code integration](CURRENT_CODE_INTEGRATION.md) | Exact process hooks, CellNet envelope, acceptance, cutoff, archive, and query mechanics. |
 | [Rollup flow](ROLLUP_FLOW.md) | Participant-to-job-to-study data flow and arithmetic. |

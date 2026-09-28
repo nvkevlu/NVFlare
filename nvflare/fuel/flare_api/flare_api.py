@@ -423,11 +423,13 @@ class Session(SessionSpec):
 
         ``retained_content`` reports the participant's job run directory size
         (a workspace-size measurement, not a curated result-only figure -- it
-        also includes logs, configuration, and job inputs). ``f3`` reports
-        accepted send bytes for job deployment, real task responses, and
-        submitted task results. Totals are additive across participants and
-        are not a substitute for cluster capacity/utilization accounting when
-        participants share physical hardware.
+        also includes logs, configuration, and job inputs).
+        ``message_traffic`` reports sender-confirmed payload bytes and logical
+        message counts, grouped by named remote recipient, for job deployment,
+        real task responses, and submitted task results. Totals are additive
+        across participants and are not a substitute for cluster
+        capacity/utilization accounting when participants share physical
+        hardware.
 
         Args:
             job_id: ID of the job

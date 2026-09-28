@@ -45,6 +45,11 @@ Every remaining change must preserve this deployment rule:
   `JobMetaKey.RESOURCE_PARTICIPANTS` so restore can rebuild the expected set.
 - Server-local acceptance through the same coordinator, job reduction,
   local summary-last publication, and unchanged normal `WORKSPACE` archival.
+- ID-only archived `resource_summary`, with the authorized CLI resolving a
+  display name from existing server job metadata when requested. On-demand
+  study rows currently include that metadata-derived name. Folder name and
+  then ID are legacy fallbacks; participant summaries and their wire envelope
+  carry no name. IDs remain unique because names may repeat.
 - Verified fixed-member archive reads for a job and on-demand study reduction
   across retained jobs. Queries stage one normal `WORKSPACE` at a time and do
   not materialize the full archive as Python `bytes`. The reader rejects any
@@ -61,36 +66,50 @@ Every remaining change must preserve this deployment rule:
   for job application deployment, real task responses, and task results;
   origin-only logical-send accounting after FOBS and before encryption;
   `DownloadService` byte folding; bounded condition-based cleanup drains; and
-  checked child/parent merge into the existing public `f3` field.
-- `retained_content` as the job process's total run-directory file size,
-  excluding only the platform's own `resource_stats/` bookkeeping. This is a
+  checked child/parent merge into public `message_traffic.sent_to` entries
+  grouped by trusted recipient identity.
+- `retained_content` as a terminal best-effort sum of regular-file logical
+  sizes in the job process's run directory, excluding only the platform's own
+  top-level `resource_stats/` bookkeeping. This is a
   deliberate simplification over the provider-registry design this document
   previously described as the remaining work here (see "Retained-result
   bytes" below for what changed and why).
 - Real one-server, two-client Process-launch POCs on Colossus have exercised
   isolated child startup, child-to-parent handoff, client CellNet delivery,
   root reconciliation, normal `WORKSPACE` persistence, and job/site/study CLI
-  reads. The substantial
-  [PyTorch run](colossus_pytorch_e2e_reference/README.md) is the primary live
-  reference. The earlier
+  reads. The
+  [historical job-name PyTorch run](colossus_pytorch_job_name_e2e_reference/README.md)
+  is runtime measurement evidence, including job-name output. Its archived
+  summaries and participant reports predate the current contract. The
+  preceding
+  [retained-content/F3 run](colossus_pytorch_retained_content_e2e_reference/README.md)
+  predates that field, while the substantial earlier
+  [PyTorch run](colossus_pytorch_e2e_reference/README.md) captures the CUDA
+  discovery gap. The still earlier
   [NumPy smoke run](colossus_e2e_reference/README.md) is the comparison case
   where the CUDA Runtime was system-resolvable and GPU collection succeeded.
 
-The exact files and CLI text generated through these production classes are in
+The exact files and CLI text for the current contract, generated through
+these production classes, are in
 [production_reference](production_reference/README.md).
 
 ## Remaining Phase 1 work
 
-### 1. F3 validation
+### 1. Message-traffic validation
 
-The production bindings and rollup are now present. The public value contains
-only `remote_accepted`, for exactly three classes: job application deployment,
+The production bindings and rollup are now present. The public value is
+`message_traffic.sent_to`, with a sender-confirmed payload pair per named
+recipient, for exactly three classes: job application deployment,
 a response containing a real task, and a submitted task result. Task requests,
 final delivery to an in-process logical destination, failures before
 acceptance, acknowledgements, a relay's duplicate contribution, workspace
 transfer, the resource report, and protocol traffic are excluded. A remote
 logical destination through a local first-hop relay is still counted once by
-its origin.
+its origin. This is not a receiver measurement: local sender acceptance does
+not guarantee that the recipient received, processed, or stored the payload.
+Outgoing and “sent to site” totals are derived from accepted participants'
+`sent_to` entries only when a job or study view is requested; no participant
+scalar `sent` or measured `received` value is persisted.
 
 One message is one top-level logical operation per remote destination. The main
 payload is sized after FOBS encoding and before optional encryption. Successful
@@ -103,11 +122,16 @@ The current focused and socket-backed suites pass across fan-out, semantic
 filtering, pre-encryption sizing, large-object and stream outcomes, exact
 final-local/local-relay handling, child callback pre-admission and drain,
 cutoff, merge, restore, bounded large-object retry identity, and
-self-exclusion. The remaining evidence is a new process-mode live run. Any
-future uncovered path must remain partial or unavailable rather than use
+self-exclusion. A one-server, two-client Process-launch
+[historical PyTorch run](colossus_pytorch_job_name_e2e_reference/README.md)
+reported the expected 14-message topology: two deployments, six real task
+responses, and six task results while also validating the then-required
+archived `job_name` field. That capture is historical under the current
+ID-only archived summary.
+Any future uncovered path must remain partial or unavailable rather than use
 generic CellNet counters or claim a complete zero.
 
-The focused [F3 implementation status](F3_GAP.md) records the exact semantics,
+The focused [message-traffic implementation status](F3_GAP.md) records the exact semantics,
 code bindings, cutoff/merge behavior, and remaining validation.
 
 ### 2. Retained-result bytes
@@ -121,29 +145,44 @@ of wiring every built-in workflow (and every custom one, which by definition
 the platform cannot enumerate in advance) was judged not worth it against a
 number that needs zero workflow-specific wiring instead.
 
-Production now emits `retained_content` as the job process's total run-
-directory file size (regular files only; symlinked entries are recorded at
-their own size and not followed), computed in
+Production now emits `retained_content` as a terminal best-effort observation
+of the job process's run directory, computed in
 [`JobResourceCollector.finish()`](../../nvflare/private/fed/resource_stats/collector.py)
 via `observe_retained_content()`. The only exclusion is the run directory's
 own top-level `resource_stats/` subtree, so the platform's own bookkeeping
 does not inflate the figure it is itself part of computing.
+
+The v1 byte rule sums logical `st_size` for regular files. Symlinks and other
+non-regular entries are ignored, and symlink targets are not followed. Hard
+links count once per path; sparse files count logical rather than allocated
+size. A clean empty traversal reports zero. A useful subtotal after a scan
+error is `partial/observation_incomplete`; if no useful observation exists, the
+field is unavailable.
 
 This is explicitly a workspace-size measurement, not a curated retained-
 result size, and the two other reasons the registry design was considered
 still apply and are now accepted tradeoffs rather than open problems:
 
 - the deployed app, configuration, logs, and job inputs are counted alongside
-  any real output, so the number is an upper bound on "what this job
-  retained," not an exact figure; and
+  any real output, while separate roots and later writes can be omitted, so the
+  number cannot be interpreted as a result size; and
 - an empty directory reports `bytes: "0"` without distinguishing "the
   workflow genuinely retained nothing" from "nothing was ever written here" --
   there is no authoritative owner to make that distinction, by design.
 
-A missing or inaccessible run directory still reports `unavailable` with
-`observation_incomplete`; an individual file that disappears mid-scan is
-skipped rather than failing the whole observation, since that race is
-expected and unrelated to job correctness.
+The scan is a participant self-report, not an attested file inventory. It is
+also non-atomic: it runs before the private handoff is written, stats-pool files
+are created, optional workspace upload begins, and later cleanup/log growth.
+Job and study totals add these participant observations, so they are not unique
+retained bytes, allocated disk usage, archive size, or billable storage.
+
+Two implementation gaps remain:
+
+- traversal is not bounded by entry count, elapsed time, depth, or filesystem
+  boundary, so a large or mounted tree can delay terminal cleanup;
+- only `Workspace.get_run_dir(job_id)` is observed. Separately configured
+  result, log, and audit roots can contain actual outputs but are omitted until
+  an explicit cross-root deduplication rule is chosen.
 
 The final job-store `WORKSPACE` component remains authoritative for a
 different fact: the bytes in the centrally retained archive. That archive
@@ -303,8 +342,9 @@ coverage; none is required to interpret the proven Process-mode result.
 - A server-job-process failure skips the normal client-outcome wait and closes
   acceptance immediately; later client reports cannot change the rollup.
 - One compute status describes CPU, memory, and GPU resource time together.
-- Totals add participant and job reports even when physical resources overlap.
-  They are not inventory, ownership, capacity, utilization, or billing data.
+- On-demand job and study totals add participant and job reports even when
+  physical resources overlap. They are not inventory, ownership, capacity,
+  utilization, or billing data.
 - The workspace-filesystem value is one final observation and is never
   multiplied by time or aggregated.
 - Normal multi-root workspace packaging remains unchanged. If another
@@ -318,7 +358,8 @@ coverage; none is required to interpret the proven Process-mode result.
 
 - no extra privilege or configuration;
 - one terminal participant report;
-- one compute status, with separate typed workspace, retained-content, and F3
+- one compute status, with separate typed workspace, retained-content, and
+  `message_traffic` statuses;
   results;
 - site hardware observations are self-reports;
 - CUDA Runtime is the only numeric GPU-count authority;
@@ -330,16 +371,23 @@ coverage; none is required to interpret the proven Process-mode result.
 - optional bounded CPU and GPU model strings are allowed;
 - the registered participant name is used directly and is bound to trusted
   client/server context;
+- the archived job summary is keyed by job ID alone; the CLI and on-demand
+  study view obtain any display name from existing metadata/folder/ID fallback,
+  without new privilege or configuration;
 - no resource-specific checksum or separate archive index is stored; live
   retries compare the accepted canonical bytes directly, and finalized reads
   derive their exact file set from `resource_summary.json`;
 - missing data is not zero;
 - the job-workspace filesystem alone is observed once and is not aggregated;
 - the existing `WORKSPACE` archive is the sole durable copy;
+- `resource_summary.json` stores participant coverage and accepted values,
+  without job totals or cutoff/finalization timestamps; the live coordinator
+  keeps its cutoff private and the CLI derives totals on demand;
 - job and study views read that archive rather than a `RESOURCE_STATS`
   component; and
 - the schema does not choose the future task/resource process topology;
-- F3 publishes remote-accepted logical payload only;
+- public `message_traffic.sent_to` publishes sender-confirmed logical payload
+  by named recipient only, not receiver-observed bytes;
 - F3 includes job application, real task response, and task result only;
 - F3 measures after FOBS and before encryption, folds unique accepted
   `DownloadService` data into the originating operation, counts a remote

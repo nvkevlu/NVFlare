@@ -35,16 +35,17 @@
     "capacity_bytes": "2199023255552"
   },
   "retained_content": {
-    "status": "unavailable",
-    "issues": [
-      "not_bound"
-    ]
-  },
-  "f3": {
     "status": "reported",
-    "remote_accepted": {
-      "payload_bytes": "4831875120",
-      "messages": "3"
-    }
+    "bytes": "0"
+  },
+  "message_traffic": {
+    "status": "reported",
+    "sent_to": [
+      {
+        "participant_name": "server",
+        "payload_bytes": "4831875120",
+        "messages": "3"
+      }
+    ]
   }
 }

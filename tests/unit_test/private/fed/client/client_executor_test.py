@@ -70,7 +70,7 @@ def test_build_participant_resource_report_binds_parent_identity_and_removes_han
         "retained_content": {"status": "unavailable", "issues": ["not_bound"]},
         "child_f3": {
             "status": "reported",
-            "remote_accepted": {"payload_bytes": "1200", "messages": "2"},
+            "sent_to": [{"participant_name": "server", "payload_bytes": "1200", "messages": "2"}],
         },
     }
     write_terminal_handoff(run_dir, handoff)
@@ -82,7 +82,7 @@ def test_build_participant_resource_report_binds_parent_identity_and_removes_han
         logger=MagicMock(),
         parent_f3={
             "status": "reported",
-            "remote_accepted": {"payload_bytes": "300", "messages": "1"},
+            "sent_to": [{"participant_name": "server", "payload_bytes": "300", "messages": "1"}],
         },
     )
 
@@ -90,9 +90,9 @@ def test_build_participant_resource_report_binds_parent_identity_and_removes_han
     assert report["participant_name"] == "site-1"
     assert report["job_id"] == "job-1"
     assert report["workspace_filesystem"]["capacity_bytes"] == "1099511627776"
-    assert report["f3"] == {
+    assert report["message_traffic"] == {
         "status": "reported",
-        "remote_accepted": {"payload_bytes": "1500", "messages": "3"},
+        "sent_to": [{"participant_name": "server", "payload_bytes": "1500", "messages": "3"}],
     }
     assert not terminal_handoff_path(run_dir).exists()
 
@@ -836,7 +836,7 @@ def test_wait_child_process_freezes_zero_traffic_f3_counter_and_forgets_it():
 
     assert counter.freeze() == {
         "status": "reported",
-        "remote_accepted": {"payload_bytes": "0", "messages": "0"},
+        "sent_to": [],
     }
     assert captured["parent_f3"] == counter.freeze()
     close_and_freeze.assert_called_once_with(

@@ -26,10 +26,12 @@
     "raw CUDA_VISIBLE_DEVICES text is never numeric authority; GPU instance-seconds require successful CUDA-runtime enumeration by the collector",
     "full GPUs and MIG compute instances remain separate groups; an empty groups array means observed zero",
     "workspace_filesystem is a point-in-time observation of the total visible capacity of exactly the filesystem containing the existing NVFlare job workspace; it is not usage, allocation, billable storage, or storage owned by the job",
-    "accepted participant entries copy resource_time, retained_content, and f3 exactly from the accepted participant_summary",
+    "accepted participant entries copy resource_time, retained_content, and message_traffic exactly from the accepted participant_summary",
+    "reported or partial participant message_traffic.sent_to contains 0..2048 entries sorted by unique participant_name, each with positive messages; each destination must be another expected participant in an accepted resource_summary; job and study totals derive a scalar sent counter by summing these destination entries",
     "the server obtains its expected participant list independently of report arrival and classifies every participant at the cutoff",
-    "job totals are deterministic sums of accepted terminal reports; resource_time is partial whenever any expected participant report or resource_time is incomplete",
+    "job totals are derived on demand as deterministic sums of accepted terminal reports and are not stored in resource_summary; resource_time is partial whenever any expected participant report or resource_time is incomplete",
     "a study_summary is a transient view; job_status is the underlying NVFlare lifecycle value while resource_data says whether that job contributes totals",
+    "job_name is obtained from existing job metadata for study rows and CLI display; it is not duplicated in resource_summary, while job_id remains the unique identity and sort key",
     "study totals are deterministic sums of rows whose resource_data is included",
     "a finalized archive contains resource_summary.json and one participant record named by participant_name for every accepted participant; resource_summary.json is written last"
   ],
@@ -46,6 +48,13 @@
   "$defs": {
     "schema_version": {"const": "1.0"},
     "job_id": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"},
+    "job_name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 255,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$",
+      "description": "Server-owned persisted job name for display and tracking; never a replacement for job_id."
+    },
     "participant_name": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9_-][A-Za-z0-9_.-]{0,127}$"},
     "timestamp": {
       "type": "string",
@@ -237,27 +246,36 @@
       "type": "object", "additionalProperties": false, "required": ["payload_bytes", "messages"],
       "properties": {"payload_bytes": {"$ref": "#/$defs/unsigned"}, "messages": {"$ref": "#/$defs/unsigned"}}
     },
-    "f3_reported": {
+    "sent_to_entry": {
       "type": "object", "additionalProperties": false,
-      "required": ["status", "remote_accepted"],
+      "required": ["participant_name", "payload_bytes", "messages"],
       "properties": {
-        "status": {"const": "reported"},
-        "remote_accepted": {"$ref": "#/$defs/counter"}
+        "participant_name": {"$ref": "#/$defs/participant_name"},
+        "payload_bytes": {"$ref": "#/$defs/unsigned"},
+        "messages": {"$ref": "#/$defs/positive_unsigned"}
       }
     },
-    "f3_partial": {
+    "message_traffic_reported": {
       "type": "object", "additionalProperties": false,
-      "required": ["status", "issues", "remote_accepted"],
+      "required": ["status", "sent_to"],
+      "properties": {
+        "status": {"const": "reported"},
+        "sent_to": {"type": "array", "maxItems": 2048, "items": {"$ref": "#/$defs/sent_to_entry"}}
+      }
+    },
+    "message_traffic_partial": {
+      "type": "object", "additionalProperties": false,
+      "required": ["status", "issues", "sent_to"],
       "properties": {
         "status": {"const": "partial"},
         "issues": {"type": "array", "minItems": 1, "maxItems": 4, "uniqueItems": true, "items": {"$ref": "#/$defs/partial_issue"}},
-        "remote_accepted": {"$ref": "#/$defs/counter"}
+        "sent_to": {"type": "array", "maxItems": 2048, "items": {"$ref": "#/$defs/sent_to_entry"}}
       }
     },
-    "f3": {
+    "message_traffic": {
       "oneOf": [
-        {"$ref": "#/$defs/f3_reported"},
-        {"$ref": "#/$defs/f3_partial"},
+        {"$ref": "#/$defs/message_traffic_reported"},
+        {"$ref": "#/$defs/message_traffic_partial"},
         {"$ref": "#/$defs/source_unavailable"},
         {"$ref": "#/$defs/source_error"}
       ]
@@ -271,26 +289,26 @@
         {"type": "object", "additionalProperties": false, "required": ["status"], "properties": {"status": {"const": "unavailable"}}}
       ]
     },
-    "f3_total": {
+    "message_traffic_total": {
       "oneOf": [
         {
-          "type": "object", "additionalProperties": false, "required": ["status", "remote_accepted"],
-          "properties": {"status": {"enum": ["reported", "partial"]}, "remote_accepted": {"$ref": "#/$defs/counter"}}
+          "type": "object", "additionalProperties": false, "required": ["status", "sent"],
+          "properties": {"status": {"enum": ["reported", "partial"]}, "sent": {"$ref": "#/$defs/counter"}}
         },
         {"type": "object", "additionalProperties": false, "required": ["status"], "properties": {"status": {"const": "unavailable"}}}
       ]
     },
     "totals": {
-      "type": "object", "additionalProperties": false, "required": ["resource_time", "retained_content", "f3"],
+      "type": "object", "additionalProperties": false, "required": ["resource_time", "retained_content", "message_traffic"],
       "properties": {
         "resource_time": {"$ref": "#/$defs/resource_time"},
         "retained_content": {"$ref": "#/$defs/retained_total"},
-        "f3": {"$ref": "#/$defs/f3_total"}
+        "message_traffic": {"$ref": "#/$defs/message_traffic_total"}
       }
     },
     "accepted_participant_entry": {
       "type": "object", "additionalProperties": false,
-      "required": ["participant_name", "role", "status", "received_at", "resource_time", "retained_content", "f3"],
+      "required": ["participant_name", "role", "status", "received_at", "resource_time", "retained_content", "message_traffic"],
       "properties": {
         "participant_name": {"$ref": "#/$defs/participant_name"},
         "role": {"enum": ["client", "server"]},
@@ -298,7 +316,7 @@
         "received_at": {"$ref": "#/$defs/timestamp"},
         "resource_time": {"$ref": "#/$defs/resource_time"},
         "retained_content": {"$ref": "#/$defs/retained_content"},
-        "f3": {"$ref": "#/$defs/f3"}
+        "message_traffic": {"$ref": "#/$defs/message_traffic"}
       }
     },
     "invalid_participant_entry": {
@@ -343,9 +361,10 @@
     },
     "included_job_row": {
       "type": "object", "additionalProperties": false,
-      "required": ["job_id", "job_status", "resource_data", "totals"],
+      "required": ["job_id", "job_name", "job_status", "resource_data", "totals"],
       "properties": {
         "job_id": {"$ref": "#/$defs/job_id"},
+        "job_name": {"$ref": "#/$defs/job_name"},
         "job_status": {
           "allOf": [{"$ref": "#/$defs/job_status"}],
           "pattern": "^(?:FINISHED:.*|FINISHED_OK|FINISHED_EXCEPTION|ABORTED|ABANDONED|FAILED)$",
@@ -356,9 +375,10 @@
       }
     },
     "excluded_job_row": {
-      "type": "object", "additionalProperties": false, "required": ["job_id", "job_status", "resource_data"],
+      "type": "object", "additionalProperties": false, "required": ["job_id", "job_name", "job_status", "resource_data"],
       "properties": {
         "job_id": {"$ref": "#/$defs/job_id"},
+        "job_name": {"$ref": "#/$defs/job_name"},
         "job_status": {"$ref": "#/$defs/job_status"},
         "resource_data": {
           "enum": ["unavailable", "nonterminal"],
@@ -390,7 +410,7 @@
     "study_job_row": {"oneOf": [{"$ref": "#/$defs/included_job_row"}, {"$ref": "#/$defs/excluded_job_row"}]},
     "participant_summary": {
       "type": "object", "additionalProperties": false,
-      "required": ["schema_version", "kind", "job_id", "participant_name", "reported_at", "resource_time", "workspace_filesystem", "retained_content", "f3"],
+      "required": ["schema_version", "kind", "job_id", "participant_name", "reported_at", "resource_time", "workspace_filesystem", "retained_content", "message_traffic"],
       "properties": {
         "schema_version": {"$ref": "#/$defs/schema_version"},
         "kind": {"const": "nvflare.resource_stats.participant_summary"},
@@ -400,20 +420,17 @@
         "resource_time": {"$ref": "#/$defs/resource_time"},
         "workspace_filesystem": {"$ref": "#/$defs/workspace_filesystem"},
         "retained_content": {"$ref": "#/$defs/retained_content"},
-        "f3": {"$ref": "#/$defs/f3"}
+        "message_traffic": {"$ref": "#/$defs/message_traffic"}
       }
     },
     "resource_summary": {
       "type": "object", "additionalProperties": false,
-      "required": ["schema_version", "kind", "job_id", "report_cutoff_at", "finalized_at", "participants", "totals"],
+      "required": ["schema_version", "kind", "job_id", "participants"],
       "properties": {
         "schema_version": {"$ref": "#/$defs/schema_version"},
         "kind": {"const": "nvflare.resource_stats.resource_summary"},
         "job_id": {"$ref": "#/$defs/job_id"},
-        "report_cutoff_at": {"$ref": "#/$defs/timestamp"},
-        "finalized_at": {"$ref": "#/$defs/timestamp"},
-        "participants": {"type": "array", "minItems": 1, "maxItems": 10000, "items": {"$ref": "#/$defs/participant_entry"}},
-        "totals": {"$ref": "#/$defs/totals"}
+        "participants": {"type": "array", "minItems": 1, "maxItems": 10000, "items": {"$ref": "#/$defs/participant_entry"}}
       }
     },
     "study_summary": {

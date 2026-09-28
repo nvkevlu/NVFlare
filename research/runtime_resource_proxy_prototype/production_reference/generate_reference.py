@@ -45,6 +45,7 @@ from nvflare.private.fed.resource_stats.collector import (
 from nvflare.private.fed.resource_stats.contract import (
     KIND_STUDY_SUMMARY,
     SCHEMA_VERSION,
+    derive_job_totals,
     derive_study_totals,
     validate_record,
 )
@@ -54,6 +55,7 @@ from nvflare.tool import cli_output
 from nvflare.tool.job.job_resources import render_job_resources, render_study_resources
 
 REFERENCE_JOB_ID = "job-20260917-001"
+REFERENCE_JOB_NAME = "hello-pt"
 REFERENCE_STUDY = "cancer-research"
 ARTIFACTS_DIR = Path(__file__).with_name("artifacts")
 
@@ -100,7 +102,9 @@ def _collect_participant(
     return report
 
 
-def _f3_snapshot(traffic_class: F3TrafficClass, operations: Iterable[tuple[int, ...]]) -> dict[str, Any]:
+def _f3_snapshot(
+    traffic_class: F3TrafficClass, recipient_name: str, operations: Iterable[tuple[int, ...]]
+) -> dict[str, Any]:
     """Build a deterministic snapshot through the production counter API.
 
     Each tuple contains the main post-FOBS payload size followed by any
@@ -111,7 +115,7 @@ def _f3_snapshot(traffic_class: F3TrafficClass, operations: Iterable[tuple[int, 
     counter = F3Counter()
     for operation in operations:
         main_payload_bytes, *oob_payload_bytes = operation
-        admission = counter.try_begin(traffic_class)
+        admission = counter.try_begin(traffic_class, recipient_name)
         if admission is None:
             raise RuntimeError("reference F3 operation was not admitted")
         for payload_bytes in oob_payload_bytes:
@@ -145,17 +149,20 @@ def _build_study_summary(job_totals: Mapping[str, Any]) -> dict[str, Any]:
     jobs = [
         {
             "job_id": REFERENCE_JOB_ID,
+            "job_name": REFERENCE_JOB_NAME,
             "job_status": "FINISHED:COMPLETED",
             "resource_data": "included",
             "totals": job_totals,
         },
         {
             "job_id": "job-20260917-002",
+            "job_name": "hello-pt-retry",
             "job_status": "FINISHED:COMPLETED",
             "resource_data": "unavailable",
         },
         {
             "job_id": "job-20260917-003",
+            "job_name": "hello-pt-next",
             "job_status": "RUNNING",
             "resource_data": "nonterminal",
         },
@@ -251,6 +258,7 @@ def build_artifacts() -> dict[str, bytes]:
                 },
                 child_f3=_f3_snapshot(
                     F3TrafficClass.TASK_RESULT,
+                    "server",
                     (
                         (12_288, 1_610_612_736),
                         (12_304, 1_610_612_736),
@@ -260,7 +268,7 @@ def build_artifacts() -> dict[str, bytes]:
                 # The client parent originates none of the v1 traffic classes,
                 # but its zero contribution is still required for complete
                 # participant attribution.
-                parent_f3=_f3_snapshot(F3TrafficClass.TASK_RESULT, ()),
+                parent_f3=_f3_snapshot(F3TrafficClass.TASK_RESULT, "server", ()),
             )
 
             server_report = _collect_participant(
@@ -278,6 +286,7 @@ def build_artifacts() -> dict[str, bytes]:
                 },
                 child_f3=_f3_snapshot(
                     F3TrafficClass.TASK_RESPONSE,
+                    "site-1",
                     (
                         (14_336, 1_610_612_736),
                         (14_352, 1_610_612_736),
@@ -286,6 +295,7 @@ def build_artifacts() -> dict[str, bytes]:
                 ),
                 parent_f3=_f3_snapshot(
                     F3TrafficClass.JOB_APPLICATION,
+                    "site-1",
                     ((2_097_152, 41_943_040),),
                 ),
             )
@@ -306,7 +316,7 @@ def build_artifacts() -> dict[str, bytes]:
         job_summary = reader.read_resource_summary()
         site_report = reader.read_participant_summary("site-1")
         reader.read_participant_summary("server")
-        study_summary = _build_study_summary(job_summary["totals"])
+        study_summary = _build_study_summary(derive_job_totals(job_summary["participants"]))
 
         artifacts: dict[str, bytes] = {}
         for path in sorted((server_run / "resource_stats").rglob("*")):
@@ -314,8 +324,12 @@ def build_artifacts() -> dict[str, bytes]:
                 relative = path.relative_to(server_run).as_posix()
                 artifacts[f"workspace/{relative}"] = path.read_bytes()
         artifacts["query/resources-study.json"] = canonical_json_bytes(study_summary)
-        artifacts["cli/resources-job.txt"] = (render_job_resources(job_summary) + "\n").encode("utf-8")
-        artifacts["cli/resources-site-1.txt"] = (render_job_resources(job_summary, site_report) + "\n").encode("utf-8")
+        artifacts["cli/resources-job.txt"] = (
+            render_job_resources(job_summary, job_name=REFERENCE_JOB_NAME) + "\n"
+        ).encode("utf-8")
+        artifacts["cli/resources-site-1.txt"] = (
+            render_job_resources(job_summary, site_report, job_name=REFERENCE_JOB_NAME) + "\n"
+        ).encode("utf-8")
         artifacts["cli/resources-study.txt"] = (render_study_resources(study_summary) + "\n").encode("utf-8")
         artifacts["cli/resources-job.json"] = _render_cli_json(
             {

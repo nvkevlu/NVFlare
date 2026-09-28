@@ -56,6 +56,13 @@ same collector and private handoff  --->  bind trusted name "server"
 
 There is one public report per participant. There is no public start record,
 end record, attempt ID, environment key, or participant identity hash.
+`participant_summary`, its completion-message envelope, and the archived
+`resource_summary` contain `job_id` but not `job_name`. The authorized CLI
+resolves a display label from existing persisted job metadata when requested;
+a participant cannot claim or replace it. Reusing this metadata introduces no
+new privilege, configuration, transport field, or resource-probe privacy
+category. This is a pre-release v1 correction rather than a schema-version
+bump.
 
 ## 1. Collection inside each job process
 
@@ -187,26 +194,43 @@ in the final resource namespace.
 ### What is measured now
 
 CPU, memory, CUDA-authorized GPU resource time, the final
-workspace-filesystem capacity observation, and F3 are implemented.
+workspace-filesystem capacity observation, retained content, and
+`message_traffic` are
+implemented.
 
-`retained_content` is intentionally emitted as:
+In v1, `retained_content` is a terminal best-effort scan of the participant's
+run directory. It sums logical `st_size` for regular files and excludes the
+top-level `resource_stats/` subtree. Symlinks and other non-regular entries are
+ignored, hard links count once per path, and sparse files count their logical
+rather than allocated size. A clean empty scan reports zero. The contract
+requires a useful subtotal after a scan error to be
+`partial/observation_incomplete`, otherwise unavailable.
 
-```json
-{"issues":["not_bound"],"status":"unavailable"}
-```
+This is not a curated result inventory. It includes application,
+configuration, input, log, temporary, and output files found in the run
+directory. The traversal is non-atomic and runs before the private handoff is
+written, stats-pool files are created, an optional workspace upload begins, and
+later cleanup/log growth. It is a participant self-report; the parent validates
+the typed value but does not attest or remeasure the files. Separately
+configured result, log, and audit roots are not covered today.
 
-Its authoritative production source is not implemented. The code does not
-guess model filenames or scan arbitrary saved files. The exact retained-result
-ownership contract still needed is
-described in [Remaining implementation gaps](GAPS.md#2-retained-result-bytes).
+Job and study totals add participant observations. They are not unique retained
+storage, the normal `WORKSPACE` archive size, allocated disk usage, or billable
+storage. The remaining bounds/error-handling and root-coverage work is tracked
+in [Remaining implementation gaps](GAPS.md#2-retained-result-bytes).
 
-F3 has one public `remote_accepted` pair. It includes only job application
+Public `message_traffic.sent_to` has one sender-confirmed counter pair per
+named remote recipient. It includes only job application
 deployment, a response containing a real task, and a submitted task result.
 Task requests, acknowledgements, final delivery to an in-process logical
 destination, failures before acceptance, an extra relay contribution,
 workspace transfer, and the terminal report are excluded. A remote logical
 destination routed through a local first-hop relay still counts once at its
-origin.
+origin. Recipient names come from trusted participant identity, not the
+first-hop relay. No participant scalar `sent` or measured `received` field is
+stored. The CLI derives outgoing and “sent to site” amounts on demand; the
+latter is addressed, sender-accepted traffic, not confirmed receipt or an
+exact-delivery guarantee.
 
 One message is one top-level logical operation per remote destination. The main
 payload is measured after FOBS encoding and before optional encryption. When
@@ -370,6 +394,11 @@ The originally selected client names are also persisted in job metadata as
 rebuild the same expected participant set; older jobs without the key fall
 back to the restored active-client list.
 
+The job's display name remains in existing server job metadata, not
+coordinator resource state or the archived summary. The CLI can resolve
+`JobMetaKey.JOB_NAME`, then `JobMetaKey.JOB_FOLDER_NAME`, then `job_id` for
+legacy metadata. It is not added to the participant wire report.
+
 The accepted canonical-byte ledger still lives only in the
 root parent's memory. Restart recovery deliberately resets the in-progress
 `resource_stats` directory instead of trusting files without the lost ledger.
@@ -392,9 +421,15 @@ Before `JobRunner._save_workspace()`, `ResourceStatsCoordinator.finalize_job()`
 closes acceptance and classifies every expected participant as `accepted`,
 `invalid`, `missing`, or `disabled`.
 
-The coordinator derives participant totals and job totals from the validated
-canonical bytes held in its live accepted ledger, using exact decimal
-arithmetic; it does not trust a child-side file as an input. Only at
+The final `resource_summary` has `job_id` but no `job_name`. The ID is the
+unique acceptance, reconciliation, storage, and ordering key. A human-facing
+name can be looked up from trusted job metadata by the authorized CLI; names
+need not be unique and are never derived from participant bytes.
+
+The coordinator copies accepted participant values from the validated
+canonical bytes held in its live ledger; it does not trust a child-side file
+as an input. It keeps the acceptance cutoff private. The persisted summary
+contains no aggregate totals or cutoff/finalization timestamps. Only at
 finalization does it write and fsync the exact accepted bytes through
 parent-owned, no-symlink descriptors. It then atomically writes and fsyncs the
 summary last in the local construction directory as the publication marker.
@@ -466,9 +501,16 @@ with `--job`; it adds the accepted participant report, including optional CPU
 and GPU models and the final visible workspace-filesystem capacity.
 
 `JobCommandModule.get_job_resources()` reads and verifies one retained
-`WORKSPACE`. `get_study_resources()` filters the existing job list by the
-active study, excludes nonterminal jobs from totals, and reads each retained
-terminal job's summary on demand. Both use the existing
+`WORKSPACE`. It resolves any human display name from the selected job's
+trusted persisted metadata, not from the resource archive.
+It derives additive job totals from the accepted participant entries on
+demand, using checked decimal arithmetic.
+`get_study_resources()` filters the existing job list by the active study,
+materializes each job's ID, trusted name, and status, excludes nonterminal
+jobs from totals, and reads each retained terminal job's summary on demand. It
+derives each included job's totals from accepted participant entries before
+adding the study values. Every row still contains a metadata-derived name and
+job ID, while the resource archive contains only the ID. Both use the existing
 `get_storage_for_download(...)` API to stage the normal `WORKSPACE` component
 in a request-scoped temporary directory. The archive reader opens that file
 directly and reads only the size-bounded fixed resource-statistics members, so
@@ -483,6 +525,10 @@ cumulative budget before appending that row; if the budget is exhausted, the
 whole request fails without deriving or returning partial totals. The complete
 serialized study record is checked against the same 64 MiB bound again before
 it is returned.
+
+The job renderer starts with `Recorded resources for job NAME (ID: JOB_ID).`
+The study renderer uses separate `JOB ID` and `NAME` columns. Names may repeat,
+so rows are sorted and reconciled by ID. JSON exposes the same two fields.
 
 ## 6. Exact reference output
 
@@ -513,14 +559,15 @@ pytest -q research/runtime_resource_proxy_prototype/production_reference/test_re
 ```
 
 The larger files under `schema/golden/v1/` remain design and contract examples.
-They demonstrate complete and boundary F3/retained-content cases. They are not
-evidence that the older live runs exercised the new F3 bindings or that an
-authoritative retained-content source exists for every workflow.
+They demonstrate complete and boundary message-traffic/retained-content cases. They are not
+evidence that the older live runs exercised the new F3 bindings or the current
+run-directory retained-content scan.
 
 ### Live process-mode proof
 
-The primary [PyTorch Colossus E2E reference](colossus_pytorch_e2e_reference/README.md)
-was captured from a real one-server, two-client Process-launch POC on
+The earlier substantial
+[PyTorch Colossus E2E reference](colossus_pytorch_e2e_reference/README.md) was
+captured from a real one-server, two-client Process-launch POC on
 September 21, 2026. The stock `hello-pt` job performed three FedAvg rounds,
 four local CIFAR-10 epochs per client and round, and cross-site evaluation on
 one NVIDIA L40. Unlike the deterministic reference generator, this run crossed
@@ -529,13 +576,14 @@ child-to-parent handoffs, authenticated client CellNet completion requests,
 root-parent reconciliation, normal `WORKSPACE` archival, the admin API, and
 the job, site, and study CLI paths.
 
-That run predates the F3 implementation in this branch, so its exact F3 value
-remains `unavailable/not_bound`. No new process-mode or Colossus live reference
-has yet replaced it. The implementation status and remaining proof are tracked
-in [F3 implementation and validation status](F3_GAP.md).
+That run predates both the F3 bindings and the run-directory retained-content
+scan in this branch, so those fields remain `unavailable/not_bound` in the
+historical files.
 
-All three reports were accepted. The archived records pass the production
-bundle validator, and the job, participant, and study views reconcile exactly.
+All three reports were accepted. The archived records passed the production
+bundle validator current at capture time, and the job, participant, and study
+views reconciled exactly. This old job/study shape is intentionally not valid
+under the current contract.
 Independent one-second telemetry proves both client PyTorch processes used the
 L40 for the 76-second training window.
 
@@ -564,12 +612,40 @@ the installed-NVIDIA-distribution fallback. These runs cover the Process
 launcher on Linux hosts; they do not substitute for live Docker, Kubernetes,
 Slurm, constrained-cgroup, CUDA-subset, multi-GPU, or MIG coverage.
 
+A later
+[retained-content/F3 PyTorch reference](colossus_pytorch_retained_content_e2e_reference/README.md)
+ran one server and two clients through the same Process-launch path on
+September 22, 2026. All three reports were accepted with `reported` resource
+time, terminal run-directory content, and old F3. The historical 14-message total matches
+two deployments, six real task responses, and six task results. That capture
+predates the intermediate job-name addition, so its stored JSON is historical
+runtime evidence rather than a current
+contract example. The deterministic production reference covers the current
+contract.
+
+That live repetition is now captured in the
+[historical job-name reference](colossus_pytorch_job_name_e2e_reference/README.md).
+Job `a624b97e-2eba-4b1c-bb44-765d83dd945b` ran `hello-pt` in study
+`job-name-validation`, completed in 32.9 seconds, and accepted all three
+participants. The archived job summary and derived study row both contain
+`job_name: "hello-pt"`. Human output renders
+`Recorded resources for job hello-pt (ID: ...).` and separate study `JOB ID`
+and `NAME` columns. Resource time, retained content, and old F3 are all reported.
+Its archived participant and job records predate the current contract,
+including removal of the stored job name; the
+[deterministic production reference](production_reference/README.md) is the
+current contract example.
+
 ## 7. Known implementation and validation gaps
 
-- `retained_content` has no authoritative bounded result-set provider.
-- The current focused and socket-backed F3 suites pass. A new process-mode
-  live run is still needed to replace the
-  historical `not_bound` F3 artifact.
+- The retained-content walk is not yet bounded by entry count, elapsed time, or
+  filesystem boundary.
+- Only the run directory is scanned. Separately configured result, log, and
+  audit roots can contain retained outputs but are not represented; including
+  them needs an explicit deduplication rule.
+- The current focused and socket-backed F3 suites pass, and the historical
+  Process-launch run supplies live origin-only sender-count evidence. Container,
+  scheduler, multi-GPU, MIG, and other platform variants remain unproven.
 - `observe_capacity_change()` is not wired to runtime resource changes. No
   future worker, GPU-release, or supervisor topology is assumed here.
 - Official Process, Docker, Kubernetes, and Slurm workers use `-I`, sanitize

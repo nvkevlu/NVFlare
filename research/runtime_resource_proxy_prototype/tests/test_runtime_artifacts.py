@@ -39,6 +39,7 @@ from runtime_probe import (  # noqa: E402
     probe_gpu_records,
     probe_storage,
 )
+from schema.contract_v1 import derive_job_totals  # noqa: E402
 
 
 class TestRuntimeProbe(unittest.TestCase):
@@ -319,7 +320,7 @@ class TestGeneratedArtifacts(unittest.TestCase):
     def test_generator_writes_one_terminal_report_and_study_view(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             output_dir = Path(temp_dir) / "artifacts"
-            receipt = generate(output_dir, "test-job", "test-study", 0.0)
+            receipt = generate(output_dir, "test-job", "test-resource-job", "test-study", 0.0)
 
             child_staging_dir = output_dir / "client_child" / "resource_stats" / "staging"
             parent_dir = output_dir / "client_parent" / "resource_stats"
@@ -345,8 +346,10 @@ class TestGeneratedArtifacts(unittest.TestCase):
                 participant_summary["resource_time"]["status"],
                 {"reported", "partial", "unavailable"},
             )
-            self.assertEqual("unavailable", participant_summary["retained_content"]["status"])
-            self.assertEqual(["not_bound"], participant_summary["retained_content"]["issues"])
+            self.assertEqual("reported", participant_summary["retained_content"]["status"])
+            self.assertEqual("0", participant_summary["retained_content"]["bytes"])
+            self.assertEqual("unavailable", participant_summary["message_traffic"]["status"])
+            self.assertNotIn("sent_to", participant_summary["message_traffic"])
             self.assertIn("workspace_filesystem", participant_summary)
             self.assertTrue(resource_summary_path.is_file())
             workspace_reader = WorkspaceResourceStatsReader(workspace_archive_path)
@@ -369,13 +372,18 @@ class TestGeneratedArtifacts(unittest.TestCase):
 
             summary = json.loads(resource_summary_path.read_text())
             self.assertEqual("test-job", summary["job_id"])
+            self.assertNotIn("job_name", summary)
             self.assertEqual(1, len(summary["participants"]))
             self.assertEqual("accepted", summary["participants"][0]["status"])
             self.assertEqual(
-                participant_summary["resource_time"],
-                summary["totals"]["resource_time"],
+                {"schema_version", "kind", "job_id", "participants"},
+                set(summary),
             )
-            self.assertNotIn("workspace_filesystem", summary["totals"])
+            self.assertEqual(
+                participant_summary["message_traffic"],
+                summary["participants"][0]["message_traffic"],
+            )
+            self.assertNotIn("workspace_filesystem", derive_job_totals(summary["participants"]))
             self.assertNotIn(str(output_dir), json.dumps(summary))
 
             with ZipFile(workspace_archive_path, "r") as workspace:
@@ -397,6 +405,10 @@ class TestGeneratedArtifacts(unittest.TestCase):
             self.assertEqual("test-study", study_summary["selection"]["study_name"])
             self.assertEqual("1", study_summary["coverage"]["included_jobs"])
             self.assertEqual("included", study_summary["jobs"][0]["resource_data"])
+            self.assertEqual(
+                derive_job_totals(summary["participants"]),
+                study_summary["jobs"][0]["totals"],
+            )
             study_text = (output_dir / "cli" / "resources-study.txt").read_text()
             self.assertIn("JOB STATUS", study_text)
             self.assertIn("FULL GPU h", study_text)

@@ -39,6 +39,7 @@ from nvflare.private.fed.resource_stats.collector import (
     read_terminal_handoff,
     write_terminal_handoff,
 )
+from nvflare.private.fed.resource_stats.contract import derive_job_totals
 from nvflare.private.fed.resource_stats.coordinator import ResourceStatsCoordinator
 from nvflare.private.fed.server.fed_server import FederatedServer
 from nvflare.private.fed.server.job_cmds import JobCommandModule
@@ -51,7 +52,13 @@ class _Connection:
         self.app_ctx = engine
         self._props = {
             JobCommandModule.JOB_ID: job_id,
-            JobCommandModule.JOB: SimpleNamespace(meta={JobMetaKey.STATUS.value: RunStatus.FINISHED_COMPLETED}),
+            JobCommandModule.JOB: SimpleNamespace(
+                job_id=job_id,
+                meta={
+                    JobMetaKey.JOB_NAME.value: "hello-pt",
+                    JobMetaKey.STATUS.value: RunStatus.FINISHED_COMPLETED,
+                },
+            ),
         }
         self.dicts = []
         self.errors = []
@@ -75,7 +82,9 @@ def _workspace_zip(run_dir):
     return stream.getvalue()
 
 
-def _terminal_handoff(run_dir, *, seconds, cpu_units, memory_bytes, gpu_count, f3_bytes=0, f3_messages=0):
+def _terminal_handoff(
+    run_dir, *, seconds, cpu_units, memory_bytes, gpu_count, f3_bytes=0, f3_messages=0, recipient_name="server"
+):
     start_ns = 8_000_000_000_000_000_000
     elapsed_ns = int(seconds * 1_000_000_000)
     ticks = iter((start_ns, start_ns + elapsed_ns))
@@ -110,7 +119,11 @@ def _terminal_handoff(run_dir, *, seconds, cpu_units, memory_bytes, gpu_count, f
         collector.finish(
             child_f3={
                 "status": "reported",
-                "remote_accepted": {"payload_bytes": str(f3_bytes), "messages": str(f3_messages)},
+                "sent_to": (
+                    [{"participant_name": recipient_name, "payload_bytes": str(f3_bytes), "messages": str(f3_messages)}]
+                    if f3_messages
+                    else []
+                ),
             }
         ),
     )
@@ -138,7 +151,7 @@ def test_authenticated_report_to_workspace_query_and_human_output(tmp_path):
         ),
         parent_f3={
             "status": "reported",
-            "remote_accepted": {"payload_bytes": "1000000", "messages": "1"},
+            "sent_to": [{"participant_name": "server", "payload_bytes": "1000000", "messages": "1"}],
         },
     )
     participant_bytes = canonical_json_bytes(client_report)
@@ -187,6 +200,7 @@ def test_authenticated_report_to_workspace_query_and_human_output(tmp_path):
         gpu_count=0,
         f3_bytes=3_000_000,
         f3_messages=2,
+        recipient_name="site-1",
     )
     fl_ctx = MagicMock()
     fl_ctx.get_workspace.return_value.get_run_dir.return_value = str(run_dir)
@@ -196,7 +210,7 @@ def test_authenticated_report_to_workspace_query_and_human_output(tmp_path):
         fl_ctx,
         parent_f3={
             "status": "reported",
-            "remote_accepted": {"payload_bytes": "500000", "messages": "1"},
+            "sent_to": [{"participant_name": "site-1", "payload_bytes": "500000", "messages": "1"}],
         },
     )
 
@@ -235,19 +249,33 @@ def test_authenticated_report_to_workspace_query_and_human_output(tmp_path):
     assert stored_workspace_path.exists()
     result, _meta = connection.dicts[0]
     assert result["resource_summary"] == finalized
+    assert "job_name" not in result["resource_summary"]
+    assert result["job_name"] == "hello-pt"
     assert result["participant_summary"] == client_report
+
+    mismatch_connection = _Connection(engine, job_id)
+    mismatch_connection._props[JobCommandModule.JOB].meta[JobMetaKey.JOB_NAME.value] = "renamed-job"
+    JobCommandModule().get_job_resources(
+        mismatch_connection,
+        ["get_job_resources", job_id],
+    )
+    assert mismatch_connection.errors == []
+    assert mismatch_connection.dicts[0][0]["resource_summary"] == finalized
+    assert mismatch_connection.dicts[0][0]["job_name"] == "renamed-job"
+
     assert [item["participant_name"] for item in finalized["participants"]] == [participant_name, "server"]
-    assert finalized["totals"]["resource_time"]["measured_seconds"] == "4463.5"
-    assert client_report["f3"] == {
+    totals = derive_job_totals(finalized["participants"])
+    assert totals["resource_time"]["measured_seconds"] == "4463.5"
+    assert client_report["message_traffic"] == {
         "status": "reported",
-        "remote_accepted": {"payload_bytes": "6000000", "messages": "5"},
+        "sent_to": [{"participant_name": "server", "payload_bytes": "6000000", "messages": "5"}],
     }
-    assert finalized["totals"]["f3"] == {
+    assert totals["message_traffic"] == {
         "status": "reported",
-        "remote_accepted": {"payload_bytes": "9500000", "messages": "8"},
+        "sent": {"payload_bytes": "9500000", "messages": "8"},
     }
 
-    output = render_job_resources(finalized, result["participant_summary"])
+    output = render_job_resources(finalized, result["participant_summary"], job_name=result["job_name"])
     assert "selected site: site-1" in output
     assert "AMD EPYC 9654 (x86_64)" in output
     assert "NVIDIA A100 80GB" in output

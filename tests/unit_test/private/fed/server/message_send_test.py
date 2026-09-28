@@ -58,6 +58,7 @@ def test_trusted_admin_fanout_creates_one_context_per_destination():
     assert contexts[0] is not contexts[1]
     assert all(context._accounting is counter for context in contexts)
     assert all(context._traffic_class is F3TrafficClass.JOB_APPLICATION for context in contexts)
+    assert [context._recipient_name for context in contexts] == ["site-1", "site-2"]
 
 
 def test_generic_admin_route_does_not_infer_a_traffic_class():

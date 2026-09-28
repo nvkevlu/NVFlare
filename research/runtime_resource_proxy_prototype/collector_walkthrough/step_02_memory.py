@@ -17,6 +17,8 @@
 import json
 import os
 
+# see psutil vs this, double check
+
 
 def main() -> None:
     page_size = os.sysconf("SC_PAGE_SIZE")

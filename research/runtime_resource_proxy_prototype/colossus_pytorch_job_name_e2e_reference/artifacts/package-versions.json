@@ -1,0 +1,7 @@
+{
+  "nvflare": "2.10.0dev0+12.gbd847b741.dirty",
+  "python": "3.12.3",
+  "torch": "2.14.0+cu130",
+  "torch_cuda": "13.0",
+  "torchvision": "0.29.0+cu130"
+}

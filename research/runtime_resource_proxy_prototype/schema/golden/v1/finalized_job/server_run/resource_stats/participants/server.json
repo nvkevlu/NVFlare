@@ -31,11 +31,19 @@
     "status": "reported",
     "bytes": "29540266113"
   },
-  "f3": {
+  "message_traffic": {
     "status": "reported",
-    "remote_accepted": {
-      "payload_bytes": "295400673280",
-      "messages": "10"
-    }
+    "sent_to": [
+      {
+        "participant_name": "site-1",
+        "payload_bytes": "147700336640",
+        "messages": "5"
+      },
+      {
+        "participant_name": "site-2",
+        "payload_bytes": "147700336640",
+        "messages": "5"
+      }
+    ]
   }
 }

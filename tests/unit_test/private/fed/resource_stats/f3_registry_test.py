@@ -65,7 +65,7 @@ def test_start_can_mark_restored_job_history_incomplete():
     assert counter.freeze() == {
         "status": "partial",
         "issues": ["attribution_incomplete"],
-        "remote_accepted": {"payload_bytes": "0", "messages": "0"},
+        "sent_to": [],
     }
 
 
@@ -80,7 +80,7 @@ def test_mark_prior_history_incomplete_handles_known_and_unknown_jobs():
 def test_close_and_freeze_condition_drains_before_snapshot():
     registry = F3CounterRegistry()
     counter = registry.start_job("job-1")
-    admission = counter.try_begin(F3TrafficClass.JOB_APPLICATION)
+    admission = counter.try_begin(F3TrafficClass.JOB_APPLICATION, "site-1")
     timer = threading.Timer(0.02, counter.complete_remote_accepted, args=(admission, 10))
     timer.start()
     try:
@@ -90,21 +90,21 @@ def test_close_and_freeze_condition_drains_before_snapshot():
 
     assert snapshot == {
         "status": "reported",
-        "remote_accepted": {"payload_bytes": "10", "messages": "1"},
+        "sent_to": [{"participant_name": "site-1", "payload_bytes": "10", "messages": "1"}],
     }
 
 
 def test_default_parent_close_freezes_pending_operation_as_gap_without_drain():
     registry = F3CounterRegistry()
     counter = registry.start_job("job-1")
-    counter.try_begin(F3TrafficClass.JOB_APPLICATION)
+    counter.try_begin(F3TrafficClass.JOB_APPLICATION, "site-1")
 
     snapshot = registry.close_and_freeze("job-1")
 
     assert snapshot == {
         "status": "partial",
         "issues": ["counter_gap"],
-        "remote_accepted": {"payload_bytes": "0", "messages": "0"},
+        "sent_to": [],
     }
 
 

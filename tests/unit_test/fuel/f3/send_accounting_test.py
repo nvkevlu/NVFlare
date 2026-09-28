@@ -36,8 +36,15 @@ from tests.unit_test.fuel.f3.streaming.download_test_utils import (
 )
 
 
+def _total_value(snapshot):
+    return {
+        "payload_bytes": str(sum(int(group["payload_bytes"]) for group in snapshot["sent_to"])),
+        "messages": str(sum(int(group["messages"]) for group in snapshot["sent_to"])),
+    }
+
+
 def _counter_value(counter: F3Counter):
-    return counter.freeze()["remote_accepted"]
+    return _total_value(counter.freeze())
 
 
 def _core_cell(fqcn="origin"):
@@ -57,7 +64,7 @@ def _core_cell(fqcn="origin"):
 def test_message_clone_preserves_context_without_serializing_it():
     message = Message(headers={"wire": "value"}, payload=b"payload")
     counter = F3Counter()
-    context = attach_logical_send_context(message, counter, F3TrafficClass.TASK_RESULT)
+    context = attach_logical_send_context(message, counter, F3TrafficClass.TASK_RESULT, recipient_name="site-1")
 
     clone = message.clone(deep_copy_headers=True)
 
@@ -66,25 +73,27 @@ def test_message_clone_preserves_context_without_serializing_it():
     assert set(clone.__dict__) == {"headers", "payload", "_logical_send_context"}
 
 
-def test_real_counter_counts_one_origin_send_per_destination():
+def test_one_context_rejects_a_second_destination_to_protect_recipient_attribution():
     counter = F3Counter()
-    context = attach_logical_send_context(Message(), counter, F3TrafficClass.TASK_RESULT)
+    context = attach_logical_send_context(Message(), counter, F3TrafficClass.TASK_RESULT, recipient_name="site-1")
 
     first = context.try_begin("origin", "site-1")
     second = context.try_begin("origin", "site-2")
     assert first is not None
-    assert second is not None
+    assert second is None
     first.accepted(10)
-    second.accepted(20)
 
     assert context.try_begin("origin", "site-1") is None
     assert context.try_begin("relay", "site-3") is None
-    assert _counter_value(counter) == {"payload_bytes": "30", "messages": "2"}
+    snapshot = counter.freeze()
+    assert snapshot["status"] == "partial"
+    assert snapshot["issues"] == ["counter_gap"]
+    assert snapshot["sent_to"] == [{"participant_name": "site-1", "payload_bytes": "10", "messages": "1"}]
 
 
 def test_pre_admission_is_reused_once_by_transport():
     counter = F3Counter()
-    context = attach_logical_send_context(Message(), counter, F3TrafficClass.TASK_RESPONSE)
+    context = attach_logical_send_context(Message(), counter, F3TrafficClass.TASK_RESPONSE, recipient_name="site-1")
 
     assert context.pre_admit("server/job", "client/job")
     assert counter.pending_count == 1
@@ -95,12 +104,15 @@ def test_pre_admission_is_reused_once_by_transport():
     assert context.try_begin("server/job", "client/job") is None
     attempt.accepted(17)
 
-    assert _counter_value(counter) == {"payload_bytes": "17", "messages": "1"}
+    assert counter.freeze() == {
+        "status": "reported",
+        "sent_to": [{"participant_name": "site-1", "payload_bytes": "17", "messages": "1"}],
+    }
 
 
 def test_pre_admission_allows_oob_registration_before_transport():
     counter = F3Counter()
-    context = attach_logical_send_context(Message(), counter, F3TrafficClass.TASK_RESPONSE)
+    context = attach_logical_send_context(Message(), counter, F3TrafficClass.TASK_RESPONSE, recipient_name="site-1")
 
     assert context.pre_admit("server/job", "client/job")
     context.register_oob_transaction("tx-1", ("client/job",))
@@ -117,20 +129,20 @@ def test_pre_admission_allows_oob_registration_before_transport():
 def test_failed_pre_admission_marks_closed_owner_partial():
     counter = F3Counter()
     counter.close()
-    context = attach_logical_send_context(Message(), counter, F3TrafficClass.TASK_RESPONSE)
+    context = attach_logical_send_context(Message(), counter, F3TrafficClass.TASK_RESPONSE, recipient_name="site-1")
 
     assert not context.pre_admit("server/job", "client/job")
 
     assert counter.freeze() == {
         "status": "partial",
         "issues": ["counter_gap"],
-        "remote_accepted": {"payload_bytes": "0", "messages": "0"},
+        "sent_to": [],
     }
 
 
 def test_oob_bytes_complete_the_same_message_only_after_settlement():
     counter = F3Counter()
-    context = attach_logical_send_context(Message(), counter, F3TrafficClass.TASK_RESULT)
+    context = attach_logical_send_context(Message(), counter, F3TrafficClass.TASK_RESULT, recipient_name="site-1")
     context.register_oob_transaction("tx-1", ("site-1",))
 
     main = context.try_begin("origin", "site-1")
@@ -171,7 +183,7 @@ def test_oob_settlement_waits_for_an_inflight_last_contribution():
 
     accounting = BlockingAccounting()
     counter = accounting.counter
-    context = attach_logical_send_context(Message(), accounting, F3TrafficClass.TASK_RESULT)
+    context = attach_logical_send_context(Message(), accounting, F3TrafficClass.TASK_RESULT, recipient_name="site-1")
     context.register_oob_transaction("tx-1", ("site-1",))
     main = context.try_begin("origin", "site-1")
     main.accepted(7)
@@ -195,7 +207,7 @@ def test_oob_settlement_waits_for_an_inflight_last_contribution():
 
 def test_failed_oob_settlement_marks_the_observation_partial():
     counter = F3Counter()
-    context = attach_logical_send_context(Message(), counter, F3TrafficClass.TASK_RESULT)
+    context = attach_logical_send_context(Message(), counter, F3TrafficClass.TASK_RESULT, recipient_name="site-1")
     context.register_oob_transaction("tx-1", ("site-1",))
     main = context.try_begin("origin", "site-1")
     main.accepted(7)
@@ -205,34 +217,32 @@ def test_failed_oob_settlement_marks_the_observation_partial():
     snapshot = counter.freeze()
     assert snapshot["status"] == "partial"
     assert snapshot["issues"] == ["counter_gap"]
-    assert snapshot["remote_accepted"] == {"payload_bytes": "0", "messages": "0"}
+    assert _total_value(snapshot) == {"payload_bytes": "0", "messages": "0"}
 
 
-def test_multi_destination_oob_retains_successful_subtotal_when_another_destination_fails():
+def test_oob_rejects_untrusted_second_destination_and_retains_first_subtotal():
     counter = F3Counter()
-    context = attach_logical_send_context(Message(), counter, F3TrafficClass.TASK_RESULT)
+    context = attach_logical_send_context(Message(), counter, F3TrafficClass.TASK_RESULT, recipient_name="site-1")
     context.register_oob_transaction("tx-1", ("site-1", "site-2"))
 
     site_1 = context.try_begin("origin", "site-1")
     site_2 = context.try_begin("origin", "site-2")
     site_1.accepted(7)
-    site_2.accepted(9)
+    assert site_2 is None
     site_1_chunk = context.make_oob_contribution_context("tx-1", "site-1", "site-1-chunk", 11)
-    site_2_chunk = context.make_oob_contribution_context("tx-1", "site-2", "site-2-chunk", 13)
     site_1_chunk.try_begin("origin", "site-1").accepted(1000)
-    site_2_chunk.try_begin("origin", "site-2").accepted(1000)
 
     context.settle_oob_transaction("tx-1", {"site-1"})
 
     snapshot = counter.freeze()
     assert snapshot["status"] == "partial"
     assert snapshot["issues"] == ["counter_gap"]
-    assert snapshot["remote_accepted"] == {"payload_bytes": "18", "messages": "1"}
+    assert _total_value(snapshot) == {"payload_bytes": "18", "messages": "1"}
 
 
 def test_unknown_oob_receivers_mark_the_main_send_partial():
     counter = F3Counter()
-    context = attach_logical_send_context(Message(), counter, F3TrafficClass.TASK_RESULT)
+    context = attach_logical_send_context(Message(), counter, F3TrafficClass.TASK_RESULT, recipient_name="site-1")
     context.register_oob_transaction("tx-unknown", None)
 
     assert context.try_begin("origin", "site-1") is None
@@ -240,12 +250,12 @@ def test_unknown_oob_receivers_mark_the_main_send_partial():
     snapshot = counter.freeze()
     assert snapshot["status"] == "partial"
     assert snapshot["issues"] == ["counter_gap"]
-    assert snapshot["remote_accepted"] == {"payload_bytes": "0", "messages": "0"}
+    assert _total_value(snapshot) == {"payload_bytes": "0", "messages": "0"}
 
 
 def test_late_oob_registration_marks_a_completed_send_partial():
     counter = F3Counter()
-    context = attach_logical_send_context(Message(), counter, F3TrafficClass.TASK_RESULT)
+    context = attach_logical_send_context(Message(), counter, F3TrafficClass.TASK_RESULT, recipient_name="site-1")
     main = context.try_begin("origin", "site-1")
     main.accepted(7)
 
@@ -254,7 +264,7 @@ def test_late_oob_registration_marks_a_completed_send_partial():
     snapshot = counter.freeze()
     assert snapshot["status"] == "partial"
     assert snapshot["issues"] == ["counter_gap"]
-    assert snapshot["remote_accepted"] == {"payload_bytes": "7", "messages": "1"}
+    assert _total_value(snapshot) == {"payload_bytes": "7", "messages": "1"}
 
 
 def test_core_cell_counts_post_fobs_pre_encryption_size(monkeypatch):
@@ -263,7 +273,7 @@ def test_core_cell_counts_post_fobs_pre_encryption_size(monkeypatch):
     cell = _core_cell()
     counter = F3Counter()
     message = Message(headers={MessageHeaderKey.DESTINATION: "site-1"}, payload={"large": "object"})
-    attach_logical_send_context(message, counter, F3TrafficClass.TASK_RESULT)
+    attach_logical_send_context(message, counter, F3TrafficClass.TASK_RESULT, recipient_name="site-1")
 
     def encode(msg, fobs_ctx):
         msg.payload = b"encoded"
@@ -283,7 +293,7 @@ def test_core_cell_reuses_pre_admission(monkeypatch):
     cell = _core_cell("server/job")
     counter = F3Counter()
     message = Message(headers={MessageHeaderKey.DESTINATION: "client/job"}, payload=b"payload")
-    context = attach_logical_send_context(message, counter, F3TrafficClass.TASK_RESPONSE)
+    context = attach_logical_send_context(message, counter, F3TrafficClass.TASK_RESPONSE, recipient_name="site-1")
     assert context.pre_admit("server/job", "client/job")
     monkeypatch.setattr(core_cell_module, "encode_payload", lambda _message, fobs_ctx: 7)
     cell.encrypt_payload = MagicMock()
@@ -301,7 +311,7 @@ def test_core_cell_excludes_direct_in_process_delivery(monkeypatch):
     cell._send_direct_message = MagicMock()
     counter = F3Counter()
     message = Message(headers={MessageHeaderKey.DESTINATION: "site-1"}, payload=b"payload")
-    attach_logical_send_context(message, counter, F3TrafficClass.TASK_RESULT)
+    attach_logical_send_context(message, counter, F3TrafficClass.TASK_RESULT, recipient_name="site-1")
     monkeypatch.setattr(core_cell_module, "encode_payload", lambda _message, fobs_ctx: 7)
     cell.encrypt_payload = MagicMock()
 
@@ -318,7 +328,7 @@ def test_core_cell_abandons_pre_admission_for_direct_final_delivery(monkeypatch)
     cell._send_direct_message = MagicMock()
     counter = F3Counter()
     message = Message(headers={MessageHeaderKey.DESTINATION: "client/job"}, payload=b"payload")
-    context = attach_logical_send_context(message, counter, F3TrafficClass.TASK_RESPONSE)
+    context = attach_logical_send_context(message, counter, F3TrafficClass.TASK_RESPONSE, recipient_name="site-1")
     assert context.pre_admit("server/job", "client/job")
     monkeypatch.setattr(core_cell_module, "encode_payload", lambda _message, fobs_ctx: 7)
     cell.encrypt_payload = MagicMock()
@@ -334,7 +344,7 @@ def test_encode_failure_leaves_pre_admission_to_freeze_partial(monkeypatch):
     cell = _core_cell("server/job")
     counter = F3Counter()
     message = Message(headers={MessageHeaderKey.DESTINATION: "client/job"}, payload=b"payload")
-    context = attach_logical_send_context(message, counter, F3TrafficClass.TASK_RESPONSE)
+    context = attach_logical_send_context(message, counter, F3TrafficClass.TASK_RESPONSE, recipient_name="site-1")
     assert context.pre_admit("server/job", "client/job")
 
     def fail_encode(_message, fobs_ctx):
@@ -348,7 +358,7 @@ def test_encode_failure_leaves_pre_admission_to_freeze_partial(monkeypatch):
     assert counter.freeze() == {
         "status": "partial",
         "issues": ["counter_gap"],
-        "remote_accepted": {"payload_bytes": "0", "messages": "0"},
+        "sent_to": [],
     }
 
 
@@ -360,13 +370,16 @@ def test_core_cell_counts_a_local_first_hop_to_a_remote_destination(monkeypatch)
     cell._send_direct_message = MagicMock()
     counter = F3Counter()
     message = Message(headers={MessageHeaderKey.DESTINATION: "site-1"}, payload=b"payload")
-    attach_logical_send_context(message, counter, F3TrafficClass.TASK_RESULT)
+    attach_logical_send_context(message, counter, F3TrafficClass.TASK_RESULT, recipient_name="site-1")
     monkeypatch.setattr(core_cell_module, "encode_payload", lambda _message, fobs_ctx: 7)
     cell.encrypt_payload = MagicMock()
 
     assert cell._send_to_endpoint(Endpoint("relay"), message) == ""
     cell._send_direct_message.assert_called_once()
-    assert _counter_value(counter) == {"payload_bytes": "7", "messages": "1"}
+    assert counter.freeze() == {
+        "status": "reported",
+        "sent_to": [{"participant_name": "site-1", "payload_bytes": "7", "messages": "1"}],
+    }
 
 
 def test_accounting_exception_never_changes_core_transport(monkeypatch):
@@ -378,7 +391,7 @@ def test_accounting_exception_never_changes_core_transport(monkeypatch):
 
     cell = _core_cell()
     message = Message(headers={MessageHeaderKey.DESTINATION: "site-1"}, payload=b"payload")
-    attach_logical_send_context(message, BrokenAccounting(), object())
+    attach_logical_send_context(message, BrokenAccounting(), object(), recipient_name="site-1")
     monkeypatch.setattr(core_cell_module, "encode_payload", lambda _message, fobs_ctx: 7)
     cell.encrypt_payload = MagicMock()
 
@@ -434,7 +447,7 @@ def test_byte_streamer_accounts_one_whole_stream_at_terminal_success(monkeypatch
     streamer.chunk_size = 4
     counter = F3Counter()
     message = Message(payload=b"abcdef")
-    context = attach_logical_send_context(message, counter, F3TrafficClass.TASK_RESULT)
+    context = attach_logical_send_context(message, counter, F3TrafficClass.TASK_RESULT, recipient_name="site-1")
     stream = BlobStream(message.payload, message.headers)
 
     def admit_task(task, _handler):
@@ -457,7 +470,7 @@ def test_byte_streamer_accounts_one_whole_stream_at_terminal_success(monkeypatch
         ByteStreamer.tx_task_map.pop(future.stream_id, None)
 
     assert counter.pending_count == 1
-    assert counter.snapshot()["remote_accepted"] == {"payload_bytes": "0", "messages": "0"}
+    assert _total_value(counter.snapshot()) == {"payload_bytes": "0", "messages": "0"}
     future.set_result(6)
 
     assert _counter_value(counter) == {"payload_bytes": "6", "messages": "1"}
@@ -472,7 +485,7 @@ def test_byte_streamer_abandons_accounting_on_async_failure_or_cancel(monkeypatc
     streamer.cell = cell
     streamer.chunk_size = 4
     counter = F3Counter()
-    context = attach_logical_send_context(Message(), counter, F3TrafficClass.TASK_RESULT)
+    context = attach_logical_send_context(Message(), counter, F3TrafficClass.TASK_RESULT, recipient_name="site-1")
     stream = BlobStream(b"abcdef", {})
 
     def admit_task(task, _handler):
@@ -502,9 +515,13 @@ def test_byte_streamer_excludes_direct_final_but_counts_remote_target_with_local
     streamer.cell = cell
     streamer.chunk_size = 4
     direct_counter = F3Counter()
-    direct_context = attach_logical_send_context(Message(), direct_counter, F3TrafficClass.TASK_RESULT)
+    direct_context = attach_logical_send_context(
+        Message(), direct_counter, F3TrafficClass.TASK_RESULT, recipient_name="site-1"
+    )
     remote_counter = F3Counter()
-    remote_context = attach_logical_send_context(Message(), remote_counter, F3TrafficClass.TASK_RESULT)
+    remote_context = attach_logical_send_context(
+        Message(), remote_counter, F3TrafficClass.TASK_RESULT, recipient_name="site-2"
+    )
 
     def admit_task(task, _handler):
         task.task_future = object()
@@ -589,7 +606,7 @@ def test_terminal_accounting_exception_never_changes_byte_streamer_admission(mon
 def test_download_service_contribution_is_deduped_and_settled_after_transport_acceptance():
     service = make_isolated_download_service()
     counter = F3Counter()
-    context = attach_logical_send_context(Message(), counter, F3TrafficClass.TASK_RESULT)
+    context = attach_logical_send_context(Message(), counter, F3TrafficClass.TASK_RESULT, recipient_name="site-1")
     tx_id = service.new_transaction(
         cell=MagicMock(),
         timeout=10.0,
@@ -674,7 +691,7 @@ def test_unaccounted_download_does_not_compute_a_chunk_identity(monkeypatch):
 def test_unsupported_download_state_marks_f3_partial_without_changing_served_data():
     service = make_isolated_download_service()
     counter = F3Counter()
-    context = attach_logical_send_context(Message(), counter, F3TrafficClass.TASK_RESULT)
+    context = attach_logical_send_context(Message(), counter, F3TrafficClass.TASK_RESULT, recipient_name="site-1")
     tx_id = service.new_transaction(
         cell=MagicMock(),
         timeout=10.0,
@@ -693,7 +710,7 @@ def test_unsupported_download_state_marks_f3_partial_without_changing_served_dat
     snapshot = counter.freeze()
     assert snapshot["status"] == "partial"
     assert snapshot["issues"] == ["counter_gap"]
-    assert snapshot["remote_accepted"] == {"payload_bytes": "0", "messages": "0"}
+    assert _total_value(snapshot) == {"payload_bytes": "0", "messages": "0"}
 
 
 def test_large_download_chunk_identity_set_has_linear_size_without_prior_chunk_scans():

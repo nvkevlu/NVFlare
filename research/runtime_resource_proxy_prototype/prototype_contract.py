@@ -40,6 +40,7 @@ from zipfile import BadZipFile, ZipFile
 from schema.contract_v1 import (
     KIND_PARTICIPANT_SUMMARY,
     KIND_RESOURCE_SUMMARY,
+    MAX_MESSAGE_DESTINATIONS,
     ContractError,
     load_and_validate,
     validate_record,
@@ -364,7 +365,7 @@ def _unavailable(issue: str = "observation_incomplete") -> dict[str, Any]:
 
 
 def _f3_has_numbers(value: Mapping[str, Any]) -> bool:
-    return value.get("status") in {"reported", "partial"} and "remote_accepted" in value
+    return value.get("status") in {"reported", "partial"} and "sent_to" in value
 
 
 def _merge_f3(child_f3: Mapping[str, Any], parent_f3: Mapping[str, Any]) -> dict[str, Any]:
@@ -381,17 +382,42 @@ def _merge_f3(child_f3: Mapping[str, Any], parent_f3: Mapping[str, Any]) -> dict
     if not numeric:
         return _unavailable("attribution_incomplete")
 
-    payload_bytes = sum(int(value["remote_accepted"]["payload_bytes"]) for value in numeric)
-    messages = sum(int(value["remote_accepted"]["messages"]) for value in numeric)
-    if payload_bytes > _U128_MAX or messages > _U128_MAX:
-        raise OverflowError("merged F3 remote_accepted exceeds the unsigned 128-bit bound")
-    result = {"remote_accepted": {"payload_bytes": str(payload_bytes), "messages": str(messages)}}
+    by_destination: dict[str, tuple[int, int]] = {}
+    for value in numeric:
+        for entry in value["sent_to"]:
+            name = entry["participant_name"]
+            payload_bytes, messages = by_destination.get(name, (0, 0))
+            payload_bytes += int(entry["payload_bytes"])
+            messages += int(entry["messages"])
+            if payload_bytes > _U128_MAX or messages > _U128_MAX:
+                raise OverflowError("merged F3 destination exceeds the unsigned 128-bit bound")
+            by_destination[name] = (payload_bytes, messages)
+    names = sorted(by_destination)
+    destinations_truncated = len(names) > MAX_MESSAGE_DESTINATIONS
+    sent_to = [
+        {
+            "participant_name": name,
+            "payload_bytes": str(by_destination[name][0]),
+            "messages": str(by_destination[name][1]),
+        }
+        for name in names[:MAX_MESSAGE_DESTINATIONS]
+    ]
+    if (
+        sum(int(entry["payload_bytes"]) for entry in sent_to) > _U128_MAX
+        or sum(int(entry["messages"]) for entry in sent_to) > _U128_MAX
+    ):
+        raise OverflowError("merged F3 traffic exceeds the unsigned 128-bit bound")
+    result = {"sent_to": sent_to}
 
-    complete = len(numeric) == 2 and all(value.get("status") == "reported" for value in numeric)
+    complete = (
+        len(numeric) == 2 and all(value.get("status") == "reported" for value in numeric) and not destinations_truncated
+    )
     if complete:
         return {"status": "reported", **result}
 
-    issues = {"attribution_incomplete"}
+    issues = {"attribution_incomplete"} if len(numeric) != 2 else set()
+    if destinations_truncated:
+        issues.add("counter_gap")
     for value in numeric:
         if value.get("status") == "partial":
             issues.update(
@@ -399,6 +425,8 @@ def _merge_f3(child_f3: Mapping[str, Any], parent_f3: Mapping[str, Any]) -> dict
                 for issue in value.get("issues", [])
                 if issue in {"attribution_incomplete", "counter_gap", "observation_incomplete"}
             )
+    if not issues:
+        issues.add("observation_incomplete")
     return {"status": "partial", "issues": sorted(issues), **result}
 
 
@@ -428,7 +456,7 @@ def _validated_child_handoff(value: Mapping[str, Any]) -> dict[str, Any]:
         "resource_time": deepcopy(value["resource_time"]),
         "workspace_filesystem": deepcopy(value["workspace_filesystem"]),
         "retained_content": deepcopy(value["retained_content"]),
-        "f3": deepcopy(value["child_f3"]),
+        "message_traffic": deepcopy(value["child_f3"]),
     }
     try:
         validate_record(probe_record)
@@ -440,7 +468,7 @@ def _validated_child_handoff(value: Mapping[str, Any]) -> dict[str, Any]:
         "resource_time": probe_record["resource_time"],
         "workspace_filesystem": probe_record["workspace_filesystem"],
         "retained_content": probe_record["retained_content"],
-        "child_f3": probe_record["f3"],
+        "child_f3": probe_record["message_traffic"],
     }
 
 
@@ -533,7 +561,7 @@ def assemble_participant_summary(
         "resource_time": resource_time,
         "workspace_filesystem": workspace_filesystem,
         "retained_content": retained_content,
-        "f3": _merge_f3(child_f3, parent_f3),
+        "message_traffic": _merge_f3(child_f3, parent_f3),
     }
     validate_record(report)
     return report
@@ -665,7 +693,7 @@ class WorkspaceResourceStatsReader:
             raise WorkspaceArchiveError("participant summary job_id does not match the resource summary")
         if participant["participant_name"] != participant_name:
             raise WorkspaceArchiveError("participant summary name does not match its archive path")
-        for field in ("resource_time", "retained_content", "f3"):
+        for field in ("resource_time", "retained_content", "message_traffic"):
             if accepted_entry[field] != participant[field]:
                 raise WorkspaceArchiveError(
                     f"resource summary accepted participant {field} does not match the participant summary"

@@ -11,15 +11,17 @@ schema fixtures for behavior that is not implemented yet.
 | 1 | [Split collector walkthrough](collector_walkthrough/README.md) | Run each CPU, memory, GPU, filesystem, and resource-time source separately on the verified Colossus host. |
 | 2 | [Implemented path](PRODUCTION_IMPLEMENTATION.md) | Follow the exact current collect, handoff, send, accept, archive, and CLI code, including explicit limitations. |
 | 3 | [Production reference output](production_reference/README.md) | Inspect files and CLI text regenerated through the production implementation. |
-| 4 | [Real PyTorch Colossus E2E output](colossus_pytorch_e2e_reference/README.md) | Inspect a complete real CUDA training run, exact resource/CLI output, the GPU-runtime discovery gap it exposed, and the environment used to validate the current fix. |
-| 5 | [Review guide](REVIEW_GUIDE.md) | Learn the schema and user-facing concepts in plain language. |
-| 6 | [Rollup flow](ROLLUP_FLOW.md) | Follow a terminal participant report through job and study rollups. |
-| 7 | [Implementation gaps](GAPS.md) | See what remains incomplete without confusing it with implemented behavior. |
-| 8 | [Detailed integration design](CURRENT_CODE_INTEGRATION.md) | Review exact code hooks, the unimplemented completion-topic fallback, and the F3 implementation. |
-| 9 | [Phase 1 implementation plan](../../docs/design/job_resource_statistics_implementation_plan.md) | Discuss the broader contract, tradeoffs, and remaining work. |
-| 10 | [Phase 2 JobStatsReporter sketch](../../docs/design/job_resource_statistics_phase2_telemetry_sketch.md) | Discuss finalized-summary publication and the deferred periodic-capacity direction. |
+| 4 | [Historical PyTorch Colossus E2E output](colossus_pytorch_job_name_e2e_reference/README.md) | Inspect real CUDA and message-path measurement evidence; its archived job record still contains the now-removed `job_name`. |
+| 5 | [Historical retained-content/F3 E2E output](colossus_pytorch_retained_content_e2e_reference/README.md) | Compare the immediately preceding runtime capture, which predates `job_name`. |
+| 6 | [Earlier PyTorch Colossus E2E output](colossus_pytorch_e2e_reference/README.md) | Inspect the GPU-runtime discovery gap that the current collector fixed. |
+| 7 | [Review guide](REVIEW_GUIDE.md) | Learn the schema and user-facing concepts in plain language. |
+| 8 | [Rollup flow](ROLLUP_FLOW.md) | Follow a terminal participant report through job and study rollups. |
+| 9 | [Implementation gaps](GAPS.md) | See what remains incomplete without confusing it with implemented behavior. |
+| 10 | [Detailed integration design](CURRENT_CODE_INTEGRATION.md) | Review exact code hooks, the unimplemented completion-topic fallback, and the internal F3 implementation behind public `message_traffic`. |
+| 11 | [Phase 1 implementation plan](../../docs/design/job_resource_statistics_implementation_plan.md) | Discuss the broader contract, tradeoffs, and remaining work. |
+| 12 | [Phase 2 JobStatsReporter sketch](../../docs/design/job_resource_statistics_phase2_telemetry_sketch.md) | Discuss finalized-summary publication and the deferred periodic-capacity direction. |
 
-For a review of what this branch actually does, steps 1 through 4 and step 7
+For a review of what this branch actually does, steps 1 through 4 and step 9
 are enough.
 The catalogs below are lookup material for exact field and validation rules.
 
@@ -28,8 +30,9 @@ The catalogs below are lookup material for exact field and validation rules.
 1. Each client or server job process observes its visible CPU, memory, and GPU
    capacity before custom job imports and accumulates capacity-time in memory.
 2. When that process finishes, cleanup stops new application commands, lets
-   already-admitted callbacks and F3 sends settle within fixed bounds, and
-   writes one private `terminal_handoff.json` in the existing run workspace.
+   already-admitted callbacks and F3 sends settle within fixed bounds, scans
+   regular files in the participant's run directory, and writes one private
+   `terminal_handoff.json` in the existing run workspace.
 3. The long-lived client or server parent freezes its own job-scoped F3
    counter, validates that fixed handoff, checked-merges parent and child F3,
    binds the trusted participant name, and creates the only public
@@ -41,22 +44,36 @@ The catalogs below are lookup material for exact field and validation rules.
 5. The root server validates each expected participant report and retains the
    first accepted canonical bytes until the existing job-completion cutoff.
 6. At cutoff it reconciles accepted and missing participants, writes accepted
-   participant files, writes `resource_summary.json` last, and saves everything
-   only in the normal `WORKSPACE` archive.
+   participant files, writes the ID-keyed `resource_summary.json` last, and
+   saves everything only in the normal `WORKSPACE` archive. The CLI gets the
+   display name from existing server metadata, not a resource report.
 7. `nvflare job resources --job ...` reads one retained workspace;
    `nvflare job resources --study ...` reads matching retained workspaces and
-   builds an on-demand study total. No separate `RESOURCE_STATS` store exists.
+   builds an on-demand study total. Job output identifies both name and ID;
+   every study row has separate `JOB ID` and `NAME` fields. No separate
+   `RESOURCE_STATS` store exists.
 
-CPU, memory, GPU resource time, workspace-filesystem capacity, and F3 are bound
-in production. Saved-result bytes remain `unavailable/not_bound` until a
-workflow owner can identify a complete bounded retained-result set.
+`job_id` remains the unique reconciliation, lookup, and sort key. `job_name` is
+a human-facing label and may be repeated by different jobs, but is not copied
+into the archived resource summary. For display, the server can resolve it
+from existing metadata, falling back to the persisted job-folder name and then
+the ID. This adds no participant wire field, privilege, configuration,
+transport, or new resource-probe privacy category.
+
+CPU, memory, GPU resource time, workspace-filesystem capacity, retained
+run-directory content, and `message_traffic` are bound in production. `retained_content` is a
+terminal best-effort participant self-report, not a curated result inventory or
+the centrally retained archive size. Public `message_traffic.sent_to` groups
+sender-confirmed payload by named destination. It is not receiver-observed
+traffic, and local acceptance does not guarantee delivery. The CLI derives
+per-site outgoing and “sent to site” amounts on demand from accepted reports.
 
 ### Production code map
 
 | Part of the flow | Main files |
 | --- | --- |
 | Observe capacity and accumulate resource time | [`resource_stats/probes`](../../nvflare/private/fed/resource_stats/probes), [`accumulator.py`](../../nvflare/private/fed/resource_stats/accumulator.py), and [`collector.py`](../../nvflare/private/fed/resource_stats/collector.py) |
-| Classify and count F3 sends | [`f3_counter.py`](../../nvflare/private/fed/resource_stats/f3_counter.py), [`f3_bindings.py`](../../nvflare/private/fed/resource_stats/f3_bindings.py), and [`send_accounting.py`](../../nvflare/fuel/f3/send_accounting.py) |
+| Classify and count message-traffic sends (internal F3) | [`f3_counter.py`](../../nvflare/private/fed/resource_stats/f3_counter.py), [`f3_bindings.py`](../../nvflare/private/fed/resource_stats/f3_bindings.py), and [`send_accounting.py`](../../nvflare/fuel/f3/send_accounting.py) |
 | Close the child and transfer its private result | [`job_process_cleanup.py`](../../nvflare/private/fed/app/job_process_cleanup.py) and [`handoff.py`](../../nvflare/private/fed/resource_stats/handoff.py) |
 | Assemble client/server reports | [`client_executor.py`](../../nvflare/private/fed/client/client_executor.py), [`job_runner.py`](../../nvflare/private/fed/server/job_runner.py), and [`collector.py`](../../nvflare/private/fed/resource_stats/collector.py) |
 | Authenticate, validate, reduce, and publish | [`fed_server.py`](../../nvflare/private/fed/server/fed_server.py), [`coordinator.py`](../../nvflare/private/fed/resource_stats/coordinator.py), and [`contract.py`](../../nvflare/private/fed/resource_stats/contract.py) |
@@ -72,16 +89,19 @@ The implementation and its supporting prototype contain:
   lookup, and optional NVML enrichment;
 - a closed JSON Schema and semantic validator;
 - one terminal site report containing internally accumulated CPU, memory, and
-  GPU resource time, a final workspace-filesystem observation, and typed
-  saved-result/F3 objects;
+  GPU resource time, a final workspace-filesystem observation, a typed
+  run-directory file-size observation, and typed `message_traffic.sent_to`
+  entries;
 - production F3 ownership, trusted bindings for deployment, real task
   responses, and task results, origin-only send accounting, a fixed cutoff,
-  and checked child/parent merge; the focused suite passes, while a new live
-  process-mode reference remains to be captured;
+  and checked child/parent merge; focused/socket-backed suites and a real
+  Process-launch run cover the selected path;
 - a production Option A completion/report envelope, direct canonical-byte
   duplicate/conflict comparison, and a bounded live accepted-byte ledger, plus
   a separate prototype for expanded fallback/retry behavior;
 - production server reconciliation with missing participants kept visible;
+- server-owned job-name lookup for CLI display and on-demand study rows,
+  while the archived `resource_summary` remains keyed only by `job_id`;
 - an internally consistent minimal `WORKSPACE` resource namespace with local
   summary-last publication and a reader that validates the summary and its
   derived namespace; a `--site` read additionally validates that selected
@@ -107,22 +127,42 @@ implemented or registered in this branch. See
 for the exact current behavior.
 
 The earlier [NumPy Colossus smoke run](colossus_e2e_reference/README.md) remains
-useful as a successful system-runtime GPU-discovery case. The PyTorch run in
-step 4 is the primary live reference because it exercises a substantial CUDA
-workload and preserves the earlier safe failure when its NVIDIA runtime was not
-system-loader-resolvable. The current collector closes that specific gap by
+useful as a successful system-runtime GPU-discovery case. The original
+[PyTorch run](colossus_pytorch_e2e_reference/README.md) preserves the earlier
+safe failure when its NVIDIA runtime was not system-loader-resolvable. The
+current collector closes that specific gap by
 loading one unique, contained runtime owned by an allowlisted NVIDIA
 distribution under roots frozen before custom imports. It does not import
 Torch or require an environment change, configuration, privilege, subprocess,
 or report-format addition. Legacy `torch`-owned runtimes and conda-only layouts
 remain outside the initial adapter and fail closed.
 
+The later
+[retained-content/F3 run](colossus_pytorch_retained_content_e2e_reference/README.md)
+shows all three participants reporting resource time, terminal run-directory
+bytes, and origin-only F3 counters. It was captured immediately before
+`job_name` was added and later removed from the archived summary, so its
+stored JSON must not be presented as current-schema output.
+
+The later
+[job-name run](colossus_pytorch_job_name_e2e_reference/README.md) is historical
+live measurement evidence. It repeated the same one-server, two-client,
+three-round PyTorch path under the contract current at capture time. The
+historical job summary and study row contain
+`job_name: "hello-pt"`; human job output names `hello-pt` beside its UUID, and
+the study table shows separate `JOB ID` and `NAME` columns. All three reports
+were accepted and resource time, retained content, and old F3 remained reported.
+Its archived participant and job records predate the current
+`message_traffic.sent_to` contract. The deterministic
+[production reference](production_reference/README.md) is the current contract.
+
 ## Concrete artifacts
 
-The authoritative implemented outputs are under
+The production-path reference outputs are under
 [production_reference](production_reference/README.md). They are regenerated
 through the production collector, coordinator, archive reader, and CLI
-renderers:
+renderers. They use the current run-directory observation and ID-only archived
+job summary.
 
 | Artifact | What to inspect |
 | --- | --- |
@@ -132,24 +172,24 @@ renderers:
 | [Production site report](production_reference/artifacts/workspace/resource_stats/participants/site-1.json) | Exact accepted client record with a readable participant name. |
 | [Production job summary](production_reference/artifacts/workspace/resource_stats/resource_summary.json) | Exact implemented rollup. |
 
-The following broader goldens are design and contract examples. Some include
-reported F3 or retained-content values that are not claims about the older
-captured live runs. Retained content still has no general authoritative source;
-F3 has production bindings and passing focused/socket-backed suites, but no new
-process-mode live reference yet. See
-[F3 implementation status](F3_GAP.md#validation-status):
+The following broader goldens are design and contract examples. Their reported
+message-traffic or retained-content values are not claims about a particular live run.
+Retained content comes from the best-effort run-directory scan. Internal F3 has
+production bindings, passing focused/socket-backed suites, and the later
+Process-launch Colossus evidence described above. See
+[message-traffic implementation status](F3_GAP.md#validation-status):
 
 | Artifact | What to inspect |
 | --- | --- |
 | [One-job text](schema/golden/v1/finalized_job/cli/resources-all.txt) | Default proposed output with every expected participant. |
 | [Study text](schema/golden/v1/finalized_job/cli/resources-study.txt) and [study JSON](schema/golden/v1/finalized_job/cli/resources-study.json) | On-demand view across retained jobs in one study. |
 | [Site-1 detail](schema/golden/v1/finalized_job/cli/resources-site-1-details.txt) | Optional CPU and GPU model display. |
-| [Site-2 detail](schema/golden/v1/finalized_job/cli/resources-site-2-details.txt) | Partial measurement evidence and an unavailable saved-result total. |
+| [Site-2 detail](schema/golden/v1/finalized_job/cli/resources-site-2-details.txt) | Partial measurement evidence and an unavailable retained-content total. |
 | [CLI JSON](schema/golden/v1/finalized_job/cli/resources-all.json) | Machine-readable command envelope. |
 | [Site-1 report](schema/golden/v1/participant_summary.json) | One complete terminal site report. |
 | [Site-2 report](schema/golden/v1/participant_summary_partial.json) | A terminal report whose single compute status explains incomplete resource time. |
-| [Server report](schema/golden/v1/participant_summary_server.json) | A terminal server report with no visible GPU and the saved-result total. |
-| [Job summary](schema/golden/v1/resource_summary.json) | Reconciled expected participants and job totals. |
+| [Server report](schema/golden/v1/participant_summary_server.json) | A terminal server report with no visible GPU and a retained-content total. |
+| [Job summary](schema/golden/v1/resource_summary.json) | Reconciled expected participants; totals are derived by requested views, not stored. |
 | [Study summary](schema/golden/v1/study_summary.json) | Derived coverage, per-job inclusion state, and totals across retained jobs. |
 | [Finalized job fixture](schema/golden/v1/finalized_job) | Pre-archive `server_run` construction input, a minimal representative existing `WORKSPACE` archive, and CLI outputs. The unpacked input is retained only so reviewers can inspect and regenerate the ZIP; it is not a second proposed job-store component. |
 | [Generation receipt](schema/golden/v1/finalized_job/generation_receipt.json) | Derived totals and the Colossus scale reference. |
@@ -163,7 +203,7 @@ job history.
 | File | Purpose |
 | --- | --- |
 | [Implemented path](PRODUCTION_IMPLEMENTATION.md) | Exact current collection, transport, persistence, and CLI hooks. |
-| [F3 implementation status](F3_GAP.md) | Exact traffic semantics, production bindings, cutoff/merge behavior, and remaining proof. |
+| [Message-traffic implementation status](F3_GAP.md) | Exact traffic semantics, production bindings, cutoff/merge behavior, live evidence, and remaining platform coverage. |
 | [Detailed integration design](CURRENT_CODE_INTEGRATION.md) | Deeper target behavior and fallback alternatives; clearly distinguish these from implemented code. |
 | [Schema guide](schema/README.md) | Record relationships and calculation rules. |
 | [Field catalog](schema/FIELD_CATALOG.md) | Every field, type, unit, and bound. |

@@ -18,6 +18,8 @@ from __future__ import annotations
 
 from decimal import Decimal
 
+from nvflare.private.fed.resource_stats.contract import derive_job_totals
+
 _GIB = Decimal(2**30)
 _HOUR = Decimal(3600)
 
@@ -56,6 +58,44 @@ def _sum_group(resource_time: dict, resource: str, field: str, kind: str | None 
     return sum(values, Decimal(0)) if values or resource in resource_time else None
 
 
+def _sent_bytes(value: dict):
+    traffic = value.get("message_traffic", {})
+    if "sent" in traffic:
+        return traffic["sent"]["payload_bytes"]
+    if "sent_to" in traffic:
+        return str(sum(int(group["payload_bytes"]) for group in traffic["sent_to"]))
+    return None
+
+
+def _incoming_traffic(participants: list[dict]) -> tuple[dict[str, int], bool, set[str]]:
+    """Index addressed sends once for the per-site CLI table."""
+
+    sent_to: dict[str, int] = {}
+    has_numeric_source = False
+    incomplete_sources = set()
+    for source in participants:
+        traffic = source.get("message_traffic", {}) if source["status"] == "accepted" else {}
+        if traffic.get("status") != "reported":
+            incomplete_sources.add(source["participant_name"])
+        if "sent_to" not in traffic:
+            continue
+        has_numeric_source = True
+        for group in traffic["sent_to"]:
+            name = group["participant_name"]
+            sent_to[name] = sent_to.get(name, 0) + int(group["payload_bytes"])
+    return sent_to, has_numeric_source, incomplete_sources
+
+
+def _sent_to_site_display(
+    sent_to: dict[str, int], has_numeric_source: bool, incomplete_sources: set[str], participant_name: str
+) -> str:
+    if not has_numeric_source:
+        return "N/A"
+    complete = not incomplete_sources or incomplete_sources == {participant_name}
+    shown = _number(str(sent_to.get(participant_name, 0)), _GIB)
+    return shown if complete else f"{shown} (partial)"
+
+
 def _metrics(value: dict) -> list[str]:
     resource_time = value.get("resource_time", {})
     return [
@@ -66,7 +106,7 @@ def _metrics(value: dict) -> list[str]:
         _number(_sum_group(resource_time, "cpu", "unit_seconds"), _HOUR),
         _number(resource_time.get("memory", {}).get("byte_seconds"), _GIB * _HOUR),
         _number(value.get("retained_content", {}).get("bytes"), _GIB),
-        _number(value.get("f3", {}).get("remote_accepted", {}).get("payload_bytes"), _GIB),
+        _number(_sent_bytes(value), _GIB),
     ]
 
 
@@ -87,20 +127,26 @@ def _has_retained_content(value: dict) -> bool:
     return value.get("retained_content", {}).get("bytes") is not None
 
 
-def _has_f3(value: dict) -> bool:
-    return value.get("f3", {}).get("remote_accepted", {}).get("payload_bytes") is not None
+def _has_message_traffic(value: dict) -> bool:
+    return _sent_bytes(value) is not None
 
 
-def _other_metrics(value: dict, show_retained: bool, show_f3: bool) -> list[str]:
+def _other_metrics(value: dict, show_retained: bool, show_message_traffic: bool) -> list[str]:
     metrics = []
     if show_retained:
-        metrics.append(_number(value.get("retained_content", {}).get("bytes"), _GIB))
-    if show_f3:
-        f3 = value.get("f3", {})
+        retained = value.get("retained_content", {})
         metrics.extend(
             [
-                f3.get("status", "—").upper(),
-                _number(f3.get("remote_accepted", {}).get("payload_bytes"), _GIB),
+                retained.get("status", "—").upper(),
+                _number(retained.get("bytes"), _GIB),
+            ]
+        )
+    if show_message_traffic:
+        traffic = value.get("message_traffic", {})
+        metrics.extend(
+            [
+                traffic.get("status", "—").upper(),
+                _number(_sent_bytes(value), _GIB),
             ]
         )
     return metrics
@@ -127,8 +173,9 @@ def _table(headers: list[str], rows: list[list[str]]) -> list[str]:
     return ["  ".join(value.ljust(widths[index]) for index, value in enumerate(row)).rstrip() for row in values]
 
 
-def render_job_resources(summary: dict, participant: dict | None = None) -> str:
+def render_job_resources(summary: dict, participant: dict | None = None, *, job_name: str | None = None) -> str:
     participants = summary["participants"]
+    sent_to, has_numeric_source, incomplete_sources = _incoming_traffic(participants)
     accepted = sum(entry["status"] == "accepted" for entry in participants)
     quality = "COMPLETE" if accepted == len(participants) else "PARTIAL"
     selected = participant.get("participant_name") if participant else None
@@ -139,8 +186,11 @@ def render_job_resources(summary: dict, participant: dict | None = None) -> str:
     )
     visible_entries = [entry for entry in participants if not selected or entry["participant_name"] == selected]
     show_retained = any(entry["status"] == "accepted" and _has_retained_content(entry) for entry in visible_entries)
-    show_f3 = any(entry["status"] == "accepted" and _has_f3(entry) for entry in visible_entries)
-    lines = [f"Recorded resources for job {summary['job_id']}."]
+    # An addressed send from another participant remains useful even when the
+    # selected participant's own report (and outbound counter) is missing.
+    show_message_traffic = has_numeric_source
+    title = f"job {job_name} (ID: {summary['job_id']})" if job_name else f"job ID {summary['job_id']}"
+    lines = [f"Recorded resources for {title}."]
     coverage = f"Job coverage: {quality} ({accepted} accepted / {len(participants)} expected)"
     if selected:
         coverage += f" | selected site: {selected}"
@@ -171,23 +221,29 @@ def render_job_resources(summary: dict, participant: dict | None = None) -> str:
             rows,
         )
     )
-    if show_retained or show_f3:
+    if show_retained or show_message_traffic:
         other_headers = ["SITE"]
         if show_retained:
-            other_headers.append("SAVED CONTENT GiB")
-        if show_f3:
-            other_headers.extend(["F3 STATUS", "F3 REMOTE ACCEPTED GiB"])
+            other_headers.extend(["RUN-DIR STATUS", "RUN-DIR FILES GiB"])
+        if show_message_traffic:
+            other_headers.extend(
+                ["MESSAGE TRAFFIC STATUS", "MESSAGE PAYLOAD SENT GiB", "MESSAGE PAYLOAD SENT TO SITE GiB"]
+            )
         other_rows = []
         for entry in visible_entries:
-            values = (
-                _other_metrics(entry, show_retained, show_f3)
-                if entry["status"] == "accepted"
-                else ["N/A"] * (len(other_headers) - 1)
-            )
+            values = []
+            if show_retained:
+                values.extend(_other_metrics(entry, True, False) if entry["status"] == "accepted" else ["N/A", "N/A"])
+            if show_message_traffic:
+                values.extend(_other_metrics(entry, False, True) if entry["status"] == "accepted" else ["N/A", "N/A"])
+                values.append(
+                    _sent_to_site_display(sent_to, has_numeric_source, incomplete_sources, entry["participant_name"])
+                )
             other_rows.append([entry["participant_name"], *values])
         lines.extend(["", "Other recorded participant totals", *_table(other_headers, other_rows)])
     if not selected:
-        totals = _metrics(summary["totals"])
+        job_totals = derive_job_totals(participants)
+        totals = _metrics(job_totals)
         resource_totals = [
             _quantity("CPU", totals[4], "unit h"),
             _quantity("MEMORY", totals[5], "GiB h"),
@@ -203,16 +259,17 @@ def render_job_resources(summary: dict, participant: dict | None = None) -> str:
                 "  " + " | ".join(resource_totals),
             ]
         )
-        other_totals = _other_metrics(summary["totals"], show_retained, show_f3)
+        other_totals = _other_metrics(job_totals, show_retained, show_message_traffic)
         if other_totals:
             labels = []
             index = 0
             if show_retained:
-                labels.append(_quantity("SAVED CONTENT", other_totals[index], "GiB"))
-                index += 1
-            if show_f3:
-                labels.append(f"F3 STATUS {other_totals[index]}")
-                labels.append(_quantity("F3 REMOTE ACCEPTED", other_totals[index + 1], "GiB"))
+                labels.append(f"RUN-DIR STATUS {other_totals[index]}")
+                labels.append(_quantity("RUN-DIR FILES", other_totals[index + 1], "GiB"))
+                index += 2
+            if show_message_traffic:
+                labels.append(f"MESSAGE TRAFFIC STATUS {other_totals[index]}")
+                labels.append(_quantity("MESSAGE PAYLOAD SENT", other_totals[index + 1], "GiB"))
             lines.append("  Other additive totals: " + " | ".join(labels))
     lines.extend(
         [
@@ -221,6 +278,7 @@ def render_job_resources(summary: dict, participant: dict | None = None) -> str:
             "  PARTIAL means at least one expected report or observation was incomplete.",
             "  Each average is resource-time divided by that row's measured interval.",
             "  Totals add participant reports; overlapping resources can be counted more than once.",
+            "  Message payload sent to a site is sender-confirmed; it is not proof of receipt.",
         ]
     )
     if not selected:
@@ -278,7 +336,9 @@ def render_study_resources(summary: dict) -> str:
     show_retained = any(
         job["resource_data"] == "included" and _has_retained_content(job["totals"]) for job in summary["jobs"]
     )
-    show_f3 = any(job["resource_data"] == "included" and _has_f3(job["totals"]) for job in summary["jobs"])
+    show_message_traffic = any(
+        job["resource_data"] == "included" and _has_message_traffic(job["totals"]) for job in summary["jobs"]
+    )
     rows = []
     for job in summary["jobs"]:
         if job["resource_data"] == "included":
@@ -289,28 +349,28 @@ def render_study_resources(summary: dict) -> str:
                 row_metrics.append(metrics[3])
             row_metrics.extend(metrics[4:6])
             if show_retained:
-                row_metrics.append(metrics[6])
-            if show_f3:
-                row_metrics.extend([job["totals"].get("f3", {}).get("status", "—").upper(), metrics[7]])
+                row_metrics.extend([job["totals"]["retained_content"]["status"].upper(), metrics[6]])
+            if show_message_traffic:
+                row_metrics.extend([job["totals"].get("message_traffic", {}).get("status", "—").upper(), metrics[7]])
         else:
             row_metrics = ["—", "N/A", "N/A", "N/A"]
             if show_mig:
                 row_metrics.insert(2, "N/A")
             if show_retained:
-                row_metrics.append("N/A")
-            if show_f3:
                 row_metrics.extend(["N/A", "N/A"])
-        rows.append([job["job_id"], job["job_status"], job["resource_data"], *row_metrics])
+            if show_message_traffic:
+                row_metrics.extend(["N/A", "N/A"])
+        rows.append([job["job_id"], job["job_name"], job["job_status"], job["resource_data"], *row_metrics])
     metric_headers = ["QUALITY", "FULL GPU h", "MIG h", "CPU unit h", "MEM GiB h"]
     if not show_mig:
         metric_headers.remove("MIG h")
     if show_retained:
-        metric_headers.append("SAVED CONTENT GiB")
-    if show_f3:
-        metric_headers.extend(["F3 STATUS", "F3 REMOTE ACCEPTED GiB"])
+        metric_headers.extend(["RUN-DIR STATUS", "RUN-DIR FILES GiB"])
+    if show_message_traffic:
+        metric_headers.extend(["MESSAGE TRAFFIC STATUS", "MESSAGE PAYLOAD SENT GiB"])
     lines.extend(
         _table(
-            ["JOB", "JOB STATUS", "RESOURCE DATA", *metric_headers],
+            ["JOB ID", "NAME", "JOB STATUS", "RESOURCE DATA", *metric_headers],
             rows,
         )
     )
@@ -334,15 +394,16 @@ def render_study_resources(summary: dict) -> str:
             "  This view includes only jobs still retained by the job store.",
         ]
     )
-    other_totals = _other_metrics(summary["totals"], show_retained, show_f3)
+    other_totals = _other_metrics(summary["totals"], show_retained, show_message_traffic)
     if other_totals:
         labels = []
         index = 0
         if show_retained:
-            labels.append(_quantity("SAVED CONTENT", other_totals[index], "GiB"))
-            index += 1
-        if show_f3:
-            labels.append(f"F3 STATUS {other_totals[index]}")
-            labels.append(_quantity("F3 REMOTE ACCEPTED", other_totals[index + 1], "GiB"))
+            labels.append(f"RUN-DIR STATUS {other_totals[index]}")
+            labels.append(_quantity("RUN-DIR FILES", other_totals[index + 1], "GiB"))
+            index += 2
+        if show_message_traffic:
+            labels.append(f"MESSAGE TRAFFIC STATUS {other_totals[index]}")
+            labels.append(_quantity("MESSAGE PAYLOAD SENT", other_totals[index + 1], "GiB"))
         lines.insert(-4, "  Other additive totals: " + " | ".join(labels))
     return "\n".join(lines)

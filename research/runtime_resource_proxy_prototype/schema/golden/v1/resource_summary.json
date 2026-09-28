@@ -2,8 +2,6 @@
   "schema_version": "1.0",
   "kind": "nvflare.resource_stats.resource_summary",
   "job_id": "job-20260909-001",
-  "report_cutoff_at": "2026-09-09T14:37:04Z",
-  "finalized_at": "2026-09-09T14:37:04.1Z",
   "participants": [
     {
       "participant_name": "site-1",
@@ -40,12 +38,15 @@
         "status": "reported",
         "bytes": "0"
       },
-      "f3": {
+      "message_traffic": {
         "status": "reported",
-        "remote_accepted": {
-          "payload_bytes": "147700336640",
-          "messages": "5"
-        }
+        "sent_to": [
+          {
+            "participant_name": "server",
+            "payload_bytes": "147700336640",
+            "messages": "5"
+          }
+        ]
       }
     },
     {
@@ -88,12 +89,15 @@
           "not_bound"
         ]
       },
-      "f3": {
+      "message_traffic": {
         "status": "reported",
-        "remote_accepted": {
-          "payload_bytes": "147700336640",
-          "messages": "5"
-        }
+        "sent_to": [
+          {
+            "participant_name": "server",
+            "payload_bytes": "147700336640",
+            "messages": "5"
+          }
+        ]
       }
     },
     {
@@ -129,60 +133,21 @@
         "status": "reported",
         "bytes": "29540266113"
       },
-      "f3": {
+      "message_traffic": {
         "status": "reported",
-        "remote_accepted": {
-          "payload_bytes": "295400673280",
-          "messages": "10"
-        }
-      }
-    }
-  ],
-  "totals": {
-    "resource_time": {
-      "status": "partial",
-      "issues": [
-        "observation_incomplete"
-      ],
-      "measured_seconds": "6369",
-      "cpu": {
-        "groups": [
+        "sent_to": [
           {
-            "model": "AMD EPYC 9654",
-            "architecture": "x86_64",
-            "unit_seconds": "88920"
+            "participant_name": "site-1",
+            "payload_bytes": "147700336640",
+            "messages": "5"
           },
           {
-            "model": "Intel Xeon Platinum 8480+",
-            "architecture": "x86_64",
-            "unit_seconds": "56736"
+            "participant_name": "site-2",
+            "payload_bytes": "147700336640",
+            "messages": "5"
           }
         ]
-      },
-      "memory": {
-        "byte_seconds": "986880405405696"
-      },
-      "gpu": {
-        "groups": [
-          {
-            "kind": "full_gpu",
-            "model": "NVIDIA A100 80GB",
-            "memory_bytes": "85899345920",
-            "instance_seconds": "15984"
-          }
-        ]
-      }
-    },
-    "retained_content": {
-      "status": "partial",
-      "bytes": "29540266113"
-    },
-    "f3": {
-      "status": "partial",
-      "remote_accepted": {
-        "payload_bytes": "590801346560",
-        "messages": "20"
       }
     }
-  }
+  ]
 }

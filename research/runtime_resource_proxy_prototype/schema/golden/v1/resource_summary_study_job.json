@@ -2,8 +2,6 @@
   "schema_version": "1.0",
   "kind": "nvflare.resource_stats.resource_summary",
   "job_id": "job-20260910-002",
-  "report_cutoff_at": "2026-09-10T18:00:01Z",
-  "finalized_at": "2026-09-10T18:00:01.1Z",
   "participants": [
     {
       "participant_name": "site-4",
@@ -40,52 +38,10 @@
         "status": "reported",
         "bytes": "59080532226"
       },
-      "f3": {
+      "message_traffic": {
         "status": "reported",
-        "remote_accepted": {
-          "payload_bytes": "2363205386240",
-          "messages": "40"
-        }
+        "sent_to": []
       }
     }
-  ],
-  "totals": {
-    "resource_time": {
-      "status": "reported",
-      "measured_seconds": "14400",
-      "cpu": {
-        "groups": [
-          {
-            "model": "AMD EPYC 9654",
-            "architecture": "x86_64",
-            "unit_seconds": "1843200"
-          }
-        ]
-      },
-      "memory": {
-        "byte_seconds": "7916483719987200"
-      },
-      "gpu": {
-        "groups": [
-          {
-            "kind": "full_gpu",
-            "model": "NVIDIA H100 80GB HBM3",
-            "memory_bytes": "85899345920",
-            "instance_seconds": "115200"
-          }
-        ]
-      }
-    },
-    "retained_content": {
-      "status": "reported",
-      "bytes": "59080532226"
-    },
-    "f3": {
-      "status": "reported",
-      "remote_accepted": {
-        "payload_bytes": "2363205386240",
-        "messages": "40"
-      }
-    }
-  }
+  ]
 }

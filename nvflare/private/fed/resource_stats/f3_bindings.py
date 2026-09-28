@@ -26,6 +26,7 @@ def attach_f3_context(
     counter: F3Counter | None,
     traffic_class: F3TrafficClass,
     *,
+    recipient_name: str,
     pre_admit: tuple[str, str] | None = None,
 ) -> bool:
     """Attach process-local accounting without ever changing send behavior.
@@ -39,7 +40,9 @@ def attach_f3_context(
     if counter is None:
         return False
     try:
-        context = attach_logical_send_context(message, accounting=counter, traffic_class=traffic_class)
+        context = attach_logical_send_context(
+            message, accounting=counter, traffic_class=traffic_class, recipient_name=recipient_name
+        )
         if pre_admit is not None:
             origin, destination = pre_admit
             if not context.pre_admit(origin=origin, destination=destination):

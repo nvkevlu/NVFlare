@@ -1,0 +1,1 @@
+POC workspace configured: /tmp/nvflare-resource-retained-e2e-20260922/poc_workspace

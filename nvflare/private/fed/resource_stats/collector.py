@@ -39,7 +39,8 @@ from pathlib import Path
 from typing import Any, Optional
 
 from .accumulator import ClockOrderError, CollectorClosedError, ResourceTimeAccumulator
-from .contract import U128_MAX, validate_record
+from .contract import INTEGER_PATTERN, MAX_ISSUES, PARTIAL_ISSUES, PARTICIPANT_NAME_PATTERN, U128_MAX, validate_record
+from .f3_counter import MAX_F3_SENT_TO_GROUPS
 from .handoff import (
     INTERNAL_HANDOFF_KIND,
     INTERNAL_HANDOFF_VERSION,
@@ -129,7 +130,7 @@ def observe_workspace_filesystem(workspace_path: str | Path) -> dict[str, Any]:
 
 
 def observe_retained_content(run_dir: str | Path) -> dict[str, Any]:
-    """Approximate retained result size as the run directory's total file size.
+    """Observe the logical size of regular files in one job run directory.
 
     This is a workspace-size measurement, not a curated result-artifact size:
     it also counts logs, config, and job inputs. A precise figure would need
@@ -140,21 +141,29 @@ def observe_retained_content(run_dir: str | Path) -> dict[str, Any]:
     bookkeeping directory is excluded, since including it would make this
     figure grow from the act of measuring it rather than from job output.
 
-    Symlinked entries are recorded at their own (lstat) size rather than
-    followed, since the job workspace is job-owned and only partially
-    trusted: a symlink to a file outside the run directory must not be able
-    to inflate this count.
+    Symlinks and other non-regular entries contribute zero bytes and are not
+    followed.  If the directory changes or becomes unreadable during the
+    scan, the observed subtotal is returned as ``partial`` rather than being
+    presented as a complete measurement.
     """
 
     root = Path(run_dir)
     try:
-        if not root.is_dir():
+        if not stat.S_ISDIR(root.lstat().st_mode):
             return {"status": "unavailable", "issues": ["observation_incomplete"]}
     except OSError:
         return {"status": "unavailable", "issues": ["observation_incomplete"]}
 
     total = 0
-    for current_dir, dir_names, file_names in os.walk(root, followlinks=False):
+    incomplete = False
+    observed_directory = False
+
+    def mark_incomplete(_error: OSError) -> None:
+        nonlocal incomplete
+        incomplete = True
+
+    for current_dir, dir_names, file_names in os.walk(root, followlinks=False, onerror=mark_incomplete):
+        observed_directory = True
         current_path = Path(current_dir)
         if current_path == root:
             dir_names[:] = [name for name in dir_names if name != RESOURCE_STATS_DIR]
@@ -162,13 +171,14 @@ def observe_retained_content(run_dir: str | Path) -> dict[str, Any]:
             try:
                 entry_stat = (current_path / name).lstat()
             except OSError:
-                # Best-effort: a file can disappear mid-walk, or be unreadable
-                # for reasons unrelated to the job (e.g. another process's
-                # transient lock). One missing entry should not blank out an
-                # otherwise-observable total.
+                incomplete = True
                 continue
             if stat.S_ISREG(entry_stat.st_mode):
                 total += entry_stat.st_size
+    if incomplete:
+        if not observed_directory:
+            return {"status": "unavailable", "issues": ["observation_incomplete"]}
+        return {"status": "partial", "issues": ["observation_incomplete"], "bytes": str(total)}
     return {"status": "reported", "bytes": str(total)}
 
 
@@ -247,7 +257,8 @@ def merge_f3_snapshots(
     numeric data, rather than silently presenting that subtotal as complete.
     """
 
-    numeric = []
+    sent_to: dict[str, tuple[int, int]] = {}
+    numeric_count = 0
     issues = set()
     missing_contribution = False
     for value in (child_f3, parent_f3):
@@ -255,19 +266,54 @@ def merge_f3_snapshots(
             missing_contribution = True
             continue
         status = value.get("status")
+        if not isinstance(status, str):
+            return {"status": "error", "issues": ["malformed_source"]}
         if status in {"reported", "partial"}:
-            try:
-                counter = value["remote_accepted"]
-                payload_bytes = int(counter["payload_bytes"])
-                messages = int(counter["messages"])
-                if not (0 <= payload_bytes <= U128_MAX and 0 <= messages <= U128_MAX):
-                    raise ValueError("counter outside U128")
-            except (KeyError, TypeError, ValueError, OverflowError):
+            groups = value.get("sent_to")
+            if not isinstance(groups, list) or len(groups) > MAX_F3_SENT_TO_GROUPS:
                 return {"status": "error", "issues": ["malformed_source"]}
-            numeric.append((payload_bytes, messages))
+            expected_keys = {"status", "sent_to"} if status == "reported" else {"status", "sent_to", "issues"}
+            if set(value) != expected_keys:
+                return {"status": "error", "issues": ["malformed_source"]}
+            prior_name = ""
+            for group in groups:
+                if not isinstance(group, Mapping) or set(group) != {"participant_name", "payload_bytes", "messages"}:
+                    return {"status": "error", "issues": ["malformed_source"]}
+                name = group["participant_name"]
+                payload_text = group["payload_bytes"]
+                messages_text = group["messages"]
+                if (
+                    not isinstance(name, str)
+                    or not PARTICIPANT_NAME_PATTERN.fullmatch(name)
+                    or name <= prior_name
+                    or not isinstance(payload_text, str)
+                    or not INTEGER_PATTERN.fullmatch(payload_text)
+                    or not isinstance(messages_text, str)
+                    or not INTEGER_PATTERN.fullmatch(messages_text)
+                ):
+                    return {"status": "error", "issues": ["malformed_source"]}
+                prior_name = name
+                payload_bytes = int(payload_text)
+                messages = int(messages_text)
+                if payload_bytes > U128_MAX or not 0 < messages <= U128_MAX:
+                    return {"status": "error", "issues": ["malformed_source"]}
+                if name not in sent_to and len(sent_to) >= MAX_F3_SENT_TO_GROUPS:
+                    issues.add("counter_gap")
+                    continue
+                old_payload, old_messages = sent_to.get(name, (0, 0))
+                if old_payload > U128_MAX - payload_bytes or old_messages > U128_MAX - messages:
+                    return {"status": "error", "issues": ["malformed_source"]}
+                sent_to[name] = (old_payload + payload_bytes, old_messages + messages)
+            numeric_count += 1
             if status == "partial":
                 value_issues = value.get("issues")
-                if not isinstance(value_issues, list):
+                if (
+                    not isinstance(value_issues, list)
+                    or not 1 <= len(value_issues) <= MAX_ISSUES
+                    or not all(isinstance(issue, str) for issue in value_issues)
+                    or value_issues != sorted(set(value_issues))
+                    or not set(value_issues).issubset(PARTIAL_ISSUES)
+                ):
                     return {"status": "error", "issues": ["malformed_source"]}
                 issues.update(value_issues)
         elif status in {"unavailable", "error"}:
@@ -282,20 +328,21 @@ def merge_f3_snapshots(
         else:
             return {"status": "error", "issues": ["malformed_source"]}
 
-    if not numeric:
+    if not numeric_count:
         issue = "observation_incomplete" if "observation_incomplete" in issues else "attribution_incomplete"
         return {"status": "unavailable", "issues": [issue]}
 
-    payload_bytes = sum(value[0] for value in numeric)
-    messages = sum(value[1] for value in numeric)
+    payload_bytes = sum(value[0] for value in sent_to.values())
+    messages = sum(value[1] for value in sent_to.values())
     if payload_bytes > U128_MAX or messages > U128_MAX:
-        return {"status": "error", "issues": ["malformed_source"]}
-    if messages == 0 and payload_bytes != 0:
         return {"status": "error", "issues": ["malformed_source"]}
 
     result = {
         "status": "partial" if missing_contribution or issues else "reported",
-        "remote_accepted": {"payload_bytes": str(payload_bytes), "messages": str(messages)},
+        "sent_to": [
+            {"participant_name": name, "payload_bytes": str(sent_to[name][0]), "messages": str(sent_to[name][1])}
+            for name in sorted(sent_to)
+        ],
     }
     if result["status"] == "partial":
         if missing_contribution:
@@ -341,7 +388,7 @@ def assemble_participant_summary(
             retained_content = validated["retained_content"]
             child_f3 = validated["child_f3"]
 
-    f3 = merge_f3_snapshots(child_f3, parent_f3)
+    message_traffic = merge_f3_snapshots(child_f3, parent_f3)
     report = {
         "schema_version": "1.0",
         "kind": "nvflare.resource_stats.participant_summary",
@@ -351,7 +398,7 @@ def assemble_participant_summary(
         "resource_time": resource_time,
         "workspace_filesystem": workspace_filesystem,
         "retained_content": retained_content,
-        "f3": f3,
+        "message_traffic": message_traffic,
     }
     validate_record(report)
     return report

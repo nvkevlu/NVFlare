@@ -21,12 +21,13 @@ def test_attach_f3_context_is_process_local_and_preserves_wire_headers():
     message = Message(headers={"existing": "value"}, payload=b"payload")
     counter = F3Counter()
 
-    assert attach_f3_context(message, counter, F3TrafficClass.TASK_RESULT)
+    assert attach_f3_context(message, counter, F3TrafficClass.TASK_RESULT, recipient_name="server")
 
     context = message.get_logical_send_context()
     assert context is not None
     assert context._accounting is counter
     assert context._traffic_class is F3TrafficClass.TASK_RESULT
+    assert context._recipient_name == "server"
     assert message.headers == {"existing": "value"}
 
 
@@ -37,11 +38,11 @@ def test_attach_failure_marks_counter_gap_without_raising_into_send_path():
 
     counter = F3Counter()
 
-    assert not attach_f3_context(RejectingMessage(), counter, F3TrafficClass.TASK_RESULT)
+    assert not attach_f3_context(RejectingMessage(), counter, F3TrafficClass.TASK_RESULT, recipient_name="server")
     assert counter.snapshot() == {
         "status": "partial",
         "issues": ["counter_gap"],
-        "remote_accepted": {"payload_bytes": "0", "messages": "0"},
+        "sent_to": [],
     }
 
 
@@ -54,4 +55,6 @@ def test_attach_failure_still_does_not_raise_when_gap_marker_is_broken():
         def mark_counter_gap(self):
             raise RuntimeError("counter unavailable")
 
-    assert not attach_f3_context(RejectingMessage(), BrokenAccounting(), F3TrafficClass.TASK_RESULT)
+    assert not attach_f3_context(
+        RejectingMessage(), BrokenAccounting(), F3TrafficClass.TASK_RESULT, recipient_name="server"
+    )

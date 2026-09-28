@@ -1,9 +1,10 @@
 # Production reference output
 
-This directory shows the exact files and text produced by the current
-production implementation. It is separate from the broader design goldens:
-the design goldens can illustrate planned hooks, while these files include
-only data the implementation can produce today.
+This directory is the deterministic reference for the current production
+handoff, run-directory observation, public message-traffic rollup, archive-reader,
+and CLI path.
+It is regenerated from controlled inputs so reviewers can verify every output
+byte without depending on a live machine.
 
 See the [implemented-path walkthrough](../PRODUCTION_IMPLEMENTATION.md) for
 when each record is collected, sent, accepted, archived, and queried.
@@ -16,7 +17,8 @@ used by a job:
 2. The child writes and the parent reads the fixed terminal handoff.
 3. `assemble_participant_summary` binds the trusted participant name.
 4. `ResourceStatsCoordinator` validates each report and writes the final
-   `resource_stats` bundle under the normal server run directory.
+   `resource_stats` bundle under the normal server run directory. The archived
+   summary is keyed by job ID alone.
 5. An in-memory normal `WORKSPACE` ZIP is read by
    `WorkspaceResourceStatsReader`, including exact summary-derived inventory
    and cross-record reconciliation.
@@ -34,7 +36,8 @@ production code, not precomputed output values.
 - [`artifacts/workspace/resource_stats/participants/server.json`](artifacts/workspace/resource_stats/participants/server.json)
   is the accepted server report.
 - [`artifacts/workspace/resource_stats/resource_summary.json`](artifacts/workspace/resource_stats/resource_summary.json)
-  is the deterministic job rollup stored in the same `WORKSPACE` archive.
+  records participant coverage and accepted values in the same `WORKSPACE`
+  archive. It has no persisted totals or cutoff/finalization timestamps.
   Production writes it last in the live run directory as the publication
   marker; the later ZIP member order is irrelevant to readers.
 - [`artifacts/query/resources-study.json`](artifacts/query/resources-study.json)
@@ -55,22 +58,40 @@ production code, not precomputed output values.
 The job table derives average visible CPU units, memory GiB, and full-GPU
 count by dividing each participant's resource-time by its measured interval.
 The additive resource-time values remain in a separately labelled block.
-These are display-only derivations: the JSON schema and stored records are
-unchanged. Columns for saved content, F3 traffic, and MIG appear only when the
-corresponding data is present. This reference therefore shows F3 but omits
-saved content and MIG.
+The job and study views derive totals from accepted participant entries when
+requested; those calculations add no aggregate field to the stored summary.
+Columns for run-directory files, message traffic, and MIG appear only
+when the corresponding data is present. This reference shows run-directory
+files and message traffic, and omits MIG. Participant reports store
+`message_traffic.sent_to` by named recipient; the job/study `sent` and
+per-site outgoing/“sent to site” amounts are derived only for requested views.
+“Sent to site” is sender-confirmed addressed traffic, not receiver-observed
+bytes or a guarantee of delivery. The site text uses `MESSAGE PAYLOAD SENT GiB`
+and `MESSAGE PAYLOAD SENT TO SITE GiB`; missing or partial sender reports limit
+the coverage of the latter.
+
+The one-job header shows both the human-facing name and unique ID. The study
+table has separate `JOB ID` and `NAME` columns, and every JSON study row has
+both fields. The fixture deliberately treats `job_id` as the reconciliation
+and ordering key because names may repeat. Neither `participant_summary` nor
+the archived `resource_summary` has `job_name`; the CLI obtains display names
+from existing trusted job metadata, and the derived study view includes them.
 
 The `workspace/` directory mirrors members inside the normal stored
 `WORKSPACE` ZIP. It is not a proposed second storage component.
 
-`retained_content` is explicitly `unavailable/not_bound` because the controlled
-reference has no authoritative bounded result owner. F3 comes from
+`retained_content` is `reported` with zero bytes for both controlled
+participants because their run directories are deliberately empty when the
+terminal observation is taken. Current v1 collection sums logical `st_size`
+for regular files under the participant run directory while excluding
+top-level `resource_stats/`; it is a best-effort self-report rather than a
+curated result inventory. Message traffic comes from
 deterministic operations admitted and completed through the production
 `F3Counter`, then supplied through the production child/parent merge. The
 controlled values include main post-FOBS bytes and out-of-band source-byte
 contributions, but they are not evidence that a live CellNet route was
-exercised. The generator never infers either value from filenames or generic
-network statistics.
+exercised. The generator does not infer traffic from generic network
+statistics.
 
 Participant identity is the readable registered name (`site-1` or `server`) in
 filenames, stored records, rollups, and CLI output. The summary's accepted
@@ -92,7 +113,7 @@ python -m research.runtime_resource_proxy_prototype.production_reference.generat
 pytest -q research/runtime_resource_proxy_prototype/production_reference/test_reference_artifacts.py
 ```
 
-`--check` does not modify the checked-in artifacts. The test also validates
-the schema, recomputes rollups, verifies the archive through the production
-reader, confirms its exact summary-derived inventory, and compares all files
-byte-for-byte with a fresh regeneration.
+`--check` does not modify the checked-in artifacts. It must report no
+differences. The test also validates the schema, recomputes rollups, verifies
+the archive through the production reader, and confirms its exact
+summary-derived inventory.

@@ -2,8 +2,6 @@
   "schema_version": "1.0",
   "kind": "nvflare.resource_stats.resource_summary",
   "job_id": "job-large-exactness",
-  "report_cutoff_at": "2026-09-09T00:15:02Z",
-  "finalized_at": "2026-09-09T00:15:02.1Z",
   "participants": [
     {
       "participant_name": "site-large",
@@ -33,45 +31,10 @@
         "status": "reported",
         "bytes": "0"
       },
-      "f3": {
+      "message_traffic": {
         "status": "reported",
-        "remote_accepted": {
-          "payload_bytes": "0",
-          "messages": "0"
-        }
+        "sent_to": []
       }
     }
-  ],
-  "totals": {
-    "resource_time": {
-      "status": "reported",
-      "measured_seconds": "901",
-      "cpu": {
-        "groups": [
-          {
-            "model": "AMD EPYC 9654",
-            "architecture": "x86_64",
-            "unit_seconds": "901"
-          }
-        ]
-      },
-      "memory": {
-        "byte_seconds": "9010000000000901"
-      },
-      "gpu": {
-        "groups": []
-      }
-    },
-    "retained_content": {
-      "status": "reported",
-      "bytes": "0"
-    },
-    "f3": {
-      "status": "reported",
-      "remote_accepted": {
-        "payload_bytes": "0",
-        "messages": "0"
-      }
-    }
-  }
+  ]
 }

@@ -15,6 +15,7 @@
 import argparse
 import json
 import sys
+from contextlib import nullcontext
 
 import pytest
 from pyhocon import ConfigFactory as CF
@@ -156,6 +157,37 @@ class TestJobCLI:
         assert args.job_id == "job-1"
         assert args.study == "cancer-research"
         assert args.site == "site-1"
+
+    def test_resources_cli_displays_metadata_name_without_copying_it_into_json(self, monkeypatch):
+        from nvflare.tool import cli_output, cli_schema
+        from nvflare.tool.job import job_resources
+
+        parser = argparse.ArgumentParser(prog="nvflare")
+        job_cli.def_job_cli_parser(parser.add_subparsers(dest="command"))
+        summary = {"job_id": "job-1", "participants": []}
+        result = {"resource_summary": summary, "job_name": "hello-pt"}
+        session = type("Session", (), {"get_job_resources": lambda self, job_id, site=None: result})()
+        monkeypatch.setattr(job_cli, "_job_session_for_args", lambda *args, **kwargs: nullcontext(session))
+        monkeypatch.setattr(cli_schema, "handle_schema_flag", lambda *args, **kwargs: None)
+        args = argparse.Namespace(job_id="job-1", study=None, site=None)
+
+        json_outputs = []
+        monkeypatch.setattr(cli_output, "is_json_mode", lambda: True)
+        monkeypatch.setattr(cli_output, "output_ok", json_outputs.append)
+        job_cli.cmd_job_resources(args)
+        assert json_outputs == [{"selection": {"job_id": "job-1", "site": "all"}, "summary": summary}]
+        assert "job_name" not in json_outputs[0]["summary"]
+
+        displayed = []
+        monkeypatch.setattr(cli_output, "is_json_mode", lambda: False)
+        monkeypatch.setattr(cli_output, "print_human", displayed.append)
+        monkeypatch.setattr(
+            job_resources,
+            "render_job_resources",
+            lambda report, participant=None, *, job_name=None: f"{report['job_id']} {job_name}",
+        )
+        job_cli.cmd_job_resources(args)
+        assert displayed == ["job-1 hello-pt"]
 
     @pytest.mark.parametrize(
         ("subcommand", "args_before_study", "args_after_study"),

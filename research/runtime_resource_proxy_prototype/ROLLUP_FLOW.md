@@ -8,6 +8,11 @@ production path, including parent/child F3 ownership and merge, is implemented
 in this branch. Remaining validation and target-only delivery/recovery behavior
 are identified as such.
 
+The [historical live reference](colossus_pytorch_job_name_e2e_reference/README.md)
+shows this process flow for one real named PyTorch job. The
+[deterministic production reference](production_reference/README.md) shows the
+current stored contract and CLI output.
+
 ## The complete flow
 
 ```mermaid
@@ -24,10 +29,10 @@ flowchart TD
     H --> I{Which parent assembled it?}
     I -->|Client parent| IA[One selected CellNet completion request]
     I -->|Server parent| IB[Call the same acceptance function locally]
-    IA --> J[Server validates and accepts final totals]
+    IA --> J[Server validates and accepts participant reports]
     IB --> J
     J --> K[Write accepted participant files]
-    K --> L[resource_summary written last in local construction]
+    K --> L[Write ID-keyed compact resource_summary last]
     L --> M[Existing WORKSPACE archive]
     M --> N[nvflare job resources --job JOB_ID --study NAME]
     M --> O[GET_STUDY_RESOURCES reads retained job summaries]
@@ -39,6 +44,12 @@ Only `participant_summary` and `resource_summary` are retained in the archived
 capacity-change intervals stay in memory. The private terminal handoff is
 written only as temporary process-to-parent state. The parent deletes it after
 assembly, so it never enters the final resource namespace or archived workspace.
+
+The participant record, completion request, and archived job summary identify
+the job by `job_id`. The authorized CLI can resolve a display name from
+existing server metadata when requested, falling back to the legacy job-folder
+name and then `job_id`. No participant can supply or override it, and no new
+privilege or configuration is needed.
 
 ## Operational collection map
 
@@ -55,7 +66,7 @@ are troubleshooting aids for an operator, not production collectors.
 | GPU capacity and model | Same startup hook as CPU | CUDA Runtime enumeration is the only count authority; the CUDA Driver API supplies validated device identity and NVML may enrich only those devices | The production probe is implemented and was verified with CUDA 13 and an NVIDIA L40G on Colossus. A failed CUDA enumeration remains unavailable rather than being inferred from `CUDA_VISIBLE_DEVICES` or `nvidia-smi`; broader CUDA-version, multi-GPU, and MIG coverage remains future validation. |
 | Elapsed time | Start hook, any platform resource-change call, and `_archive_results()` | A monotonic nanosecond clock, converted to seconds with at most nine fractional digits | Each closed interval contributes CPU unit-seconds, memory byte-seconds, and GPU instance-seconds to the in-memory accumulator. |
 | Workspace-filesystem capacity | CJ or SJ `_archive_results()`, once at finalization | `os.statvfs(Workspace.get_run_dir(job_id))`; capacity is `f_blocks * f_frsize` | One terminal observation enters the private handoff. It is never added across participants or jobs. |
-| Retained-content bytes | CJ or SJ `_archive_results()`, once at finalization | A bounded retained-result set supplied by an existing workflow owner | The rule is fixed, but the authoritative set is not yet bound for every workflow. An unbound workflow reports unavailable; NVFlare does not scan the workspace or guess filenames. |
+| Retained-content bytes | CJ or SJ `_archive_results()`, once at finalization | Recursive regular-file `lstat().st_size` sum under `Workspace.get_run_dir(job_id)`, excluding top-level `resource_stats/` | A clean traversal reports the observed total. Symlinks and non-regular entries are ignored; hard links count per path; sparse files count logical size. A useful subtotal after an error is partial. This is a non-atomic participant self-report, not a curated or attested result inventory. |
 | Child F3 counters | CJ or SJ throughout the run, frozen in `_archive_results()` | Origin-only sender accounting for real task responses and task results; one logical message per remote destination, with bytes measured after FOBS and before encryption | Cleanup closes command admission and pre-drains callbacks for up to five seconds while transport is alive, then closes/drains F3 for up to five seconds and writes its snapshot into the private handoff. |
 | Parent F3 counters | CP or SP from trusted job start until after `job_handle.wait()` | Origin-only sender accounting; SP owns blocking job-application deployment, while forwarded traffic is not recounted | The parent closes and freezes immediately, then checked-adds the non-overlapping process contributions before it builds the public report. Any pending parent operation is an instrumentation gap, not work that delays cleanup. |
 
@@ -95,8 +106,8 @@ then installs the new capacity.
 If a future execution design replaces workers or moves task execution to
 another process, this in-process adapter must be replaced or its accumulated
 state carried forward by a platform component spanning the participant's
-logical work. The one persisted report and both rollups remain unchanged; this
-design does not select the future owner or handoff.
+logical work. The one persisted participant report and both on-demand views
+remain unchanged; this design does not select the future owner or handoff.
 
 The current private interval includes idle waits inside the job process. It is
 visible process capacity-time, not active-task time or utilization.
@@ -123,12 +134,21 @@ handoff with four child-derived facts:
 - accumulated CPU, memory, and GPU resource time;
 - the visible capacity of the filesystem containing the existing job
   workspace;
-- bytes in an authoritative bounded retained-result set; and
+- a best-effort sum of regular-file logical sizes in the participant's run
+  directory, excluding top-level `resource_stats/`; and
 - final child-process F3 sender counters.
 
 The handoff has a fixed internal version and kind plus `resource_time`,
 `workspace_filesystem`, `retained_content`, and `child_f3`. It is temporary
 platform handoff state, not a public schema record.
+
+The retained-content traversal is not an atomic snapshot. It occurs before the
+handoff is written, before stats-pool files are created, before an optional
+workspace upload, and before any later cleanup or log growth. The job process
+can also change the observed tree, so the parent validates the typed self-report
+but does not attest its contents. Separately configured result, log, and audit
+roots are not currently included. Job and study sums are additive participant
+observations, not unique retained bytes, archive size, or billable storage.
 
 The child writes it atomically at the fixed path
 `<workspace>/<job_id>/resource_stats/staging/terminal_handoff.json`. The parent
@@ -168,13 +188,15 @@ participant_summary
 │   ├── status
 │   └── capacity_bytes (reported only)
 ├── retained_content
-└── f3
+└── message_traffic
+    ├── status
+    └── sent_to[].{participant_name,payload_bytes,messages}
 ```
 
 There is no public startup record, final-capacity comparison, attempt ID,
 environment key, end reason, stability flag, or raw period list.
 
-`f3.remote_accepted` includes only job application deployment, real task
+`message_traffic.sent_to` includes only job application deployment, real task
 responses, and task results. One operation contributes one message per remote
 destination. The main payload is measured after FOBS encoding and before
 optional encryption. Successfully accepted unique `DownloadService` bytes are
@@ -182,11 +204,14 @@ folded into that operation without another message or retry duplication.
 Final delivery to an in-process logical destination, failed sends, task
 requests, acknowledgements, a relay's duplicate contribution, and the terminal
 report are excluded. A remote logical destination reached through a local
-first-hop relay is still counted once at its origin.
+first-hop relay is still counted once at its origin. Each entry names the
+intended recipient using trusted participant identity. It records sender-side
+local acceptance, not bytes observed at that recipient, and does not guarantee
+delivery.
 
 If the child handoff is missing, oversized, or invalid, the parent still
 builds a valid report: child-derived objects are unavailable and usable parent
-F3 is partial. The private handoff is removed after assembly. CP sends the
+message traffic is partial. The private handoff is removed after assembly. CP sends the
 exact report bytes using exactly one completion transport:
 
 - Option A extends `REPORT_JOB_FAILURE` / `report_job_failure` with the
@@ -257,7 +282,14 @@ The server starts with the participant list fixed at job start, not the set of
 reports that happened to arrive. Every selected client and the server therefore
 appears as `accepted`, `missing`, `invalid`, or `disabled`.
 
-For accepted reports, the server adds only additive fields:
+The resulting `resource_summary` contains `job_id` but not `job_name`.
+The CLI resolves a display name from server-owned persisted job metadata, with
+folder name and then ID as legacy fallbacks. The label can be reused by
+another job; the ID remains the unique reconciliation, archive lookup, and
+sort key.
+
+When a user requests a job view, the CLI derives only additive fields from the
+accepted participant entries:
 
 ```text
 job measured seconds       = Σ participant measured seconds
@@ -265,12 +297,15 @@ job CPU unit-seconds       = Σ participant CPU unit-seconds
 job memory byte-seconds    = Σ participant memory byte-seconds
 job GPU instance-seconds   = Σ participant GPU instance-seconds
 job retained bytes         = Σ participant retained bytes
-job F3 remote-accepted bytes/messages = Σ participant remote-accepted values
+job message_traffic.sent bytes/messages = Σ participant sent_to entries
 ```
 
-The job summary groups compatible CPU and GPU entries before adding them. It
-preserves the coverage status and issue information needed to explain missing
-or partial contributions.
+The on-demand job view groups compatible CPU and GPU entries before adding
+them. The stored summary preserves each participant's status and issue
+information needed to explain missing or partial contributions.
+For a selected site, “message payload sent” sums that site's outgoing
+`sent_to` entries; “message payload sent to site” sums other accepted
+participants' entries addressed to that site. Neither is measured receipt.
 
 Added `measured_seconds` is participant time. Parallel participants make it
 larger than the job's wall-clock duration; that is expected.
@@ -280,7 +315,10 @@ participants can observe the same shared filesystem, so such a total would be
 misleading. Each participant's one terminal observation remains available in
 `--site` detail.
 
-After checked addition, the server writes:
+The coordinator keeps its acceptance cutoff private. The persisted summary
+contains the expected participant list, accepted values, and job ID; it does
+not contain a job name, aggregate totals, or cutoff/finalization
+timestamps. After validation, the server writes:
 
 ```text
 resource_stats/participants/<participant_name>.json
@@ -322,7 +360,12 @@ member when it is read but is not a cryptographic integrity or signing
 mechanism.
 
 Default output uses the job summary. `--site` also opens the one accepted
-participant record selected through the trusted participant map.
+participant record selected through the trusted participant map. The human
+header is `Recorded resources for job NAME (ID: JOB_ID).` The server gets that
+display name from trusted job metadata rather than the archived summary; a
+missing name falls back to the job ID.
+The one-job view computes its totals from accepted participant entries when
+requested; the archive does not store a second totals object.
 
 ## Stage 7: show all retained jobs in a study
 
@@ -335,15 +378,16 @@ nvflare job resources --study STUDY_NAME --format json
 bare `nvflare job resources` command shows help, and `--site` requires `--job`.
 
 `GET_STUDY_RESOURCES` uses current active-study authorization and makes one
-pass over the retained jobs visible to the caller. It keeps the IDs and
-statuses returned by that pass, then classifies jobs without rescanning:
+pass over the retained jobs visible to the caller. It keeps each ID, trusted
+name, and status returned by that pass, then classifies jobs without
+rescanning:
 
 ```mermaid
 flowchart LR
     A[Retained job from one scan] --> B{Terminal?}
     B -- No --> C[Listed as nonterminal; excluded from totals]
     B -- Yes --> D{Valid resource summary?}
-    D -- Yes --> E[Included and added]
+    D -- Yes --> G[Included and added]
     D -- No --> F[Terminal but unavailable]
 ```
 
@@ -360,7 +404,7 @@ study CPU unit-seconds       = Σ included job CPU unit-seconds
 study memory byte-seconds    = Σ included job memory byte-seconds
 study GPU instance-seconds   = Σ included job GPU instance-seconds
 study retained bytes         = Σ included job retained bytes
-study F3 remote-accepted bytes/messages = Σ included job remote-accepted values
+study message_traffic.sent bytes/messages = Σ included job derived sent values
 ```
 
 Workspace-filesystem capacity is never part of the study total.
@@ -371,6 +415,11 @@ Overlapping jobs are counted independently; the value is not study wall time.
 The response includes a per-job status list plus included, unavailable, and
 nonterminal-excluded counts. This makes the coverage visible instead of hiding
 terminal jobs whose archives are absent or invalid.
+
+Every row includes both `job_id` and `job_name`, even when its resource data is
+unavailable or nonterminal. The CLI renders separate `JOB ID` and `NAME`
+columns. Duplicate names are allowed; ID remains the unique row key and the
+deterministic sort key.
 
 A job that finishes after its scanned status was recorded remains nonterminal
 in this response and is eligible on the next query.

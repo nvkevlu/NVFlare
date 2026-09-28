@@ -38,11 +38,8 @@
     "status": "reported",
     "bytes": "59080532226"
   },
-  "f3": {
+  "message_traffic": {
     "status": "reported",
-    "remote_accepted": {
-      "payload_bytes": "2363205386240",
-      "messages": "40"
-    }
+    "sent_to": []
   }
 }

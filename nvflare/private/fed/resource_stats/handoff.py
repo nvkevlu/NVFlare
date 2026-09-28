@@ -123,7 +123,7 @@ def _validate_handoff(value: Mapping[str, Any]) -> dict[str, Any]:
         "resource_time": deepcopy(value["resource_time"]),
         "workspace_filesystem": deepcopy(value["workspace_filesystem"]),
         "retained_content": deepcopy(value["retained_content"]),
-        "f3": deepcopy(value["child_f3"]),
+        "message_traffic": deepcopy(value["child_f3"]),
     }
     try:
         validate_record(probe)

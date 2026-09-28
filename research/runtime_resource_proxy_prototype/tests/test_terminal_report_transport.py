@@ -69,7 +69,7 @@ def summary_bytes(
             "status": "unavailable",
             "issues": ["observation_incomplete"],
         },
-        "f3": {
+        "message_traffic": {
             "status": "unavailable",
             "issues": ["observation_incomplete"],
         },

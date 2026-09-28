@@ -19,7 +19,7 @@ from nvflare.apis.event_type import EventType
 from nvflare.apis.filter import Filter
 from nvflare.apis.fl_constant import FLContextKey, FLMetaKey, ReservedKey
 from nvflare.apis.fl_constant import ReturnCode as ShareableRC
-from nvflare.apis.fl_constant import SecureTrainConst, ServerCommandKey, ServerCommandNames
+from nvflare.apis.fl_constant import SecureTrainConst, ServerCommandKey, ServerCommandNames, SiteType
 from nvflare.apis.fl_context import FLContext
 from nvflare.apis.fl_exception import FLCommunicationError
 from nvflare.apis.shareable import ReservedHeaderKey, Shareable, make_copy
@@ -516,7 +516,9 @@ class Communicator:
             msg_headers[MessageHeaderKey.MSG_ROOT_TTL] = msg_root_ttl
 
         task_message = new_cell_message(msg_headers, shareable)
-        attach_f3_context(task_message, get_job_f3_counter(), F3TrafficClass.TASK_RESULT)
+        attach_f3_context(
+            task_message, get_job_f3_counter(), F3TrafficClass.TASK_RESULT, recipient_name=SiteType.SERVER
+        )
         job_id = fl_ctx.get_job_id()
 
         if not timeout:

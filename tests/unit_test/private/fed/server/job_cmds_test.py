@@ -1230,11 +1230,14 @@ def test_get_study_resources_normalizes_run_status_enum(monkeypatch):
     JobCommandModule().get_study_resources(conn, ["get_study_resources"])
 
     result, _meta = conn.dicts[0]
-    assert result["jobs"] == [{"job_id": "job-1", "job_status": "RUNNING", "resource_data": "nonterminal"}]
+    assert result["jobs"] == [
+        {"job_id": "job-1", "job_name": "job-1", "job_status": "RUNNING", "resource_data": "nonterminal"}
+    ]
 
 
 def test_get_study_resources_stages_workspace_instead_of_loading_component(monkeypatch):
     monkeypatch.setattr(job_cmds_module, "JobDefManagerSpec", object)
+    monkeypatch.setattr(job_cmds_module, "derive_job_totals", lambda participants: {"marker": participants[0]})
     monkeypatch.setattr(job_cmds_module, "derive_study_totals", lambda rows: {"derived": True})
     monkeypatch.setattr(job_cmds_module, "validate_record", lambda record: None)
     job = _FakeListedJob(
@@ -1258,7 +1261,7 @@ def test_get_study_resources_stages_workspace_instead_of_loading_component(monke
 
         @staticmethod
         def read_resource_summary():
-            return {"job_id": "job-1", "totals": {"marker": "included"}}
+            return {"job_id": "job-1", "participants": ["included"]}
 
     engine.job_def_manager.get_storage_for_download = MagicMock(side_effect=_stage_workspace)
     engine.job_def_manager.get_storage_component = MagicMock(
@@ -1274,6 +1277,7 @@ def test_get_study_resources_stages_workspace_instead_of_loading_component(monke
     assert result["jobs"] == [
         {
             "job_id": "job-1",
+            "job_name": "job-1",
             "job_status": RunStatus.FINISHED_COMPLETED.value,
             "resource_data": "included",
             "totals": {"marker": "included"},
@@ -1283,6 +1287,70 @@ def test_get_study_resources_stages_workspace_instead_of_loading_component(monke
     engine.job_def_manager.get_storage_component.assert_not_called()
     assert len(staged_paths) == 1
     assert not staged_paths[0].exists()
+
+
+def test_get_study_resources_uses_job_metadata_name_without_archived_copy(monkeypatch):
+    monkeypatch.setattr(job_cmds_module, "JobDefManagerSpec", object)
+    monkeypatch.setattr(job_cmds_module, "derive_job_totals", lambda participants: {"marker": participants})
+    monkeypatch.setattr(job_cmds_module, "derive_study_totals", lambda rows: {"derived": True})
+    monkeypatch.setattr(job_cmds_module, "validate_record", lambda record: None)
+    job = _FakeListedJob(
+        {
+            JobMetaKey.JOB_ID.value: "job-1",
+            JobMetaKey.JOB_NAME.value: "trusted-name",
+            JobMetaKey.STATUS.value: RunStatus.FINISHED_COMPLETED,
+        }
+    )
+    engine = _FakeListEngine([job])
+
+    def _stage_workspace(jid, download_dir, component, download_file, fl_ctx):
+        archive_path = Path(download_dir) / jid / download_file
+        archive_path.parent.mkdir(parents=True)
+        archive_path.write_bytes(b"staged workspace")
+
+    class _PathReader:
+        archive_job_id = "job-1"
+
+        def __init__(self, workspace_path):
+            assert Path(workspace_path).read_bytes() == b"staged workspace"
+
+        @staticmethod
+        def read_resource_summary():
+            return {
+                "job_id": _PathReader.archive_job_id,
+                "participants": [],
+            }
+
+    engine.job_def_manager.get_storage_for_download = MagicMock(side_effect=_stage_workspace)
+    monkeypatch.setattr(job_cmds_module, "WorkspaceResourceStatsReader", _PathReader)
+    conn = _MockConnection(app_ctx=engine, props={ConnProps.ACTIVE_STUDY: "default"})
+
+    JobCommandModule().get_study_resources(conn, ["get_study_resources"])
+
+    assert conn.errors == []
+    result, _meta = conn.dicts[0]
+    assert result["jobs"] == [
+        {
+            "job_id": "job-1",
+            "job_name": "trusted-name",
+            "job_status": RunStatus.FINISHED_COMPLETED.value,
+            "resource_data": "included",
+            "totals": {"marker": []},
+        }
+    ]
+
+    _PathReader.archive_job_id = "job-2"
+    mismatch_conn = _MockConnection(app_ctx=engine, props={ConnProps.ACTIVE_STUDY: "default"})
+    JobCommandModule().get_study_resources(mismatch_conn, ["get_study_resources"])
+    assert mismatch_conn.errors == []
+    assert mismatch_conn.dicts[0][0]["jobs"] == [
+        {
+            "job_id": "job-1",
+            "job_name": "trusted-name",
+            "job_status": RunStatus.FINISHED_COMPLETED.value,
+            "resource_data": "unavailable",
+        }
+    ]
 
 
 def test_list_jobs_ignores_duration_parse_failures(monkeypatch):

@@ -657,7 +657,7 @@ def test_handoff_to_public_report_round_trip(tmp_path):
         job_collector.finish(
             child_f3={
                 "status": "reported",
-                "remote_accepted": {"payload_bytes": "1200", "messages": "2"},
+                "sent_to": [{"participant_name": "server", "payload_bytes": "1200", "messages": "2"}],
             }
         ),
     )
@@ -669,7 +669,7 @@ def test_handoff_to_public_report_round_trip(tmp_path):
         child_handoff=handoff,
         parent_f3={
             "status": "reported",
-            "remote_accepted": {"payload_bytes": "300", "messages": "1"},
+            "sent_to": [{"participant_name": "server", "payload_bytes": "300", "messages": "1"}],
         },
     )
     encoded = canonical_json_bytes(report)
@@ -678,9 +678,9 @@ def test_handoff_to_public_report_round_trip(tmp_path):
     assert report["resource_time"]["measured_seconds"] == "2"
     assert report["workspace_filesystem"]["status"] == "reported"
     assert report["retained_content"] == {"status": "reported", "bytes": "0"}
-    assert report["f3"] == {
+    assert report["message_traffic"] == {
         "status": "reported",
-        "remote_accepted": {"payload_bytes": "1500", "messages": "3"},
+        "sent_to": [{"participant_name": "server", "payload_bytes": "1500", "messages": "3"}],
     }
     assert "participant_key" not in encoded.decode()
 
@@ -732,7 +732,7 @@ def test_observe_retained_content_is_unavailable_when_run_dir_is_a_file(tmp_path
     assert observe_retained_content(run_dir) == {"status": "unavailable", "issues": ["observation_incomplete"]}
 
 
-def test_observe_retained_content_records_a_symlinked_file_at_its_own_size_without_following_it(tmp_path):
+def test_observe_retained_content_ignores_a_symlinked_file_without_following_it(tmp_path):
     outside = tmp_path.parent / "outside_the_run_dir.bin"
     outside.write_bytes(b"o" * 10_000)
     try:
@@ -743,15 +743,40 @@ def test_observe_retained_content_records_a_symlinked_file_at_its_own_size_witho
 
         result = observe_retained_content(run_dir)
 
-        # The symlink's own (lstat) size is recorded; the large target it
-        # points to, outside the run directory, must not inflate the count.
-        assert result["status"] == "reported"
-        assert int(result["bytes"]) < 10_000
+        assert result == {"status": "reported", "bytes": "0"}
     finally:
         outside.unlink()
 
 
-def test_observe_retained_content_skips_a_file_that_disappears_mid_walk(tmp_path, monkeypatch):
+def test_observe_retained_content_ignores_a_symlinked_directory_without_following_it(tmp_path):
+    outside = tmp_path.parent / "outside_the_run_dir"
+    outside.mkdir()
+    (outside / "large.bin").write_bytes(b"o" * 10_000)
+    try:
+        run_dir = tmp_path / "run"
+        run_dir.mkdir()
+        (run_dir / "linked-directory").symlink_to(outside, target_is_directory=True)
+
+        assert observe_retained_content(run_dir) == {"status": "reported", "bytes": "0"}
+    finally:
+        (outside / "large.bin").unlink()
+        outside.rmdir()
+
+
+def test_observe_retained_content_rejects_a_symlinked_run_directory(tmp_path):
+    actual_run_dir = tmp_path / "actual"
+    actual_run_dir.mkdir()
+    (actual_run_dir / "output.bin").write_bytes(b"x" * 100)
+    linked_run_dir = tmp_path / "linked"
+    linked_run_dir.symlink_to(actual_run_dir, target_is_directory=True)
+
+    assert observe_retained_content(linked_run_dir) == {
+        "status": "unavailable",
+        "issues": ["observation_incomplete"],
+    }
+
+
+def test_observe_retained_content_marks_a_disappearing_file_partial(tmp_path, monkeypatch):
     (tmp_path / "kept.bin").write_bytes(b"k" * 60)
     (tmp_path / "removed.bin").write_bytes(b"r" * 40)
 
@@ -765,7 +790,42 @@ def test_observe_retained_content_skips_a_file_that_disappears_mid_walk(tmp_path
 
     monkeypatch.setattr(collector.os, "walk", flaky_walk)
 
-    assert observe_retained_content(tmp_path) == {"status": "reported", "bytes": "60"}
+    assert observe_retained_content(tmp_path) == {
+        "status": "partial",
+        "issues": ["observation_incomplete"],
+        "bytes": "60",
+    }
+
+
+def test_observe_retained_content_marks_a_walk_error_partial(tmp_path, monkeypatch):
+    (tmp_path / "kept.bin").write_bytes(b"k" * 60)
+    real_walk = os.walk
+
+    def flaky_walk(top, **kwargs):
+        kwargs["onerror"](PermissionError("simulated traversal failure"))
+        yield from real_walk(top, **kwargs)
+
+    monkeypatch.setattr(collector.os, "walk", flaky_walk)
+
+    assert observe_retained_content(tmp_path) == {
+        "status": "partial",
+        "issues": ["observation_incomplete"],
+        "bytes": "60",
+    }
+
+
+def test_observe_retained_content_is_unavailable_when_walk_cannot_observe_any_directory(tmp_path, monkeypatch):
+    def fail_before_yield(_root, *, followlinks, onerror):
+        assert followlinks is False
+        onerror(PermissionError("denied"))
+        return iter(())
+
+    monkeypatch.setattr(collector.os, "walk", fail_before_yield)
+
+    assert observe_retained_content(tmp_path) == {
+        "status": "unavailable",
+        "issues": ["observation_incomplete"],
+    }
 
 
 def test_restored_collector_keeps_new_totals_but_marks_prior_interval_incomplete(tmp_path):
@@ -818,7 +878,7 @@ def test_missing_handoff_is_explicitly_unavailable():
         child_handoff=None,
         parent_f3={
             "status": "reported",
-            "remote_accepted": {"payload_bytes": "300", "messages": "1"},
+            "sent_to": [{"participant_name": "server", "payload_bytes": "300", "messages": "1"}],
         },
     )
 
@@ -826,10 +886,10 @@ def test_missing_handoff_is_explicitly_unavailable():
         "status": "unavailable",
         "issues": ["observation_incomplete"],
     }
-    assert report["f3"] == {
+    assert report["message_traffic"] == {
         "status": "partial",
         "issues": ["attribution_incomplete"],
-        "remote_accepted": {"payload_bytes": "300", "messages": "1"},
+        "sent_to": [{"participant_name": "server", "payload_bytes": "300", "messages": "1"}],
     }
 
 
@@ -838,28 +898,58 @@ def test_merge_f3_snapshots_preserves_partial_issues_and_checks_u128():
         {
             "status": "partial",
             "issues": ["counter_gap"],
-            "remote_accepted": {"payload_bytes": "5", "messages": "1"},
+            "sent_to": [{"participant_name": "server", "payload_bytes": "5", "messages": "1"}],
         },
         {
             "status": "reported",
-            "remote_accepted": {"payload_bytes": "7", "messages": "2"},
+            "sent_to": [{"participant_name": "server", "payload_bytes": "7", "messages": "2"}],
         },
     ) == {
         "status": "partial",
         "issues": ["counter_gap"],
-        "remote_accepted": {"payload_bytes": "12", "messages": "3"},
+        "sent_to": [{"participant_name": "server", "payload_bytes": "12", "messages": "3"}],
     }
 
     assert merge_f3_snapshots(
         {
             "status": "reported",
-            "remote_accepted": {"payload_bytes": str(2**128 - 1), "messages": "1"},
+            "sent_to": [{"participant_name": "server", "payload_bytes": str(2**128 - 1), "messages": "1"}],
         },
         {
             "status": "reported",
-            "remote_accepted": {"payload_bytes": "1", "messages": "1"},
+            "sent_to": [{"participant_name": "server", "payload_bytes": "1", "messages": "1"}],
         },
     ) == {"status": "error", "issues": ["malformed_source"]}
+
+
+def test_merge_f3_snapshots_keeps_distinct_recipients_sorted_and_rejects_duplicate_source_groups():
+    child = {
+        "status": "reported",
+        "sent_to": [
+            {"participant_name": "site-1", "payload_bytes": "5", "messages": "1"},
+            {"participant_name": "site-2", "payload_bytes": "7", "messages": "2"},
+        ],
+    }
+    parent = {
+        "status": "reported",
+        "sent_to": [{"participant_name": "site-2", "payload_bytes": "3", "messages": "1"}],
+    }
+
+    assert merge_f3_snapshots(child, parent) == {
+        "status": "reported",
+        "sent_to": [
+            {"participant_name": "site-1", "payload_bytes": "5", "messages": "1"},
+            {"participant_name": "site-2", "payload_bytes": "10", "messages": "3"},
+        ],
+    }
+    assert merge_f3_snapshots({**child, "sent_to": list(reversed(child["sent_to"]))}, parent) == {
+        "status": "error",
+        "issues": ["malformed_source"],
+    }
+    assert merge_f3_snapshots({**child, "status": []}, parent) == {
+        "status": "error",
+        "issues": ["malformed_source"],
+    }
 
 
 def _minimal_handoff():

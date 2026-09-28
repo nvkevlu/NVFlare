@@ -38,7 +38,7 @@ _CALL_FAILED = object()
 class LogicalSendAccounting(Protocol):
     """Callback surface supplied by the job-scoped accounting owner."""
 
-    def try_begin(self, traffic_class: object) -> Optional[object]:
+    def try_begin(self, traffic_class: object, recipient_name: str) -> Optional[object]:
         pass
 
     def complete_remote_accepted(self, admission: object, payload_bytes: int) -> bool:
@@ -131,12 +131,14 @@ class _OobContributionContext:
 
 
 class LogicalSendContext:
-    """Origin-owned state for one logical message and all of its destinations."""
+    """Origin-owned state for one logical message to one final destination."""
 
-    def __init__(self, accounting: LogicalSendAccounting, traffic_class: object):
+    def __init__(self, accounting: LogicalSendAccounting, traffic_class: object, recipient_name: str):
         self._accounting = accounting
         self._traffic_class = traffic_class
+        self._recipient_name = recipient_name
         self._origin: Optional[str] = None
+        self._destination: Optional[str] = None
         self._lock = threading.RLock()
         self._destinations: dict[str, _DestinationState] = {}
         self._transaction_receivers: dict[str, Optional[frozenset[str]]] = {}
@@ -177,6 +179,11 @@ class LogicalSendContext:
             elif self._origin != origin:
                 self.mark_counter_gap()
                 return False
+            if self._destination is None:
+                self._destination = destination
+            elif self._destination != destination:
+                self.mark_counter_gap()
+                return False
 
             state = self._destinations.setdefault(destination, _DestinationState())
             if state.owner_admission_attempted:
@@ -189,7 +196,7 @@ class LogicalSendContext:
                 return False
             state.owner_admission_attempted = True
 
-        admission = self._safe_call("try_begin", self._traffic_class, failed_value=_CALL_FAILED)
+        admission = self._safe_call("try_begin", self._traffic_class, self._recipient_name, failed_value=_CALL_FAILED)
         if admission is _CALL_FAILED or admission is None:
             self.mark_counter_gap()
             return False
@@ -210,6 +217,13 @@ class LogicalSendContext:
             elif self._origin != origin:
                 # A process-local direct delivery can retain the Python attribute.
                 # Only the Cell that first originated this logical send may count it.
+                return None
+            if self._destination is None:
+                self._destination = destination
+            elif self._destination != destination:
+                # A context has one trusted participant name. A second final
+                # destination cannot safely reuse that attribution.
+                self.mark_counter_gap()
                 return None
 
             state = self._destinations.setdefault(destination, _DestinationState())
@@ -232,7 +246,9 @@ class LogicalSendContext:
             unbound_destination = bool(self._transaction_receivers) and not destination_has_transaction
 
         if not owner_admission_attempted:
-            admission = self._safe_call("try_begin", self._traffic_class, failed_value=_CALL_FAILED)
+            admission = self._safe_call(
+                "try_begin", self._traffic_class, self._recipient_name, failed_value=_CALL_FAILED
+            )
             if admission is _CALL_FAILED or admission is None:
                 self.mark_counter_gap()
                 return None
@@ -529,10 +545,10 @@ class LogicalSendContext:
 
 
 def attach_logical_send_context(
-    message, accounting: LogicalSendAccounting, traffic_class: object
+    message, accounting: LogicalSendAccounting, traffic_class: object, recipient_name: str
 ) -> LogicalSendContext:
     """Attach one trusted, process-local logical-send context to ``message``."""
 
-    context = LogicalSendContext(accounting=accounting, traffic_class=traffic_class)
+    context = LogicalSendContext(accounting=accounting, traffic_class=traffic_class, recipient_name=recipient_name)
     message.set_logical_send_context(context)
     return context

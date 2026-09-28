@@ -1,4 +1,4 @@
-Recorded resources for job job-20260909-001.
+Recorded resources for job qwen2.5-14b-federated-qualification (ID: job-20260909-001).
 Job coverage: PARTIAL (3 accepted / 4 expected)
 
 Recorded average visible capacity over each measured interval
@@ -9,19 +9,20 @@ site-3  client  missing   —         —              N/A        N/A       N/A
 server  server  accepted  REPORTED  37m3s          8.0000     64.0000   0.0000
 
 Other recorded participant totals
-SITE    SAVED CONTENT GiB  F3 STATUS  F3 REMOTE ACCEPTED GiB
-site-1  0.0000             REPORTED   137.5567
-site-2  N/A                REPORTED   137.5567
-site-3  N/A                N/A        N/A
-server  27.5115            REPORTED   275.1133
+SITE    RUN-DIR STATUS  RUN-DIR FILES GiB  MESSAGE TRAFFIC STATUS  MESSAGE PAYLOAD SENT GiB  MESSAGE PAYLOAD SENT TO SITE GiB
+site-1  REPORTED        0.0000             REPORTED                137.5567                  137.5567 (partial)
+site-2  UNAVAILABLE     N/A                REPORTED                137.5567                  137.5567 (partial)
+site-3  N/A             N/A                N/A                     N/A                       0.0000
+server  REPORTED        27.5115            REPORTED                275.1133                  275.1133 (partial)
 
 Additive participant resource-time from accepted reports | compute: PARTIAL
   Summed measured participant time: 1h46m9s
   CPU 40.4600 unit h | MEMORY 255.3067 GiB h | FULL GPUs 4.4400 instance h
-  Other additive totals: SAVED CONTENT 27.5115 GiB | F3 STATUS PARTIAL | F3 REMOTE ACCEPTED 550.2266 GiB
+  Other additive totals: RUN-DIR STATUS PARTIAL | RUN-DIR FILES 27.5115 GiB | MESSAGE TRAFFIC STATUS PARTIAL | MESSAGE PAYLOAD SENT 550.2266 GiB
 
 Notes:
   PARTIAL means at least one expected report or observation was incomplete.
   Each average is resource-time divided by that row's measured interval.
   Totals add participant reports; overlapping resources can be counted more than once.
+  Message payload sent to a site is sender-confirmed; it is not proof of receipt.
   Use --site SITE or --format json to see hardware model details.

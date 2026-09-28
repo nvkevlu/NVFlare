@@ -80,6 +80,7 @@ from nvflare.private.fed.resource_stats.contract import (
     MAX_STUDY_SUMMARY_BYTES,
     SCHEMA_VERSION,
     canonical_json_bytes,
+    derive_job_totals,
     derive_study_totals,
     utc_timestamp,
     validate_record,
@@ -121,6 +122,17 @@ JSON_LOG_FILE_NAME = "log.json"
 
 def _active_study_from_conn(conn: Connection) -> str:
     return conn.get_prop(ConnProps.ACTIVE_STUDY, DEFAULT_STUDY) or DEFAULT_STUDY
+
+
+def _resource_job_name(job: Job, job_id: str | None = None) -> str:
+    """Return the trusted persisted name, with a stable legacy fallback."""
+
+    return (
+        job.meta.get(JobMetaKey.JOB_NAME.value)
+        or job.meta.get(JobMetaKey.JOB_FOLDER_NAME.value)
+        or job_id
+        or job.job_id
+    )
 
 
 def _append_no_such_job_error(conn: Connection, job_id: str):
@@ -642,7 +654,7 @@ class JobCommandModule(CommandModule, CommandUtil, BinaryTransfer):
                     summary = reader.read_resource_summary()
                     if summary["job_id"] != job_id:
                         raise WorkspaceResourceStatsError("resource summary job_id does not match selected job")
-                    result = {"resource_summary": summary}
+                    result = {"resource_summary": summary, "job_name": _resource_job_name(job, job_id)}
                     if parsed.site:
                         result["participant_summary"] = reader.read_participant_summary(parsed.site)
         except (OSError, StorageException, WorkspaceResourceStatsError) as e:
@@ -673,15 +685,21 @@ class JobCommandModule(CommandModule, CommandUtil, BinaryTransfer):
             selected = sorted(
                 (
                     job.job_id,
+                    _resource_job_name(job),
                     _normalize_job_status(job.meta.get(JobMetaKey.STATUS.value)),
                 )
                 for job in jobs
             )
             rows = []
             cumulative_row_bytes = 0
-            for job_id, status in selected:
+            for job_id, job_name, status in selected:
                 if not _is_terminal_resource_job(status):
-                    row = {"job_id": job_id, "job_status": status, "resource_data": "nonterminal"}
+                    row = {
+                        "job_id": job_id,
+                        "job_name": job_name,
+                        "job_status": status,
+                        "resource_data": "nonterminal",
+                    }
                 else:
                     try:
                         with self._staged_workspace_archive(job_def_manager, job_id, fl_ctx) as workspace_path:
@@ -690,12 +708,18 @@ class JobCommandModule(CommandModule, CommandUtil, BinaryTransfer):
                             raise WorkspaceResourceStatsError("resource summary job_id does not match selected job")
                         row = {
                             "job_id": job_id,
+                            "job_name": job_name,
                             "job_status": status,
                             "resource_data": "included",
-                            "totals": summary["totals"],
+                            "totals": derive_job_totals(summary["participants"]),
                         }
                     except (OSError, StorageException, WorkspaceResourceStatsError):
-                        row = {"job_id": job_id, "job_status": status, "resource_data": "unavailable"}
+                        row = {
+                            "job_id": job_id,
+                            "job_name": job_name,
+                            "job_status": status,
+                            "resource_data": "unavailable",
+                        }
 
                 row_bytes = len(canonical_json_bytes(row))
                 if row_bytes > MAX_STUDY_SUMMARY_BYTES - cumulative_row_bytes:

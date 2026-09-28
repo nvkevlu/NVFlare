@@ -114,3 +114,4 @@ def test_submit_update_attaches_task_result_context_at_the_producer():
     assert context is not None
     assert context._accounting is counter
     assert context._traffic_class is F3TrafficClass.TASK_RESULT
+    assert context._recipient_name == "server"

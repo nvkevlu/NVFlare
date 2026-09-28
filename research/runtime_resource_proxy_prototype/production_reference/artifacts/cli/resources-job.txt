@@ -1,4 +1,4 @@
-Recorded resources for job job-20260917-001.
+Recorded resources for job hello-pt (ID: job-20260917-001).
 Job coverage: COMPLETE (2 accepted / 2 expected)
 
 Recorded average visible capacity over each measured interval
@@ -7,17 +7,18 @@ site-1  client  accepted  REPORTED  37m3s          32.0000    192.0000  4.0000
 server  server  accepted  REPORTED  37m20s         8.0000     64.0000   0.0000
 
 Other recorded participant totals
-SITE    F3 STATUS  F3 REMOTE ACCEPTED GiB
-site-1  REPORTED   4.5000
-server  REPORTED   4.5411
+SITE    RUN-DIR STATUS  RUN-DIR FILES GiB  MESSAGE TRAFFIC STATUS  MESSAGE PAYLOAD SENT GiB  MESSAGE PAYLOAD SENT TO SITE GiB
+site-1  REPORTED        0.0000             REPORTED                4.5000                    4.5411
+server  REPORTED        0.0000             REPORTED                4.5411                    4.5000
 
 Additive participant resource-time from accepted reports | compute: REPORTED
   Summed measured participant time: 1h14m23s
   CPU 24.7422 unit h | MEMORY 158.4089 GiB h | FULL GPUs 2.4706 instance h
-  Other additive totals: F3 STATUS REPORTED | F3 REMOTE ACCEPTED 9.0411 GiB
+  Other additive totals: RUN-DIR STATUS REPORTED | RUN-DIR FILES 0.0000 GiB | MESSAGE TRAFFIC STATUS REPORTED | MESSAGE PAYLOAD SENT 9.0411 GiB
 
 Notes:
   PARTIAL means at least one expected report or observation was incomplete.
   Each average is resource-time divided by that row's measured interval.
   Totals add participant reports; overlapping resources can be counted more than once.
+  Message payload sent to a site is sender-confirmed; it is not proof of receipt.
   Use --site SITE or --format json to see hardware model details.

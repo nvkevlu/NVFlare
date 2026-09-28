@@ -38,7 +38,6 @@ from prototype_contract import (  # noqa: E402
     assemble_participant_summary,
     load_terminal_handoff,
 )
-from schema.contract_v1 import derive_job_totals  # noqa: E402
 
 FINALIZED_RESOURCE_ROOT = GOLDEN_ROOT / "finalized_job" / "server_run" / "resource_stats"
 
@@ -79,7 +78,7 @@ class TestResourceTimeAccumulator(unittest.TestCase):
             "retained_content": {"status": "reported", "bytes": "0"},
             "child_f3": {
                 "status": "reported",
-                "remote_accepted": {"payload_bytes": "100", "messages": "1"},
+                "sent_to": [{"participant_name": "server", "payload_bytes": "100", "messages": "1"}],
             },
         }
 
@@ -92,7 +91,7 @@ class TestResourceTimeAccumulator(unittest.TestCase):
             child_handoff=handoff,
             parent_f3={
                 "status": "reported",
-                "remote_accepted": {"payload_bytes": "300", "messages": "2"},
+                "sent_to": [{"participant_name": "server", "payload_bytes": "300", "messages": "2"}],
             },
         )
 
@@ -119,8 +118,10 @@ class TestResourceTimeAccumulator(unittest.TestCase):
             resource_time["memory"]["byte_seconds"],
         )
         self.assertEqual("240", resource_time["gpu"]["groups"][0]["instance_seconds"])
-        self.assertEqual("400", report["f3"]["remote_accepted"]["payload_bytes"])
-        self.assertEqual("3", report["f3"]["remote_accepted"]["messages"])
+        self.assertEqual(
+            [{"participant_name": "server", "payload_bytes": "400", "messages": "3"}],
+            report["message_traffic"]["sent_to"],
+        )
         with self.assertRaises(AccumulatorClosedError):
             accumulator.observe(300, self.capacity("8", "68719476736", "0"))
 
@@ -133,6 +134,31 @@ class TestResourceTimeAccumulator(unittest.TestCase):
         self.assertEqual("partial", report["resource_time"]["status"])
         self.assertEqual("30", report["resource_time"]["measured_seconds"])
         self.assertEqual(["observation_incomplete"], report["resource_time"]["issues"])
+
+    def test_parent_and_child_merge_traffic_by_destination(self):
+        fields = self.handoff_fields()
+        fields["child_f3"]["sent_to"] = [
+            {"participant_name": "server", "payload_bytes": "100", "messages": "1"},
+            {"participant_name": "site-b", "payload_bytes": "50", "messages": "1"},
+        ]
+        handoff = ResourceTimeAccumulator().finish_measurements(0, **fields)
+        report = assemble_participant_summary(
+            job_id="job-a",
+            participant_name="site-a",
+            reported_at="2026-09-09T14:37:03Z",
+            child_handoff=handoff,
+            parent_f3={
+                "status": "reported",
+                "sent_to": [{"participant_name": "server", "payload_bytes": "300", "messages": "2"}],
+            },
+        )
+        self.assertEqual(
+            [
+                {"participant_name": "server", "payload_bytes": "400", "messages": "3"},
+                {"participant_name": "site-b", "payload_bytes": "50", "messages": "1"},
+            ],
+            report["message_traffic"]["sent_to"],
+        )
 
     def test_no_observation_is_unavailable_and_time_must_be_monotonic(self):
         unavailable = self.assemble(ResourceTimeAccumulator().finish_measurements(20, **self.handoff_fields()))
@@ -183,9 +209,9 @@ class TestResourceTimeAccumulator(unittest.TestCase):
         self.assertEqual("unavailable", report["resource_time"]["status"])
         self.assertEqual("unavailable", report["workspace_filesystem"]["status"])
         self.assertEqual("unavailable", report["retained_content"]["status"])
-        self.assertEqual("partial", report["f3"]["status"])
-        self.assertEqual(["attribution_incomplete"], report["f3"]["issues"])
-        self.assertEqual("300", report["f3"]["remote_accepted"]["payload_bytes"])
+        self.assertEqual("partial", report["message_traffic"]["status"])
+        self.assertEqual(["attribution_incomplete"], report["message_traffic"]["issues"])
+        self.assertEqual("300", report["message_traffic"]["sent_to"][0]["payload_bytes"])
 
     def test_invalid_or_oversized_child_handoff_cannot_suppress_parent_report(self):
         malformed = self.handoff_fields()
@@ -194,7 +220,7 @@ class TestResourceTimeAccumulator(unittest.TestCase):
         malformed["resource_time"] = {"status": "reported", "made_up": "1"}
         report = self.assemble(malformed)
         self.assertEqual("unavailable", report["resource_time"]["status"])
-        self.assertEqual("partial", report["f3"]["status"])
+        self.assertEqual("partial", report["message_traffic"]["status"])
 
         valid_handoff = ResourceTimeAccumulator()
         valid_handoff.observe(0, self.capacity("4", "34359738368", "0"))
@@ -344,7 +370,9 @@ class TestWorkspaceResourceStatsReader(unittest.TestCase):
                 "unit_seconds", "71137"
             ),
             "retained_content": lambda entry: entry["retained_content"].__setitem__("bytes", "1"),
-            "f3": lambda entry: entry["f3"]["remote_accepted"].__setitem__("payload_bytes", "147700336641"),
+            "message_traffic": lambda entry: entry["message_traffic"]["sent_to"][0].__setitem__(
+                "payload_bytes", "147700336641"
+            ),
         }
         for field, mutate in mutations.items():
             with self.subTest(field=field), tempfile.TemporaryDirectory() as temp_dir:
@@ -357,7 +385,6 @@ class TestWorkspaceResourceStatsReader(unittest.TestCase):
                     if entry["participant_name"] == self.PARTICIPANT_NAME
                 )
                 mutate(accepted)
-                summary_record["totals"] = derive_job_totals(summary_record["participants"])
                 summary = self._json_bytes(summary_record)
                 self._write_archive(
                     archive_path,

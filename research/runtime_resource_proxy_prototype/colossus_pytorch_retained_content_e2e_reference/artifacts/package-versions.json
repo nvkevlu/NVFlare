@@ -1,0 +1,8 @@
+{
+  "nvflare_distribution": "2.10.0.dev260922",
+  "platform": "Linux-6.17.0-35-generic-x86_64-with-glibc2.39",
+  "python": "3.12.3",
+  "torch": "2.14.0+cu130",
+  "torch_cuda": "13.0",
+  "torchvision": "0.29.0+cu130"
+}

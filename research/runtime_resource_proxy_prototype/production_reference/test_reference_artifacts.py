@@ -27,6 +27,7 @@ from nvflare.private.fed.resource_stats.contract import (
 from nvflare.tool.job.job_resources import render_job_resources, render_study_resources
 from research.runtime_resource_proxy_prototype.production_reference.generate_reference import (
     ARTIFACTS_DIR,
+    REFERENCE_JOB_NAME,
     build_artifacts,
     check_artifacts,
 )
@@ -68,26 +69,44 @@ def test_checked_in_outputs_are_exact_production_regeneration_and_reconcile():
         )
         == job_summary
     )
-    assert job_summary["totals"] == derive_job_totals(job_summary["participants"])
+    assert "totals" not in job_summary
+    assert "report_cutoff_at" not in job_summary
+    assert "finalized_at" not in job_summary
+    job_totals = derive_job_totals(job_summary["participants"])
+    assert "job_name" not in job_summary
     assert {entry["participant_name"] for entry in job_summary["participants"]} == {"server", "site-1"}
     assert site_report["participant_name"] == "site-1"
     assert server_report["participant_name"] == "server"
 
     for report in (site_report, server_report):
-        assert report["retained_content"] == {"status": "unavailable", "issues": ["not_bound"]}
-        assert report["f3"]["status"] == "reported"
-        assert int(report["f3"]["remote_accepted"]["payload_bytes"]) > 0
-    assert site_report["f3"]["remote_accepted"]["messages"] == "3"
-    assert server_report["f3"]["remote_accepted"]["messages"] == "4"
+        assert report["retained_content"] == {"status": "reported", "bytes": "0"}
+        assert report["message_traffic"]["status"] == "reported"
+        assert len(report["message_traffic"]["sent_to"]) == 1
+        assert int(report["message_traffic"]["sent_to"][0]["payload_bytes"]) > 0
+    assert site_report["message_traffic"]["sent_to"][0]["participant_name"] == "server"
+    assert site_report["message_traffic"]["sent_to"][0]["messages"] == "3"
+    assert server_report["message_traffic"]["sent_to"][0]["participant_name"] == "site-1"
+    assert server_report["message_traffic"]["sent_to"][0]["messages"] == "4"
+    assert job_totals["message_traffic"]["sent"]["messages"] == "7"
 
     study_summary = load_and_validate(
         artifacts["query/resources-study.json"],
         KIND_STUDY_SUMMARY,
     )
+    assert study_summary["jobs"][0]["totals"] == job_totals
     assert study_summary["totals"] == derive_study_totals(study_summary["jobs"])
+    assert [job["job_name"] for job in study_summary["jobs"]] == [
+        REFERENCE_JOB_NAME,
+        "hello-pt-retry",
+        "hello-pt-next",
+    ]
 
-    assert artifacts["cli/resources-job.txt"].decode() == render_job_resources(job_summary) + "\n"
-    assert artifacts["cli/resources-site-1.txt"].decode() == (render_job_resources(job_summary, site_report) + "\n")
+    assert artifacts["cli/resources-job.txt"].decode() == (
+        render_job_resources(job_summary, job_name=REFERENCE_JOB_NAME) + "\n"
+    )
+    assert artifacts["cli/resources-site-1.txt"].decode() == (
+        render_job_resources(job_summary, site_report, job_name=REFERENCE_JOB_NAME) + "\n"
+    )
     assert artifacts["cli/resources-study.txt"].decode() == render_study_resources(study_summary) + "\n"
 
     job_cli = json.loads(artifacts["cli/resources-job.json"])

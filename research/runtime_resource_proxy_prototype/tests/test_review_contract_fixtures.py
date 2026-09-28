@@ -64,12 +64,17 @@ class TestReviewContractFixtures(unittest.TestCase):
             network = json.loads((root / "f3_finalization.json").read_text())
             self.assertEqual("5632", network["primary_metrics"][0]["value"])
             self.assertEqual("2", network["primary_metrics"][1]["value"])
-            self.assertEqual({"status", "remote_accepted"}, set(network["canonical_f3"]))
+            self.assertEqual(
+                {"remote_transport_accepted"},
+                set(network["internal_f3_snapshot"]),
+            )
+            self.assertIn("not a public message_traffic value", network["public_contract_note"])
+            self.assertNotIn("message_traffic", network)
             diagnostics = network["post_cutoff_diagnostics_not_embedded_in_summary"]
             self.assertEqual(1024, diagnostics["excluded_summary_publication"]["payload_bytes"])
             self.assertEqual(512, diagnostics["late_after_cutoff"]["payload_bytes"])
-            self.assertNotIn("late_after_cutoff", network["canonical_f3"])
-            self.assertNotIn("summary_excluded", network["canonical_f3"])
+            self.assertNotIn("late_after_cutoff", network["internal_f3_snapshot"])
+            self.assertNotIn("summary_excluded", network["internal_f3_snapshot"])
 
             accumulator = json.loads((root / "resource_time_accumulator.json").read_text())
             self.assertEqual(2, accumulator["observation_events"])

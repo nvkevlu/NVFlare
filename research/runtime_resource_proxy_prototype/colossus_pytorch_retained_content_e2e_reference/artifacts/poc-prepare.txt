@@ -1,0 +1,4 @@
+Preparing POC workspace at /tmp/nvflare-resource-retained-e2e-20260922/poc_workspace for 2 clients...
+provision at /tmp/nvflare-resource-retained-e2e-20260922/poc_workspace for 2 clients with /tmp/nvflare-resource-retained-e2e-20260922/poc_workspace/project.yml
+INFO: Root CA validity: NotBefore=2026-09-22T16:50:57+00:00, NotAfter=2027-09-17T16:50:57+00:00
+INFO: Generated results can be found under /tmp/nvflare-resource-retained-e2e-20260922/poc_workspace/example_project/prod_00. 
