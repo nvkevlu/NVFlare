@@ -77,8 +77,9 @@ The validation range and its labels are used locally to compute
 [homogeneity_score](https://scikit-learn.org/stable/modules/generated/sklearn.metrics.homogeneity_score.html).
 With the default class order, the shared validation range `[120:150]` contains
 only one class, so homogeneity is 1 regardless of clustering quality. For a more
-meaningful evaluation, shuffle before splitting or choose a validation range
-that covers multiple classes. To regenerate a shuffled CSV, run:
+meaningful evaluation, shuffle before splitting, or adjust both training and
+validation ranges so that validation covers multiple classes and remains
+disjoint from all clients' training ranges. To regenerate a shuffled CSV, run:
 
 ```bash
 python utils/prepare_data.py --dataset_name iris --randomize 1 --out_path /tmp/nvflare/dataset/sklearn_iris.csv
