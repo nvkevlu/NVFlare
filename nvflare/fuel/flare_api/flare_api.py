@@ -408,6 +408,75 @@ class Session(SessionSpec):
             raise InternalError("server failed to return job meta")
         return job_meta
 
+    def get_job_resources(self, job_id: str, site: str = None) -> dict:
+        """Return the finalized resource-statistics report for one job.
+
+        Reports participant-visible CPU, memory, and CUDA-device capacity-time,
+        CPU time consumed, run-directory file bytes, selected message traffic,
+        and one final workspace-filesystem capacity observation. Capacity-time
+        does not establish that the job used a GPU. Data is only available after
+        the job has finished and the server has finalized its resource report;
+        calling this before finalization raises :class:`JobNotDone`.
+
+        ``retained_content`` reports the participant's job run directory size
+        (a workspace-size measurement, not a curated result-only figure -- it
+        also includes logs, configuration, and job inputs).
+        ``message_traffic`` reports sender-confirmed payload bytes and logical
+        message counts, grouped by named remote recipient, for job deployment,
+        real task responses, and submitted task results. Totals are additive
+        across participants and are not a substitute for cluster
+        capacity/utilization accounting when participants share physical
+        hardware.
+
+        The default command wait is 300 seconds because reading the existing
+        workspace archive can take time. An explicit session command timeout
+        takes precedence. A timeout does not cancel the server's archive read.
+
+        Args:
+            job_id: ID of the job
+            site: optional participant name (e.g. a client site, or "server")
+                to also include that participant's own report in the result
+
+        Returns: a dict with key ``resource_summary`` (the job-level rollup),
+            plus ``participant_summary`` when ``site`` is given. See
+            :ref:`job_cli` ("Job Resources" section) for the full field
+            reference.
+
+        """
+        self._validate_job_id(job_id)
+        parts = [AdminCommandNames.GET_JOB_RESOURCES, job_id]
+        if site is not None:
+            if not isinstance(site, str) or not site:
+                raise InvalidArgumentError("site must be a non-empty string")
+            parts.extend(["--site", site])
+        reply = self._do_command(join_args(parts), enforce_meta=False)
+        return self._get_dict_data(reply)
+
+    def get_study_resources(self) -> dict:
+        """Return resource statistics across retained jobs in the active study.
+
+        Scans retained, finalized jobs the caller may inspect in the active study (see
+        :ref:`flare_api_initialization` for how the active study is selected)
+        and derives additive totals within each resource-schema version.
+        The server checks each job with the same permission as
+        ``get_job_resources`` before reading its archive. Restricted jobs are
+        omitted from rows, totals, and coverage counts, without a denied-job
+        count. An empty result means no accessible retained jobs were found.
+        Accessible jobs that are not yet finalized, or whose resource data is
+        unavailable, are counted under ``coverage`` but excluded from numeric totals.
+
+        The default command wait is 300 seconds; an explicit session command
+        timeout takes precedence. The server stages each existing workspace
+        archive in sequence. A timeout does not cancel that scan.
+
+        Returns: a dict describing the study-level rollup (``jobs``,
+            ``coverage``, and ``totals``). See :ref:`job_cli`
+            ("Job Resources" section) for the full field reference.
+
+        """
+        reply = self._do_command(AdminCommandNames.GET_STUDY_RESOURCES, enforce_meta=False)
+        return self._get_dict_data(reply)
+
     def list_jobs(
         self,
         detailed: bool = False,

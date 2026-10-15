@@ -95,6 +95,36 @@ can be run:
    expiration. Re-export or reuse the original local job folder and submit it
    with current credentials instead.
 
+.. _flare_api_resource_utilization:
+
+Job Resources
+^^^^^^^^^^^^^
+Use :meth:`get_job_resources<nvflare.fuel.flare_api.flare_api.Session.get_job_resources>` and
+:meth:`get_study_resources<nvflare.fuel.flare_api.flare_api.Session.get_study_resources>` to retrieve how much
+capacity-time, CPU consumed, run-directory file size, and selected message
+traffic recorded for a finished job's participants:
+
+.. code-block:: python
+
+    # one job, all participants' totals
+    resources = sess.get_job_resources(job_id)
+
+    # one job, including a single participant's own report
+    resources = sess.get_job_resources(job_id, site="site-1")
+
+    # rollup across accessible retained jobs in the active study
+    study_resources = sess.get_study_resources()
+
+The study query applies the same per-job permission as ``get_job_resources``.
+Restricted jobs are absent from the rows, totals, and coverage counts. The
+server checks permission before reading a job's archive. An empty study result
+means the caller has no accessible retained jobs, whether the study is empty
+or contains only restricted jobs.
+
+See :ref:`job_cli` ("Job Resources" section) for measurement meanings, coverage
+and availability limits, GPU observations, and the equivalent
+``nvflare job resources`` CLI command.
+
 .. _flare_api_monitor_job:
 
 Monitor Job
