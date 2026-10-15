@@ -13,7 +13,6 @@
 # limitations under the License.
 
 import concurrent.futures
-import copy
 import os
 import threading
 import uuid
@@ -100,6 +99,11 @@ class Adapter:
         result = future.result()
         self.logger.debug(f"{stream_req_id=}: {headers=}, incoming data={result}")
         request = Message(headers, result)
+        receive_properties = getattr(future, "receive_properties", None)
+        if isinstance(receive_properties, dict):
+            for key in (MessagePropKey.ENDPOINT, MessagePropKey.COMMON_NAME):
+                if key in receive_properties:
+                    request.set_prop(key, receive_properties[key])
 
         # PASS_THROUGH can be requested per-message, per-channel, or for one
         # exact (channel, topic) route. Any source activates LazyDownloadRef
@@ -200,7 +204,25 @@ class Adapter:
             }
         )
 
-        encode_payload(response, StreamHeaderKey.PAYLOAD_ENCODING, fobs_ctx=self.cell.get_fobs_context())
+        accounting_context = response.get_logical_send_context()
+        if accounting_context is not None:
+            try:
+                prepare = getattr(accounting_context, "prepare_destination", None)
+                if callable(prepare):
+                    prepare(self.my_info.fqcn, origin)
+            except BaseException:
+                try:
+                    accounting_context.mark_counter_gap()
+                except BaseException:
+                    pass
+        # Receiver IDs govern tensor source lifetime. The request's first hop
+        # may forward references to a trainer, so accounting must not invent IDs.
+        fobs_ctx = self.cell.get_fobs_context()
+        encode_payload(
+            response,
+            StreamHeaderKey.PAYLOAD_ENCODING,
+            fobs_ctx=fobs_ctx,
+        )
         self.logger.debug(f"sending: {stream_req_id=}: {response.headers=}, target={origin}")
         try:
             # Response production is asynchronous and can outlive the request timeout. Mark its transport frames
@@ -330,7 +352,7 @@ class Cell(StreamCell):
         with concurrent.futures.ThreadPoolExecutor(max_workers=len(targets)) as executor:
             self.logger.debug(f"broadcast to {targets=}")
             for t in targets:
-                req = Message(copy.deepcopy(request.headers), request.payload)
+                req = request.clone(deep_copy_headers=True)
                 target_argument["request"] = TargetMessage(t, channel, topic, req).message
                 target_argument["target"] = t
                 target_argument["abort_signal"] = abort_signal
@@ -504,6 +526,18 @@ class Cell(StreamCell):
         Returns: reply data
 
         """
+        accounting_context = request.get_logical_send_context()
+        if accounting_context is not None:
+            try:
+                prepare = getattr(accounting_context, "prepare_destination", None)
+                if callable(prepare):
+                    prepare(self.get_fqcn(), target)
+            except BaseException:
+                try:
+                    accounting_context.mark_counter_gap()
+                except BaseException:
+                    pass
+
         self._encode_message(
             request,
             abort_signal,

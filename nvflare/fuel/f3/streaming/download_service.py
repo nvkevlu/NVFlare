@@ -13,6 +13,7 @@
 # limitations under the License.
 import dataclasses
 import functools
+import struct
 import threading
 import time
 import uuid
@@ -55,6 +56,112 @@ _SOURCE_FAILURE_NOTIFY_TIMEOUT = 3.0
 _SOURCE_FAILURE_NOTIFY_TOTAL_TIMEOUT = 10.0
 _SOURCE_FAILURE_NOTIFY_ATTEMPTS = 4
 _SOURCE_FAILURE_NOTIFY_BACKOFF = 0.25
+
+# Request states are normally tiny progress dictionaries. Accounting keeps a
+# canonical key for each state until its DownloadService transaction settles so
+# a retry can reuse the original logical chunk identity. Bound that
+# observational work: unusual application-defined states make F3 partial rather
+# than allowing accounting to copy or walk an arbitrarily large object graph.
+_ACCOUNTING_STATE_MAX_DEPTH = 16
+_ACCOUNTING_STATE_MAX_NODES = 4096
+_ACCOUNTING_STATE_MAX_SCALAR_BYTES = 64 * 1024
+_ACCOUNTING_STATE_UNSUPPORTED = object()
+
+
+def _canonical_accounting_state(value):
+    """Return a bounded, hashable key for ordinary FOBS-safe request state.
+
+    Exact built-in scalars, dictionaries, lists, and tuples are supported.
+    ``None`` means the state is unsupported, cyclic, too deep, or over budget.
+    Type tags preserve distinctions such as ``True`` versus ``1`` and list
+    versus tuple. Dictionary order does not affect the key.
+    """
+
+    remaining_nodes = _ACCOUNTING_STATE_MAX_NODES
+    remaining_scalar_bytes = _ACCOUNTING_STATE_MAX_SCALAR_BYTES
+    active_containers = set()
+
+    def consume_scalar_bytes(size: int) -> bool:
+        nonlocal remaining_scalar_bytes
+        if size < 0 or size > remaining_scalar_bytes:
+            return False
+        remaining_scalar_bytes -= size
+        return True
+
+    def visit(item, depth: int):
+        nonlocal remaining_nodes
+        if depth > _ACCOUNTING_STATE_MAX_DEPTH or remaining_nodes <= 0:
+            return _ACCOUNTING_STATE_UNSUPPORTED
+        remaining_nodes -= 1
+
+        item_type = type(item)
+        if item is None:
+            return ("none",)
+        if item_type is bool:
+            return ("bool", item)
+        if item_type is int:
+            byte_count = max(1, (abs(item).bit_length() + 7) // 8)
+            return ("int", item) if consume_scalar_bytes(byte_count) else _ACCOUNTING_STATE_UNSUPPORTED
+        if item_type is float:
+            return ("float", struct.pack("!d", item))
+        if item_type is complex:
+            return ("complex", struct.pack("!dd", item.real, item.imag))
+        if item_type is str:
+            # Every Unicode code point needs at least one UTF-8 byte. Check
+            # length first so a huge string is rejected before encoding it.
+            if len(item) > remaining_scalar_bytes:
+                return _ACCOUNTING_STATE_UNSUPPORTED
+            encoded_size = len(item.encode("utf-8"))
+            return ("str", item) if consume_scalar_bytes(encoded_size) else _ACCOUNTING_STATE_UNSUPPORTED
+        if item_type is bytes:
+            return ("bytes", item) if consume_scalar_bytes(len(item)) else _ACCOUNTING_STATE_UNSUPPORTED
+        if item_type is bytearray:
+            if not consume_scalar_bytes(len(item)):
+                return _ACCOUNTING_STATE_UNSUPPORTED
+            return ("bytearray", bytes(item))
+        if item_type is memoryview:
+            if not consume_scalar_bytes(item.nbytes):
+                return _ACCOUNTING_STATE_UNSUPPORTED
+            return ("memoryview", item.tobytes())
+
+        if item_type not in (dict, list, tuple):
+            return _ACCOUNTING_STATE_UNSUPPORTED
+
+        item_id = id(item)
+        if item_id in active_containers:
+            return _ACCOUNTING_STATE_UNSUPPORTED
+        active_containers.add(item_id)
+        try:
+            if item_type is dict:
+                entries = []
+                for key, entry_value in item.items():
+                    canonical_key = visit(key, depth + 1)
+                    canonical_value = visit(entry_value, depth + 1)
+                    if (
+                        canonical_key is _ACCOUNTING_STATE_UNSUPPORTED
+                        or canonical_value is _ACCOUNTING_STATE_UNSUPPORTED
+                    ):
+                        return _ACCOUNTING_STATE_UNSUPPORTED
+                    entries.append((canonical_key, canonical_value))
+                return ("dict", frozenset(entries))
+
+            entries = []
+            for entry in item:
+                canonical_entry = visit(entry, depth + 1)
+                if canonical_entry is _ACCOUNTING_STATE_UNSUPPORTED:
+                    return _ACCOUNTING_STATE_UNSUPPORTED
+                entries.append(canonical_entry)
+            return ("list" if item_type is list else "tuple", tuple(entries))
+        finally:
+            active_containers.remove(item_id)
+
+    try:
+        result = visit(value, 0)
+        return None if result is _ACCOUNTING_STATE_UNSUPPORTED else result
+    except BaseException:
+        # Accounting is observational. A hostile or simply unusual state must
+        # never alter DownloadService's real serving path.
+        return None
 
 
 class _SourceFailureKey:
@@ -299,6 +406,21 @@ class _Ref:
 
     def mark_active(self):
         self.tx.mark_active()
+
+    @staticmethod
+    def accounting_chunk_key(request_state) -> Optional[tuple]:
+        """Return a stable, bounded key for one logical produced chunk.
+
+        ``LogicalSendContext`` already retains accepted and in-flight
+        contribution IDs. The canonical state can therefore be used directly
+        in that ID; a second per-ref state-to-integer ledger would duplicate
+        both memory and synchronization.
+        """
+
+        try:
+            return _canonical_accounting_state(request_state)
+        except BaseException:
+            return None
 
     def obj_downloaded(self, to_receiver: str, status: str):
         self._finalize_receiver(to_receiver, status)
@@ -681,6 +803,7 @@ class _Transaction:
         min_receivers: Optional[int] = None,
         receiver_acquire_timeout: Optional[float] = None,
         receiver_idle_timeout: Optional[float] = None,
+        send_accounting_context=None,
     ):
         """Constructor of the transaction object.
 
@@ -747,6 +870,7 @@ class _Transaction:
         self.transaction_done_cb = transaction_done_cb
         self.cb_kwargs = cb_kwargs or {}
         self.outcome_cb = outcome_cb
+        self.send_accounting_context = send_accounting_context
         self.progress_cb = progress_cb
         if progress_interval < 0:
             raise ValueError(f"progress_interval must be non-negative, got {progress_interval}")
@@ -996,6 +1120,35 @@ class _Transaction:
                 # last-resort belt: an exception between the computation handler and
                 # here left no verdict at all
                 outcome = self._fail_closed_outcome(status)
+            if self.send_accounting_context is not None:
+                successful_receivers = set()
+                if outcome is not None and outcome.refs:
+                    candidates = (
+                        set(outcome.receiver_ids)
+                        if outcome.receiver_ids is not None
+                        else set().union(*(ref.receiver_statuses for ref in outcome.refs))
+                    )
+                    successful_receivers = {
+                        receiver
+                        for receiver in candidates
+                        if all(ref.receiver_statuses.get(receiver) == DownloadStatus.SUCCESS for ref in outcome.refs)
+                    }
+                try:
+                    self.send_accounting_context.settle_oob_transaction(self.tid, successful_receivers)
+                except BaseException as ex:
+                    self.logger.warning(
+                        f"logical-send accounting settlement for tx {self.tid} failed: "
+                        f"{secure_format_exception(ex)}"
+                    )
+                    try:
+                        self.send_accounting_context.mark_counter_gap()
+                    except BaseException:
+                        pass
+                    for receiver in successful_receivers:
+                        try:
+                            self.send_accounting_context.mark_oob_incomplete(receiver)
+                        except BaseException:
+                            pass
             if on_outcome and outcome is not None:
                 _invoke_cb_safely(self.logger, f"outcome recording for tx {self.tid}", on_outcome, outcome)
             self._settlement_complete = True
@@ -1322,6 +1475,7 @@ class DownloadService:
         min_receivers: Optional[int] = None,
         receiver_acquire_timeout: Optional[float] = None,
         receiver_idle_timeout: Optional[float] = None,
+        send_accounting_context=None,
         **cb_kwargs,
     ):
         cls._initialize(cell)
@@ -1338,6 +1492,7 @@ class DownloadService:
             min_receivers=min_receivers,
             receiver_acquire_timeout=receiver_acquire_timeout,
             receiver_idle_timeout=receiver_idle_timeout,
+            send_accounting_context=send_accounting_context,
         )
         # tx_ids are ATTEMPT-SCOPED and single-use while known: a retry is a NEW
         # transaction with a new id (the stable cross-attempt identity is the
@@ -1373,6 +1528,18 @@ class DownloadService:
                     )
                 cls._outcome_owners[tx.tid] = tx
                 cls._tx_table[tx.tid] = tx
+        if send_accounting_context is not None:
+            try:
+                send_accounting_context.register_oob_transaction(tx.tid, tx.receiver_ids)
+            except BaseException as ex:
+                cls._logger.warning(
+                    f"failed to register logical-send accounting for download transaction {tx.tid}: "
+                    f"{secure_format_exception(ex)}"
+                )
+                try:
+                    send_accounting_context.mark_counter_gap()
+                except BaseException:
+                    pass
         return tx.tid
 
     @classmethod
@@ -1394,6 +1561,16 @@ class DownloadService:
             ref = tx.add_object(obj, ref_id)
             cls._ref_table[ref.rid] = ref
             cls._finished_refs.pop(ref.rid, None)
+        if tx.send_accounting_context is not None:
+            try:
+                register = getattr(tx.send_accounting_context, "register_source_reference", None)
+                if callable(register):
+                    register(transaction_id, ref.rid)
+            except BaseException:
+                try:
+                    tx.send_accounting_context.mark_counter_gap()
+                except BaseException:
+                    pass
         return ref.rid
 
     @classmethod
@@ -1706,6 +1883,16 @@ class DownloadService:
             ref.emit_progress(receiver_id=requester, state=TransferProgressState.ACTIVE)
             tx = ref.tx
             assert isinstance(tx, _Transaction)
+            if tx.send_accounting_context is not None:
+                try:
+                    resolve = getattr(tx.send_accounting_context, "resolve_oob_consumer", None)
+                    if callable(resolve):
+                        resolve(tx.tid, requester, request)
+                except BaseException:
+                    try:
+                        tx.send_accounting_context.mark_counter_gap()
+                    except BaseException:
+                        pass
 
             # receiver-confirmed completion is armed only when the receiver advertised the
             # capability on this request AND the local kill-switch is on
@@ -1755,6 +1942,7 @@ class DownloadService:
                 # continue — accumulate bytes for timing summary in transaction_done()
                 # CacheableObject returns a list of byte-chunks; FileDownloader returns raw bytes.
                 # Sum chunk lengths for lists (len(list) counts items, not bytes).
+                bytes_delta = 0
                 if data is not None:
                     bytes_delta = sum(len(c) for c in data) if isinstance(data, list) else len(data)
                     items_delta = len(data) if isinstance(data, list) else None
@@ -1768,7 +1956,7 @@ class DownloadService:
                 # no CONFIRM_EXPECTED on data chunks: the receiver only consumes it from the
                 # terminal reply (confirms are sent only after terminal serves), so advertising
                 # per chunk would be dead weight on the hottest wire message
-                return make_reply(
+                reply = make_reply(
                     ReturnCode.OK,
                     body={
                         _PropKey.STATUS: rc,
@@ -1777,6 +1965,34 @@ class DownloadService:
                         _PropKey.CANCEL_CAPABLE: True,
                     },
                 )
+                if tx.send_accounting_context is not None:
+                    try:
+                        chunk_key = ref.accounting_chunk_key(current_state)
+                        contribution_context = None
+                        if chunk_key is not None:
+                            contribution_context = tx.send_accounting_context.make_oob_contribution_context(
+                                transaction_id=tx.tid,
+                                destination=requester,
+                                contribution_id=(tx.tid, rid, requester, chunk_key),
+                                payload_bytes=bytes_delta,
+                            )
+                        if contribution_context is not None:
+                            reply.set_logical_send_context(contribution_context)
+                        else:
+                            tx.send_accounting_context.mark_oob_incomplete(requester)
+                    except BaseException as ex:
+                        cls._logger.warning(
+                            f"logical-send accounting contribution for tx {tx.tid} failed: "
+                            f"{secure_format_exception(ex)}"
+                        )
+                        try:
+                            tx.send_accounting_context.mark_oob_incomplete(requester)
+                        except BaseException:
+                            try:
+                                tx.send_accounting_context.mark_counter_gap()
+                            except BaseException:
+                                pass
+                return reply
 
         finally:
             ref.tx.end_op()
