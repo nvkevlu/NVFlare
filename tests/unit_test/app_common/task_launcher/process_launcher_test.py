@@ -21,6 +21,7 @@ import sys
 import threading
 import time
 from dataclasses import replace
+from decimal import Decimal
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -41,7 +42,9 @@ from nvflare.app_common.task_launcher.process_launcher import (
     ProcessTaskLauncher,
     _OwnedProcessAdapter,
 )
-from nvflare.utils.process_utils import ProcessAdapter, spawn_process
+from nvflare.private.fed.resource_stats import cpu_consumed as cpu_module
+from nvflare.private.fed.resource_stats.cpu_consumed import CpuConsumedAccountant
+from nvflare.utils.process_utils import ProcessAdapter, ProcessSpawnError, spawn_process
 
 pytestmark = pytest.mark.skipif(os.name != "posix", reason="ProcessTaskLauncher requires POSIX process groups")
 requires_waitid = pytest.mark.skipif(
@@ -718,6 +721,98 @@ def test_spawn_failure_allows_retry_of_same_attempt(tmp_path, monkeypatch):
         with pytest.raises(OSError, match="spawn failed"):
             launcher.launch_task(request)
         assert request.identity not in launcher._attempt_identities
+
+
+@pytest.fixture
+def fake_task_launch(monkeypatch):
+    """Exercise launch bookkeeping without creating or observing a process."""
+
+    monkeypatch.setattr(os, "waitid", Mock(), raising=False)
+    adapter = Mock(pid=1234)
+    spawn = Mock(return_value=adapter)
+    handle = Mock(execution_id="process:1234")
+    constructor = Mock(return_value=handle)
+    monkeypatch.setattr("nvflare.app_common.task_launcher.process_launcher.spawn_process", spawn)
+    monkeypatch.setattr("nvflare.app_common.task_launcher.process_launcher.ProcessTaskHandle", constructor)
+    return adapter, spawn, handle, constructor
+
+
+def _active_cpu_accountant(monkeypatch):
+    snapshots = iter(((Decimal("1"), Decimal("2")), (Decimal("3"), Decimal("7"))))
+    accountant = CpuConsumedAccountant(usage_reader=lambda: next(snapshots))
+    monkeypatch.setattr(cpu_module, "_active", accountant)
+    return accountant
+
+
+def test_task_worker_registration_preserves_waited_cpu_and_marks_descendants_partial(
+    tmp_path, monkeypatch, fake_task_launch
+):
+    accountant = _active_cpu_accountant(monkeypatch)
+    adapter, spawn, handle, constructor = fake_task_launch
+    request = _request(tmp_path, "cpu-partial", "pass")
+
+    assert ProcessTaskLauncher().launch_task(request) is handle
+
+    spawn.assert_called_once_with(list(request.argv), dict(request.environment), cwd=request.cwd)
+    assert constructor.call_args.args[1]._adapter is adapter
+    assert accountant.finish() == {"seconds": "7", "status": "partial", "issues": ["attribution_incomplete"]}
+    adapter.poll.assert_not_called()
+    adapter.wait.assert_not_called()
+
+
+def test_task_worker_registration_without_active_collector_is_a_noop(tmp_path, monkeypatch, fake_task_launch):
+    monkeypatch.setattr(cpu_module, "_active", None)
+    adapter, _spawn, handle, _constructor = fake_task_launch
+
+    assert ProcessTaskLauncher().launch_task(_request(tmp_path, "cpu-inactive", "pass")) is handle
+    adapter.poll.assert_not_called()
+    adapter.wait.assert_not_called()
+
+
+def test_failed_task_spawn_does_not_mark_cpu_partial(tmp_path, monkeypatch, fake_task_launch):
+    accountant = _active_cpu_accountant(monkeypatch)
+    _adapter, spawn, _handle, constructor = fake_task_launch
+    spawn.side_effect = OSError("spawn failed")
+
+    with pytest.raises(OSError, match="spawn failed"):
+        ProcessTaskLauncher().launch_task(_request(tmp_path, "cpu-failed-spawn", "pass"))
+
+    assert accountant.finish() == {"seconds": "7"}
+    constructor.assert_not_called()
+
+
+def test_task_registration_failure_does_not_change_launch(tmp_path, monkeypatch, fake_task_launch):
+    adapter, _spawn, handle, _constructor = fake_task_launch
+    monkeypatch.setattr(
+        "nvflare.app_common.task_launcher.process_launcher.register_managed_child",
+        Mock(side_effect=RuntimeError("instrumentation failure")),
+    )
+    request = _request(tmp_path, "cpu-hook-failure", "pass")
+    launcher = ProcessTaskLauncher()
+
+    assert launcher.launch_task(request) is handle
+    assert request.identity in launcher._attempt_identities
+    adapter.poll.assert_not_called()
+    adapter.wait.assert_not_called()
+
+
+def test_post_acquisition_spawn_failure_registers_coverage_without_replacing_cleanup(
+    tmp_path, monkeypatch, fake_task_launch
+):
+    accountant = _active_cpu_accountant(monkeypatch)
+    adapter, spawn, handle, _constructor = fake_task_launch
+    spawn.side_effect = ProcessSpawnError(adapter)
+    request = _request(tmp_path, "cpu-acquired-failure", "pass")
+    launcher = ProcessTaskLauncher()
+
+    with pytest.raises(TaskLaunchError, match="execution settled during cleanup"):
+        launcher.launch_task(request)
+
+    assert request.identity in launcher._attempt_identities
+    handle.cancel.assert_called_once()
+    assert accountant.finish() == {"seconds": "7", "status": "partial", "issues": ["attribution_incomplete"]}
+    adapter.poll.assert_not_called()
+    adapter.wait.assert_not_called()
 
 
 @requires_waitid

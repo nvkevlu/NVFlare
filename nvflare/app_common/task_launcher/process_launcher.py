@@ -46,6 +46,7 @@ from nvflare.apis.task_launcher_spec import (
     TaskSettlementError,
     UnsupportedTaskResourceError,
 )
+from nvflare.private.fed.resource_stats.cpu_consumed import register_managed_child
 from nvflare.utils.process_utils import ProcessAdapter, ProcessSpawnError, spawn_process
 
 
@@ -511,6 +512,14 @@ class ProcessTaskLauncher(TaskLauncherSpec):
             with self._lock:
                 self._attempt_identities.remove(request.identity)
             raise
+
+        try:
+            # Waited-child CPU includes this worker, but not necessarily its
+            # unwaited descendants. Registration neither polls nor reaps it.
+            register_managed_child(adapter, descendants_may_be_unwaited=True)
+        except Exception:
+            # Optional statistics must not change an acquired task's lifecycle.
+            pass
 
         handle = ProcessTaskHandle(
             request,
