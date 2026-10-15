@@ -1,0 +1,26 @@
+Recorded resources for job Synthetic capacity contract example (ID: synthetic-capacity-changes).
+GPU count basis: CUDA Driver (schema 3.0).
+Participants with data: 1/1
+
+Observed resources per participant (CPU in cores)
+SITE    TIME   CPU VISIBLE (cores)  AVG CPU USED (cores)  MEM GiB  CUDA DEVICES  VERIFIED FULL GPUs
+site-1  10m0s  varies               0.3000                varies   varies        varies
+
+Recorded files and message payload
+SITE    RUN-DIR FILES GiB  PAYLOAD SENT GiB  PAYLOAD SENT TO SITE GiB
+site-1  0.0000             0.0000            0.0000
+
+Derived capacity-time totals
+  CPU visible 4.0000 core-h | Memory visible 8.0000 GiB-h | CUDA devices available 0.2500 device-h | Verified full GPUs 0.2500 GPU-h
+  CPU time used 0.0500 core-h | Run-dir files 0.0000 GiB | Message payload sent 0.0000 GiB
+
+Notes:
+  TIME covers capacity observations. CPU used is process CPU time divided by its matching measured interval.
+  CPU visible is capacity; CPU used is not host utilization %.
+  CPU used may miss child-process work; known gaps are marked *.
+  CUDA-device capacity records devices available to the job process, not utilization or proof of use.
+  Sums add participant values; physically shared resources may be counted more than once.
+  Payload sent to a site is sender-confirmed, not proof of receipt.
+  Capacity-time totals multiply observed capacity by its matching measured interval.
+  'varies' means capacity changed between recorded intervals; see --format json for each interval.
+  Use --site SITE or --format json to see hardware model details.

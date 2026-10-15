@@ -1,0 +1,27 @@
+Recorded resources for job Synthetic capacity contract example (ID: synthetic-capacity-normal).
+GPU count basis: CUDA Driver (schema 3.0).
+Participants with data: 2/2 | showing site-1
+
+Observed resources per participant (CPU in cores)
+SITE    TIME   CPU VISIBLE (cores)  AVG CPU USED (cores)  MEM GiB  CUDA DEVICES  VERIFIED FULL GPUs
+site-1  10m0s  32.0000              0.3000                64.0000  2.0000        2.0000
+
+Recorded files and message payload
+SITE    RUN-DIR FILES GiB  PAYLOAD SENT GiB  PAYLOAD SENT TO SITE GiB
+site-1  0.0000             1.0000            1.0000
+
+Notes:
+  TIME covers capacity observations. CPU used is process CPU time divided by its matching measured interval.
+  CPU visible is capacity; CPU used is not host utilization %.
+  CPU used may miss child-process work; known gaps are marked *.
+  CUDA-device capacity records devices available to the job process, not utilization or proof of use.
+  Sums add participant values; physically shared resources may be counted more than once.
+  Payload sent to a site is sender-confirmed, not proof of receipt.
+  Capacity-time totals multiply observed capacity by its matching measured interval.
+
+Hardware detail for site-1
+Model metadata is optional and does not change numeric totals.
+
+CPU: AMD EPYC 9654 (x86_64); 32.0000 visible units
+GPU: NVIDIA A100, 80.0000 GiB per instance; 2.0000 visible instances
+Visible workspace-filesystem capacity at reporting time: 1024.0000 GiB

@@ -1,0 +1,43 @@
+{
+  "job_id": "synthetic-capacity-large",
+  "kind": "nvflare.resource_stats.resource_summary",
+  "participants": [
+    {
+      "cpu_consumed": {
+        "measured_seconds": "9007199254740993",
+        "seconds": "9007199254740993"
+      },
+      "message_traffic": {
+        "sent_to": []
+      },
+      "participant_name": "site-1",
+      "received_at": "2026-10-12T12:00:00Z",
+      "resource_capacity": {
+        "cpu": {
+          "groups": [
+            {
+              "units": "1048576"
+            }
+          ]
+        },
+        "gpu": {
+          "groups": [
+            {
+              "count": "4096",
+              "kind": "cuda_device_unclassified"
+            }
+          ]
+        },
+        "measured_seconds": "9007199254740993",
+        "memory": {
+          "bytes": "18446744073709551615"
+        }
+      },
+      "retained_content": {
+        "bytes": "18446744073709551617"
+      },
+      "role": "client"
+    }
+  ],
+  "schema_version": "3.0"
+}

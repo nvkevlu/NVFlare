@@ -1,0 +1,28 @@
+{
+  "job_id": "synthetic-capacity-unavailable",
+  "kind": "nvflare.resource_stats.resource_summary",
+  "participants": [
+    {
+      "cpu_consumed": {
+        "measured_seconds": "600",
+        "seconds": "180"
+      },
+      "message_traffic": {
+        "sent_to": []
+      },
+      "participant_name": "site-1",
+      "received_at": "2026-10-12T12:00:00Z",
+      "resource_capacity": {
+        "issues": [
+          "unsupported"
+        ],
+        "status": "unavailable"
+      },
+      "retained_content": {
+        "bytes": "0"
+      },
+      "role": "client"
+    }
+  ],
+  "schema_version": "3.0"
+}

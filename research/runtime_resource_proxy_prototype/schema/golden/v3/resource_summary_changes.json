@@ -1,0 +1,77 @@
+{
+  "job_id": "synthetic-capacity-changes",
+  "kind": "nvflare.resource_stats.resource_summary",
+  "participants": [
+    {
+      "cpu_consumed": {
+        "measured_seconds": "600",
+        "seconds": "180"
+      },
+      "message_traffic": {
+        "sent_to": []
+      },
+      "participant_name": "site-1",
+      "received_at": "2026-10-12T12:00:00Z",
+      "resource_capacity": {
+        "intervals": [
+          {
+            "cpu": {
+              "groups": [
+                {
+                  "architecture": "x86_64",
+                  "model": "AMD EPYC 9654",
+                  "units": "32"
+                }
+              ]
+            },
+            "gpu": {
+              "groups": [
+                {
+                  "count": "2",
+                  "kind": "full_gpu",
+                  "memory_bytes": "85899345920",
+                  "model": "NVIDIA A100"
+                }
+              ]
+            },
+            "measured_seconds": "300",
+            "memory": {
+              "bytes": "68719476736"
+            }
+          },
+          {
+            "cpu": {
+              "groups": [
+                {
+                  "architecture": "x86_64",
+                  "model": "AMD EPYC 9654",
+                  "units": "16"
+                }
+              ]
+            },
+            "gpu": {
+              "groups": [
+                {
+                  "count": "1",
+                  "kind": "full_gpu",
+                  "memory_bytes": "85899345920",
+                  "model": "NVIDIA A100"
+                }
+              ]
+            },
+            "measured_seconds": "300",
+            "memory": {
+              "bytes": "34359738368"
+            }
+          }
+        ],
+        "measured_seconds": "600"
+      },
+      "retained_content": {
+        "bytes": "0"
+      },
+      "role": "client"
+    }
+  ],
+  "schema_version": "3.0"
+}
