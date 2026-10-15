@@ -1227,8 +1227,10 @@ class K8sJobLauncher(JobLauncherSpec):
                 resources["limits"]["memory"] = portable_spec["memory"]
                 resources["requests"]["memory"] = portable_spec["memory"]
             if job_resource:
-                resources["limits"]["nvidia.com/gpu"] = job_resource
-                resources["requests"]["nvidia.com/gpu"] = job_resource
+                # Kubernetes quantities are strings, including device counts.
+                gpu_quantity = str(job_resource)
+                resources["limits"]["nvidia.com/gpu"] = gpu_quantity
+                resources["requests"]["nvidia.com/gpu"] = gpu_quantity
             job_config["resources"] = resources
             if self.security_context:
                 job_config["security_context"] = self.security_context

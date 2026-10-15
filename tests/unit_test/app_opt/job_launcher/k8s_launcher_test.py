@@ -12,7 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import copy
+import json
 import logging
+import subprocess
 import sys
 from types import ModuleType
 from unittest.mock import MagicMock, Mock, patch
@@ -98,7 +101,7 @@ def _make_job_config(**overrides):
         "volume_list": _DEFAULT_VOLUME_LIST,
         "module_args": {"-m": "val_m", "-w": "val_w"},
         "set_list": ["key1=val1", "key2=val2"],
-        "resources": {"limits": {"nvidia.com/gpu": 1}},
+        "resources": {"limits": {"nvidia.com/gpu": "1"}},
     }
     cfg.update(overrides)
     return cfg
@@ -472,7 +475,7 @@ class TestK8sJobHandle:
         cfg = _make_job_config()
         handle = K8sJobHandle("job-1", _make_api_instance(), cfg)
         container = handle.get_manifest()["spec"]["containers"][0]
-        assert container["resources"]["limits"]["nvidia.com/gpu"] == 1
+        assert container["resources"]["limits"]["nvidia.com/gpu"] == "1"
 
     def test_manifest_resources_passed_through_unconditionally(self):
         cfg = _make_job_config(resources={"limits": {"cpu": "500m"}})
@@ -3022,7 +3025,7 @@ spec:
         try:
             launcher.launch_job(_make_launch_job_meta(gpu=2), _make_launch_fl_ctx())
             manifest = mock_api.create_namespaced_pod.call_args.kwargs["body"]
-            assert manifest["spec"]["containers"][0]["resources"]["limits"]["nvidia.com/gpu"] == 2
+            assert manifest["spec"]["containers"][0]["resources"]["limits"]["nvidia.com/gpu"] == "2"
         finally:
             _exit_patches(patches)
 
@@ -3035,7 +3038,7 @@ spec:
             meta[JobMetaKey.RESOURCE_SPEC.value] = {"site-1": {"num_of_gpus": 2}}
             launcher.launch_job(meta, _make_launch_fl_ctx())
             manifest = mock_api.create_namespaced_pod.call_args.kwargs["body"]
-            assert manifest["spec"]["containers"][0]["resources"]["limits"]["nvidia.com/gpu"] == 2
+            assert manifest["spec"]["containers"][0]["resources"]["limits"]["nvidia.com/gpu"] == "2"
         finally:
             _exit_patches(patches)
 
@@ -3065,7 +3068,7 @@ spec:
             }
             launcher.launch_job(meta, _make_launch_fl_ctx())
             manifest = mock_api.create_namespaced_pod.call_args.kwargs["body"]
-            assert manifest["spec"]["containers"][0]["resources"]["limits"]["nvidia.com/gpu"] == 2
+            assert manifest["spec"]["containers"][0]["resources"]["limits"]["nvidia.com/gpu"] == "2"
         finally:
             _exit_patches(patches)
 
@@ -3078,7 +3081,7 @@ spec:
             meta[JobMetaKey.RESOURCE_SPEC.value] = {"site-1": {"num_of_gpus": 2}}
             launcher.launch_job(meta, _make_launch_fl_ctx())
             manifest = mock_api.create_namespaced_pod.call_args.kwargs["body"]
-            assert manifest["spec"]["containers"][0]["resources"]["limits"]["nvidia.com/gpu"] == 3
+            assert manifest["spec"]["containers"][0]["resources"]["limits"]["nvidia.com/gpu"] == "3"
         finally:
             _exit_patches(patches)
 
@@ -3152,7 +3155,7 @@ spec:
             launcher.launch_job(meta, _make_launch_fl_ctx())
             manifest = mock_api.create_namespaced_pod.call_args.kwargs["body"]
             limits = manifest["spec"]["containers"][0]["resources"]["limits"]
-            assert limits["nvidia.com/gpu"] == 2
+            assert limits["nvidia.com/gpu"] == "2"
             assert limits["cpu"] == "1000m"
             assert limits["memory"] == "4Gi"
         finally:
@@ -3204,10 +3207,87 @@ spec:
             launcher.launch_job(_make_launch_job_meta(gpu=2), _make_launch_fl_ctx())
             manifest = mock_api.create_namespaced_pod.call_args.kwargs["body"]
             resources = manifest["spec"]["containers"][0]["resources"]
-            assert resources["requests"]["nvidia.com/gpu"] == 2
-            assert resources["limits"]["nvidia.com/gpu"] == 2
+            assert resources["requests"]["nvidia.com/gpu"] == "2"
+            assert resources["limits"]["nvidia.com/gpu"] == "2"
         finally:
             _exit_patches(patches)
+
+    @pytest.mark.parametrize("templated", [False, True])
+    def test_gpu_quantities_pass_real_sdk_validation_and_serialization(self, templated):
+        """Use a clean SDK process so module doubles cannot hide validation."""
+
+        patches = _make_k8s_launcher_patches()
+        launcher, mock_api = self._setup(patches)
+        self._prime_running(mock_api)
+        try:
+            if templated:
+                from nvflare.app_opt.job_launcher.study_runtime import StudyRuntime
+
+                launcher._resolve_study_runtime = Mock(
+                    return_value=StudyRuntime(
+                        study="test", pod_template={"spec": {"containers": [{"name": "nvflare_job"}]}}
+                    )
+                )
+            launcher.launch_job(_make_launch_job_meta(gpu=2), _make_launch_fl_ctx())
+            manifest = copy.deepcopy(mock_api.create_namespaced_pod.call_args.kwargs["body"])
+        finally:
+            _exit_patches(patches)
+        program = """
+import copy
+import json
+import sys
+try:
+    from kubernetes import client
+except ImportError:
+    print(json.dumps({"sdk_available": False}))
+    raise SystemExit(0)
+
+manifest = json.load(sys.stdin)
+strict_models = hasattr(client.V1Pod, "model_validate")
+serialized = []
+class TransportBoundary(Exception):
+    pass
+
+with client.ApiClient() as api_client:
+    def transport(*args, **kwargs):
+        body = kwargs.get("body", args[3] if len(args) > 3 else None)
+        serialized.append(api_client.sanitize_for_serialization(body))
+        raise TransportBoundary()
+    api_client.call_api = transport
+    api = client.CoreV1Api(api_client)
+    try:
+        api.create_namespaced_pod(namespace="qualification", body=manifest)
+    except TransportBoundary:
+        pass
+    else:
+        raise AssertionError("expected offline transport boundary")
+    resources = serialized[0]["spec"]["containers"][0]["resources"]
+    assert resources["requests"]["nvidia.com/gpu"] == "2"
+    assert resources["limits"]["nvidia.com/gpu"] == "2"
+    if strict_models:
+        from pydantic import ValidationError
+        previous = copy.deepcopy(manifest)
+        for bucket in ("requests", "limits"):
+            previous["spec"]["containers"][0]["resources"][bucket]["nvidia.com/gpu"] = 2
+        try:
+            api.create_namespaced_pod(namespace="qualification", body=previous)
+        except ValidationError:
+            assert len(serialized) == 1
+        else:
+            raise AssertionError("integer GPU quantities must be rejected before transport")
+print(json.dumps({"sdk_available": True, "strict_quantity_validation": strict_models}))
+"""
+        checked = subprocess.run(
+            [sys.executable, "-c", program],
+            input=json.dumps(manifest),
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        assert checked.returncode == 0, checked.stderr
+        if not json.loads(checked.stdout)["sdk_available"]:
+            pytest.skip("requires the real Kubernetes SDK for offline model validation")
 
     def test_pod_manifest_no_cpu_memory_requests_when_not_specified(self):
         # When cpu/memory are absent from launcher_spec, requests has only ephemeral-storage.
