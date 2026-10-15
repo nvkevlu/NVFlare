@@ -73,6 +73,10 @@ def _worker_runtime(workspace_root, runner, mock_upload=True):
             "security_init_for_job",
             "register_ext_decomposers",
             "configure_logging",
+            "JobResourceCollector",
+            "start_job_f3_counter",
+            "get_job_f3_counter",
+            "write_terminal_handoff",
         ):
             stack.enter_context(patch.object(worker_process, name))
         if mock_upload:
@@ -116,6 +120,32 @@ def test_worker_preserves_execution_exception_when_cleanup_fails(tmp_path, execu
 
     assert exc_info.value is (execution_error if execution_fails else cleanup_error)
     client.terminate.assert_called_once()
+
+
+def test_statistics_gap_failure_does_not_skip_existing_error_publication(tmp_path):
+    runner = MagicMock()
+    execution_error = RuntimeError("runner failed")
+    runner.run.side_effect = execution_error
+    collector = MagicMock()
+    collector.mark_cpu_consumption_incomplete.side_effect = RuntimeError("statistics unavailable")
+
+    with (
+        _worker_runtime(tmp_path, runner) as (args, client),
+        patch.object(worker_process, "JobResourceCollector", return_value=collector),
+        patch.object(worker_process, "start_job_f3_counter"),
+        patch.object(worker_process, "get_job_f3_counter", return_value=None),
+        patch.object(worker_process, "write_terminal_handoff"),
+        patch("nvflare.private.fed.app.job_process_cleanup.shutdown_f3_streaming"),
+        patch("nvflare.private.fed.app.job_process_cleanup.security_close"),
+    ):
+        with pytest.raises(RuntimeError) as exc_info:
+            worker_process.main(args)
+        assert exc_info.value is execution_error
+        worker_process.upload_results_on_shutdown.assert_called_once()
+        collector.finish.assert_called_once()
+        client.terminate.assert_not_called()
+        MainProcessMonitor._do_cleanup(threading.Event())
+        client.terminate.assert_called_once()
 
 
 def test_normal_worker_cleanup_stays_on_the_main_thread(tmp_path):

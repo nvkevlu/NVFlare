@@ -32,6 +32,9 @@ from nvflare.private.fed.app.job_process_cleanup import shutdown_job_process_run
 from nvflare.private.fed.app.utils import monitor_parent_process
 from nvflare.private.fed.client.client_app_runner import ClientAppRunner
 from nvflare.private.fed.client.client_status import ClientStatus
+from nvflare.private.fed.resource_stats.collector import JobResourceCollector, write_terminal_handoff
+from nvflare.private.fed.resource_stats.f3_counter import F3_DRAIN_TIMEOUT_SECONDS
+from nvflare.private.fed.resource_stats.f3_job_counter import get_job_f3_counter, start_job_f3_counter
 from nvflare.private.fed.utils.fed_utils import (
     create_stats_pool_files_for_job,
     fobs_initialize,
@@ -61,6 +64,20 @@ def main(args):
     download_workspace(args, secure_train)
     workspace = Workspace(args.workspace, args.client_name, config_folder)
     refresh_custom_dir_import_path(workspace.get_app_custom_dir(args.job_id))
+    resource_collector = None
+    try:
+        # Observe capacity within the existing job startup lifecycle. Keep
+        # normal Python imports and dependency paths available throughout.
+        resource_collector = JobResourceCollector(workspace.get_run_dir(args.job_id))
+    except Exception:
+        # Resource reporting is observational and must never change the job outcome.
+        pass
+    try:
+        # Start independently from the capacity collector so failure in one
+        # observation path cannot disable the other.
+        start_job_f3_counter()
+    except Exception:
+        pass
     set_stats_pool_config_for_job(workspace, args.job_id)
 
     try:
@@ -133,10 +150,40 @@ def main(args):
     finally:
 
         def _archive_results():
+            child_f3 = None
+            counter = get_job_f3_counter()
+            if counter:
+                try:
+                    # Application command admission is already closed here.
+                    # Close F3 admission too, then give accepted logical sends a
+                    # fixed, bounded interval to settle before writing the handoff.
+                    counter.close_and_drain(F3_DRAIN_TIMEOUT_SECONDS)
+                    child_f3 = counter.freeze()
+                except Exception:
+                    child_f3 = None
+            if resource_collector:
+                try:
+                    write_terminal_handoff(
+                        workspace.get_run_dir(args.job_id),
+                        resource_collector.finish(child_f3=child_f3),
+                    )
+                except Exception as e:
+                    if logger:
+                        try:
+                            logger.warning(f"Could not write resource statistics: {secure_format_exception(e)}")
+                        except Exception:
+                            pass
             err = create_stats_pool_files_for_job(workspace, args.job_id)
             if err and logger:
                 logger.warning(err)
             upload_results_on_shutdown(args, secure_train, log=logger)
+
+        def _mark_callback_drain_incomplete():
+            if resource_collector:
+                resource_collector.mark_cpu_consumption_incomplete()
+            counter = get_job_f3_counter()
+            if counter:
+                counter.mark_counter_gap()
 
         def _close_commands():
             try:
@@ -158,6 +205,7 @@ def main(args):
                     stop_cell=federated_client.stop_cell if federated_client else None,
                     logger=logger,
                     before_streaming_shutdown=before_streaming_shutdown,
+                    mark_callback_drain_incomplete=_mark_callback_drain_incomplete,
                 )
             finally:
                 # Preserve the upload exception, but never let it bypass the remaining
@@ -181,6 +229,13 @@ def main(args):
                     except Exception as e:
                         if logger:
                             logger.warning(f"failed to stop command admission: {secure_format_exception(e)}")
+                # Preserve main's failure publication path and cleanup owner.
+                # These callbacks have not drained; report best-effort subtotals.
+                try:
+                    _mark_callback_drain_incomplete()
+                except Exception:
+                    # Optional accounting must not prevent existing result publication.
+                    pass
                 _archive_results()
             except Exception as e:
                 if logger:

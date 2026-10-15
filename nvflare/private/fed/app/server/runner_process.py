@@ -33,6 +33,10 @@ from nvflare.private.defs import AUTH_CLIENT_NAME_FOR_SJ, AppFolderConstants
 from nvflare.private.fed.app.fl_conf import FLServerStarterConfiger
 from nvflare.private.fed.app.job_process_cleanup import shutdown_job_process_runtime
 from nvflare.private.fed.app.utils import monitor_parent_process
+from nvflare.private.fed.resource_stats.collector import JobResourceCollector, write_terminal_handoff
+from nvflare.private.fed.resource_stats.external_transfer import load_task_token_verifier
+from nvflare.private.fed.resource_stats.f3_counter import F3_DRAIN_TIMEOUT_SECONDS
+from nvflare.private.fed.resource_stats.f3_job_counter import get_job_f3_counter, start_job_f3_counter
 from nvflare.private.fed.server.server_app_runner import ServerAppRunner
 from nvflare.private.fed.server.server_state import HotState
 from nvflare.private.fed.utils.fed_utils import (
@@ -68,6 +72,26 @@ def main(args):
     download_workspace(args, secure_train)
     workspace = Workspace(root_dir=args.workspace, site_name=SiteType.SERVER)
     refresh_custom_dir_import_path(workspace.get_app_custom_dir(args.job_id))
+    resource_collector = None
+    try:
+        # Observe capacity within the existing job startup lifecycle. Keep
+        # normal Python imports and dependency paths available throughout.
+        resource_collector = JobResourceCollector(
+            workspace.get_run_dir(args.job_id),
+            prior_observation_incomplete=bool(args.snapshot)
+            or kv_list.get("resource_prior_attempt_incomplete") is True,
+        )
+    except Exception:
+        # Resource reporting is observational and must never change the job outcome.
+        pass
+    try:
+        # Start independently from the capacity collector so failure in one
+        # observation path cannot disable the other.
+        f3_counter = start_job_f3_counter()
+        if args.snapshot:
+            f3_counter.mark_prior_history_incomplete()
+    except Exception:
+        pass
     set_stats_pool_config_for_job(workspace, args.job_id)
 
     server = None
@@ -101,6 +125,13 @@ def main(args):
             # create the FL server
             server_config, server = deployer.create_fl_server(args, secure_train=secure_train)
 
+            # Verification uses only the existing parent's public certificate.
+            # Missing proof affects statistics, never task delivery or startup.
+            server.resource_stats_token_verifier = (
+                load_task_token_verifier(conf.site_certificate_file)
+                if secure_train is True and get_job_f3_counter() is not None
+                else None
+            )
             server.cell = server.create_job_cell(
                 args.job_id, args.root_url, args.parent_url, secure_train, server_config
             )
@@ -134,10 +165,37 @@ def main(args):
             cell = getattr(server, "cell", None)
 
             def _archive_results():
+                child_f3 = None
+                counter = get_job_f3_counter()
+                if counter:
+                    try:
+                        counter.close_and_drain(F3_DRAIN_TIMEOUT_SECONDS)
+                        child_f3 = counter.freeze()
+                    except Exception:
+                        child_f3 = None
+                if resource_collector:
+                    try:
+                        write_terminal_handoff(
+                            workspace.get_run_dir(args.job_id),
+                            resource_collector.finish(child_f3=child_f3),
+                        )
+                    except Exception as e:
+                        if logger:
+                            try:
+                                logger.warning(f"Could not write resource statistics: {secure_format_exception(e)}")
+                            except Exception:
+                                pass
                 err = create_stats_pool_files_for_job(workspace, args.job_id)
                 if err and logger:
                     logger.warning(err)
                 upload_results_on_shutdown(args, secure_train, log=logger)
+
+            def _mark_callback_drain_incomplete():
+                if resource_collector:
+                    resource_collector.mark_cpu_consumption_incomplete()
+                counter = get_job_f3_counter()
+                if counter:
+                    counter.mark_counter_gap()
 
             try:
                 shutdown_job_process_runtime(
@@ -146,6 +204,7 @@ def main(args):
                     stop_cell=cell.stop if cell else None,
                     logger=logger,
                     before_streaming_shutdown=_archive_results,
+                    mark_callback_drain_incomplete=_mark_callback_drain_incomplete,
                 )
             finally:
                 if deployer:

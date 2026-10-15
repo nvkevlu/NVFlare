@@ -90,6 +90,7 @@ class FLServerStarterConfiger(JsonConfigurator):
         self.app_validator = None
         self.snapshot_persistor = None
         self.site_org = ""
+        self.site_certificate_file = None
 
     def start_config(self, config_ctx: ConfigContext):
         """Start the config process.
@@ -116,6 +117,9 @@ class FLServerStarterConfiger(JsonConfigurator):
         except Exception:
             raise ValueError(f"Server config error: '{self.server_config_file_names}'")
 
+        # Preserve the provisioned public certificate before job TLS credentials
+        # replace it. Site auth tokens are signed by the parent, not the job key.
+        self.site_certificate_file = self.config_data["servers"][0].get(SSLConstants.CERT)
         if self.args.job_id:
             run_dir = self.workspace.get_run_dir(self.args.job_id)
             for server in self.config_data["servers"]:

@@ -82,7 +82,10 @@ def _workspace_with_kit(tmp_path, site_name):
     ("job_id", "with_job_cert", "expect_job_cert"),
     [("job-1", True, True), ("job-1", False, False), (None, True, False)],
 )
-def test_server_configer_points_job_process_at_job_credential(tmp_path, job_id, with_job_cert, expect_job_cert):
+@pytest.mark.parametrize("site_cert", ["server.crt", "custom-parent.crt"])
+def test_server_configer_points_job_process_at_job_credential(
+    tmp_path, job_id, with_job_cert, expect_job_cert, site_cert
+):
     workspace = _workspace_with_kit(tmp_path, SiteType.SERVER)
     run_dir = workspace.get_run_dir("job-1")
     if with_job_cert:
@@ -93,7 +96,7 @@ def test_server_configer_points_job_process_at_job_credential(tmp_path, job_id, 
     configer.server_config_file_names = ["fed_server.json"]
     server = {
         SecureTrainConst.SSL_ROOT_CERT: "rootCA.pem",
-        SecureTrainConst.SSL_CERT: "server.crt",
+        SecureTrainConst.SSL_CERT: site_cert,
         SecureTrainConst.PRIVATE_KEY: "server.key",
     }
     configer.config_data = {"servers": [server]}
@@ -103,11 +106,27 @@ def test_server_configer_points_job_process_at_job_credential(tmp_path, job_id, 
 
     startup = workspace.get_startup_kit_dir()
     assert server[SecureTrainConst.SSL_ROOT_CERT] == os.path.join(startup, "rootCA.pem")
+    # The registration token is signed by the provisioned parent, not the job.
+    # Preserve only its public certificate path before replacing job TLS keys.
+    assert configer.site_certificate_file == os.path.join(startup, site_cert)
     if expect_job_cert:
         assert (server[SecureTrainConst.SSL_CERT], server[SecureTrainConst.PRIVATE_KEY]) == job_cert_paths(run_dir)
     else:
-        assert server[SecureTrainConst.SSL_CERT] == os.path.join(startup, "server.crt")
+        assert server[SecureTrainConst.SSL_CERT] == os.path.join(startup, site_cert)
         assert server[SecureTrainConst.PRIVATE_KEY] == os.path.join(startup, "server.key")
+
+
+def test_server_configer_without_site_certificate_keeps_verifier_unavailable(tmp_path):
+    configer = FLServerStarterConfiger.__new__(FLServerStarterConfiger)
+    configer.args = SimpleNamespace(job_id="job-1")
+    configer.workspace = _workspace_with_kit(tmp_path, SiteType.SERVER)
+    configer.server_config_file_names = ["fed_server.json"]
+    configer.config_data = {"servers": [{}]}
+
+    with patch("nvflare.private.fed.app.fl_conf.JsonConfigurator.start_config"):
+        configer.start_config(MagicMock())
+
+    assert configer.site_certificate_file is None
 
 
 @pytest.mark.parametrize(
