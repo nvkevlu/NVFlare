@@ -110,6 +110,24 @@ def test_abort_wins_prevents_launch(admission, window):
         assert "before running" in responses[0]["meta"]["info"]
         assert a.statuses["job-1"] == RunStatus.FINISHED_ABORTED
         a.runner._start_run.assert_not_called()
+        assert a.runner.f3_counters.get("job-1") is None
+    assert not a.runner._starting_jobs
+
+
+def test_abort_during_deployment_survives_counter_cleanup_error(admission):
+    a = admission
+
+    def deploy(*args):
+        a.abort()
+        return "job-1", []
+
+    a.runner._deploy_job.side_effect = deploy
+    a.runner.f3_counters.forget_job = MagicMock(side_effect=RuntimeError("statistics cleanup failed"))
+
+    a.runner.run(a.ctx)
+
+    assert a.statuses["job-1"] == RunStatus.FINISHED_ABORTED
+    a.runner._start_run.assert_not_called()
     assert not a.runner._starting_jobs
 
 
