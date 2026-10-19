@@ -13,8 +13,10 @@ normal workspace preparation and before application construction. It sends one
 final report during the existing completion flow. This change adds no probe,
 startup wrapper, privilege, dependency, configuration, or resource-release step.
 
-CPU units are logical-CPU capacity after the existing affinity and visible cgroup rules.
-Memory bytes are physical memory capped by applicable readable cgroup limits. GPU count
+CPU units start with the allowed logical-CPU count, falling back to the machine's
+online count when necessary, and apply smaller readable CPU-set and quota
+limits. A quota is CPU time divided by its period, not a set of pinned CPU IDs.
+Memory bytes are physical memory capped by readable memory limits. GPU count
 is the CUDA Driver's execution-visible count; optional NVML classification
 cannot remove a counted device. These are observations of visible capacity,
 not reservations or proof of actual resource use.
@@ -54,6 +56,15 @@ and round-half-even for finer product fractions.
 Successful measurements omit status and issues. A partial measurement keeps
 known values with the existing issue codes; unavailable contains only status
 and issues. GPU unavailability does not erase known CPU or memory capacity.
+
+An unreadable or malformed CPU/RAM limit does not discard another usable
+value. Keep the smallest usable capacity and mark the block `partial` with
+`observation_incomplete` when a restriction cannot be checked. Using the
+online CPU count because affinity is unavailable has the same indication.
+An absent or unlimited constraint is not a failed read. These best-effort
+values may exceed the actual process limit; unavailable is reserved for a
+dimension with no usable positive value. No additional status, source field,
+or issue code is required.
 
 Today's launch paths probe once. The existing capacity-change hook can close
 an interval and record another observation. If it is used, the final report

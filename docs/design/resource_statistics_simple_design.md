@@ -1,7 +1,7 @@
 # Resource statistics simple design
 
 Resource statistics gives users a best-effort record of the resources a job
-could see, its recorded CPU work, files remaining in its run directory, and
+could see, its recorded CPU work, total size of files in its run directory, and
 selected application data sent between participants. It uses NVFlare's existing
 access and dependencies. It requires no extra privileges, mounts, services,
 operator settings, or changes to Python startup and imports.
@@ -12,7 +12,7 @@ operator settings, or changes to Python startup and imports.
 Prepare the normal job workspace
   -> observe CPU, RAM and CUDA capacity once
   -> record elapsed time, CPU work and included application sends
-  -> finish measurements and observe remaining files
+  -> finish measurements and total the remaining file sizes
   -> pass the report to the client parent
   -> release compute resources, then attach the report to the existing completion notification
   -> server saves participant measurements in the normal job workspace archive
@@ -20,21 +20,20 @@ Prepare the normal job workspace
 ```
 
 The observation happens before application construction, after the existing
-workspace preparation and custom-path refresh. Python startup imports may
-already have run. These are site self-reports, not tamper-proof evidence.
+workspace preparation. These are site self-reports, not tamper-proof evidence.
 
 ## What each measurement means
 
 | Measurement | Meaning and method |
 | --- | --- |
-| CPU capacity | Logical CPU units allowed by process affinity and readable cgroup limits; a quota may allow a fraction of a CPU. |
-| RAM capacity | Physical RAM bounded by readable cgroup memory limits, not currently free RAM. |
+| CPU capacity | Allowed logical-CPU count, reduced by readable CPU limits. If a limit cannot be checked, keep a best-effort count and mark the missing information. A quota may allow a fraction of a CPU. |
+| RAM capacity | Physical RAM reduced by readable memory limits, not currently free RAM. Unreadable limits keep the best available value with incomplete information marked. |
 | CUDA capacity | Devices available for CUDA execution to the job process, counted through the system CUDA Driver. Seeing a GPU does not prove the job used it. |
 | Hardware descriptions | Optional CPU/GPU models and architecture; GPU type is verified with optional NVML or left unclassified. |
 | Covered seconds | Monotonic elapsed time assigned to the capacity observation, including waiting. |
 | CPU work | User and system CPU time for the process and descendants accounted for after waiting, with its own elapsed duration. Arbitrary un-waited descendants are not guaranteed covered. |
 | Workspace filesystem | Visible total capacity of the filesystem containing the existing run directory, not storage owned by the job. |
-| Remaining files | Bounded sum of regular-file logical lengths under the run directory, excluding symlinks and the top-level report directory. |
+| Run-directory file size | Bounded sum of regular-file lengths under the run directory, excluding symlinks and the top-level report directory. Only the total is stored, not filenames. |
 | Application data | Accepted payload bytes and logical messages for job deployment, actual task responses, and task results, grouped by destination. Not network-interface traffic or proof of receipt. |
 
 The report keeps capacities and seconds separately. This illustrative excerpt
@@ -64,6 +63,12 @@ Successful measurements have no status label. A partial measurement retains
 known values; unavailable means no usable value. A missing Driver is unavailable,
 not zero. A successful Driver observation of no devices is zero. Missing GPU
 information does not hide a valid CPU average.
+
+An unreadable CPU/RAM limit does not erase a usable count or byte value.
+Apply the smaller limits that can be read and retain the best available
+capacity with `partial` and `observation_incomplete`. It may overstate the
+actual limit. CPU capacity is unavailable only without a usable positive count;
+RAM capacity is unavailable only without a usable positive byte value.
 
 The server checks report identity and contents. It keeps accepted reports in
 memory until job finalization writes the archive files. A server crash before

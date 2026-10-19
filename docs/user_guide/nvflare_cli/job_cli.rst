@@ -610,223 +610,95 @@ Show running job statistics:
 so specifying ``--site all`` explicitly is equivalent to omitting it.
 It also supports ``--schema``.
 
+.. _job_resources_cli:
+
 **********************
 Job Resources
 **********************
 
-``nvflare job resources`` reports observed CPU, memory, and GPU capacity,
-derived capacity-time totals, CPU consumption, run-directory file size, and
-selected message traffic for each finished job participant. Data is available
-once the job has finished and the server has finalized the participant reports.
-Use ``nvflare job stats``
-for a running job's live training statistics.
+``nvflare job resources`` reads saved resource reports after a job has
+finished and the server has finalized them. It shows observed capacity,
+recorded CPU work, total run-directory file size, and selected application
+payload. For the collection methods and interpretation, start with
+:ref:`resource_statistics`.
 
-A job or study query reads the archived, self-contained resource summary.
-Additional files in its directory or a missing participant-detail file do not
-prevent that query. ``--site`` additionally reads the named participant's detail;
-that requested file must exist exactly once and agree with the summary.
-
-Show recorded resources for one job:
+Commands
+=========
 
 .. code-block:: shell
 
-   nvflare job resources --job <job_id>
-   nvflare job resources --job <job_id> --study cancer_research
+   # One job in the default study
+   nvflare job resources --job JOB_ID
 
-The first line of the human-readable result identifies both values, for
-example ``Recorded resources for job hello-pt (ID: abc123).`` The job name is
-the existing server-owned job metadata; the ID remains the unique lookup and
-reconciliation key.
+   # One job in a named study
+   nvflare job resources --job JOB_ID --study STUDY_NAME
 
-Resource queries use a five-minute default command wait because they read
-existing workspace archives. Small queries return as soon as their result is
-ready. A timeout does not cancel the server's archive read; large studies or
-slow storage can still exceed the wait. Other job commands keep their existing
-timeouts.
+   # Add one participant's hardware and workspace-filesystem detail
+   nvflare job resources --job JOB_ID --site site-1
 
-Add ``--site`` to also include one participant's own report, including
-hardware model details:
+   # Structured job or participant output
+   nvflare job resources --job JOB_ID --site site-1 --format json
 
-.. code-block:: shell
+   # Accessible retained jobs in a study
+   nvflare job resources --study STUDY_NAME
 
-   nvflare job resources --job <job_id> --site site-1
+Arguments
+==========
 
-Show the rollup across accessible retained, finalized jobs in a study:
+- ``--job``: job ID to inspect, in the default study unless ``--study`` is given.
+- ``--study``: select the study containing ``--job``, or query the study when
+  ``--job`` is omitted.
+- ``--site``: include one participant's report, hardware models, and visible
+  workspace-filesystem capacity. Requires ``--job``.
+- ``--format json``: return structured output for automation.
+- ``--schema``: print the command schema.
 
-.. code-block:: shell
+Bare ``nvflare job resources`` displays help. Use the standard startup-kit
+selection described in :ref:`job_cli`; no feature-specific setup is required.
+A job name comes from existing job metadata and does not replace its ID.
 
-   nvflare job resources --study cancer_research
-
-The study table has separate ``JOB ID`` and ``NAME`` columns. Job names are
-labels and can repeat, so rows remain distinct and deterministically ordered by
-job ID.
-
-The server checks every job with the same resource-view permission used by
-``--job`` before reading its workspace archive. Restricted jobs do not appear
-in rows, totals, or coverage counts, and the output does not reveal how many
-jobs were excluded by permissions. The ``Jobs: ... found`` count includes only
-accessible jobs. An empty result means no accessible retained jobs were found.
-Accessible jobs that are not finalized or lack readable resource data appear
-in coverage, but do not contribute numeric totals. The 10,000-job query limit
-also applies only to accessible jobs.
-
-``job resources`` accepts:
-
-- ``--job``: job ID to inspect. Uses the default study unless ``--study`` is
-  also given.
-- ``--study``: study containing the job (with ``--job``), or the study to roll
-  up (without ``--job``). If omitted with ``--job``, the default study is used.
-- ``--site``: also return one participant's own report, hardware model detail,
-  and the payload other participants reported sending to that site. Requires
-  ``--job``.
-- ``job resources`` also supports ``--schema``.
-
-Reported fields
+Read the result
 ================
 
-- **Job identity**: the archived resource summary contains ``job_id``, not a
-  duplicated ``job_name``. The authorized CLI reads the existing server-owned
-  job metadata for a display name; if needed, it falls back to job-folder name
-  and then job ID. Every on-demand study row currently includes both ID and
-  metadata-derived name for each accessible job, even when resource data is unavailable. Participant
-  summaries and their terminal wire reports do not carry ``job_name``. No new
-  privilege or configuration is required for this lookup.
-- **CPU / memory / GPU capacity**: schema ``3.0`` participant reports and
-  resource summaries store ``resource_capacity`` with raw observed CPU
-  ``cpu.groups[].units``, memory ``memory.bytes``, GPU ``gpu.groups[].count``,
-  and ``measured_seconds``. The per-participant table displays these capacities
-  directly. If recorded intervals have different capacities, the affected
-  column shows ``varies``; ``--format json`` provides the individual intervals.
-  Job and study totals compute capacity-time (e.g. GPU-hours, CPU-unit-hours,
-  GiB-hours) by multiplying each observed capacity by its matching measured
-  duration and adding the interval products. These derived values are not
-  persisted in schema ``3.0`` participant reports or resource summaries.
-  Each participant's accepted report omits ``status`` for a complete compute measurement; JSON
-  uses ``partial`` for a useful subtotal and ``unavailable`` when no usable
-  compute observation exists. Human-readable tables show numeric values,
-  ``*`` for incomplete values, and an em dash for unavailable values, with
-  details under ``Data gaps``. A participant whose report was not accepted is
-  shown separately as ``missing`` or ``invalid``; missing data is never zero.
-- **CPU consumed**: CPU seconds used by the job process and its threads,
-  plus terminated child processes whose CPU usage was collected by the
-  operating system after they were waited for. This lifecycle counter uses
-  ``RUSAGE_SELF`` and ``RUSAGE_CHILDREN`` on Unix. It is separate from
-  visible CPU capacity and its derived CPU-unit-time. Known live workers or
-  descendants that may not have been waited for make the value ``partial``;
-  missing counter evidence makes it ``unavailable``. New reports also keep
-  ``cpu_consumed.measured_seconds``, the elapsed interval measured with that
-  counter. ``AVG CPU USED`` divides CPU seconds by this matching duration,
-  regardless of whether GPU capacity was available. For example, 2 CPU seconds
-  over 10 elapsed seconds display 0.2 cores used. Partial CPU coverage adds
-  ``*``. A missing matching duration leaves the average unknown. CPU consumed can be an
-  input to a billing policy when that policy accepts the reported coverage.
-- **GPU measurement**: schema ``3.0`` reports use the
-  system CUDA Driver API to count the devices visible to the job process.
-  Optional NVML metadata classifies those counted devices as full GPUs or
-  MIG compute instances; a classification failure retains a counted device
-  as ``cuda_device_unclassified``. A missing Driver observation is
-  unavailable. A successful observation of zero devices is reported zero.
-- **Workspace filesystem capacity**: a one-time snapshot taken when the
-  participant's report was assembled, shown only with ``--site``.
-- **Run-directory files**: a terminal best-effort sum of logical file sizes for
-  regular files in the participant's job run directory, excluding top-level
-  ``resource_stats/``. Entries identified as symlinks or non-regular files are
-  ignored. Symlink skipping is best effort when directories change during
-  the scan. Hard links count per path and sparse files count logical rather than allocated
-  size. This is not a curated "just the model/result" figure -- it can include
-  logs, configuration, temporary files, and job inputs. A useful subtotal
-  after a scan error or collection limit is ``partial`` in JSON. Collection
-  examines at most 100,000 entries, descends at most 64 directory levels,
-  and checks a one-second deadline between entries. A slow filesystem call
-  can exceed that deadline. Separately configured result, log, and audit
-  roots are not currently included.
-- **Message traffic**: payload bytes the sender's transport accepted for job
-  deployment, real task responses, and submitted task results, grouped by
-  destination participant. The per-site ``sent to site`` figure is derived
-  from other participants' reports. It is not a measurement by the receiving
-  process or proof of delivery. Acknowledgements, empty task polling, and
-  traffic outside those three operations are excluded.
-  Managed external trainers can serve tensor bytes directly to the server.
-  Their source-side accepted bytes are joined to the client job's one logical
-  result, using a negotiated optional summary in the existing settlement
-  request. Unmatched, missing, or unsupported source accounting is partial;
-  it is not assumed to be zero. A shared source batch is counted as transferred,
-  even if the result retained only some tensors from that batch. Other trainer
-  modes and forwarded connections need separate qualification.
+The participant table shows observed CPU, memory, and CUDA-device capacity.
+``AVG CPU USED`` divides recorded CPU seconds by that counter's own elapsed
+duration. Totals are calculated at query time. ``*`` marks incomplete values;
+``—`` means no usable value. See the output examples in
+:ref:`resource_statistics` and the detailed explanations:
 
-Totals are **additive across participants**: if participants share physical
-hardware (for example, a proof-of-concept deployment running multiple sites on
-one machine), the sum can exceed that machine's actual capacity. This is
-participant resource accounting. A billing or scheduling policy must account
-for shared hardware and incomplete measurements when using these values.
-Run-directory-file totals can likewise count repeated files
-across participants; they are not unique retained storage, archive size,
-allocated disk usage, or billable storage. The file walk is a non-atomic
-participant self-report taken before handoff creation, stats-pool files,
-optional workspace upload, and later cleanup or log growth.
+- :ref:`resource_statistics_capacity`
+- :ref:`resource_statistics_cpu_work`
+- :ref:`resource_statistics_files`
+- :ref:`resource_statistics_message_traffic`
+- :ref:`resource_statistics_reports`
 
-The human-readable ``Participants with data: accepted/expected`` line shows
-report coverage. A participant that never reports still shows as ``missing``.
-Report coverage is separate from the training outcome and from the
-completeness of each accepted measurement.
+Study queries check each job's normal resource-read permission before archive
+access, rows, totals, or coverage counts. Nonterminal jobs and jobs without a
+readable final summary do not contribute to numeric totals. The view covers
+only jobs still retained in the job store.
 
-These status fields answer different questions: report acceptance, compute
-measurement completeness, CPU-consumption coverage, run-directory scan
-completeness, and message-counter completeness. These may differ for one
-participant. The essential
-numeric meanings are complete value, useful subtotal, and no usable value;
-they keep an incomplete subtotal from being shown as a complete total.
-Current measurement exceptions use only ``partial`` and ``unavailable``.
-A collection failure with no usable value is unavailable; a useful issue code
-such as ``malformed_source`` can preserve the cause. An ``invalid`` participant
-status already says its report was rejected and does not repeat a fixed issue.
+Resource queries use a five-minute default command wait because they read
+workspace archives. A query returns as soon as its result is ready; a timeout
+does not cancel the server's archive read. Other commands retain their existing
+timeouts.
 
-Input validation checks contents rather than presentation: compact JSON and
-pretty-printed JSON are equivalent, and quantities such as ``"2"`` and
-``"2.0"`` have the same value. Collection lists can arrive in any order but
-must remain unique. Writers normalize values and sort collections internally.
-Size limits, privacy rules, duplicate JSON-key rejection, identities, bounds,
-and consistency checks still apply.
+Structured output and errors
+============================
 
-Reports and archive readers use the current schema ``3.0`` only. Earlier
-experimental formats are not supported; this feature has not been released.
+For a job, the JSON response data contains ``resource_summary``, plus
+``participant_summary`` when ``--site`` is requested. A study response data
+contains ``summary`` with its job rows and computed totals. Reports and archive
+readers support only the current schema ``3.0``. The format and example files
+are described in :ref:`resource_statistics_reports`.
 
-Measurement availability
-========================
+An unknown job returns ``JOB_NOT_FOUND``. A job not yet finalized returns
+``JOB_NOT_FINALIZED``; retry after completion. ``--site`` without ``--job``
+returns ``INVALID_ARGUMENT``. A requested participant-detail file must exist
+and agree with the job summary. Missing detail does not invalidate a summary-only
+job or study query; unrelated extra archive files are harmless.
 
-Reporting is best effort. A missing terminal report, a process failure, or a
-report received after finalization can leave a participant missing. An
-accepted report can still contain partial or unavailable measurements.
-Missing coverage does not change the federated job's success or failure.
-
-Linux Process mode has been exercised with a two-client PyTorch job on one
-GPU. End-to-end qualification of Docker, Kubernetes, Slurm, multi-GPU, MIG,
-and GPU containers remains open. Multi-node Slurm resource capacity is currently
-``unavailable`` because the rank-zero observation does not cover the other
-nodes. This command publishes the measurements present in the archive; it
-does not imply that every launcher or hardware configuration is qualified.
-
-Study-level errors
-====================
-
-- If ``--site`` is given without ``--job``, the command fails with
-  ``INVALID_ARGUMENT``.
-- Requesting an unknown or not-yet-finalized job returns ``JOB_NOT_FOUND`` or
-  ``JOB_NOT_FINALIZED`` respectively; retry ``JOB_NOT_FINALIZED`` after the job
-  finishes.
-- Use ``--format json`` to retrieve the full structured envelope
-  (``resource_summary``, and ``participant_summary`` when ``--site`` is given,
-  or ``summary`` for a study rollup) for automation. ``resource_summary`` has
-  ``job_id`` and the expected participant entries, but no ``job_name`` or
-  derived totals. Schema ``3.0`` participant entries carry observed
-  ``resource_capacity``; older archives carry their original ``resource_time``.
-  Study ``jobs`` rows have both identity fields and computed
-  ``resource_time`` totals where data is available. The participant
-  record remains keyed only by ``job_id``; the server resolves the display
-  name from existing metadata when handling the CLI query.
-
-The same data is available programmatically through the FLARE API; see
-:ref:`flare_api_resource_utilization`.
+For running-job training statistics, use ``nvflare job stats``. The same saved
+resource reports are available through :ref:`flare_api_resource_utilization`.
 
 ***************************
 Recipe-Based Job Creation

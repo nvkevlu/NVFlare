@@ -100,13 +100,14 @@ can be run:
 Job Resources
 ^^^^^^^^^^^^^
 Use :meth:`get_job_resources<nvflare.fuel.flare_api.flare_api.Session.get_job_resources>` and
-:meth:`get_study_resources<nvflare.fuel.flare_api.flare_api.Session.get_study_resources>` to retrieve how much
-capacity-time, CPU consumed, run-directory file size, and selected message
-traffic recorded for a finished job's participants:
+:meth:`get_study_resources<nvflare.fuel.flare_api.flare_api.Session.get_study_resources>`
+to retrieve recorded capacity, CPU work, total run-directory file size, and
+selected message traffic for a finished job's participants. Job and study
+queries derive capacity-time totals from the stored capacities and durations:
 
 .. code-block:: python
 
-    # one job, all participants' totals
+    # one job's saved participant measurements
     resources = sess.get_job_resources(job_id)
 
     # one job, including a single participant's own report
@@ -121,9 +122,9 @@ server checks permission before reading a job's archive. An empty study result
 means the caller has no accessible retained jobs, whether the study is empty
 or contains only restricted jobs.
 
-See :ref:`job_cli` ("Job Resources" section) for measurement meanings, coverage
-and availability limits, GPU observations, and the equivalent
-``nvflare job resources`` CLI command.
+See :ref:`resource_statistics` for the feature overview and measurement
+details, :ref:`resource_statistics_reports` for report fields and storage,
+and :ref:`job_resources_cli` for equivalent CLI commands.
 
 .. _flare_api_monitor_job:
 

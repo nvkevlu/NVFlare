@@ -1,0 +1,23 @@
+Resources recorded for finalized jobs in study synthetic-capacity-examples.
+Jobs: 4 found | 2 with resource data | 1 without | 1 not finalized (excluded)
+
+JOB ID                         NAME                                 JOB STATUS          CUDA DEVICE-h  FULL GPU-h  CPU VISIBLE core-h  MEM VISIBLE GiB-h  CPU USED core-h  RUN-DIR GiB  PAYLOAD SENT GiB
+synthetic-capacity-normal      Synthetic capacity contract example  FINISHED:COMPLETED  0.3333         0.3333      6.6889              13.3778            0.0833           0.0625       2.0000
+synthetic-capacity-second-job  Synthetic capacity contract example  FINISHED:COMPLETED  0.1667         0.1667      2.0222              4.0444             0.0417           0.0625       2.0000
+synthetic-no-resource-archive  Synthetic missing archive            FINISHED:COMPLETED  —              —           —                   —                  —                —            —
+synthetic-running              Synthetic running job                RUNNING             —              —           —                   —                  —                —            —
+
+Derived capacity-time totals
+  CPU visible 8.7111 core-h | Memory visible 17.4222 GiB-h | CUDA devices available 0.5000 device-h | Verified full GPUs 0.5000 GPU-h
+  CPU time used 0.1250 core-h | Run-dir files 0.1250 GiB | Message payload sent 4.0000 GiB
+
+Data gaps:
+  synthetic-no-resource-archive: no valid resource summary
+  synthetic-running: not finalized (excluded)
+
+Notes:
+  * = incomplete number; — = no usable value. See --format json for details.
+  Capacity-time totals multiply observed capacity by its matching measured interval.
+  Sums include only finalized jobs with valid resource summaries and may count shared resources more than once.
+  CPU used is process CPU time, not visible CPU capacity or host utilization %.
+  This view includes only jobs still retained by the job store.
