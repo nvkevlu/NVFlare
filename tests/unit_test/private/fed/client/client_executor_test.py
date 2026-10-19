@@ -42,13 +42,13 @@ from nvflare.private.fed.client.client_executor import (
 )
 from nvflare.private.fed.client.client_status import ClientStatus
 from nvflare.private.fed.client.communicator import Communicator
-from nvflare.private.fed.resource_stats.collector import (
+from nvflare.private.fed.resource_stats.f3_counter import F3Counter, F3TrafficClass
+from nvflare.private.fed.resource_stats.handoff import (
     INTERNAL_HANDOFF_KIND,
     INTERNAL_HANDOFF_VERSION,
     terminal_handoff_path,
     write_terminal_handoff,
 )
-from nvflare.private.fed.resource_stats.f3_counter import F3_PARENT_DRAIN_TIMEOUT_SECONDS, F3Counter, F3TrafficClass
 from nvflare.private.fed.utils.job_cert_utils import find_job_cert, write_job_cert
 
 EXPECTED_REPORTABLE_JOB_FAILURES = {
@@ -84,9 +84,6 @@ def test_build_participant_resource_report_binds_parent_identity_and_removes_han
         participant_name="site-1",
         workspace=str(tmp_path),
         logger=MagicMock(),
-        parent_f3={
-            "sent_to": [{"participant_name": "server", "payload_bytes": "300", "messages": "1"}],
-        },
     )
 
     report = json.loads(report_bytes)
@@ -95,7 +92,7 @@ def test_build_participant_resource_report_binds_parent_identity_and_removes_han
     assert report["workspace_filesystem"]["capacity_bytes"] == "1099511627776"
     assert report["cpu_consumed"] == {"seconds": "12.5"}
     assert report["message_traffic"] == {
-        "sent_to": [{"participant_name": "server", "payload_bytes": "1500", "messages": "3"}],
+        "sent_to": [{"participant_name": "server", "payload_bytes": "1200", "messages": "2"}],
     }
     assert not terminal_handoff_path(run_dir).exists()
 
@@ -128,8 +125,11 @@ def test_client_relaunch_preserves_unavailable_observations_without_inventing_va
         "seconds": "12.5",
     }
     assert report["resource_capacity"]["status"] == "unavailable"
-    assert report["message_traffic"]["status"] == "unavailable"
-    assert "sent_to" not in report["message_traffic"]
+    assert report["message_traffic"] == {
+        "status": "partial",
+        "issues": ["attribution_incomplete", "observation_incomplete"],
+        "sent_to": [],
+    }
 
 
 @pytest.mark.parametrize("already_partial", [False, True])
@@ -164,7 +164,6 @@ def test_client_relaunch_marks_capacity_cpu_and_traffic_observations_incomplete(
         participant_name="site-1",
         workspace=str(tmp_path),
         logger=MagicMock(),
-        parent_f3={"sent_to": []},
         prior_attempt_incomplete=True,
     )
 
@@ -188,15 +187,11 @@ def test_client_relaunch_marks_capacity_cpu_and_traffic_observations_incomplete(
 
 
 @pytest.mark.parametrize("prior_attempt_incomplete", [False, True])
-def test_client_report_preserves_real_child_and_parent_accepted_traffic(tmp_path, prior_attempt_incomplete):
+def test_client_report_preserves_child_accepted_traffic_with_known_zero_parent(tmp_path, prior_attempt_incomplete):
     child_counter = F3Counter()
     child_result = child_counter.try_begin(F3TrafficClass.TASK_RESULT, "server")
     assert child_counter.complete_remote_accepted(child_result, 1200)
-    parent_counter = F3Counter()
-    deployment = parent_counter.try_begin(F3TrafficClass.JOB_APPLICATION, "server")
-    assert parent_counter.complete_remote_accepted(deployment, 300)
     assert child_counter.close_and_drain(0.0)
-    assert parent_counter.close_and_drain(0.0)
     run_dir = Workspace._join_under_root(str(tmp_path), WorkspaceConstants.WORKSPACE_PREFIX + "job-1")
     write_terminal_handoff(
         run_dir,
@@ -216,12 +211,11 @@ def test_client_report_preserves_real_child_and_parent_accepted_traffic(tmp_path
         participant_name="site-1",
         workspace=str(tmp_path),
         logger=MagicMock(),
-        parent_f3=parent_counter.freeze(),
         prior_attempt_incomplete=prior_attempt_incomplete,
     )
 
     report = json.loads(data)
-    expected_traffic = {"sent_to": [{"participant_name": "server", "payload_bytes": "1500", "messages": "2"}]}
+    expected_traffic = {"sent_to": [{"participant_name": "server", "payload_bytes": "1200", "messages": "1"}]}
     expected_consumed = {"seconds": "12.5"}
     if prior_attempt_incomplete:
         for measurement in (expected_traffic, expected_consumed):
@@ -407,18 +401,14 @@ def test_start_app_pending_handle_operations_before_launcher_returns(tmp_path):
         )
 
 
-def test_start_app_starts_the_cp_f3_counter_before_launcher_selection(tmp_path):
+def test_start_app_does_not_create_an_unused_client_parent_counter(tmp_path):
     job_id = "job-1"
     job_meta, workspace, client, fl_ctx = _make_start_app_inputs(tmp_path, job_id)
     executor = JobExecutor(client=client, startup=workspace.get_startup_kit_dir())
     launcher = MagicMock()
 
     def get_job_launcher(*_args, **_kwargs):
-        # The counter must exist and still be collecting by the time launcher
-        # selection happens.
-        counter = executor.f3_counters.get(job_id)
-        assert counter is not None
-        assert counter.state == "collecting"
+        assert not hasattr(executor, "f3_counters")
         return launcher
 
     with (
@@ -437,7 +427,7 @@ def test_start_app_starts_the_cp_f3_counter_before_launcher_selection(tmp_path):
         )
 
 
-def test_start_app_forgets_the_cp_f3_counter_when_launch_fails(tmp_path):
+def test_start_app_removes_pending_process_when_launch_fails(tmp_path):
     job_id = "job-1"
     job_meta, workspace, client, fl_ctx = _make_start_app_inputs(tmp_path, job_id)
     executor = JobExecutor(client=client, startup=workspace.get_startup_kit_dir())
@@ -459,7 +449,7 @@ def test_start_app_forgets_the_cp_f3_counter_when_launch_fails(tmp_path):
             fl_ctx,
         )
 
-    assert executor.f3_counters.get(job_id) is None
+    assert job_id not in executor.run_processes
 
 
 def test_client_cpu_attempt_marker_survives_parent_restart_and_redeployment(tmp_path):
@@ -1080,7 +1070,7 @@ def test_wait_child_process_reports_terminal_return_code(return_code, process_st
     engine.fire_event.assert_called_once_with(EventType.JOB_COMPLETED, fl_ctx)
 
 
-def test_wait_child_process_freezes_zero_traffic_f3_counter_and_forgets_it():
+def test_wait_child_process_assembles_known_zero_client_parent_contribution():
     client = MagicMock()
     client.client_name = "site-1"
     client.send_request_before_shutdown.return_value.get_header.return_value = ReturnCode.OK
@@ -1094,25 +1084,20 @@ def test_wait_child_process_freezes_zero_traffic_f3_counter_and_forgets_it():
             _ABORT_REQUESTED_KEY: False,
         }
     }
-    # Simulate start_app() having already started the counter for this job.
-    counter = job_executor.f3_counters.start_job("job-1")
-    close_and_freeze = MagicMock(wraps=job_executor.f3_counters.close_and_freeze)
-    job_executor.f3_counters.close_and_freeze = close_and_freeze
-
     engine = MagicMock()
     fl_ctx = MagicMock()
     fl_ctx.get_engine.return_value = engine
     captured = {}
 
-    def build_report(**kwargs):
+    def assemble_report(**kwargs):
         captured.update(kwargs)
-        return b"{}"
+        return {}
 
     with (
         patch("nvflare.private.fed.client.client_executor.get_return_code", return_value=JobReturnCode.SUCCESS),
         patch(
-            "nvflare.private.fed.client.client_executor._build_participant_resource_report",
-            side_effect=build_report,
+            "nvflare.private.fed.client.client_executor.assemble_participant_summary",
+            side_effect=assemble_report,
         ),
     ):
         job_executor._wait_child_process_finish(
@@ -1125,13 +1110,8 @@ def test_wait_child_process_freezes_zero_traffic_f3_counter_and_forgets_it():
             fl_ctx=fl_ctx,
         )
 
-    assert counter.freeze() == {"sent_to": []}
-    assert captured["parent_f3"] == counter.freeze()
-    close_and_freeze.assert_called_once_with(
-        "job-1",
-        drain_timeout_seconds=F3_PARENT_DRAIN_TIMEOUT_SECONDS,
-    )
-    assert job_executor.f3_counters.get("job-1") is None
+    assert captured["parent_f3"] == {"sent_to": []}
+    assert not hasattr(job_executor, "f3_counters")
 
 
 def test_wait_child_process_cleans_up_when_terminal_outcome_report_fails():

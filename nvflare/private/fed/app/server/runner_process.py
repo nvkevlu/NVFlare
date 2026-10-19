@@ -33,10 +33,11 @@ from nvflare.private.defs import AUTH_CLIENT_NAME_FOR_SJ, AppFolderConstants
 from nvflare.private.fed.app.fl_conf import FLServerStarterConfiger
 from nvflare.private.fed.app.job_process_cleanup import shutdown_job_process_runtime
 from nvflare.private.fed.app.utils import monitor_parent_process
-from nvflare.private.fed.resource_stats.collector import JobResourceCollector, write_terminal_handoff
+from nvflare.private.fed.resource_stats.collector import JobResourceCollector
 from nvflare.private.fed.resource_stats.external_transfer import load_task_token_verifier
 from nvflare.private.fed.resource_stats.f3_counter import F3_DRAIN_TIMEOUT_SECONDS
 from nvflare.private.fed.resource_stats.f3_job_counter import get_job_f3_counter, start_job_f3_counter
+from nvflare.private.fed.resource_stats.handoff import write_terminal_handoff
 from nvflare.private.fed.server.server_app_runner import ServerAppRunner
 from nvflare.private.fed.server.server_state import HotState
 from nvflare.private.fed.utils.fed_utils import (

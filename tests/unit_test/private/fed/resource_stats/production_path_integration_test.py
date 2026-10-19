@@ -32,15 +32,10 @@ from nvflare.apis.job_def import JobMetaKey, RunStatus
 from nvflare.apis.job_def_manager_spec import JobDefManagerSpec
 from nvflare.fuel.f3.cellnet.defs import MessageHeaderKey
 from nvflare.private.defs import CellMessageHeaderKeys, JobFailureMsgKey, new_cell_message
-from nvflare.private.fed.resource_stats.collector import (
-    JobResourceCollector,
-    assemble_participant_summary,
-    canonical_json_bytes,
-    read_terminal_handoff,
-    write_terminal_handoff,
-)
-from nvflare.private.fed.resource_stats.contract import derive_job_totals
+from nvflare.private.fed.resource_stats.collector import JobResourceCollector, assemble_participant_summary
+from nvflare.private.fed.resource_stats.contract import canonical_json_bytes, derive_job_totals
 from nvflare.private.fed.resource_stats.coordinator import ResourceStatsCoordinator
+from nvflare.private.fed.resource_stats.handoff import read_terminal_handoff, write_terminal_handoff
 from nvflare.private.fed.server.fed_server import FederatedServer
 from nvflare.private.fed.server.job_cmds import JobCommandModule
 from nvflare.private.fed.server.job_runner import JobRunner
@@ -93,9 +88,7 @@ def _terminal_handoff(
         clock_ns=lambda: next(ticks),
         capacity_probe=lambda: {
             "cpu": {
-                "units": cpu_units,
-                "model": "AMD EPYC 9654",
-                "architecture": "x86_64",
+                "groups": [{"units": cpu_units, "model": "AMD EPYC 9654", "architecture": "x86_64"}],
             },
             "memory": {"bytes": memory_bytes},
             "gpu": {
@@ -148,9 +141,7 @@ def test_authenticated_report_to_workspace_query_and_human_output(tmp_path):
             f3_bytes=5_000_000,
             f3_messages=4,
         ),
-        parent_f3={
-            "sent_to": [{"participant_name": "server", "payload_bytes": "1000000", "messages": "1"}],
-        },
+        parent_f3={"sent_to": []},
     )
     participant_bytes = canonical_json_bytes(client_report)
 
@@ -216,7 +207,7 @@ def test_authenticated_report_to_workspace_query_and_human_output(tmp_path):
 
     # Read through the production admin command exactly as the public Session
     # API does.  The mocked manager represents only the durable job-store I/O;
-    # summary validation, inventory verification, participant selection, and response
+    # summary validation, known archive paths, participant selection, and response
     # construction are all production code.
     staged_paths = []
     stored_workspace_path = tmp_path / "stored-workspace"
@@ -267,10 +258,10 @@ def test_authenticated_report_to_workspace_query_and_human_output(tmp_path):
     assert all("status" not in entry["cpu_consumed"] for entry in finalized["participants"])
     assert "status" not in totals["cpu_consumed"]
     assert client_report["message_traffic"] == {
-        "sent_to": [{"participant_name": "server", "payload_bytes": "6000000", "messages": "5"}],
+        "sent_to": [{"participant_name": "server", "payload_bytes": "5000000", "messages": "4"}],
     }
     assert totals["message_traffic"] == {
-        "sent": {"payload_bytes": "9500000", "messages": "8"},
+        "sent": {"payload_bytes": "8500000", "messages": "7"},
     }
 
     output = render_job_resources(finalized, result["participant_summary"], job_name=result["job_name"])

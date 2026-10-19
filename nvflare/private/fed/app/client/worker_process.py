@@ -32,9 +32,10 @@ from nvflare.private.fed.app.job_process_cleanup import shutdown_job_process_run
 from nvflare.private.fed.app.utils import monitor_parent_process
 from nvflare.private.fed.client.client_app_runner import ClientAppRunner
 from nvflare.private.fed.client.client_status import ClientStatus
-from nvflare.private.fed.resource_stats.collector import JobResourceCollector, write_terminal_handoff
+from nvflare.private.fed.resource_stats.collector import JobResourceCollector
 from nvflare.private.fed.resource_stats.f3_counter import F3_DRAIN_TIMEOUT_SECONDS
 from nvflare.private.fed.resource_stats.f3_job_counter import get_job_f3_counter, start_job_f3_counter
+from nvflare.private.fed.resource_stats.handoff import write_terminal_handoff
 from nvflare.private.fed.utils.fed_utils import (
     create_stats_pool_files_for_job,
     fobs_initialize,

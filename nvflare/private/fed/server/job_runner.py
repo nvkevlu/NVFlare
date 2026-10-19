@@ -45,12 +45,7 @@ from nvflare.lighter.tool_consts import NVFLARE_SIG_FILE
 from nvflare.lighter.utils import verify_folder_signature
 from nvflare.private.admin_defs import Message, MsgHeader, ReturnCode
 from nvflare.private.defs import RequestHeader, TrainingTopic
-from nvflare.private.fed.resource_stats.collector import (
-    assemble_participant_summary,
-    canonical_json_bytes,
-    read_terminal_handoff,
-    remove_terminal_handoff,
-)
+from nvflare.private.fed.resource_stats.collector import assemble_participant_summary
 from nvflare.private.fed.resource_stats.coordinator import (
     RESOURCE_REPORT_ACCEPTED,
     RESOURCE_REPORT_DUPLICATE,
@@ -58,6 +53,11 @@ from nvflare.private.fed.resource_stats.coordinator import (
 )
 from nvflare.private.fed.resource_stats.f3_counter import F3_PARENT_DRAIN_TIMEOUT_SECONDS, F3TrafficClass
 from nvflare.private.fed.resource_stats.f3_registry import F3CounterRegistry
+from nvflare.private.fed.resource_stats.handoff import (
+    canonical_json_bytes,
+    read_terminal_handoff,
+    remove_terminal_handoff,
+)
 from nvflare.private.fed.server.admin import check_client_replies
 from nvflare.private.fed.server.server_state import HotState
 from nvflare.private.fed.utils.app_deployer import AppDeployer
