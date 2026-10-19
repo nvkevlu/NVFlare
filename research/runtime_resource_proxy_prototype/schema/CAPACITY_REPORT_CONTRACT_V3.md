@@ -1,6 +1,6 @@
 # Participant capacity reports
 
-Updated October 15, 2026. Schema 3.0 stores the resource capacities observed by
+Updated October 19, 2026. Schema 3.0 stores the resource capacities observed by
 the participant's job process, rather than storing capacity multiplied by
 elapsed seconds. A normal report therefore exposes CPU units, memory bytes,
 and CUDA-device counts directly. Job and study queries calculate capacity-time
@@ -61,10 +61,23 @@ An unreadable or malformed CPU/RAM limit does not discard another usable
 value. Keep the smallest usable capacity and mark the block `partial` with
 `observation_incomplete` when a restriction cannot be checked. Using the
 online CPU count because affinity is unavailable has the same indication.
-An absent or unlimited constraint is not a failed read. These best-effort
+An absent controller or explicitly unlimited limit is not a failed read.
+A missing file required by an assigned v1 controller is. These best-effort
 values may exceed the actual process limit; unavailable is reserved for a
 dimension with no usable positive value. No additional status, source field,
 or issue code is required.
+
+The block can be partial even when CPU, RAM, GPU, and duration are all present.
+This records uncertainty in a limit or earlier observation, not necessarily a
+missing field. Preserve its covered seconds and available values through the
+handoff, job summary, and query calculations. The same block-level indication
+marks derived capacity-time; CPU consumption retains its independent status.
+The record does not identify a particular failed bound.
+
+A malformed measurement in the child handoff makes only that measurement
+unavailable with `malformed_source`; valid sibling measurements remain usable.
+Malformed JSON, identity, or the handoff envelope is still rejected as a whole.
+Server reception validates the complete public report as before.
 
 Today's launch paths probe once. The existing capacity-change hook can close
 an interval and record another observation. If it is used, the final report

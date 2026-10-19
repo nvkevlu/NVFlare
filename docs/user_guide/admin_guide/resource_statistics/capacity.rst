@@ -55,7 +55,7 @@ count (or machine count), or physical RAM, reduced by any smaller readable
 limits. The value may exceed the actual limit. The CLI marks it with ``*``
 and explains the gap. Only an observation with no usable value is unavailable.
 
-An absent or unlimited constraint is not a failed measurement. Missing GPU
+An absent controller or unlimited limit is not a failed measurement. Missing GPU
 information does not remove CPU or memory data.
 
 CUDA devices and GPU memory

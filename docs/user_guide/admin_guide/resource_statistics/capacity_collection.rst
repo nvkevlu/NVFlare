@@ -26,7 +26,7 @@ An unreadable or invalid bound does not erase the other values. NVFlare
 keeps the smallest usable value and marks the capacity observation partial
 with ``observation_incomplete`` when a restriction could not be checked.
 The same applies when only the machine-wide count is available in place of
-affinity. A missing or explicitly unlimited constraint is not a failed read.
+affinity. An absent controller or explicitly unlimited limit is not a failed read.
 If no positive value is available, CPU capacity is unavailable.
 
 For example, if affinity allows sixteen CPUs but a configured quota cannot

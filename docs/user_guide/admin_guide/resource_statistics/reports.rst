@@ -96,10 +96,10 @@ launches it, called its parent, reads temporary report data from:
 
    resource_stats/staging/terminal_handoff.json
 
-The parent supplies the job and participant identity, combines child and
-parent message counters, assembles the report before releasing resources,
-and sends it afterward. The temporary file is removed when consumed. The
-server participant follows its corresponding runner/parent path.
+The parent supplies the job and participant identity, assembles the report
+before releasing resources, and sends it afterward. The temporary file is
+removed when consumed. The server follows its corresponding runner/parent
+path and also includes deployment messages sent by its parent process.
 
 Transport and validation
 ------------------------
@@ -184,7 +184,7 @@ Exceptions identify what happened without changing another measurement's value:
      - Meaning
    * - ``partial``
      - Measurement
-     - Values remain, but some information is missing; this also covers best-effort CPU/RAM fallback.
+     - Usable values remain; the explanation describes what could not be measured or checked.
    * - ``unavailable``
      - Measurement
      - No usable value; do not substitute zero.
@@ -198,24 +198,33 @@ Exceptions identify what happened without changing another measurement's value:
      - Participant
      - The server knows this expected participant was not launched for the job.
 
-An exception's ``issues`` list can explain its cause:
+The JSON ``issues`` codes have the following meanings. The CLI shows the
+explanation, not the code:
 
 .. list-table:: Issue codes
    :header-rows: 1
-   :widths: 35 65
+   :widths: 25 45 30
 
    * - Code
-     - Explanation
+     - Concrete examples
+     - How to interpret the value
    * - ``observation_incomplete``
-     - An observation or earlier measurement window is missing or incomplete.
+     - A CPU/RAM limit could not be read; GPU counting failed; a file scan stopped at its limit; an earlier attempt's measurements are missing.
+     - Available values remain. Capacity can be too high after fallback; file totals can be too low after a stopped scan.
    * - ``attribution_incomplete``
-     - Some work or contribution could not be assigned completely to this participant.
+     - Child-process CPU time was not accounted for, or a trainer's tensor transfer could not be tied to this participant.
+     - The recorded CPU work or message total may omit that contribution.
    * - ``counter_gap``
-     - Included traffic may be missing from the counter, for example an unresolved contribution.
+     - A message-accounting callback failed or a tensor transfer was still unresolved when counters closed.
+     - Some accepted messages or payload bytes may be missing.
    * - ``unsupported``
-     - This measurement cannot be provided for the current platform or execution arrangement.
+     - The platform does not provide the measurement, or a multi-node launch cannot be represented by a local capacity observation.
+     - No usable value is reported for that measurement. This is not zero.
    * - ``malformed_source``
-     - Source measurement data is invalid and cannot be used as supplied.
+     - A child hands its parent a negative byte count, invalid number, or incorrectly shaped measurement.
+     - The invalid value is discarded; independent valid measurements and contributions remain usable.
+
+The report does not identify the exact CPU/RAM limit that could not be read.
 
 For example, a capacity block may retain CPU and RAM while omitting an
 unavailable GPU observation:

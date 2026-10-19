@@ -411,10 +411,12 @@ class Session(SessionSpec):
     def get_job_resources(self, job_id: str, site: str = None) -> dict:
         """Return the finalized resource-statistics report for one job.
 
-        Reports participant-visible CPU, memory, and CUDA-device capacity-time,
+        Reports participant-visible CPU, memory, and CUDA-device capacity,
         CPU time consumed, run-directory file bytes, selected message traffic,
-        and one final workspace-filesystem capacity observation. Capacity-time
-        does not establish that the job used a GPU. Data is only available after
+        together with the seconds each capacity observation covers. A site
+        query also includes its final workspace-filesystem capacity. Queries
+        calculate capacity-time when needed; capacity does not establish that
+        the job used a GPU. Data is only available after
         the job has finished and the server has finalized its resource report;
         calling this before finalization raises :class:`JobNotDone`.
 
@@ -457,7 +459,7 @@ class Session(SessionSpec):
 
         Scans retained, finalized jobs the caller may inspect in the active study (see
         :ref:`flare_api_initialization` for how the active study is selected)
-        and derives additive totals within each resource-schema version.
+        and derives additive totals from the current resource-report format.
         The server checks each job with the same permission as
         ``get_job_resources`` before reading its archive. Restricted jobs are
         omitted from rows, totals, and coverage counts, without a denied-job

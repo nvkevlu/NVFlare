@@ -49,6 +49,9 @@ authorized job/site/study query -> archive reader -> derived totals -> CLI
 The server job process has the corresponding runner/parent path. The shared
 site parent is not an extra compute-capacity participant. Several jobs can
 observe the same hardware; reports are not deduplicated into a host inventory.
+The client parent has no counter for the included application traffic; it
+passes the child's counters through. The server additionally includes its
+parent process's deployment sends.
 
 The [collector](../../nvflare/private/fed/resource_stats/collector.py) is created
 after normal workspace preparation and before application construction in
@@ -84,9 +87,16 @@ applies smaller readable memory bounds. An unreadable or malformed limit
 does not erase those values: retain the best available capacity and mark
 `resource_capacity` with `partial` and `observation_incomplete` when a
 restriction cannot be checked. Host-count fallback when affinity is unavailable
-uses the same indication. Missing or unlimited constraints are not read errors.
+uses the same indication. An absent controller or explicitly unlimited limit
+is not a read error. A missing file required by an assigned v1 controller is.
 Use unavailable only when no usable positive value can be obtained for that
 dimension. Independent dimensions remain usable.
+
+Keep this indication at the capacity-block level, including when all resource
+values and duration are present. Do not add per-bound status fields. The compact
+report cannot identify which particular limit failed. Its derived products
+retain the same indication; CPU consumption uses its own independent clock and
+quality. A CPU probe failure must not erase memory, CUDA, or their duration.
 
 Quota ratios are rounded down to at most nine fractional digits. A CPU-time budget of
 200,000 microseconds per 100,000-microsecond period means two logical-CPU
@@ -239,6 +249,26 @@ protection, duplicate-key rejection, and report-size bounds. Child handoffs
 are self-reports, not immutable evidence. Unknown is not zero; success omits
 status, while exceptions use the current `partial`/`unavailable` and participant
 gap forms. CPU/RAM fallback uses those same fields.
+
+Validate each named handoff measurement independently with
+`normalize_measurement(field, value)`. Replace a malformed measurement with
+`unavailable` and `malformed_source`, retaining valid siblings. Malformed JSON,
+identity, and envelope checks still reject the handoff as a whole. Validate
+the complete public report at the server boundary. `participant_measurements`
+copies the accepted measurements into a summary; it does not calculate totals.
+
+### Explaining gaps
+
+Successful measurements omit status and issues. The CLI shows a short reason
+beside affected data; users do not need to interpret raw issue codes.
+
+| Issue code | Concrete cause | Consequence |
+| --- | --- | --- |
+| `observation_incomplete` | An unreadable CPU/RAM limit, failed GPU observation, interrupted file scan, or missing earlier attempt. | Keep usable values. Fallback capacity may be too high; a stopped file scan may be too low. |
+| `attribution_incomplete` | Missing waited-child CPU time or an unassociated trainer transfer. | Some CPU work or message bytes may be missing. |
+| `counter_gap` | A failed accounting callback or unresolved transfer at counter closure. | Some accepted message bytes/counts may be missing. |
+| `unsupported` | A platform or multi-node arrangement cannot supply this measurement. | No usable value; do not substitute zero. |
+| `malformed_source` | A malformed numeric value or measurement object in the child handoff. | Discard the invalid value; keep independent valid measurements and contributions. |
 
 ## Archive queries and shutdown behavior
 
