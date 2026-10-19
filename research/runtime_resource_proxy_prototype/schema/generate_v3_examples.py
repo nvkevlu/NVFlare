@@ -77,7 +77,7 @@ def entry(record):
         "participant_name": record["participant_name"],
         "role": "server" if record["participant_name"] == "server" else "client",
         "received_at": AT,
-        **contract.derive_participant_totals(record),
+        **contract.participant_measurements(record),
     }
 
 
@@ -117,6 +117,9 @@ def examples():
     partial["resource_capacity"].pop("gpu")
     partial["resource_capacity"].update(status="partial", issues=["observation_incomplete"])
     partial["cpu_consumed"].update(status="partial", issues=["attribution_incomplete"])
+    fallback = participant(job_id="synthetic-capacity-fallback")
+    fallback["resource_capacity"].update(status="partial", issues=["observation_incomplete"])
+    fallback["message_traffic"] = {"sent_to": []}
     unavailable = participant(job_id="synthetic-capacity-unavailable")
     unavailable["resource_capacity"] = {"status": "unavailable", "issues": ["unsupported"]}
     unavailable["message_traffic"] = {"sent_to": []}
@@ -143,6 +146,7 @@ def examples():
         "participant_summary": normal,
         "participant_summary_server": normal_server,
         "participant_summary_partial": partial,
+        "participant_summary_fallback": fallback,
         "participant_summary_unavailable": unavailable,
         "participant_summary_changes": changed,
         "participant_summary_large_value": large,
@@ -151,6 +155,7 @@ def examples():
     for label, members, missing in (
         ("resource_summary", [normal, normal_server], False),
         ("resource_summary_partial", [normal, partial, normal_server], False),
+        ("resource_summary_fallback", [fallback], False),
         ("resource_summary_missing", [normal, normal_server], True),
         ("resource_summary_unavailable", [unavailable], False),
         ("resource_summary_changes", [changed], False),

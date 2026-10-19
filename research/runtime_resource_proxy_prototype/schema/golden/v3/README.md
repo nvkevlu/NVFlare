@@ -13,6 +13,9 @@ example covers 300 seconds at two GPUs followed by 300 seconds at one GPU.
 Its query-derived GPU time is 900 device-seconds; those products are absent
 from participant and job-summary storage. Partial, unavailable and missing
 examples show independent coverage and counters.
+The fallback example keeps CPU, RAM, CUDA, and duration while marking that
+some limits or earlier observations could not be checked. Its CPU-used average
+remains independent; no per-resource status fields are added.
 
 The study combines two current-format jobs in one derived totals object. It
 also contains one finished job without a report and one running job, which

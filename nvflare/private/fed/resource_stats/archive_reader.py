@@ -27,8 +27,8 @@ from .contract import (
     MAX_PARTICIPANT_SUMMARY_BYTES,
     MAX_RESOURCE_SUMMARY_BYTES,
     ContractError,
-    derive_participant_totals,
     load_and_validate,
+    participant_measurements,
 )
 
 RESOURCE_STATS_PREFIX = "resource_stats/"
@@ -93,7 +93,7 @@ class WorkspaceResourceStatsReader:
             or record["participant_name"] != participant_name
         ):
             raise WorkspaceResourceStatsError("participant summary identity does not match its archive slot")
-        copied = derive_participant_totals(record)
+        copied = participant_measurements(record)
         if any(summary_entry[field] != copied[field] for field in copied):
             raise WorkspaceResourceStatsError("participant summary values do not match the resource summary")
         return record

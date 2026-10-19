@@ -19,6 +19,7 @@ from copy import deepcopy
 
 import pytest
 
+from nvflare.private.fed.resource_stats import contract
 from nvflare.private.fed.resource_stats.contract import (
     KIND_PARTICIPANT_SUMMARY,
     KIND_RESOURCE_SUMMARY,
@@ -28,11 +29,12 @@ from nvflare.private.fed.resource_stats.contract import (
     canonical_json_bytes,
     capacity_to_resource_time,
     derive_job_totals,
-    derive_participant_totals,
     derive_study_totals,
     load_and_validate,
+    normalize_measurement,
     normalize_message_traffic,
     normalize_record,
+    participant_measurements,
     validate_record,
 )
 
@@ -63,7 +65,7 @@ def _accepted_entry(participant_name="site-1", role="client", received_at="2026-
         "participant_name": participant_name,
         "role": role,
         "received_at": received_at,
-        **derive_participant_totals(record),
+        **participant_measurements(record),
     }
 
 
@@ -103,7 +105,7 @@ def test_unreleased_feature_rejects_other_formats_for_all_readers(version):
     with pytest.raises(ContractError, match="schema_version"):
         load_and_validate(data, KIND_PARTICIPANT_SUMMARY)
     with pytest.raises(ContractError, match="schema_version"):
-        derive_participant_totals(record)
+        participant_measurements(record)
 
 
 def test_success_statuses_and_issues_are_absent_from_complete_measurements():
@@ -325,10 +327,10 @@ def test_canonical_json_bytes_is_deterministic_and_json_decodable():
     assert json.loads(first) == record
 
 
-def test_derive_participant_totals_copies_reportable_fields():
+def test_participant_measurements_copies_reportable_fields():
     record = _participant_summary()
 
-    totals = derive_participant_totals(record)
+    totals = participant_measurements(record)
 
     assert set(totals) == {"resource_capacity", "cpu_consumed", "retained_content", "message_traffic"}
     assert totals["cpu_consumed"] == {"seconds": "0"}
@@ -824,3 +826,57 @@ def test_fractional_capacity_product_rounding_preserves_the_original_observation
     assert normalize_record(report)["resource_capacity"]["cpu"]["groups"] == [{"units": "0.000000001"}]
     derived = capacity_to_resource_time(report["resource_capacity"])
     assert derived["cpu"]["groups"] == [{"unit_seconds": "0"}]
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["resource_capacity", "cpu_consumed", "workspace_filesystem", "retained_content", "message_traffic"],
+)
+def test_one_measurement_normalization_uses_the_same_rules_without_requiring_siblings(field):
+    source = _participant_summary()[field]
+    normalized = normalize_measurement(field, source)
+    assert normalized == source
+    assert normalized is not source
+    normalized["unexpected"] = "value"
+    with pytest.raises(ContractError, match="unexpected"):
+        normalize_measurement(field, normalized)
+    assert "unexpected" not in source
+
+
+@pytest.mark.parametrize("field", ["resource_time", "cpu", "anything", None])
+def test_one_measurement_normalization_rejects_unknown_names(field):
+    with pytest.raises(ContractError, match="supported participant measurement"):
+        normalize_measurement(field, {})
+
+
+def test_best_effort_capacity_can_retain_all_values_and_matching_seconds():
+    report = _participant_summary()
+    report["resource_capacity"].update(status="partial", issues=["observation_incomplete"])
+    normalized = normalize_record(report)
+    copied = participant_measurements(normalized)
+    totals = derive_job_totals([_accepted_entry() | copied])
+    assert normalized["resource_capacity"]["measured_seconds"] == "2"
+    assert totals["resource_time"]["status"] == "partial"
+    assert totals["resource_time"]["issues"] == ["observation_incomplete"]
+    assert totals["resource_time"]["measured_seconds"] == "2"
+    assert totals["resource_time"]["cpu"]["groups"][0]["unit_seconds"] == "32"
+    assert "status" not in totals["cpu_consumed"]
+
+
+@pytest.mark.parametrize("operation", ["capacity", "job"])
+def test_capacity_products_are_not_computed_twice_within_one_operation(monkeypatch, operation):
+    report = _participant_summary()
+    entry = _accepted_entry()
+    original = contract._capacity_time_from_validated
+    calls = []
+
+    def counted(capacity):
+        calls.append(capacity)
+        return original(capacity)
+
+    monkeypatch.setattr(contract, "_capacity_time_from_validated", counted)
+    if operation == "capacity":
+        capacity_to_resource_time(report["resource_capacity"])
+    else:
+        derive_job_totals([entry])
+    assert len(calls) == 1

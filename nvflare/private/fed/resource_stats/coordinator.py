@@ -38,8 +38,8 @@ from .contract import (
     SCHEMA_VERSION,
     ContractError,
     canonical_json_bytes,
-    derive_participant_totals,
     load_and_validate,
+    participant_measurements,
     utc_timestamp,
     validate_record,
 )
@@ -332,7 +332,7 @@ class ResourceStatsCoordinator:
                         {
                             **base,
                             "received_at": accepted.received_at,
-                            **derive_participant_totals(record),
+                            **participant_measurements(record),
                         }
                     )
                 elif participant_name in state.disabled:

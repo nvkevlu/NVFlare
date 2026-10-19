@@ -27,17 +27,21 @@ _MISSING = "—"
 
 _ISSUE_LABELS = {
     "counter_gap": "some messages may be missing",
-    "observation_incomplete": "observation incomplete",
-    "attribution_incomplete": "some work could not be attributed",
+    "observation_incomplete": "part of the measurement could not be collected",
+    "attribution_incomplete": "some work could not be assigned to this participant",
     "unsupported": "not supported here",
-    "malformed_source": "invalid source data",
+    "malformed_source": "measurement contained invalid values",
 }
 
 _MEASUREMENT_LABELS = {
-    "resource_time": "visible capacity",
+    "resource_capacity": "visible capacity",
     "cpu_consumed": "CPU time used",
     "retained_content": "run-dir files",
     "message_traffic": "message traffic",
+}
+_TOTAL_MEASUREMENT_LABELS = {
+    "resource_time": "visible capacity",
+    **{key: label for key, label in _MEASUREMENT_LABELS.items() if key != "resource_capacity"},
 }
 
 
@@ -236,9 +240,35 @@ def _table(headers: list[str], rows: list[list[str]]) -> list[str]:
     return ["  ".join(value.ljust(widths[index]) for index, value in enumerate(row)).rstrip() for row in values]
 
 
-def _issue_detail(value: dict) -> str:
+def _issue_detail(value: dict, field: str) -> str:
     issues = value.get("issues", [])
-    return "; ".join(_ISSUE_LABELS.get(issue, issue.replace("_", " ")) for issue in issues)
+    labels = dict(_ISSUE_LABELS)
+    if field == "resource_capacity":
+        observations = value.get("intervals", [value])
+        missing = [
+            label
+            for resource, label in (("cpu", "CPU"), ("memory", "RAM"), ("gpu", "GPU"))
+            if any(resource not in observation for observation in observations)
+        ]
+        labels["observation_incomplete"] = (
+            f"{', '.join(missing)} capacity could not be observed for the whole interval"
+            if missing
+            else "some limits or earlier observations could not be checked; capacity may be overstated"
+        )
+        labels["attribution_incomplete"] = "some capacity observations could not be assigned to this participant"
+    elif field == "cpu_consumed":
+        labels["observation_incomplete"] = "part of the CPU measurement interval is missing"
+        labels["attribution_incomplete"] = "some child-process CPU time may be missing"
+    elif field == "retained_content":
+        labels["observation_incomplete"] = "the file scan stopped early or could not read every file"
+        labels["attribution_incomplete"] = "some files could not be assigned to this participant"
+    elif field == "message_traffic":
+        labels["observation_incomplete"] = "some message counters were unavailable"
+        labels["attribution_incomplete"] = "some message traffic could not be assigned to this participant"
+        labels["counter_gap"] = "some accepted messages or tensor bytes may be missing"
+    elif field == "workspace_filesystem":
+        labels["observation_incomplete"] = "the workspace filesystem capacity could not be read"
+    return "; ".join(labels.get(issue, issue.replace("_", " ")) for issue in issues)
 
 
 def _data_gaps(participants: list[dict]) -> list[str]:
@@ -250,14 +280,15 @@ def _data_gaps(participants: list[dict]) -> list[str]:
             continue
         gaps = []
         for field, label in _MEASUREMENT_LABELS.items():
-            if field == "resource_time":
-                field = "resource_capacity"
             value = entry.get(field, {"status": "unavailable"})
             status = _metric_status(value)
             if status == "reported":
                 continue
-            detail = _issue_detail(value)
-            gaps.append(f"{label} {status}" + (f" ({detail})" if detail else ""))
+            detail = _issue_detail(value, field)
+            if status == "partial":
+                gaps.append(f"{label}: {detail or 'some values may be missing'}")
+            else:
+                gaps.append(f"{label} unavailable" + (f" ({detail})" if detail else ""))
         if gaps:
             lines.append(f"  {name}: " + "; ".join(gaps))
     return lines
@@ -440,7 +471,7 @@ def render_job_resources(summary: dict, participant: dict | None = None, *, job_
     gaps = _data_gaps(visible_entries)
     if selected and participant and "status" in participant.get("workspace_filesystem", {}):
         workspace = participant["workspace_filesystem"]
-        detail = _issue_detail(workspace)
+        detail = _issue_detail(workspace, "workspace_filesystem")
         gaps.append(f"  {selected}: workspace-filesystem capacity unavailable" + (f" ({detail})" if detail else ""))
     if gaps:
         lines.extend(["", "Data gaps:", *gaps])
@@ -547,7 +578,7 @@ def render_study_resources(summary: dict) -> str:
                 row_metrics.append(_marked(_number(_sent_bytes(totals), _GIB), _metric_status(traffic)))
             incomplete = [
                 f"{label} {'incomplete' if _metric_status(totals[field]) == 'partial' else 'unavailable'}"
-                for field, label in _MEASUREMENT_LABELS.items()
+                for field, label in _TOTAL_MEASUREMENT_LABELS.items()
                 if _metric_status(totals[field]) != "reported"
             ]
             if incomplete:

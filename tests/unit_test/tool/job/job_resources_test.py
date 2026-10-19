@@ -114,7 +114,7 @@ def test_schema_3_partial_capacity_and_cpu_counter_keep_their_own_values_and_win
     assert _site_cell(output, "MEM GiB") == "64.0000*"
     assert _site_cell(output, "AVG CPU USED") == "0.2000"
     assert _site_cell(output, "CUDA DEVICES") == "—"
-    assert "visible capacity partial (observation incomplete)" in output
+    assert "visible capacity: GPU capacity could not be observed for the whole interval" in output
 
 
 def test_schema_3_zero_visible_devices_is_an_observed_zero():
@@ -127,6 +127,31 @@ def test_schema_3_zero_visible_devices_is_an_observed_zero():
     assert _site_cell(output, "VERIFIED FULL GPUs") == "0.0000"
     assert "CUDA devices available 0.0000 device-h" in output
     assert "visible capacity unavailable" not in output
+
+
+def test_best_effort_capacity_keeps_values_and_explains_the_possible_overstatement():
+    participant = _participant()
+    participant["resource_capacity"].update(status="partial", issues=["observation_incomplete"])
+
+    output = render_job_resources(_job_summary(participant))
+
+    assert _site_cell(output, "CPU VISIBLE") == "8.0000*"
+    assert _site_cell(output, "MEM GiB") == "64.0000*"
+    assert _site_cell(output, "CUDA DEVICES") == "2.0000*"
+    assert _site_cell(output, "AVG CPU USED") == "0.5000"
+    assert "some limits or earlier observations could not be checked; capacity may be overstated" in output
+    assert "observation_incomplete" not in output
+    assert "visible capacity partial" not in output
+
+
+def test_file_scan_gap_explains_what_stopped_instead_of_showing_an_issue_code():
+    participant = _participant()
+    participant["retained_content"] = {"status": "partial", "issues": ["observation_incomplete"], "bytes": str(2**30)}
+
+    output = render_job_resources(_job_summary(participant))
+
+    assert "run-dir files: the file scan stopped early or could not read every file" in output
+    assert "observation_incomplete" not in output
 
 
 def test_schema_3_capacity_changes_show_varies_without_inventing_an_average():
@@ -430,7 +455,7 @@ def test_unavailable_source_cause_is_shown_without_another_status_column():
 
     output = render_job_resources(_job_summary(participant))
 
-    assert "run-dir files unavailable (invalid source data)" in output
+    assert "run-dir files unavailable (measurement contained invalid values)" in output
     assert "RUN-DIR STATUS" not in output
 
 

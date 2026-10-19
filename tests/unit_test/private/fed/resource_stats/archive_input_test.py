@@ -26,8 +26,8 @@ from nvflare.private.fed.resource_stats.archive_reader import WorkspaceResourceS
 from nvflare.private.fed.resource_stats.contract import (
     SCHEMA_VERSION,
     canonical_json_bytes,
-    derive_participant_totals,
     normalize_record,
+    participant_measurements,
 )
 
 
@@ -65,7 +65,7 @@ def _reports():
                 "participant_name": "site-1",
                 "role": "client",
                 "received_at": "2026-09-17T12:00:01Z",
-                **derive_participant_totals(participant),
+                **participant_measurements(participant),
             },
             {"participant_name": "server", "role": "server", "status": "missing"},
         ],

@@ -12,20 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Collect one final resource-statistics report in an NVFlare job process.
-
-This module is the thin orchestration facade for the resource-stats feature:
-it composes the per-dimension capacity probes (``probes/``), the pure
-capacity-recording core (``accumulator.py``), and the private
-child-to-parent handoff file I/O (``handoff.py``) into the two entry points
-the rest of NVFlare actually calls -- ``JobResourceCollector`` (runs inside
-the job process) and ``assemble_participant_summary`` (runs in the semi-
-trusted parent, which asserts identity rather than trusting anything else the
-child wrote).  Names that used to live directly in this file (probe
-internals, ``ResourceCapacityRecorder``, terminal-handoff read/write/remove)
-are re-exported here unchanged so existing imports of
-``nvflare.private.fed.resource_stats.collector`` keep working.
-"""
+"""Collect job measurements and assemble one final participant report."""
 
 from __future__ import annotations
 
@@ -38,56 +25,18 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any, Optional
 
-from .accumulator import ClockOrderError, CollectorClosedError, ResourceCapacityRecorder
-from .contract import SCHEMA_VERSION, U128_MAX, ContractError, normalize_message_traffic, validate_record
+from . import accumulator, handoff
+from .contract import (
+    SCHEMA_VERSION,
+    U128_MAX,
+    ContractError,
+    normalize_measurement,
+    normalize_message_traffic,
+    validate_record,
+)
 from .cpu_consumed import CpuConsumedAccountant, install_cpu_accountant
 from .f3_counter import MAX_F3_SENT_TO_GROUPS
-from .handoff import (
-    INTERNAL_HANDOFF_KIND,
-    INTERNAL_HANDOFF_VERSION,
-    MAX_TERMINAL_HANDOFF_BYTES,
-    RESOURCE_STATS_DIR,
-    STAGING_DIR,
-    TERMINAL_HANDOFF_FILE,
-    InvalidTerminalHandoff,
-    _validate_handoff,
-    canonical_json_bytes,
-    read_terminal_handoff,
-    remove_terminal_handoff,
-    terminal_handoff_path,
-    write_terminal_handoff,
-)
-from .probes.cgroup_linux import discover_cgroups, probe_cpu, probe_memory
-from .probes.gpu_nvidia import probe_gpu
-
-__all__ = [
-    "ClockOrderError",
-    "CollectorClosedError",
-    "ResourceCapacityRecorder",
-    "InvalidTerminalHandoff",
-    "INTERNAL_HANDOFF_KIND",
-    "INTERNAL_HANDOFF_VERSION",
-    "MAX_TERMINAL_HANDOFF_BYTES",
-    "RESOURCE_STATS_DIR",
-    "STAGING_DIR",
-    "TERMINAL_HANDOFF_FILE",
-    "canonical_json_bytes",
-    "terminal_handoff_path",
-    "write_terminal_handoff",
-    "read_terminal_handoff",
-    "remove_terminal_handoff",
-    "probe_cpu",
-    "probe_memory",
-    "probe_gpu",
-    "probe_capacity",
-    "observe_workspace_filesystem",
-    "observe_retained_content",
-    "JobResourceCollector",
-    "assemble_participant_summary",
-    "merge_f3_snapshots",
-    "CapacitySnapshot",
-    "CapacityProbe",
-]
+from .probes import cgroup_linux, gpu_nvidia
 
 _SLURM_NODE_COUNT_ENV = "NVFL_NNODES"
 
@@ -108,19 +57,40 @@ def utc_now() -> str:
 
 
 def probe_capacity() -> dict[str, Any]:
-    """Return only capacity members that can be established from this process."""
+    """Keep independent usable observations, marking any unchecked limits."""
 
     capacity = {}
-    discovery = discover_cgroups()
-    cpu = probe_cpu(discovery)
-    if cpu is not None:
-        capacity["cpu"] = cpu
-    memory = probe_memory(discovery)
-    if memory is not None:
-        capacity["memory"] = memory
-    gpu = probe_gpu()
-    if gpu is not None:
-        capacity["gpu"] = gpu
+    issues: set[str] = set()
+    try:
+        discovery = cgroup_linux.discover_cgroups()
+    except Exception:
+        discovery = (None, None)
+        issues.add("observation_incomplete")
+    probes = (
+        ("cpu", lambda: cgroup_linux.probe_cpu(discovery, issues=issues)),
+        ("memory", lambda: cgroup_linux.probe_memory(discovery, issues=issues)),
+        ("gpu", gpu_nvidia.probe_gpu),
+    )
+    for name, probe in probes:
+        try:
+            value = probe()
+            if value is None:
+                continue
+            checked = normalize_measurement(
+                "resource_capacity",
+                {
+                    "measured_seconds": "0",
+                    "status": "partial",
+                    "issues": ["observation_incomplete"],
+                    name: value,
+                },
+            )
+            capacity[name] = checked[name]
+        except Exception:
+            # A native query or malformed dimension must not erase the others.
+            issues.add("observation_incomplete")
+    if issues:
+        capacity.update(status="partial", issues=sorted(issues))
     return capacity
 
 
@@ -198,7 +168,7 @@ def observe_retained_content(run_dir: str | Path) -> dict[str, Any]:
                     break
                 total += entry_stat.st_size
             elif stat.S_ISDIR(entry_stat.st_mode):
-                if depth == 0 and entry.name == RESOURCE_STATS_DIR:
+                if depth == 0 and entry.name == handoff.RESOURCE_STATS_DIR:
                     continue
                 if depth >= _MAX_RETAINED_DEPTH:
                     incomplete = True
@@ -250,7 +220,7 @@ class JobResourceCollector:
             # This is launcher-owned evidence.  If it is malformed, do not
             # present the rank-zero observation as complete.
             self._multi_node_incomplete = _SLURM_NODE_COUNT_ENV in os.environ
-        self._accumulator = ResourceCapacityRecorder(clock_ns=clock_ns)
+        self._accumulator = accumulator.ResourceCapacityRecorder(clock_ns=clock_ns)
         try:
             capacity = capacity_probe()
             if not isinstance(capacity, Mapping):
@@ -290,8 +260,8 @@ class JobResourceCollector:
             # nodes, so publishing those numbers would understate the site.
             resource_capacity = _unavailable("unsupported")
         return {
-            "internal_version": INTERNAL_HANDOFF_VERSION,
-            "kind": INTERNAL_HANDOFF_KIND,
+            "internal_version": handoff.INTERNAL_HANDOFF_VERSION,
+            "kind": handoff.INTERNAL_HANDOFF_KIND,
             "resource_capacity": resource_capacity,
             "cpu_consumed": cpu_consumed,
             "workspace_filesystem": observe_workspace_filesystem(self.run_dir),
@@ -377,39 +347,17 @@ def assemble_participant_summary(
     child_handoff: Optional[Mapping[str, Any]],
     parent_f3: Optional[Mapping[str, Any]] = None,
 ) -> dict[str, Any]:
-    """Create the sole public report, binding identity in the parent process.
+    """Assemble a handoff already checked by read_terminal_handoff.
 
-    Runs in the semi-trusted parent (client_executor.py on the client side;
-    the server's own equivalent call on the server side): ``job_id`` and
-    ``participant_name`` are asserted by the caller, not read from anything
-    the child wrote, and the result degrades to "observation_incomplete"
-    whenever the child handoff is missing or fails validation.
+    The parent supplies identity. Final record validation also checks the
+    combined traffic contribution before anything is sent to the server.
     """
 
-    if child_handoff is None:
-        resource_capacity = _unavailable("observation_incomplete")
-        cpu_consumed = _unavailable("observation_incomplete")
-        workspace_filesystem = _unavailable("observation_incomplete")
-        retained_content = _unavailable("observation_incomplete")
-        child_f3 = None
-    else:
-        try:
-            validated = _validate_handoff(child_handoff)
-        except InvalidTerminalHandoff:
-            validated = None
-        if validated is None:
-            resource_capacity = _unavailable("observation_incomplete")
-            cpu_consumed = _unavailable("observation_incomplete")
-            workspace_filesystem = _unavailable("observation_incomplete")
-            retained_content = _unavailable("observation_incomplete")
-            child_f3 = None
-        else:
-            resource_capacity = validated["resource_capacity"]
-            cpu_consumed = validated["cpu_consumed"]
-            workspace_filesystem = validated["workspace_filesystem"]
-            retained_content = validated["retained_content"]
-            child_f3 = validated["child_f3"]
-
+    measurements = {
+        name: child_handoff[name] if child_handoff is not None else _unavailable("observation_incomplete")
+        for name in ("resource_capacity", "cpu_consumed", "workspace_filesystem", "retained_content")
+    }
+    child_f3 = child_handoff["child_f3"] if child_handoff is not None else None
     message_traffic = merge_f3_snapshots(child_f3, parent_f3)
     report = {
         "schema_version": SCHEMA_VERSION,
@@ -417,10 +365,7 @@ def assemble_participant_summary(
         "job_id": job_id,
         "participant_name": participant_name,
         "reported_at": utc_now(),
-        "resource_capacity": resource_capacity,
-        "cpu_consumed": cpu_consumed,
-        "workspace_filesystem": workspace_filesystem,
-        "retained_content": retained_content,
+        **measurements,
         "message_traffic": message_traffic,
     }
     validate_record(report)

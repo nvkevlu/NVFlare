@@ -258,7 +258,7 @@ def _privacy_walk(value: Any, path: str = "$") -> None:
             if not isinstance(key, str):
                 _fail(path, "object keys must be strings")
             if key.lower() in _FORBIDDEN_KEYS:
-                _fail(f"{path}.{key}", "field is forbidden by the v1 privacy policy")
+                _fail(f"{path}.{key}", "field is forbidden by the resource-statistics privacy policy")
             _privacy_walk(nested, f"{path}.{key}")
     elif isinstance(value, list):
         for index, nested in enumerate(value):
@@ -303,11 +303,10 @@ def _gpu_group_key(group: Mapping[str, Any]) -> tuple[str, str, str, str]:
     )
 
 
-def _validate_gpu_time_group(value: Any, path: str) -> None:
-    group = _mapping(value, path)
-    _exact_keys(group, {"kind", "instance_seconds"}, {"model", "memory_bytes", "mig_profile"}, path)
+def _validate_gpu_metadata(group: Mapping[str, Any], path: str) -> None:
+    """Check device classification and optional metadata in either representation."""
+
     kind = _enum(group["kind"], GPU_KINDS, f"{path}.kind")
-    _decimal(group["instance_seconds"], f"{path}.instance_seconds", positive=True)
     if "model" in group:
         _model(group["model"], f"{path}.model")
     if "memory_bytes" in group:
@@ -316,6 +315,13 @@ def _validate_gpu_time_group(value: Any, path: str) -> None:
         _identifier(group["mig_profile"], MIG_PROFILE_PATTERN, f"{path}.mig_profile")
     if kind != "mig_compute_instance" and "mig_profile" in group:
         _fail(f"{path}.mig_profile", "is valid only for a MIG compute-instance group")
+
+
+def _validate_gpu_time_group(value: Any, path: str) -> None:
+    group = _mapping(value, path)
+    _exact_keys(group, {"kind", "instance_seconds"}, {"model", "memory_bytes", "mig_profile"}, path)
+    _validate_gpu_metadata(group, path)
+    _decimal(group["instance_seconds"], f"{path}.instance_seconds", positive=True)
 
 
 def _validate_group_list(value: Any, path: str, *, gpu: bool) -> None:
@@ -422,23 +428,21 @@ def _validate_capacity_interval(value: Any, path: str, *, complete: bool) -> Non
             group = _mapping(raw, group_path)
             _exact_keys(group, {"kind", "count"}, {"model", "memory_bytes", "mig_profile"}, group_path)
             count += _integer(group["count"], f"{group_path}.count", maximum=MAX_GPU_GROUPS, positive=True)
-            # Type and optional metadata follow the existing Driver contract.
-            _validate_gpu_time_group(
-                {**{key: item for key, item in group.items() if key != "count"}, "instance_seconds": "1"},
-                group_path,
-            )
+            _validate_gpu_metadata(group, group_path)
             keys.append(_gpu_group_key(group))
         if len(keys) != len(set(keys)) or count > MAX_GPU_GROUPS:
             _fail(f"{path}.gpu.groups", "groups must be unique and total at most 4096 CUDA devices")
 
 
-def _validate_resource_capacity(value: Any, path: str) -> None:
+def _validate_resource_capacity(value: Any, path: str) -> dict[str, Any]:
+    """Validate raw observations and return their checked query-only products."""
+
     capacity = _mapping(value, path)
     status = _optional_status(capacity, "reported", RESOURCE_TIME_STATUSES, f"{path}.status")
     if status == "unavailable":
         _exact_keys(capacity, {"status", "issues"}, set(), path)
         _issues(capacity["issues"], RESOURCE_TIME_UNAVAILABLE_ISSUES, f"{path}.issues")
-        return
+        return dict(capacity)
     numeric = {key: item for key, item in capacity.items() if key not in {"status", "issues"}}
     if status == "partial":
         _issues(capacity.get("issues"), RESOURCE_TIME_PARTIAL_ISSUES, f"{path}.issues")
@@ -461,7 +465,7 @@ def _validate_resource_capacity(value: Any, path: str) -> None:
         _validate_capacity_interval(numeric, path, complete=status == "reported")
     # Reject arithmetic overflow before accepting a report that could not be
     # finalized or queried. This computation is never added to stored records.
-    _capacity_time_from_validated(capacity)
+    return _capacity_time_from_validated(capacity)
 
 
 def _capacity_time_from_validated(capacity: Mapping[str, Any]) -> dict[str, Any]:
@@ -519,8 +523,7 @@ def capacity_to_resource_time(capacity: Mapping[str, Any]) -> dict[str, Any]:
     """Calculate query-only capacity-time from validated raw observations."""
 
     capacity = _normalize_tree(capacity)
-    _validate_resource_capacity(capacity, "resource_capacity")
-    return _capacity_time_from_validated(capacity)
+    return _validate_resource_capacity(capacity, "resource_capacity")
 
 
 def _validate_workspace_filesystem(value: Any, path: str) -> None:
@@ -729,12 +732,32 @@ def normalize_quota_units(quota_us: int, period_us: int) -> str:
 def normalize_message_traffic(value: Mapping[str, Any]) -> dict[str, Any]:
     """Validate and normalize one current participant traffic measurement."""
 
-    value = _mapping(value, "message_traffic")
+    return normalize_measurement("message_traffic", value)
+
+
+def normalize_measurement(field: str, value: Mapping[str, Any]) -> dict[str, Any]:
+    """Validate and independently normalize one named participant measurement.
+
+    This is the same validation used inside a participant report. A malformed
+    measurement can be rejected without discarding unrelated measurements.
+    Identity and envelope validation remain the caller's responsibility.
+    """
+
+    validators = {
+        "resource_capacity": _validate_resource_capacity,
+        "cpu_consumed": _validate_cpu_consumed,
+        "workspace_filesystem": _validate_workspace_filesystem,
+        "retained_content": _validate_retained_content,
+        "message_traffic": _validate_message_traffic,
+    }
+    if not isinstance(field, str) or field not in validators:
+        _fail("measurement", "is not a supported participant measurement")
+    value = _mapping(value, field)
     if _json_depth(value) > MAX_JSON_DEPTH:
-        _fail("message_traffic", f"exceeds maximum JSON depth {MAX_JSON_DEPTH}")
-    _privacy_walk(value, "message_traffic")
+        _fail(field, f"exceeds maximum JSON depth {MAX_JSON_DEPTH}")
+    _privacy_walk(value, field)
     normalized = _normalize_tree(value)
-    _validate_message_traffic(normalized, "message_traffic")
+    validators[field](normalized, field)
     return normalized
 
 
@@ -949,24 +972,25 @@ def _validate_participant_summary(record: Mapping[str, Any], path: str) -> None:
             _fail(f"{path}.message_traffic.sent_to", "cannot include the sending participant")
 
 
-def derive_participant_totals(participant_record: Mapping[str, Any]) -> dict[str, Any]:
+def participant_measurements(participant_record: Mapping[str, Any]) -> dict[str, Any]:
     """Copy the validated terminal measurement objects into the server entry."""
 
     participant_record = normalize_record(participant_record)
     if participant_record["kind"] != KIND_PARTICIPANT_SUMMARY:
         _fail("$.kind", f"must equal {KIND_PARTICIPANT_SUMMARY}")
     return {
-        "resource_capacity": deepcopy(participant_record["resource_capacity"]),
-        "cpu_consumed": deepcopy(participant_record["cpu_consumed"]),
-        "retained_content": deepcopy(participant_record["retained_content"]),
-        "message_traffic": deepcopy(participant_record["message_traffic"]),
+        "resource_capacity": participant_record["resource_capacity"],
+        "cpu_consumed": participant_record["cpu_consumed"],
+        "retained_content": participant_record["retained_content"],
+        "message_traffic": participant_record["message_traffic"],
     }
 
 
-def _validate_participant_entry(value: Any, path: str) -> None:
+def _validate_participant_entry(value: Any, path: str) -> dict[str, Any] | None:
     entry = _mapping(value, path)
     status = _optional_status(entry, "accepted", PARTICIPANT_STATUSES, f"{path}.status")
     base = {"participant_name", "role"}
+    resource_time = None
     if status == "accepted":
         _exact_keys(
             entry,
@@ -982,7 +1006,7 @@ def _validate_participant_entry(value: Any, path: str) -> None:
             path,
         )
         _timestamp(entry["received_at"], f"{path}.received_at")
-        _validate_resource_capacity(entry["resource_capacity"], f"{path}.resource_capacity")
+        resource_time = _validate_resource_capacity(entry["resource_capacity"], f"{path}.resource_capacity")
         _validate_cpu_consumed(entry["cpu_consumed"], f"{path}.cpu_consumed")
         _validate_retained_content(entry["retained_content"], f"{path}.retained_content")
         _validate_message_traffic(entry["message_traffic"], f"{path}.message_traffic")
@@ -993,18 +1017,22 @@ def _validate_participant_entry(value: Any, path: str) -> None:
         _exact_keys(entry, base | {"status"}, set(), path)
     _identifier(entry["participant_name"], PARTICIPANT_NAME_PATTERN, f"{path}.participant_name")
     _enum(entry["role"], ROLES, f"{path}.role")
+    return resource_time
 
 
 def _validate_participant_list(
     participants: Sequence[Mapping[str, Any]],
     *,
     path: str,
-) -> None:
+) -> list[dict[str, Any]]:
     if not isinstance(participants, list) or not 1 <= len(participants) <= MAX_PARTICIPANTS:
         _fail(path, f"must contain 1..{MAX_PARTICIPANTS} entries")
     ordering: list[tuple[str, str]] = []
+    resource_times = []
     for index, entry in enumerate(participants):
-        _validate_participant_entry(entry, f"{path}[{index}]")
+        resource_time = _validate_participant_entry(entry, f"{path}[{index}]")
+        if resource_time is not None:
+            resource_times.append(resource_time)
         ordering.append((entry["role"], entry["participant_name"]))
     if len({item[1] for item in ordering}) != len(ordering):
         _fail(path, "participant_name values must be unique")
@@ -1019,16 +1047,17 @@ def _validate_participant_list(
                     f"{path}[{index}].message_traffic.sent_to",
                     "destinations must name another expected participant",
                 )
+    return resource_times
 
 
 def derive_job_totals(participants: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     """Derive job totals from one complete expected-participant list."""
 
     participants = _normalize_tree(participants)
-    _validate_participant_list(participants, path="participants")
+    resource_times = _validate_participant_list(participants, path="participants")
     accepted = [entry for entry in participants if "status" not in entry]
     return _aggregate_totals(
-        [capacity_to_resource_time(entry["resource_capacity"]) for entry in accepted],
+        resource_times,
         [entry["cpu_consumed"] for entry in accepted],
         [entry["retained_content"] for entry in accepted],
         [entry["message_traffic"] for entry in accepted],
@@ -1272,7 +1301,7 @@ def validate_bundle(
         entry = accepted[participant_name]
         if record["schema_version"] != resource_summary["schema_version"]:
             _fail(f"participant_records[{participant_name!r}].schema_version", "must equal summary version")
-        copied = derive_participant_totals(record)
+        copied = participant_measurements(record)
         for field in copied:
             if entry.get(field) != copied[field]:
                 _fail(

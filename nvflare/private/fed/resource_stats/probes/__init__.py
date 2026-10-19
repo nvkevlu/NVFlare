@@ -16,5 +16,6 @@
 
 Each probe module returns ``None`` when a dimension cannot be established on
 this platform/process, so ``collector.probe_capacity`` can omit that member
-rather than fail closed for the whole capacity snapshot.
+rather than discard the other observations. CPU/RAM probes also flag unchecked
+limits through the collector's shared issue set, retaining usable values.
 """

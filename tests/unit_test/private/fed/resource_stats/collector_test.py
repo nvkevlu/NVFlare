@@ -18,20 +18,29 @@ from pathlib import Path
 import pytest
 
 from nvflare.private.fed.resource_stats import collector
+from nvflare.private.fed.resource_stats.accumulator import ClockOrderError, ResourceCapacityRecorder
 from nvflare.private.fed.resource_stats.collector import (
-    ClockOrderError,
     JobResourceCollector,
-    ResourceCapacityRecorder,
     assemble_participant_summary,
-    canonical_json_bytes,
     merge_f3_snapshots,
     observe_retained_content,
+)
+from nvflare.private.fed.resource_stats.contract import (
+    canonical_json_bytes,
+    capacity_to_resource_time,
+    load_and_validate,
+)
+from nvflare.private.fed.resource_stats.handoff import (
+    INTERNAL_HANDOFF_KIND,
+    INTERNAL_HANDOFF_VERSION,
+    RESOURCE_STATS_DIR,
+    STAGING_DIR,
+    InvalidTerminalHandoff,
     read_terminal_handoff,
     remove_terminal_handoff,
     terminal_handoff_path,
     write_terminal_handoff,
 )
-from nvflare.private.fed.resource_stats.contract import capacity_to_resource_time, load_and_validate
 from nvflare.private.fed.resource_stats.probes import cgroup_linux, gpu_nvidia
 
 
@@ -41,7 +50,7 @@ def test_monotonic_ns_is_private_and_output_is_compact_seconds():
 
     accumulator.observe(
         {
-            "cpu": {"units": "8", "model": "AMD EPYC 9654", "architecture": "x86_64"},
+            "cpu": {"groups": [{"units": "8", "model": "AMD EPYC 9654", "architecture": "x86_64"}]},
             "memory": {"bytes": "68719476736"},
             "gpu": {"groups": [{"kind": "full_gpu", "count": 2, "model": "NVIDIA H100 80GB HBM3"}]},
         }
@@ -59,7 +68,7 @@ def test_unclassified_cuda_device_capacity_accumulates_without_relabeling():
     accumulator = ResourceCapacityRecorder(clock_ns=lambda: next(ticks))
     accumulator.observe(
         {
-            "cpu": {"units": "4"},
+            "cpu": {"groups": [{"units": "4"}]},
             "memory": {"bytes": "1024"},
             "gpu": {"groups": [{"kind": "cuda_device_unclassified", "count": 2, "model": "NVIDIA H100"}]},
         }
@@ -92,8 +101,8 @@ def test_capacity_change_closes_one_interval_and_starts_the_next():
     accumulator = ResourceCapacityRecorder(clock_ns=lambda: next(ticks))
     common = {"memory": {"bytes": 1024}, "gpu": {"groups": []}}
 
-    accumulator.observe({"cpu": {"units": 8}, **common})
-    accumulator.observe({"cpu": {"units": 4}, **common})
+    accumulator.observe({"cpu": {"groups": [{"units": 8}]}, **common})
+    accumulator.observe({"cpu": {"groups": [{"units": 4}]}, **common})
     result = accumulator.finish()
 
     assert result["measured_seconds"] == "2"
@@ -107,7 +116,7 @@ def test_capacity_change_closes_one_interval_and_starts_the_next():
 def test_unchanged_capacity_observations_stay_one_flat_record():
     ticks = iter([0, 1_000_000_000, 4_000_000_000])
     recorder = ResourceCapacityRecorder(clock_ns=lambda: next(ticks))
-    capacity = {"cpu": {"units": "8"}, "memory": {"bytes": "4096"}, "gpu": {"groups": []}}
+    capacity = {"cpu": {"groups": [{"units": "8"}]}, "memory": {"bytes": "4096"}, "gpu": {"groups": []}}
     recorder.observe(capacity)
     recorder.observe(capacity)
     record = recorder.finish()
@@ -119,7 +128,7 @@ def test_unchanged_capacity_observations_stay_one_flat_record():
 def test_unknown_capacity_gap_excludes_elapsed_time_from_derived_products():
     ticks = iter([0, 2_000_000_000, 5_000_000_000, 7_000_000_000])
     recorder = ResourceCapacityRecorder(clock_ns=lambda: next(ticks))
-    capacity = {"cpu": {"units": "8"}, "memory": {"bytes": "4096"}, "gpu": {"groups": []}}
+    capacity = {"cpu": {"groups": [{"units": "8"}]}, "memory": {"bytes": "4096"}, "gpu": {"groups": []}}
     recorder.observe(capacity)
     recorder.mark_gap()
     recorder.observe(capacity)
@@ -131,7 +140,7 @@ def test_unknown_capacity_gap_excludes_elapsed_time_from_derived_products():
 
 def test_zero_elapsed_preserves_observed_capacity_not_an_unavailable_record():
     recorder = ResourceCapacityRecorder(clock_ns=lambda: 1)
-    recorder.observe({"cpu": {"units": "8"}, "memory": {"bytes": "4096"}, "gpu": {"groups": []}})
+    recorder.observe({"cpu": {"groups": [{"units": "8"}]}, "memory": {"bytes": "4096"}, "gpu": {"groups": []}})
     record = recorder.finish()
     assert record["measured_seconds"] == "0"
     assert record["cpu"]["groups"] == [{"units": "8"}]
@@ -139,10 +148,43 @@ def test_zero_elapsed_preserves_observed_capacity_not_an_unavailable_record():
     assert capacity_to_resource_time(record)["cpu"]["groups"] == [{"unit_seconds": "0"}]
 
 
+def test_fallback_capacity_keeps_numeric_values_and_full_observed_duration():
+    ticks = iter([0, 10_000_000_000])
+    recorder = ResourceCapacityRecorder(clock_ns=lambda: next(ticks))
+    recorder.observe(
+        {
+            "status": "partial",
+            "issues": ["observation_incomplete"],
+            "cpu": {"groups": [{"units": "8"}]},
+            "memory": {"bytes": "4096"},
+            "gpu": {"groups": []},
+        }
+    )
+
+    result = recorder.finish()
+
+    assert result == {
+        "status": "partial",
+        "issues": ["observation_incomplete"],
+        "measured_seconds": "10",
+        "cpu": {"groups": [{"units": "8"}]},
+        "memory": {"bytes": "4096"},
+        "gpu": {"groups": []},
+    }
+    assert capacity_to_resource_time(result)["cpu"]["groups"] == [{"unit_seconds": "80"}]
+
+
+def test_scalar_cpu_shape_is_not_an_alternate_capacity_format():
+    recorder = ResourceCapacityRecorder(clock_ns=lambda: 0)
+
+    with pytest.raises((TypeError, ValueError)):
+        recorder.observe({"cpu": {"units": "8"}})
+
+
 def test_clock_must_not_move_backwards():
     ticks = iter([20, 19])
     accumulator = ResourceCapacityRecorder(clock_ns=lambda: next(ticks))
-    accumulator.observe({"cpu": {"units": 1}})
+    accumulator.observe({"cpu": {"groups": [{"units": 1}]}})
 
     with pytest.raises(ClockOrderError):
         accumulator.finish()
@@ -171,8 +213,9 @@ def test_v2_cpu_quota_is_conservatively_floored(monkeypatch):
         lambda path: values.get(path, cgroup_linux._CGROUP_FILE_MISSING),
     )
     monkeypatch.setattr(cgroup_linux, "_cpu_identity", lambda _affinity, _models: {})
+    monkeypatch.setattr(cgroup_linux, "_cpu_models", lambda _affinity: {})
 
-    assert collector.probe_cpu() == {"groups": [{"units": "0.666666666"}]}
+    assert cgroup_linux.probe_cpu() == {"groups": [{"units": "0.666666666"}]}
 
 
 def test_v1_cpu_quota_is_conservatively_floored(monkeypatch):
@@ -211,12 +254,13 @@ def test_v1_cpu_quota_is_conservatively_floored(monkeypatch):
         lambda path: values.get(path, cgroup_linux._CGROUP_FILE_MISSING),
     )
     monkeypatch.setattr(cgroup_linux, "_cpu_identity", lambda _affinity, _models: {})
+    monkeypatch.setattr(cgroup_linux, "_cpu_models", lambda _affinity: {})
 
-    assert collector.probe_cpu() == {"groups": [{"units": "0.666666666"}]}
+    assert cgroup_linux.probe_cpu() == {"groups": [{"units": "0.666666666"}]}
 
 
 @pytest.mark.parametrize("bad_value", ["garbage", cgroup_linux._CGROUP_FILE_UNREADABLE])
-def test_v2_cpu_does_not_fall_back_when_applicable_quota_is_invalid(monkeypatch, bad_value):
+def test_v2_cpu_keeps_affinity_when_applicable_quota_is_invalid(monkeypatch, bad_value):
     mount = Path("/sys/fs/cgroup")
     leaf = mount / "job"
     values = {
@@ -237,8 +281,12 @@ def test_v2_cpu_does_not_fall_back_when_applicable_quota_is_invalid(monkeypatch,
         "_read_cgroup_file",
         lambda path: values.get(path, cgroup_linux._CGROUP_FILE_MISSING),
     )
+    monkeypatch.setattr(cgroup_linux, "_cpu_identity", lambda _affinity, _models: {})
+    monkeypatch.setattr(cgroup_linux, "_cpu_models", lambda _affinity: {})
 
-    assert collector.probe_cpu() is None
+    issues = set()
+    assert cgroup_linux.probe_cpu(issues=issues) == {"groups": [{"units": "8"}]}
+    assert issues == {"observation_incomplete"}
 
 
 def test_v2_cpu_accepts_explicit_unlimited_quota(monkeypatch):
@@ -263,11 +311,12 @@ def test_v2_cpu_accepts_explicit_unlimited_quota(monkeypatch):
         lambda path: values.get(path, cgroup_linux._CGROUP_FILE_MISSING),
     )
     monkeypatch.setattr(cgroup_linux, "_cpu_identity", lambda _affinity, _models: {})
+    monkeypatch.setattr(cgroup_linux, "_cpu_models", lambda _affinity: {})
 
-    assert collector.probe_cpu() == {"groups": [{"units": "4"}]}
+    assert cgroup_linux.probe_cpu() == {"groups": [{"units": "4"}]}
 
 
-def test_v1_cpu_does_not_fall_back_when_applicable_quota_is_malformed(monkeypatch):
+def test_v1_cpu_keeps_affinity_when_applicable_quota_is_malformed(monkeypatch):
     cpu_mount = Path("/sys/fs/cgroup/cpu")
     cpu_leaf = cpu_mount / "job"
     values = {
@@ -289,12 +338,16 @@ def test_v1_cpu_does_not_fall_back_when_applicable_quota_is_malformed(monkeypatc
         "_read_cgroup_file",
         lambda path: values.get(path, cgroup_linux._CGROUP_FILE_MISSING),
     )
+    monkeypatch.setattr(cgroup_linux, "_cpu_identity", lambda _affinity, _models: {})
+    monkeypatch.setattr(cgroup_linux, "_cpu_models", lambda _affinity: {})
 
-    assert collector.probe_cpu() is None
+    issues = set()
+    assert cgroup_linux.probe_cpu(issues=issues) == {"groups": [{"units": "8"}]}
+    assert issues == {"observation_incomplete"}
 
 
 @pytest.mark.parametrize("bad_value", ["garbage", cgroup_linux._CGROUP_FILE_UNREADABLE])
-def test_v2_memory_does_not_fall_back_when_applicable_limit_is_invalid(monkeypatch, bad_value):
+def test_v2_memory_keeps_physical_ram_when_applicable_limit_is_invalid(monkeypatch, bad_value):
     mount = Path("/sys/fs/cgroup")
     leaf = mount / "job"
     values = {
@@ -315,7 +368,9 @@ def test_v2_memory_does_not_fall_back_when_applicable_limit_is_invalid(monkeypat
         lambda path: values.get(path, cgroup_linux._CGROUP_FILE_MISSING),
     )
 
-    assert collector.probe_memory() is None
+    issues = set()
+    assert cgroup_linux.probe_memory(issues=issues) == {"bytes": str(4096 * 1024)}
+    assert issues == {"observation_incomplete"}
 
 
 def test_v2_memory_accepts_explicit_unlimited_limit(monkeypatch):
@@ -339,11 +394,11 @@ def test_v2_memory_accepts_explicit_unlimited_limit(monkeypatch):
         lambda path: values.get(path, cgroup_linux._CGROUP_FILE_MISSING),
     )
 
-    assert collector.probe_memory() == {"bytes": str(4096 * 1024)}
+    assert cgroup_linux.probe_memory() == {"bytes": str(4096 * 1024)}
 
 
 @pytest.mark.parametrize("bad_value", ["garbage", cgroup_linux._CGROUP_FILE_UNREADABLE])
-def test_v1_memory_does_not_fall_back_when_applicable_limit_is_invalid(monkeypatch, bad_value):
+def test_v1_memory_keeps_physical_ram_when_applicable_limit_is_invalid(monkeypatch, bad_value):
     mount = Path("/sys/fs/cgroup/memory")
     leaf = mount / "job"
     values = {leaf / "memory.limit_in_bytes": bad_value}
@@ -361,7 +416,9 @@ def test_v1_memory_does_not_fall_back_when_applicable_limit_is_invalid(monkeypat
         lambda path: values.get(path, cgroup_linux._CGROUP_FILE_MISSING),
     )
 
-    assert collector.probe_memory() is None
+    issues = set()
+    assert cgroup_linux.probe_memory(issues=issues) == {"bytes": str(4096 * 1024)}
+    assert issues == {"observation_incomplete"}
 
 
 def test_v1_memory_accepts_kernel_unlimited_sentinel(monkeypatch):
@@ -382,18 +439,18 @@ def test_v1_memory_accepts_kernel_unlimited_sentinel(monkeypatch):
         lambda path: values.get(path, cgroup_linux._CGROUP_FILE_MISSING),
     )
 
-    assert collector.probe_memory() == {"bytes": str(4096 * 1024)}
+    assert cgroup_linux.probe_memory() == {"bytes": str(4096 * 1024)}
 
 
 def test_cpu_only_host_without_loadable_driver_has_partial_resource_capacity(monkeypatch):
     # A missing Driver does not prove zero CUDA devices, even on a CPU-only host.
     monkeypatch.setattr(gpu_nvidia, "_load_driver", lambda: None)
     monkeypatch.setattr(
-        collector,
+        cgroup_linux,
         "probe_cpu",
-        lambda _discovery: {"units": "4", "model": "AMD EPYC 9654", "architecture": "x86_64"},
+        lambda _discovery, *, issues: {"groups": [{"units": "4", "model": "AMD EPYC 9654", "architecture": "x86_64"}]},
     )
-    monkeypatch.setattr(collector, "probe_memory", lambda _discovery: {"bytes": "1073741824"})
+    monkeypatch.setattr(cgroup_linux, "probe_memory", lambda _discovery, *, issues: {"bytes": "1073741824"})
 
     capacity = collector.probe_capacity()
     assert "gpu" not in capacity
@@ -409,13 +466,70 @@ def test_cpu_only_host_without_loadable_driver_has_partial_resource_capacity(mon
     assert "gpu" not in result
 
 
+@pytest.mark.parametrize("failed_resource", ["cpu", "memory", "gpu"])
+def test_probe_failure_does_not_erase_independent_capacity(monkeypatch, failed_resource):
+    expected = {
+        "cpu": {"groups": [{"units": "4"}]},
+        "memory": {"bytes": "4096"},
+        "gpu": {"groups": []},
+    }
+    monkeypatch.setattr(cgroup_linux, "discover_cgroups", lambda: ([], []))
+    for resource, value in expected.items():
+        module = gpu_nvidia if resource == "gpu" else cgroup_linux
+        monkeypatch.setattr(module, f"probe_{resource}", lambda *args, value=value, **kwargs: value)
+
+    def fail_probe(*args, **kwargs):
+        raise RuntimeError("simulated probe failure")
+
+    module = gpu_nvidia if failed_resource == "gpu" else cgroup_linux
+    monkeypatch.setattr(module, f"probe_{failed_resource}", fail_probe)
+
+    capacity = collector.probe_capacity()
+
+    assert capacity == {
+        **{resource: value for resource, value in expected.items() if resource != failed_resource},
+        "status": "partial",
+        "issues": ["observation_incomplete"],
+    }
+
+
+def test_probe_fallback_remains_partial_through_handoff_and_public_summary(monkeypatch, tmp_path):
+    def cpu_fallback(_discovery, *, issues):
+        issues.add("observation_incomplete")
+        return {"groups": [{"units": "8"}]}
+
+    monkeypatch.setattr(cgroup_linux, "probe_cpu", cpu_fallback)
+    monkeypatch.setattr(cgroup_linux, "probe_memory", lambda _discovery, *, issues: {"bytes": "4096"})
+    monkeypatch.setattr(gpu_nvidia, "probe_gpu", lambda: {"groups": []})
+    ticks = iter([0, 10_000_000_000])
+    job_collector = JobResourceCollector(tmp_path, clock_ns=lambda: next(ticks))
+    write_terminal_handoff(tmp_path, job_collector.finish(child_f3={"sent_to": []}))
+
+    report = assemble_participant_summary(
+        job_id="job-1",
+        participant_name="site-1",
+        child_handoff=read_terminal_handoff(tmp_path),
+        parent_f3={"sent_to": []},
+    )
+
+    assert report["resource_capacity"] == {
+        "status": "partial",
+        "issues": ["observation_incomplete"],
+        "measured_seconds": "10",
+        "cpu": {"groups": [{"units": "8"}]},
+        "memory": {"bytes": "4096"},
+        "gpu": {"groups": []},
+    }
+    assert report["message_traffic"] == {"sent_to": []}
+
+
 def test_handoff_to_public_report_round_trip(tmp_path):
     ticks = iter([1_000_000_000, 3_000_000_000])
     job_collector = JobResourceCollector(
         tmp_path,
         clock_ns=lambda: next(ticks),
         capacity_probe=lambda: {
-            "cpu": {"units": 2, "model": "AMD EPYC 9654", "architecture": "x86_64"},
+            "cpu": {"groups": [{"units": 2, "model": "AMD EPYC 9654", "architecture": "x86_64"}]},
             "memory": {"bytes": 4096},
             "gpu": {"groups": []},
         },
@@ -688,7 +802,7 @@ def test_restored_collector_keeps_new_totals_but_marks_prior_interval_incomplete
         tmp_path,
         clock_ns=lambda: next(ticks),
         capacity_probe=lambda: {
-            "cpu": {"units": 2},
+            "cpu": {"groups": [{"units": 2}]},
             "memory": {"bytes": 4096},
             "gpu": {"groups": []},
         },
@@ -723,7 +837,7 @@ def test_cpu_duration_is_independent_of_missing_gpu_capacity(monkeypatch, tmp_pa
         tmp_path,
         clock_ns=lambda: next(resource_ticks),
         cpu_clock_ns=lambda: next(cpu_ticks),
-        capacity_probe=lambda: {"cpu": {"units": 8}, "memory": {"bytes": 4096}},
+        capacity_probe=lambda: {"cpu": {"groups": [{"units": 8}]}, "memory": {"bytes": 4096}},
     )
 
     handoff = job_collector.finish()
@@ -740,7 +854,7 @@ def test_multinode_slurm_rank_zero_measurement_is_unavailable(monkeypatch, tmp_p
         tmp_path,
         clock_ns=lambda: next(ticks),
         capacity_probe=lambda: {
-            "cpu": {"units": 8},
+            "cpu": {"groups": [{"units": 8}]},
             "memory": {"bytes": 4096},
             "gpu": {"groups": []},
         },
@@ -830,8 +944,8 @@ def test_merge_f3_snapshots_keeps_distinct_recipients_sorted_and_rejects_duplica
 
 def _minimal_handoff():
     return {
-        "internal_version": collector.INTERNAL_HANDOFF_VERSION,
-        "kind": collector.INTERNAL_HANDOFF_KIND,
+        "internal_version": INTERNAL_HANDOFF_VERSION,
+        "kind": INTERNAL_HANDOFF_KIND,
         "resource_capacity": {"status": "unavailable", "issues": ["observation_incomplete"]},
         "cpu_consumed": {"status": "unavailable", "issues": ["observation_incomplete"]},
         "workspace_filesystem": {"status": "unavailable", "issues": ["observation_incomplete"]},
@@ -856,7 +970,7 @@ def test_terminal_handoff_requires_cpu_consumed(tmp_path):
     handoff = _minimal_handoff()
     del handoff["cpu_consumed"]
 
-    with pytest.raises(collector.InvalidTerminalHandoff, match="terminal handoff fields"):
+    with pytest.raises(InvalidTerminalHandoff, match="terminal handoff fields"):
         write_terminal_handoff(tmp_path, handoff)
 
 
@@ -864,7 +978,7 @@ def test_terminal_handoff_rejects_old_runtime_count_basis(tmp_path):
     old_handoff = _minimal_handoff()
     old_handoff["internal_version"] = "1"
 
-    with pytest.raises(collector.InvalidTerminalHandoff, match="unsupported version"):
+    with pytest.raises(InvalidTerminalHandoff, match="unsupported version"):
         write_terminal_handoff(tmp_path, old_handoff)
 
 
@@ -886,10 +1000,10 @@ def test_handoff_parent_does_not_follow_intermediate_staging_symlink(tmp_path):
     outside_run = tmp_path / "outside"
     outside_handoff = write_terminal_handoff(outside_run, _minimal_handoff())
     run_dir = tmp_path / "run"
-    stats_dir = run_dir / collector.RESOURCE_STATS_DIR
+    stats_dir = run_dir / RESOURCE_STATS_DIR
     stats_dir.mkdir(parents=True)
     try:
-        (stats_dir / collector.STAGING_DIR).symlink_to(outside_handoff.parent, target_is_directory=True)
+        (stats_dir / STAGING_DIR).symlink_to(outside_handoff.parent, target_is_directory=True)
     except (NotImplementedError, OSError):
         pytest.skip("symlinks are unavailable on this platform")
 

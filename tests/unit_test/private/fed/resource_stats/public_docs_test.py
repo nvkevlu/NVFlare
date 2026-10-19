@@ -22,7 +22,7 @@ from pathlib import Path
 
 import pytest
 
-from nvflare.private.fed.resource_stats.contract import derive_participant_totals, load_and_validate, validate_record
+from nvflare.private.fed.resource_stats.contract import load_and_validate, participant_measurements, validate_record
 from nvflare.tool.job.job_resources import render_job_resources, render_study_resources
 
 ROOT = Path(__file__).resolve().parents[5]
@@ -50,7 +50,7 @@ def test_published_records_reconcile_without_filesystem_capacity_in_job_summary(
         item for item in summary["participants"] if item["participant_name"] == participant["participant_name"]
     )
     assert summary["job_id"] == participant["job_id"]
-    for key, value in derive_participant_totals(participant).items():
+    for key, value in participant_measurements(participant).items():
         assert entry[key] == value
     assert "workspace_filesystem" in participant
     assert all("workspace_filesystem" not in item for item in summary["participants"])

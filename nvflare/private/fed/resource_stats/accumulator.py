@@ -64,13 +64,21 @@ class ResourceCapacityRecorder:
 
     def observe(self, capacity: Mapping[str, Any]) -> None:
         self._ensure_open()
-        normalized = self._public_capacity(self._normalize_capacity(capacity))
+        if not isinstance(capacity, Mapping):
+            raise TypeError("capacity must be a mapping")
+        if set(capacity) - {"cpu", "memory", "gpu", "status", "issues"}:
+            raise ValueError("capacity has unsupported fields")
+        dimensions = {name: capacity[name] for name in ("cpu", "memory", "gpu") if name in capacity}
+        normalized = self._public_capacity(self._normalize_capacity(dimensions))
         probe = {"measured_seconds": "0", **normalized}
-        if not all(name in normalized for name in ("cpu", "memory", "gpu")):
+        if "status" in capacity or "issues" in capacity:
+            probe.update({name: capacity[name] for name in ("status", "issues") if name in capacity})
+        elif not all(name in normalized for name in ("cpu", "memory", "gpu")):
             probe.update(status="partial", issues=["observation_incomplete"])
         capacity_to_resource_time(probe)
         self._advance(self._read_clock())
         self._capacity = normalized
+        self._issues.update(probe.get("issues", []))
 
     def mark_gap(self) -> None:
         self._ensure_open()
@@ -177,8 +185,6 @@ class ResourceCapacityRecorder:
             if not isinstance(cpu, Mapping):
                 raise TypeError("cpu capacity must be an object")
             raw_groups = cpu.get("groups")
-            if raw_groups is None:
-                raw_groups = [cpu]
             if not isinstance(raw_groups, list) or not raw_groups:
                 raise TypeError("cpu.groups must be a non-empty list")
             groups = []

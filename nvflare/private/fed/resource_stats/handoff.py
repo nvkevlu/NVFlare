@@ -14,12 +14,9 @@
 
 """Checked read/write of the private, job-process-owned terminal handoff.
 
-The job process (child) writes this file to hand its resource-time,
-workspace-filesystem, retained-content, and child F3 observations to the
-semi-trusted parent process. The parent
-(``collector.assemble_participant_summary``) validates those observations but
-does not accept identity from the child: ``job_id`` and ``participant_name``
-come from parent-owned lifecycle state.
+The child writes capacity, CPU work, file sizes, and traffic observations.
+The parent validates each measurement while reading the handoff. Identity
+comes from parent-owned lifecycle state, never from the child file.
 Directory-relative operations protect against path redirection on supported
 platforms. Other platforms reject pre-existing directory symlinks but do not
 claim race-proof traversal.
@@ -33,16 +30,12 @@ import secrets
 import stat
 import tempfile
 from collections.abc import Mapping
-from copy import deepcopy
 from pathlib import Path
 from typing import Any, Optional
 
-from .contract import MAX_PARTICIPANT_SUMMARY_BYTES, SCHEMA_VERSION, ContractError
-from .contract import canonical_json_bytes as _contract_json_bytes
-from .contract import normalize_record
+from .contract import MAX_PARTICIPANT_SUMMARY_BYTES, ContractError, canonical_json_bytes, normalize_measurement
 
-# The private handoff carries raw capacity and duration. Older product-based
-# handoffs must never be relabeled as version-3 capacity snapshots.
+# The private handoff carries raw capacity and duration.
 INTERNAL_HANDOFF_VERSION = "3"
 INTERNAL_HANDOFF_KIND = "nvflare.resource_stats.internal.terminal_handoff"
 MAX_TERMINAL_HANDOFF_BYTES = MAX_PARTICIPANT_SUMMARY_BYTES
@@ -67,12 +60,6 @@ _SECURE_HANDOFF_WRITE_DIR_FD = (
 
 class InvalidTerminalHandoff(ValueError):
     """Raised when the child-to-parent handoff is malformed or oversized."""
-
-
-def canonical_json_bytes(value: Mapping[str, Any]) -> bytes:
-    """Serialize a record deterministically while keeping stored files readable."""
-
-    return _contract_json_bytes(value)
 
 
 def terminal_handoff_path(run_dir: str | Path) -> Path:
@@ -135,32 +122,12 @@ def _validate_handoff(value: Mapping[str, Any]) -> dict[str, Any]:
         raise InvalidTerminalHandoff(f"terminal handoff fields must be {sorted(required)}")
     if value["internal_version"] != INTERNAL_HANDOFF_VERSION or value["kind"] != INTERNAL_HANDOFF_KIND:
         raise InvalidTerminalHandoff("terminal handoff has an unsupported version or kind")
-    probe = {
-        "schema_version": SCHEMA_VERSION,
-        "kind": "nvflare.resource_stats.participant_summary",
-        "job_id": "handoff-validation",
-        "participant_name": "handoff-validation",
-        "reported_at": "1970-01-01T00:00:00Z",
-        "resource_capacity": deepcopy(value["resource_capacity"]),
-        "cpu_consumed": deepcopy(value["cpu_consumed"]),
-        "workspace_filesystem": deepcopy(value["workspace_filesystem"]),
-        "retained_content": deepcopy(value["retained_content"]),
-        "message_traffic": deepcopy(value["child_f3"]),
-    }
-    try:
-        probe = normalize_record(probe)
-    except ContractError as exc:
-        # CPU accounting is independent: a broken CPU observation must
-        # not erase otherwise valid capacity, filesystem, retained, or F3 data.
-        probe["cpu_consumed"] = {"status": "unavailable", "issues": ["malformed_source"]}
+    result = {"internal_version": INTERNAL_HANDOFF_VERSION, "kind": INTERNAL_HANDOFF_KIND}
+    for name in ("resource_capacity", "cpu_consumed", "workspace_filesystem", "retained_content", "child_f3"):
         try:
-            probe = normalize_record(probe)
+            result[name] = normalize_measurement("message_traffic" if name == "child_f3" else name, value[name])
         except ContractError:
-            raise InvalidTerminalHandoff(f"terminal handoff is invalid: {exc}") from exc
-    result = {name: deepcopy(value[name]) for name in required}
-    for name in ("resource_capacity", "cpu_consumed", "workspace_filesystem", "retained_content"):
-        result[name] = deepcopy(probe[name])
-    result["child_f3"] = deepcopy(probe["message_traffic"])
+            result[name] = {"status": "unavailable", "issues": ["malformed_source"]}
     return result
 
 

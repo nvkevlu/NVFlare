@@ -31,6 +31,23 @@ def _handoff():
     }
 
 
+def _complete_handoff():
+    return {
+        "internal_version": module.INTERNAL_HANDOFF_VERSION,
+        "kind": module.INTERNAL_HANDOFF_KIND,
+        "resource_capacity": {
+            "measured_seconds": "10",
+            "cpu": {"groups": [{"units": "2"}]},
+            "memory": {"bytes": "4096"},
+            "gpu": {"groups": []},
+        },
+        "cpu_consumed": {"seconds": "2", "measured_seconds": "10"},
+        "workspace_filesystem": {"capacity_bytes": "1024"},
+        "retained_content": {"bytes": "128"},
+        "child_f3": {"sent_to": [{"participant_name": "server", "payload_bytes": "512", "messages": "1"}]},
+    }
+
+
 def _link(path, target, *, directory):
     try:
         path.symlink_to(target, target_is_directory=directory)
@@ -64,6 +81,52 @@ def test_atomic_writer_round_trip_and_replacement_without_leftover_temp_files(tm
     module.write_terminal_handoff(run, updated)
     assert module.read_terminal_handoff(run) == updated
     assert list(path.parent.iterdir()) == [path]
+
+
+@pytest.mark.parametrize(
+    "measurement", ["resource_capacity", "cpu_consumed", "workspace_filesystem", "retained_content", "child_f3"]
+)
+def test_reader_isolates_a_malformed_measurement_without_erasing_other_values(tmp_path, measurement):
+    original = _complete_handoff()
+    path = module.write_terminal_handoff(tmp_path, original)
+    malformed = {**original, measurement: {"unexpected": "field"}}
+    path.write_bytes(module.canonical_json_bytes(malformed))
+
+    result = module.read_terminal_handoff(tmp_path)
+
+    assert result is not None
+    assert result[measurement] == {"status": "unavailable", "issues": ["malformed_source"]}
+    for name, value in original.items():
+        if name != measurement:
+            assert result[name] == value
+
+
+@pytest.mark.parametrize("change", ["extra_field", "missing_field", "wrong_kind", "wrong_version"])
+def test_reader_still_rejects_a_malformed_envelope(tmp_path, change):
+    handoff = _complete_handoff()
+    path = module.write_terminal_handoff(tmp_path, handoff)
+    if change == "extra_field":
+        handoff["participant_name"] = "untrusted-child-name"
+    elif change == "missing_field":
+        handoff.pop("cpu_consumed")
+    elif change == "wrong_kind":
+        handoff["kind"] = "not-a-terminal-handoff"
+    else:
+        handoff["internal_version"] = "1"
+    path.write_bytes(module.canonical_json_bytes(handoff))
+
+    assert module.read_terminal_handoff(tmp_path) is None
+
+
+def test_reader_normalizes_numeric_values_at_the_parent_boundary(tmp_path):
+    handoff = _complete_handoff()
+    path = module.write_terminal_handoff(tmp_path, handoff)
+    handoff["resource_capacity"]["measured_seconds"] = "10.000"
+    handoff["resource_capacity"]["cpu"]["groups"][0]["units"] = "2.0"
+    handoff["cpu_consumed"]["seconds"] = "2.000000000"
+    path.write_bytes(module.canonical_json_bytes(handoff))
+
+    assert module.read_terminal_handoff(tmp_path) == _complete_handoff()
 
 
 @pytest.mark.parametrize("component", ["run", "resource_stats", "staging"])

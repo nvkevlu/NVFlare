@@ -1,0 +1,49 @@
+{
+  "cpu_consumed": {
+    "measured_seconds": "600",
+    "seconds": "180"
+  },
+  "job_id": "synthetic-capacity-fallback",
+  "kind": "nvflare.resource_stats.participant_summary",
+  "message_traffic": {
+    "sent_to": []
+  },
+  "participant_name": "site-1",
+  "reported_at": "2026-10-12T12:00:00Z",
+  "resource_capacity": {
+    "cpu": {
+      "groups": [
+        {
+          "architecture": "x86_64",
+          "model": "AMD EPYC 9654",
+          "units": "32"
+        }
+      ]
+    },
+    "gpu": {
+      "groups": [
+        {
+          "count": "2",
+          "kind": "full_gpu",
+          "memory_bytes": "85899345920",
+          "model": "NVIDIA A100"
+        }
+      ]
+    },
+    "issues": [
+      "observation_incomplete"
+    ],
+    "measured_seconds": "600",
+    "memory": {
+      "bytes": "68719476736"
+    },
+    "status": "partial"
+  },
+  "retained_content": {
+    "bytes": "0"
+  },
+  "schema_version": "3.0",
+  "workspace_filesystem": {
+    "capacity_bytes": "1099511627776"
+  }
+}

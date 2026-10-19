@@ -23,8 +23,7 @@ import pytest
 
 from nvflare.private.fed.resource_stats import coordinator as coordinator_module
 from nvflare.private.fed.resource_stats.archive_reader import WorkspaceResourceStatsError, WorkspaceResourceStatsReader
-from nvflare.private.fed.resource_stats.collector import canonical_json_bytes
-from nvflare.private.fed.resource_stats.contract import SCHEMA_VERSION
+from nvflare.private.fed.resource_stats.contract import SCHEMA_VERSION, canonical_json_bytes
 from nvflare.private.fed.resource_stats.coordinator import (
     RESOURCE_REPORT_ACCEPTED,
     RESOURCE_REPORT_CONFLICT,

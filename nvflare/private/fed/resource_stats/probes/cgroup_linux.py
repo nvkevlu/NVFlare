@@ -12,13 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Linux cgroup v1/v2 and /proc based CPU and memory capacity probes.
+"""Best-effort Linux CPU and memory capacity from readable OS limits.
 
-Both dimensions share the same cgroup-mount/ancestor-walking primitives, so
-they are kept in one module rather than split further. Every probe here fails
-closed (returns ``None`` for the whole dimension) on any unreadable or
-malformed cgroup file rather than falling back to a wider value that could
-overstate capacity.
+Use the smallest usable bound. A limit that cannot be checked adds one
+incomplete-observation indication without discarding other readable bounds.
 """
 
 from __future__ import annotations
@@ -56,6 +53,28 @@ def _read_cgroup_file(path: Path) -> str | object:
         return _CGROUP_FILE_MISSING
     except (OSError, UnicodeError):
         return _CGROUP_FILE_UNREADABLE
+
+
+def _incomplete(issues: Optional[set[str]]) -> None:
+    if issues is not None:
+        issues.add("observation_incomplete")
+
+
+def _limit_text(path: Path, issues: Optional[set[str]], *, required: bool = False) -> Optional[str]:
+    """Read one limit; an absent optional controller file is not an error."""
+
+    value = _read_cgroup_file(path)
+    if value is _CGROUP_FILE_UNREADABLE or (required and value is _CGROUP_FILE_MISSING):
+        _incomplete(issues)
+    return value if isinstance(value, str) else None
+
+
+def _positive_sysconf(name: str) -> Optional[int]:
+    try:
+        value = os.sysconf(name)
+    except (AttributeError, OSError, TypeError, ValueError):
+        return None
+    return value if type(value) is int and value > 0 else None
 
 
 def _is_v1_memory_unlimited(limit: int, page_size: int) -> bool:
@@ -279,8 +298,58 @@ def _heterogeneous_cpu_groups(affinity: Optional[set[int]], models: dict[int, st
     ]
 
 
-def probe_cpu(_discovery=None) -> Optional[dict[str, Any]]:
-    """Return the narrowest runtime-visible CPU capacity on Linux."""
+def _controller_paths(controller: str, discovery, issues: Optional[set[str]]) -> tuple[list[Path], str]:
+    mount, directory, version = _controller_location(controller, discovery)
+    if version == "unavailable":
+        _incomplete(issues)
+    return (_ancestors(directory, mount) if directory is not None and mount is not None else []), version
+
+
+def _cpuset_bound(path: Path, version: str, issues: Optional[set[str]]) -> Optional[Decimal]:
+    filename = "cpuset.cpus.effective" if version == "v2" else "cpuset.effective_cpus"
+    value = _limit_text(path / filename, issues)
+    if value is None and version == "v1":
+        value = _limit_text(path / "cpuset.cpus", issues, required=True)
+    if value is None:
+        return None
+    count = _parse_cpu_list(value)
+    if count is None:
+        _incomplete(issues)
+        return None
+    return Decimal(count)
+
+
+def _quota_bound(path: Path, version: str, issues: Optional[set[str]]) -> Optional[Decimal]:
+    if version == "v2":
+        value = _limit_text(path / "cpu.max", issues)
+        if value is None:
+            return None
+        tokens = value.split()
+        if len(tokens) != 2:
+            _incomplete(issues)
+            return None
+        quota_text, period_text = tokens
+    else:
+        quota_text = _limit_text(path / "cpu.cfs_quota_us", issues, required=True)
+        if quota_text is None or quota_text == "-1":
+            return None
+        period_text = _limit_text(path / "cpu.cfs_period_us", issues, required=True)
+        if period_text is None:
+            return None
+    try:
+        period = int(period_text)
+        if period <= 0:
+            raise ValueError("CPU quota period must be positive")
+        if quota_text == "max" and version == "v2":
+            return None
+        return Decimal(normalize_quota_units(int(quota_text), period))
+    except ValueError:
+        _incomplete(issues)
+        return None
+
+
+def probe_cpu(_discovery=None, *, issues: Optional[set[str]] = None) -> Optional[dict[str, Any]]:
+    """Return the smallest usable CPU bound, retaining a best-effort fallback."""
 
     if platform.system() != "Linux":
         return None
@@ -288,144 +357,81 @@ def probe_cpu(_discovery=None) -> Optional[dict[str, Any]]:
     try:
         affinity = set(os.sched_getaffinity(0))
         affinity_count = len(affinity) or None
-    except (AttributeError, OSError):
+    except (AttributeError, OSError, TypeError, ValueError):
         affinity = None
         affinity_count = None
 
     candidates: list[Decimal] = []
     if affinity_count:
         candidates.append(Decimal(affinity_count))
-
-    mount, directory, version = _controller_location("cpuset", discovery)
-    if version == "unavailable":
-        return None
-    if directory is not None and mount is not None:
-        for path in _ancestors(directory, mount):
-            value = _read_cgroup_file(path / ("cpuset.cpus.effective" if version == "v2" else "cpuset.effective_cpus"))
-            if value is _CGROUP_FILE_UNREADABLE:
-                return None
-            if value is _CGROUP_FILE_MISSING:
-                if version == "v2":
-                    # The controller may not be enabled at this level.
-                    continue
-                value = _read_cgroup_file(path / "cpuset.cpus")
-                if value is _CGROUP_FILE_UNREADABLE or value is _CGROUP_FILE_MISSING:
-                    return None
-            count = _parse_cpu_list(value)
-            if count is None:
-                return None
-            candidates.append(Decimal(count))
-
-    mount, directory, version = _controller_location("cpu", discovery)
-    if version == "unavailable":
-        return None
-    if directory is not None and mount is not None:
-        for path in _ancestors(directory, mount):
-            if version == "v2":
-                value = _read_cgroup_file(path / "cpu.max")
-                if value is _CGROUP_FILE_UNREADABLE:
-                    return None
-                if value is _CGROUP_FILE_MISSING:
-                    continue
-                tokens = value.split()
-                if len(tokens) != 2:
-                    return None
-                try:
-                    period = int(tokens[1])
-                except ValueError:
-                    return None
-                if period <= 0:
-                    return None
-                if tokens[0] == "max":
-                    continue
-                try:
-                    quota = int(tokens[0])
-                except ValueError:
-                    return None
-                if quota <= 0:
-                    return None
-            else:
-                quota_value = _read_cgroup_file(path / "cpu.cfs_quota_us")
-                period_value = _read_cgroup_file(path / "cpu.cfs_period_us")
-                if _CGROUP_FILE_UNREADABLE in (quota_value, period_value):
-                    return None
-                if _CGROUP_FILE_MISSING in (quota_value, period_value):
-                    return None
-                try:
-                    quota = int(quota_value)
-                    period = int(period_value)
-                except ValueError:
-                    return None
-                if period <= 0 or quota == 0 or quota < -1:
-                    return None
-                if quota == -1:
-                    continue
+    else:
+        _incomplete(issues)
+        online = _positive_sysconf("SC_NPROCESSORS_ONLN")
+        if online is None:
             try:
-                candidates.append(Decimal(normalize_quota_units(quota, period)))
-            except ValueError:
-                return None
-
-    if affinity_count is None:
-        try:
-            online = os.sysconf("SC_NPROCESSORS_ONLN")
-        except (AttributeError, OSError, ValueError):
-            online = os.cpu_count()
-        if isinstance(online, int) and online > 0:
+                online = os.cpu_count()
+            except (OSError, TypeError, ValueError):
+                online = None
+        if type(online) is int and online > 0:
             candidates.append(Decimal(online))
+
+    for controller, read_bound in (("cpuset", _cpuset_bound), ("cpu", _quota_bound)):
+        paths, version = _controller_paths(controller, discovery, issues)
+        for path in paths:
+            bound = read_bound(path, version, issues)
+            if bound is not None:
+                candidates.append(bound)
     if not candidates:
         return None
 
     selected = min(candidates)
-    models = _cpu_models(affinity)
-    if affinity_count is not None and selected == Decimal(affinity_count):
-        groups = _heterogeneous_cpu_groups(affinity, models)
-        if groups:
-            return {"groups": groups}
     group: dict[str, Any] = {"units": _decimal_text(selected)}
-    group.update(_cpu_identity(affinity, models))
+    try:
+        models = _cpu_models(affinity)
+        if affinity_count is not None and selected == Decimal(affinity_count):
+            groups = _heterogeneous_cpu_groups(affinity, models)
+            if groups:
+                return {"groups": groups}
+        group.update(_cpu_identity(affinity, models))
+    except Exception:
+        # Optional hardware descriptions must never erase the capacity.
+        pass
     return {"groups": [group]}
 
 
-def probe_memory(_discovery=None) -> Optional[dict[str, str]]:
-    """Return the narrowest positive physical/cgroup memory capacity."""
+def probe_memory(_discovery=None, *, issues: Optional[set[str]] = None) -> Optional[dict[str, str]]:
+    """Return the smallest usable physical/cgroup memory bound."""
 
     if platform.system() != "Linux":
         return None
     discovery = discover_cgroups() if _discovery is None else _discovery
     candidates = []
-    try:
-        page_size = os.sysconf("SC_PAGE_SIZE")
-        physical = page_size * os.sysconf("SC_PHYS_PAGES")
-    except (AttributeError, OSError, ValueError):
-        page_size = 0
-        physical = 0
-    if isinstance(physical, int) and physical > 0:
-        candidates.append(physical)
+    page_size = _positive_sysconf("SC_PAGE_SIZE")
+    page_count = _positive_sysconf("SC_PHYS_PAGES")
+    if page_size is not None and page_count is not None:
+        candidates.append(page_size * page_count)
+    else:
+        _incomplete(issues)
 
-    mount, directory, version = _controller_location("memory", discovery)
-    if version == "unavailable":
-        return None
-    if directory is not None and mount is not None:
-        for path in _ancestors(directory, mount):
-            value = _read_cgroup_file(path / ("memory.max" if version == "v2" else "memory.limit_in_bytes"))
-            if value is _CGROUP_FILE_UNREADABLE:
-                return None
-            if value is _CGROUP_FILE_MISSING:
-                if version == "v1":
-                    return None
-                continue
-            if version == "v2" and value == "max":
-                continue
-            try:
-                limit = int(value)
-            except ValueError:
-                return None
+    paths, version = _controller_paths("memory", discovery, issues)
+    for path in paths:
+        value = _limit_text(
+            path / ("memory.max" if version == "v2" else "memory.limit_in_bytes"), issues, required=version == "v1"
+        )
+        if value is None or (version == "v2" and value == "max"):
+            continue
+        try:
+            limit = int(value)
             if limit <= 0:
-                return None
-            if version == "v1":
-                if _is_v1_memory_unlimited(limit, page_size):
-                    continue
-                if limit >= _V1_MEMORY_UNLIMITED_MIN:
-                    return None
-            candidates.append(limit)
+                raise ValueError("Memory limit must be positive")
+        except ValueError:
+            _incomplete(issues)
+            continue
+        if version == "v1":
+            if _is_v1_memory_unlimited(limit, page_size or 0):
+                continue
+            if limit >= _V1_MEMORY_UNLIMITED_MIN:
+                _incomplete(issues)
+                continue
+        candidates.append(limit)
     return {"bytes": str(min(candidates))} if candidates else None
