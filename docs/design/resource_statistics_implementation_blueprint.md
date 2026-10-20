@@ -209,6 +209,20 @@ empty polling, and final same-process direct delivery do not become extra
 application messages. Known rejected sends contribute nothing. Instrumentation
 failures and unresolved accounting contributions leave a gap.
 
+The reporting integration starts the job-scoped counters and drains them before
+using their snapshots in reports. Generic communication hooks are passive when
+no accounting context is supplied: they do not start counters or add shutdown
+waits on their own.
+
+Download accounting uses the producer's `accounting_chunk_key` to distinguish
+retries from different chunks. Built-in producers return bounded integer tuples,
+such as byte ranges; arbitrary request-state objects are not retained as keys.
+A custom `Downloadable` without a stable key leaves `counter_gap`. The same
+issue covers conflicting byte lengths for one key or exhaustion of the fixed
+16,384-entry tracking budget per logical send/source contribution. Further
+bookkeeping stops, not delivery. Accepted subtotals remain; no extra issue code
+or status is introduced.
+
 Managed trainers can serve tensors directly. The bounded optional contribution
 on the existing `RESULT_SOURCE_SETTLED` path joins those bytes to the one task
 result. Separately served tensor bytes do not create another logical message.
@@ -266,7 +280,7 @@ beside affected data; users do not need to interpret raw issue codes.
 | --- | --- | --- |
 | `observation_incomplete` | An unreadable CPU/RAM limit, failed GPU observation, interrupted file scan, or missing earlier attempt. | Keep usable values. Fallback capacity may be too high; a stopped file scan may be too low. |
 | `attribution_incomplete` | Missing waited-child CPU time or an unassociated trainer transfer. | Some CPU work or message bytes may be missing. |
-| `counter_gap` | A failed accounting callback or unresolved transfer at counter closure. | Some accepted message bytes/counts may be missing. |
+| `counter_gap` | An unresolved transfer, failed accounting callback, custom download without stable chunk identifiers, exhausted tracking budget, or conflicting byte lengths for one chunk identifier. | Some accepted message bytes/counts may be missing. Downloads continue normally. |
 | `unsupported` | A platform or multi-node arrangement cannot supply this measurement. | No usable value; do not substitute zero. |
 | `malformed_source` | A malformed numeric value or measurement object in the child handoff. | Discard the invalid value; keep independent valid measurements and contributions. |
 
@@ -284,13 +298,24 @@ job permissions before archives, rows, totals, or coverage counts. The
 totals from participant measurements. Job names come from existing metadata, not stored
 resource reports. Applicable MIG detail is shown only when relevant.
 
-Before final collection, command callbacks may drain for up to five seconds,
-and in-flight child send accounting for up to five seconds. A failed callback
-drain can use a further five-second fallback after the messaging endpoint
-stops. Already-settled work does not sleep for these bounds. Parent counter
-freeze adds no wait. These are separate bounds, not one overall deadline;
-unresolved contributions become partial data. The server uses its normal
-client-outcome wait rather than an additional statistics-only wait.
+Only the reporting integration adds the pre-publication drains. When an actual
+publication callback will write the report, command callbacks may drain for up
+to five seconds before that callback; in-flight child send accounting can use
+up to five seconds. A failed callback drain can use a further five-second
+fallback after the messaging endpoint stops. Failed-client deferred cleanup
+has already attempted report publication: it stops transport before waiting for
+callbacks and adds no pre-publication wait. Publication errors still pass through
+the existing cleanup owner.
+
+Already-settled work does not sleep for these bounds. Parent counter freeze
+adds no wait. These are separate bounds, not one overall deadline; unresolved
+contributions become partial data. The server uses its normal client-outcome
+wait rather than an additional statistics-only wait.
+
+If restoring a server job fails before it enters `running_jobs`, discard only
+the counter newly registered by that restore attempt. Keep pre-existing counters.
+Once `running_jobs` owns the job, normal completion owns counter cleanup even
+if restoring scheduler state fails afterward.
 
 ## Validation and review
 

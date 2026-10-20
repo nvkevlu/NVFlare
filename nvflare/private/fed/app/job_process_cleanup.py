@@ -55,13 +55,12 @@ def shutdown_job_process_runtime(
                 logger.warning(f"failed to drain command callbacks{suffix}: {secure_format_exception(e)}")
             return False
 
-    # Reject new app commands, then let every callback already admitted through
-    # that gate finish while Cell and F3 streaming are still usable. Otherwise
-    # one of those callbacks could originate traffic after the F3 snapshot was
-    # frozen. A failed bounded drain makes the snapshot explicitly partial.
+    # Publication needs a settled snapshot while transport is still usable.
+    # Without publication (including deferred failure cleanup), stop transport
+    # first so its joins do not start behind a statistics-only callback wait.
     _run_stage("command admission", stop_command_admission)
-    callbacks_drained = True
-    if wait_for_command_callbacks:
+    callbacks_drained = wait_for_command_callbacks is None
+    if before_streaming_shutdown and wait_for_command_callbacks:
         callbacks_drained = _wait_for_callbacks(before_publication=True)
         if not callbacks_drained:
             _run_stage("F3 callback completeness", mark_callback_drain_incomplete)

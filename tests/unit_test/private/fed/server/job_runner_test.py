@@ -1610,3 +1610,76 @@ def test_restore_running_job_registers_resource_participants_before_server_start
     assert engine.start_app_on_server.call_args.kwargs["restored_attempt"] is True
     assert engine.start_app_on_server.call_args.kwargs["snapshot"] is None
     runner.scheduler.restore_scheduled_job.assert_called_once_with("job-1")
+
+
+def _make_restore_inputs(tmp_path):
+    runner, fl_ctx, engine, job, _client_sites = _make_runner_inputs()
+    runner.scheduler = MagicMock()
+    runner.log_error = MagicMock()
+    fl_ctx.get_workspace.return_value.get_run_dir.return_value = str(tmp_path / "run_job-1")
+    engine.get_component.return_value.get_job.return_value = job
+    client = MagicMock()
+    client.name = "site-1"
+    return runner, fl_ctx, engine, job, {"token-1": client}
+
+
+@pytest.mark.parametrize("raise_on_start", (False, True))
+def test_failed_restore_discards_new_counter_before_running_ownership(tmp_path, raise_on_start):
+    runner, fl_ctx, engine, _job, clients = _make_restore_inputs(tmp_path)
+    if raise_on_start:
+        engine.start_app_on_server.side_effect = RuntimeError("launch failed")
+    else:
+        engine.start_app_on_server.return_value = "launch failed"
+
+    runner.restore_running_job("job-1", clients, None, fl_ctx)
+
+    assert runner.f3_counters.get("job-1") is None
+    assert "job-1" not in runner.running_jobs
+    runner.scheduler.restore_scheduled_job.assert_not_called()
+    runner.log_error.assert_called_once()
+
+
+@pytest.mark.parametrize("already_running", (False, True))
+def test_failed_restore_does_not_discard_existing_counter(tmp_path, already_running):
+    runner, fl_ctx, engine, job, clients = _make_restore_inputs(tmp_path)
+    existing_counter = runner.f3_counters.start_job("job-1")
+    if already_running:
+        runner.running_jobs["job-1"] = job
+    engine.start_app_on_server.return_value = "launch failed"
+
+    runner.restore_running_job("job-1", clients, None, fl_ctx)
+
+    assert runner.f3_counters.get("job-1") is existing_counter
+    assert ("job-1" in runner.running_jobs) is already_running
+    runner.log_error.assert_called_once()
+
+
+def test_scheduler_restore_failure_keeps_running_counter_owned(tmp_path):
+    runner, fl_ctx, _engine, job, clients = _make_restore_inputs(tmp_path)
+    runner.scheduler.restore_scheduled_job.side_effect = RuntimeError("scheduler restore failed")
+
+    runner.restore_running_job("job-1", clients, None, fl_ctx)
+
+    assert runner.running_jobs["job-1"] is job
+    assert runner.f3_counters.get("job-1") is not None
+    runner.log_error.assert_called_once()
+
+
+@pytest.mark.parametrize("existing", (False, True))
+def test_counter_registration_failure_only_discards_new_counter(tmp_path, existing):
+    runner, fl_ctx, _engine, job, clients = _make_restore_inputs(tmp_path)
+    existing_counter = runner.f3_counters.start_job("job-1") if existing else None
+    start_job = runner.f3_counters.start_job
+
+    def register_then_fail(*args, **kwargs):
+        start_job(*args, **kwargs)
+        raise RuntimeError("counter setup failed")
+
+    runner.f3_counters.start_job = register_then_fail
+
+    runner.restore_running_job("job-1", clients, None, fl_ctx)
+
+    assert runner.running_jobs["job-1"] is job
+    assert runner.f3_counters.get("job-1") is existing_counter
+    runner.scheduler.restore_scheduled_job.assert_called_once_with("job-1")
+    runner.log_warning.assert_called_once()

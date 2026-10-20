@@ -992,6 +992,7 @@ class JobRunner(FLComponent):
 
     def restore_running_job(self, job_id: str, job_clients, snapshot, fl_ctx: FLContext):
         engine = fl_ctx.get_engine()
+        new_f3_counter = False
 
         try:
             job_manager = engine.get_component(SystemComponents.JOB_MANAGER)
@@ -1021,9 +1022,12 @@ class JobRunner(FLComponent):
             try:
                 # A restart loses pre-restart traffic history. Keep the new
                 # subtotal, but label it partial rather than a clean zero/full total.
+                new_f3_counter = self.f3_counters.get(job_id) is None
                 self.f3_counters.start_job(job_id, prior_history_incomplete=True)
             except Exception as e:
-                self.f3_counters.forget_job(job_id)
+                if new_f3_counter:
+                    self.f3_counters.forget_job(job_id)
+                    new_f3_counter = False
                 self.log_warning(
                     fl_ctx,
                     f"F3 statistics are unavailable for restored job ({job_id}): {secure_format_exception(e)}",
@@ -1038,6 +1042,20 @@ class JobRunner(FLComponent):
                 self._pending_client_outcomes[job_id] = {c.name for c in job_clients.values()}
             self.scheduler.restore_scheduled_job(job_id)
         except Exception as e:
+            # Failed startup never reaches normal completion cleanup. Once the
+            # running table owns the job, however, it must retain the counter
+            # even if restoring scheduler state fails afterward.
+            if new_f3_counter:
+                try:
+                    with self.lock:
+                        if job_id not in self.running_jobs:
+                            self.f3_counters.forget_job(job_id)
+                except Exception as cleanup_error:
+                    self.log_warning(
+                        fl_ctx,
+                        f"Failed to discard F3 statistics for job ({job_id}): "
+                        f"{secure_format_exception(cleanup_error)}",
+                    )
             self.log_error(
                 fl_ctx, f"Failed to restore the job: {job_id} to the running job table: {secure_format_exception(e)}."
             )

@@ -42,6 +42,62 @@ def test_job_process_runtime_shutdown_order(monkeypatch):
     ]
 
 
+@pytest.mark.parametrize("drained", (False, True))
+def test_shutdown_without_publication_stops_transport_before_waiting(monkeypatch, drained):
+    calls = []
+    monkeypatch.setattr(job_process_cleanup, "shutdown_f3_streaming", lambda: calls.append("streaming"))
+    monkeypatch.setattr(job_process_cleanup, "security_close", lambda: calls.append("security"))
+    logger = MagicMock()
+
+    def wait_for_callbacks(timeout):
+        # A failed client's deferred cleanup has only MPM's short grace period.
+        # Transport must already be stopped before any bounded callback wait.
+        assert "streaming" in calls and "cell" in calls
+        calls.append(("callbacks", timeout))
+        return drained
+
+    mark_incomplete = MagicMock()
+    job_process_cleanup.shutdown_job_process_runtime(
+        stop_command_admission=lambda: calls.append("admission"),
+        wait_for_command_callbacks=wait_for_callbacks,
+        stop_cell=lambda: calls.append("cell"),
+        logger=logger,
+        mark_callback_drain_incomplete=mark_incomplete,
+    )
+
+    assert calls == [
+        "admission",
+        "streaming",
+        "cell",
+        ("callbacks", job_process_cleanup._COMMAND_CALLBACK_DRAIN_TIMEOUT),
+        "security",
+    ]
+    mark_incomplete.assert_not_called()
+    assert logger.warning.call_count == (0 if drained else 1)
+
+
+def test_shutdown_without_publication_continues_after_post_stop_wait_error(monkeypatch):
+    calls = []
+    monkeypatch.setattr(job_process_cleanup, "shutdown_f3_streaming", lambda: calls.append("streaming"))
+    monkeypatch.setattr(job_process_cleanup, "security_close", lambda: calls.append("security"))
+
+    def fail_wait(_timeout):
+        calls.append("callbacks")
+        raise RuntimeError("callback failure")
+
+    logger = MagicMock()
+    job_process_cleanup.shutdown_job_process_runtime(
+        stop_command_admission=None,
+        wait_for_command_callbacks=fail_wait,
+        stop_cell=lambda: calls.append("cell"),
+        logger=logger,
+    )
+
+    assert calls == ["streaming", "cell", "callbacks", "security"]
+    logger.warning.assert_called_once()
+    assert "before resource-statistics publication" not in logger.warning.call_args.args[0]
+
+
 def test_job_process_runtime_attempts_every_stage_after_failure(monkeypatch):
     calls = []
 
