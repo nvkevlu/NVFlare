@@ -338,11 +338,18 @@ class JobRunner(FLComponent):
         if client_deploy_requests:
             engine = fl_ctx.get_engine()
             admin_server = engine.server.admin_server
+            # Reporting owns registry creation and counter activation.
+            # Without an existing job counter, keep the ordinary send unchanged.
+            accounting_options = {}
+            counters = getattr(self, "f3_counters", None)
+            counter = counters.get(job.job_id) if counters is not None else None
+            if counter is not None:
+                accounting_options = {
+                    "logical_send_accounting": counter,
+                    "logical_send_traffic_class": F3TrafficClass.JOB_APPLICATION,
+                }
             client_token_to_reply = admin_server.send_requests_and_get_reply_dict(
-                client_deploy_requests,
-                timeout_secs=admin_server.timeout,
-                logical_send_accounting=self.f3_counters.get(job.job_id),
-                logical_send_traffic_class=F3TrafficClass.JOB_APPLICATION,
+                client_deploy_requests, timeout_secs=admin_server.timeout, **accounting_options
             )
 
             # check replies and see whether required clients are okay
