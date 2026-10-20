@@ -13,13 +13,3 @@ site-1  17179869184.0000   0.0000            0.0000
 Derived capacity-time totals
   CPU visible 2623536934927580965.5467 core-h | Memory visible 42984029141853486537186.4178 GiB-h | CUDA devices available 10248191152060863.1467 device-h | Verified full GPUs 0.0000 GPU-h | Type-unverified CUDA devices 10248191152060863.1467 device-h
   CPU time used 2501999792983.6092 core-h | Run-dir files 17179869184.0000 GiB | Message payload sent 0.0000 GiB
-
-Notes:
-  TIME covers capacity observations. CPU used is process CPU time divided by its matching measured interval.
-  CPU visible is capacity; CPU used is not host utilization %.
-  CPU used may miss child-process work; known gaps are marked *.
-  CUDA-device capacity records devices available to the job process, not utilization or proof of use.
-  Sums add participant values; physically shared resources may be counted more than once.
-  Payload sent to a site is sender-confirmed, not proof of receipt.
-  Capacity-time totals multiply observed capacity by its matching measured interval.
-  Use --site SITE or --format json to see hardware model details.

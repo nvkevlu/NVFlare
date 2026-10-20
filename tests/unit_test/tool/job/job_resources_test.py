@@ -69,6 +69,51 @@ def _site_cell(output: str, header: str, site: str = "site-1") -> str:
     return cells[next(index for index, column in enumerate(columns) if column.startswith(header))]
 
 
+@pytest.mark.parametrize("scope", ["job", "study"])
+@pytest.mark.parametrize("incomplete", [False, True])
+def test_cli_only_shows_a_short_legend_when_needed(scope, incomplete):
+    participant = _participant()
+    participant["retained_content"] = {"bytes": "0"}
+    participant["message_traffic"] = {"sent_to": []}
+    if incomplete:
+        participant["resource_capacity"].update(status="partial", issues=["observation_incomplete"])
+    summary = _job_summary(participant)
+    if scope == "job":
+        output = render_job_resources(summary)
+    else:
+        job = {
+            "job_id": "job-1",
+            "job_name": "example",
+            "job_status": "FINISHED:COMPLETED",
+            "resource_data": "included",
+            "totals": derive_job_totals(summary["participants"]),
+        }
+        output = render_study_resources(
+            {
+                "selection": {"study_name": "default"},
+                "coverage": {
+                    "selected_jobs": "1",
+                    "included_jobs": "1",
+                    "unavailable_jobs": "0",
+                    "nonterminal_jobs": "0",
+                },
+                "jobs": [job],
+                "totals": derive_study_totals([job]),
+            }
+        )
+
+    assert "Notes:" not in output
+    assert "Capacity-time totals multiply" not in output
+    assert "TIME covers" not in output
+    assert "Use --site" not in output
+    if incomplete:
+        assert "Data gaps:" in output
+        assert output.endswith("* = incomplete; — = unavailable.")
+    else:
+        assert "Data gaps:" not in output
+        assert "* = incomplete" not in output
+
+
 @pytest.mark.parametrize("measured, cpu_hours", [("3600", "8.0000"), ("7200", "16.0000"), ("0", "0.0000")])
 def test_schema_3_displays_observed_capacity_without_dividing_by_duration(measured, cpu_hours):
     participant = _participant()
@@ -90,7 +135,7 @@ def test_schema_3_displays_observed_capacity_without_dividing_by_duration(measur
     assert _site_cell(output, "VERIFIED FULL GPUs") == "2.0000"
     assert "Derived capacity-time totals" in output
     assert f"CPU visible {cpu_hours} core-h" in output
-    assert "matching measured interval" in output
+    assert "Notes:" not in output
     assert "AMD EPYC 9654; 8.0000 visible units" in detail
     assert "NVIDIA H100 80GB HBM3; 2.0000 visible instances" in detail
     assert "average visible" not in detail
@@ -176,6 +221,7 @@ def test_schema_3_capacity_changes_show_varies_without_inventing_an_average():
     assert "CUDA devices available 3.0000 device-h" in output
     assert "2 recorded intervals" in detail
     assert "each interval's capacity and hardware details" in detail
+    assert "varies = capacity changed; see --format json." in output
     assert "average visible" not in detail
 
 
@@ -353,7 +399,7 @@ def test_sender_confirmed_inbound_remains_visible_when_destination_report_is_mis
     server_row = next(line for line in output.splitlines() if line.startswith("server") and "1.0000" in line)
     assert "—" in server_row
     assert "1.0000" in server_row
-    assert "sender-confirmed" in output
+    assert "Notes:" not in output
 
 
 def test_cpu_used_average_is_marked_when_process_cpu_is_incomplete():

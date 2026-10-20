@@ -45,7 +45,6 @@ This example uses synthetic data to demonstrate the CLI format.
 
 .. literalinclude:: resource_statistics/examples/job_resources.out
    :language: text
-   :end-before: Notes:
 
 ``CPU VISIBLE`` is logical CPU capacity, ``MEM GiB`` is RAM capacity, and
 ``CUDA DEVICES`` is the number of devices available to that process for CUDA
@@ -110,7 +109,6 @@ each row.
 
 .. literalinclude:: resource_statistics/examples/study_resources.out
    :language: text
-   :end-before: Notes:
 
 Collection and availability
 ===========================

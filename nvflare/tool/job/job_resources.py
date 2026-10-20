@@ -476,32 +476,15 @@ def render_job_resources(summary: dict, participant: dict | None = None, *, job_
     if gaps:
         lines.extend(["", "Data gaps:", *gaps])
     show_legend = any("*" in line or _MISSING in line for line in lines)
-    lines.extend(["", "Notes:"])
     if show_legend:
-        lines.append("  * = incomplete number; — = no usable value. See --format json for details.")
-    lines.extend(
-        [
-            "  TIME covers capacity observations. CPU used is process CPU time divided by its matching measured interval.",
-            "  CPU visible is capacity; CPU used is not host utilization %.",
-            "  CPU used may miss child-process work; known gaps are marked *.",
-            "  CUDA-device capacity records devices available to the job process, not utilization or proof of use.",
-            "  Sums add participant values; physically shared resources may be counted more than once.",
-            "  Payload sent to a site is sender-confirmed, not proof of receipt.",
-        ]
-    )
-    lines.append("  Capacity-time totals multiply observed capacity by its matching measured interval.")
-    if any("intervals" in _resource_measurement(entry) for entry in visible_entries if _accepted(entry)):
-        lines.append(
-            "  'varies' means capacity changed between recorded intervals; see --format json for each interval."
-        )
-    if not selected:
-        lines.append("  Use --site SITE or --format json to see hardware model details.")
-    elif participant:
+        lines.extend(["", "* = incomplete; — = unavailable."])
+    if any("varies" in cell for row in rows for cell in row[1:]):
+        lines.extend(["", "varies = capacity changed; see --format json."])
+    if selected and participant:
         lines.extend(
             [
                 "",
                 f"Hardware detail for {selected}",
-                "Model metadata is optional and does not change numeric totals.",
                 "",
             ]
         )
@@ -627,15 +610,6 @@ def render_study_resources(summary: dict) -> str:
     if gaps:
         lines.extend(["", "Data gaps:", *gaps])
     show_legend = any("*" in line or _MISSING in line for line in lines)
-    lines.extend(["", "Notes:"])
     if show_legend:
-        lines.append("  * = incomplete number; — = no usable value. See --format json for details.")
-    lines.extend(
-        [
-            "  Capacity-time totals multiply observed capacity by its matching measured interval.",
-            "  Sums include only finalized jobs with valid resource summaries and may count shared resources more than once.",
-            "  CPU used is process CPU time, not visible CPU capacity or host utilization %.",
-            "  This view includes only jobs still retained by the job store.",
-        ]
-    )
+        lines.extend(["", "* = incomplete; — = unavailable."])
     return "\n".join(lines)

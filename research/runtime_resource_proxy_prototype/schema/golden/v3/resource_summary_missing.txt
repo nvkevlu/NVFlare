@@ -21,13 +21,4 @@ Derived capacity-time totals
 Data gaps:
   site-3: missing report
 
-Notes:
-  * = incomplete number; — = no usable value. See --format json for details.
-  TIME covers capacity observations. CPU used is process CPU time divided by its matching measured interval.
-  CPU visible is capacity; CPU used is not host utilization %.
-  CPU used may miss child-process work; known gaps are marked *.
-  CUDA-device capacity records devices available to the job process, not utilization or proof of use.
-  Sums add participant values; physically shared resources may be counted more than once.
-  Payload sent to a site is sender-confirmed, not proof of receipt.
-  Capacity-time totals multiply observed capacity by its matching measured interval.
-  Use --site SITE or --format json to see hardware model details.
+* = incomplete; — = unavailable.
