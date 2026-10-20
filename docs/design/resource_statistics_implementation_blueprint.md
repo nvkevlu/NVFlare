@@ -209,6 +209,10 @@ empty polling, and final same-process direct delivery do not become extra
 application messages. Known rejected sends contribute nothing. Instrumentation
 failures and unresolved accounting contributions leave a gap.
 
+Stream bytes come from the successful transfer's actual byte count, not its
+declared size. A hierarchical client's task result is addressed to its consuming
+parent participant; a relay prefix is routing information, not a participant name.
+
 The reporting integration starts the job-scoped counters and drains them before
 using their snapshots in reports. Generic communication hooks are passive when
 no accounting context is supplied: they do not start counters or add shutdown

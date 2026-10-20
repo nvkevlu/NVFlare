@@ -15,7 +15,8 @@ NVFlare counts payload for three operations:
 
 * The server deploys a job application to a client.
 * The server sends a task to a client.
-* A client sends a task result to the server.
+* A client sends a task result to the server or, in a hierarchical deployment,
+  its parent client.
 
 The bytes include serialized application data and associated separately
 transferred tensors. One operation to one destination counts as one message;
@@ -71,6 +72,8 @@ When bytes are counted
 NVFlare measures serialized payload before encryption and credits it after
 local send acceptance or the associated completed stream transfer. A rejected
 send contributes nothing. Local acceptance does not prove remote receipt.
+For a stream, the byte count comes from successful completion, even when its
+size was unknown before sending.
 
 For example, a 1 KiB result envelope with 64 MiB of transferred tensors
 contributes 67,109,888 payload bytes and one message.
