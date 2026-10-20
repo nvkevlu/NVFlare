@@ -34,7 +34,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Optional
 
-from .contract import PARTICIPANT_NAME_PATTERN, U128_MAX
+from .communication_limits import PARTICIPANT_NAME_PATTERN, U128_MAX
 
 _COLLECTING = "collecting"
 _CLOSING = "closing"

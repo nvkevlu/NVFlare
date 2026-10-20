@@ -12,16 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Process-global F3Counter access for a job process (SJ or CJ).
+"""Optional process-local counter shared by one job's send call sites.
 
-Unlike a parent process (SP/CP, see ``f3_registry.py``), a job process
-(``worker_process.py``/``runner_process.py``) only ever runs one job, so a
-single counter for the whole process's lifetime is sufficient -- there is no
-job_id to key by. A module-level singleton (rather than nesting this inside
-``JobResourceCollector``) is deliberate: the trusted task-response and
-task-result call sites have no reference to the ``JobResourceCollector``
-instance ``worker_process.py``/``runner_process.py`` construct locally, and
-should not need one just to record a send.
+Importing this module does not activate accounting. Reporting integration owns
+counter startup, final draining and publication. Without that consumer, send
+hooks receive None and do not create accounting contexts or transfer ledgers.
+The long-lived server parent uses the per-job registry in f3_registry.py instead.
 """
 
 from __future__ import annotations

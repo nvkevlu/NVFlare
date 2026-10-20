@@ -34,7 +34,7 @@ from nvflare.fuel.f3.cellnet.fqcn import FQCN
 from nvflare.private.defs import CellMessageHeaderKeys
 from nvflare.private.fed.utils.identity_utils import TokenVerifier, load_cert_file
 
-from .contract import U128_MAX
+from .communication_limits import U128_MAX
 from .f3_job_counter import get_job_f3_counter
 
 MAX_SUMMARY_BYTES = 64 * 1024

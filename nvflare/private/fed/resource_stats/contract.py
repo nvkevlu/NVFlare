@@ -33,6 +33,8 @@ from datetime import datetime, timezone
 from decimal import ROUND_FLOOR, ROUND_HALF_EVEN, Decimal, InvalidOperation, localcontext
 from typing import Any, Mapping, Sequence
 
+from .communication_limits import PARTICIPANT_NAME_PATTERN, U128_MAX
+
 SCHEMA_VERSION = "3.0"
 
 KIND_PARTICIPANT_SUMMARY = "nvflare.resource_stats.participant_summary"
@@ -99,7 +101,6 @@ MAX_STUDY_SUMMARY_BYTES = MAX_RECORD_BYTES[KIND_STUDY_SUMMARY]
 
 U32_MAX = 2**32 - 1
 U64_MAX = 2**64 - 1
-U128_MAX = 2**128 - 1
 MAX_CPU_UNITS = Decimal("1048576")
 
 INTEGER_PATTERN = re.compile(r"^[0-9]{1,39}(?:\.0{1,9})?$")
@@ -107,7 +108,6 @@ DECIMAL_PATTERN = re.compile(r"^[0-9]{1,39}(?:\.[0-9]{1,9})?$")
 TIMESTAMP_PATTERN = re.compile(r"^([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2})(?:\.([0-9]{1,9}))?Z$")
 JOB_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 MAX_JOB_NAME_LENGTH = 255
-PARTICIPANT_NAME_PATTERN = re.compile(r"^[A-Za-z0-9_-][A-Za-z0-9_.-]{0,127}$")
 MODEL_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._()+/@-]{0,127}$")
 ARCHITECTURE_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,31}$")
 MIG_PROFILE_PATTERN = re.compile(r"^[1-9][0-9]*g\.[1-9][0-9]*gb(?:\+me)?$")
