@@ -85,6 +85,18 @@ transfers or a collection failure keep a partial subtotal rather than
 silently treating missing bytes as zero. An empty ``sent_to`` list without
 an exception means observed zero included traffic.
 
+Chunked downloads
+-----------------
+
+Each chunk needs a stable identifier so a retried chunk is not counted twice.
+The built-in producers supply one. A custom ``Downloadable`` can provide it
+through ``accounting_chunk_key``; otherwise its byte accounting is incomplete.
+
+The ``counter_gap`` issue also covers a transfer still pending when the report
+is collected, a failed accounting callback, too many tracking entries, or the
+same chunk identifier appearing with conflicting byte lengths. These conditions
+affect statistics only: downloads keep their normal behavior.
+
 External trainers
 -----------------
 

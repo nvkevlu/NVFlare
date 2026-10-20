@@ -215,8 +215,8 @@ explanation, not the code:
      - Child-process CPU time was not accounted for, or a trainer's tensor transfer could not be tied to this participant.
      - The recorded CPU work or message total may omit that contribution.
    * - ``counter_gap``
-     - A message-accounting callback failed or a tensor transfer was still unresolved when counters closed.
-     - Some accepted messages or payload bytes may be missing.
+     - A transfer was unresolved at collection; an accounting callback failed; a custom download lacks stable chunk identifiers; tracking reached its limit; or one chunk identifier had conflicting byte lengths.
+     - Some accepted messages or payload bytes may be missing. Downloads continue normally.
    * - ``unsupported``
      - The platform does not provide the measurement, or a multi-node launch cannot be represented by a local capacity observation.
      - No usable value is reported for that measurement. This is not zero.

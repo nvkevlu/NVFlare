@@ -69,6 +69,27 @@ oversized, unsupported, or malformed data is an accounting gap, not zero.
 Repeated valid contributions do not add bytes again; conflicting contributions
 remain incomplete. The source summary is a site self-report, not signed proof.
 
+## Chunk identities and memory bounds
+
+Byte accounting identifies chunks using the producer's actual progress:
+files use the starting and ending byte offsets; cached objects use the first
+item's index and the number of produced items. Extra request fields are not
+copied into accounting keys. A custom `Downloadable` can supply its own stable
+key through `accounting_chunk_key(current_state, next_state)`: one to four
+unsigned 64-bit integers. Without a valid key, its data is still served, but
+its accounting remains partial. Retrying a key does not add bytes twice; a
+changed byte length for the same key makes accounting partial.
+
+Each logical send keeps at most 16,384 accounting entries across chunk keys
+and delegated-consumer mappings. Each trainer-result accumulator has the same
+chunk-key limit across its source references. Consumer names cached for
+accounting are limited to 512 characters. If more entries are needed,
+accounting becomes partial and stops retaining new chunk and consumer
+metadata; downloading and source release continue normally. These in-memory
+limits are separate from the 64 KiB,
+256-group summary-block limits above. No chunk-key hook runs when accounting
+is disabled.
+
 ## Settlement stays independent
 
 The backend first performs its existing outer origin/session/task checks.
@@ -112,13 +133,14 @@ The server job's different TLS certificate is not the token-signing identity.
 The configured parent public certificate is retained before job TLS replacement;
 no parent private key or new configuration is required.
 
-Every descendant pull, retry, and EOF request must carry that exact tuple and
-match the current client registration and known job/source context. Signature
-verification happens once at task binding, not per chunk. The transport calls
-the optional resolver each time; a previously cached consumer mapping cannot
-replace proof. Direct authenticated TLS remains an independent alternative.
-Failure leaves accounting partial and does not alter download authorization,
-receiver settings, completion, or source release.
+While accounting is active, every descendant pull, retry, and EOF request must
+carry that exact tuple and match the current client registration and known
+job/source context. Signature verification happens once at task binding, not
+per chunk. A cached consumer mapping cannot replace this check. The first
+failed check stops accounting for that logical send; subsequent downloads
+continue without trying to restore it. Direct authenticated TLS remains an
+independent alternative. Failure leaves accounting partial and does not alter
+download authorization, receiver settings, completion, or source release.
 
 This uses the existing site trust boundary: a bearer tuple proves site
 delegation, not independent trainer identity or malicious-site-proof statistics.

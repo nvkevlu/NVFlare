@@ -74,6 +74,18 @@ def _is_server_job_cell(my_info) -> bool:
     return len(path) >= 2 and path[0] == FQCN.ROOT_SERVER
 
 
+def _abandon_before_send(accounting_context, origin, destination):
+    if accounting_context is None:
+        return
+    try:
+        abandon = getattr(accounting_context, "abandon_before_send", None)
+        if callable(abandon):
+            abandon(origin, destination)
+    except BaseException:
+        # An optional accounting callback must not replace the send error.
+        pass
+
+
 class SimpleWaiter:
     def __init__(self, req_id, target, result):
         super().__init__()
@@ -190,6 +202,8 @@ class Adapter:
         if not stream_req_id:
             # no need to reply!
             self.logger.debug("Do not send reply because there is no stream_req_id!")
+            if isinstance(response, Message):
+                _abandon_before_send(response.get_logical_send_context(), self.my_info.fqcn, origin)
             return
 
         if not isinstance(response, Message):
@@ -217,14 +231,14 @@ class Adapter:
                     pass
         # Receiver IDs govern tensor source lifetime. The request's first hop
         # may forward references to a trainer, so accounting must not invent IDs.
-        fobs_ctx = self.cell.get_fobs_context()
-        encode_payload(
-            response,
-            StreamHeaderKey.PAYLOAD_ENCODING,
-            fobs_ctx=fobs_ctx,
-        )
-        self.logger.debug(f"sending: {stream_req_id=}: {response.headers=}, target={origin}")
         try:
+            fobs_ctx = self.cell.get_fobs_context()
+            encode_payload(
+                response,
+                StreamHeaderKey.PAYLOAD_ENCODING,
+                fobs_ctx=fobs_ctx,
+            )
+            self.logger.debug(f"sending: {stream_req_id=}: {response.headers=}, target={origin}")
             # Response production is asynchronous and can outlive the request timeout. Mark its transport frames
             # optional so a stale destination is dropped without ERROR-level routing noise. Reliable delivery and
             # receiver-side stream errors still settle reply_future and the original request waiter when present.
@@ -238,8 +252,9 @@ class Adapter:
                 optional=transport_optional,
                 reliable=True,
             )
-        except BlobSizeError as ex:
-            if _is_server_job_cell(self.my_info):
+        except BaseException as ex:
+            _abandon_before_send(accounting_context, self.my_info.fqcn, origin)
+            if isinstance(ex, BlobSizeError) and _is_server_job_cell(self.my_info):
                 self.logger.critical(
                     f"streamed response from server job cell {self.my_info.fqcn} is too large; "
                     f"exiting job process to fail the job: {secure_format_exception(ex)}"
@@ -538,16 +553,20 @@ class Cell(StreamCell):
                 except BaseException:
                     pass
 
-        self._encode_message(
-            request,
-            abort_signal,
-            num_receivers=num_receivers,
-            receiver_ids=receiver_ids,
-            fobs_ctx_props=fobs_ctx_props,
-        )
-        return self._send_one_request(
-            channel, target, topic, request, timeout, secure, optional, abort_signal, progress_wait_cb
-        )
+        try:
+            self._encode_message(
+                request,
+                abort_signal,
+                num_receivers=num_receivers,
+                receiver_ids=receiver_ids,
+                fobs_ctx_props=fobs_ctx_props,
+            )
+            return self._send_one_request(
+                channel, target, topic, request, timeout, secure, optional, abort_signal, progress_wait_cb
+            )
+        except BaseException:
+            _abandon_before_send(accounting_context, self.get_fqcn(), target)
+            raise
 
     def _send_one_request(
         self,

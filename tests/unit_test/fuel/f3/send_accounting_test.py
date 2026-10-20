@@ -278,9 +278,9 @@ def test_rejected_cached_consumer_proof_is_evicted_and_stays_incomplete(rejected
 
     assert context.resolve_oob_consumer("tx", "client.job.trainer", Message()) is None
     assert context.make_oob_contribution_context("tx", "client.job.trainer", "rejected", 5) is None
-    # A concurrent or later valid request may restore the destination mapping,
-    # but can never restore this incomplete admission or accept stale bytes.
-    assert context.resolve_oob_consumer("tx", "client.job.trainer", Message()) == "client.job"
+    # Accounting stays stopped after proof loss; delivery and source lifetime
+    # are independent of whether a later pull supplies valid proof.
+    assert context.resolve_oob_consumer("tx", "client.job.trainer", Message()) is None
     inflight.accepted(100)
     assert stale.try_begin("server.job", "client.job.trainer") is None
     context.settle_oob_transaction("tx", ("client.job.trainer",))
@@ -490,7 +490,7 @@ def test_core_cell_abandons_pre_admission_for_direct_final_delivery(monkeypatch)
     assert _counter_value(counter) == {"payload_bytes": "0", "messages": "0"}
 
 
-def test_encode_failure_leaves_pre_admission_to_freeze_partial(monkeypatch):
+def test_encode_failure_releases_pre_admission_without_waiting(monkeypatch):
     import nvflare.fuel.f3.cellnet.core_cell as core_cell_module
 
     cell = _core_cell("server/job")
@@ -506,12 +506,9 @@ def test_encode_failure_leaves_pre_admission_to_freeze_partial(monkeypatch):
     cell.encrypt_payload = MagicMock()
 
     assert cell._send_to_endpoint(Endpoint("client/job"), message)
-    assert not counter.close_and_drain(0.0)
-    assert counter.freeze() == {
-        "status": "partial",
-        "issues": ["counter_gap"],
-        "sent_to": [],
-    }
+    assert counter.pending_count == 0
+    assert counter.close_and_drain(0.0)
+    assert counter.freeze() == {"sent_to": []}
 
 
 def test_core_cell_counts_a_local_first_hop_to_a_remote_destination(monkeypatch):
@@ -925,7 +922,7 @@ def test_proof_loss_after_first_chunk_never_changes_download_or_source_release(r
         _trainer_pull(ref_id, rejected if reject_on == "eof" else "valid", second.payload["state"])
     )
 
-    assert resolver.call_count == 3
+    assert resolver.call_count == (2 if reject_on == "data" else 3)
     assert eof.payload["status"] == "eof"
     assert tx.receiver_ids is None
     assert tx.num_receivers == 1
@@ -950,7 +947,7 @@ def test_first_unresolved_pull_then_valid_proof_continues_delivery_but_stays_par
     assert first.get_logical_send_context() is None
     second = service._handle_download(_trainer_pull(ref_id, "valid", first.payload["state"]))
     assert second.payload["data"] == b"second"
-    assert second.get_logical_send_context().try_begin("server.job", "client.job.trainer") is None
+    assert second.get_logical_send_context() is None
     eof = service._handle_download(_trainer_pull(ref_id, "valid", second.payload["state"]))
 
     assert eof.payload["status"] == "eof"
@@ -961,46 +958,18 @@ def test_first_unresolved_pull_then_valid_proof_continues_delivery_but_stays_par
     assert counter.freeze() == {"status": "partial", "issues": ["counter_gap"], "sent_to": []}
 
 
-def test_download_chunk_identity_canonicalizes_builtin_state_and_dedupes_retry():
+def test_download_chunk_identity_uses_produced_chunk_not_extra_request_fields():
     tx = _Transaction(timeout=10.0, num_receivers=1)
     ref = tx.add_object(MockDownloadable([b"data"]))
-
-    first_state = {
-        "nested": [None, True, 7, 1.25, b"bytes", bytearray(b"array"), memoryview(b"view")],
-        "position": (3, {"phase": complex(2, -1)}),
-    }
-    reordered_equivalent_state = {
-        "position": (3, {"phase": complex(2, -1)}),
-        "nested": [None, True, 7, 1.25, b"bytes", bytearray(b"array"), memoryview(b"view")],
-    }
-
-    first_key = ref.accounting_chunk_key(first_state)
-    retry_key = ref.accounting_chunk_key(reordered_equivalent_state)
-    distinct_key = ref.accounting_chunk_key({"nested": tuple(first_state["nested"])})
-
-    assert first_key == retry_key
-    assert distinct_key != first_key
-    assert len({first_key, retry_key, distinct_key}) == 2
-
-
-def test_download_chunk_identity_rejects_unbounded_or_unsupported_state_without_allocating_ledger():
-    from nvflare.fuel.f3.streaming import download_service as download_service_module
-
-    tx = _Transaction(timeout=10.0, num_receivers=1)
-    ref = tx.add_object(MockDownloadable([b"data"]))
-    cyclic_state = []
-    cyclic_state.append(cyclic_state)
-
-    assert ref.accounting_chunk_key({"custom": object()}) is None
-    assert ref.accounting_chunk_key(b"x" * (download_service_module._ACCOUNTING_STATE_MAX_SCALAR_BYTES + 1)) is None
-    assert ref.accounting_chunk_key(cyclic_state) is None
+    first_key = ref.accounting_chunk_key({"extra": object()}, {"chunk_idx": 1})
+    retry_key = ref.accounting_chunk_key({"extra": b"x" * 100_000}, {"chunk_idx": 1})
+    assert first_key == retry_key == (0, 1)
+    assert ref.accounting_chunk_key(None, {"chunk_idx": 2}) == (1, 2)
 
 
 def test_unaccounted_download_does_not_compute_a_chunk_identity(monkeypatch):
-    from nvflare.fuel.f3.streaming import download_service as download_service_module
-
-    canonicalize = MagicMock(side_effect=AssertionError("unaccounted download canonicalized state"))
-    monkeypatch.setattr(download_service_module, "_canonical_accounting_state", canonicalize)
+    hook = MagicMock(side_effect=AssertionError("unaccounted download requested an accounting key"))
+    monkeypatch.setattr(MockDownloadable, "accounting_chunk_key", hook)
     service = make_isolated_download_service()
     tx_id = service.new_transaction(cell=MagicMock(), timeout=10.0, num_receivers=1)
     ref_id = service.add_object(tx_id, MockDownloadable([b"data"]))
@@ -1008,10 +977,10 @@ def test_unaccounted_download_does_not_compute_a_chunk_identity(monkeypatch):
     reply = service._handle_download(pull_request(ref_id, "site-1"))
 
     assert reply.payload["data"] == b"data"
-    canonicalize.assert_not_called()
+    hook.assert_not_called()
 
 
-def test_unsupported_download_state_marks_f3_partial_without_changing_served_data():
+def test_unsupported_download_producer_marks_f3_partial_without_changing_served_data():
     service = make_isolated_download_service()
     counter = F3Counter()
     context = attach_logical_send_context(Message(), counter, F3TrafficClass.TASK_RESULT, recipient_name="site-1")
@@ -1022,7 +991,9 @@ def test_unsupported_download_state_marks_f3_partial_without_changing_served_dat
         receiver_ids=("site-1",),
         send_accounting_context=context,
     )
-    ref_id = service.add_object(tx_id, MockDownloadable([b"data"]))
+    obj = MockDownloadable([b"data"])
+    obj.accounting_chunk_key = lambda current_state, next_state: None
+    ref_id = service.add_object(tx_id, obj)
     main = context.try_begin("origin", "site-1")
     main.accepted(4)
 
@@ -1034,27 +1005,6 @@ def test_unsupported_download_state_marks_f3_partial_without_changing_served_dat
     assert snapshot["status"] == "partial"
     assert snapshot["issues"] == ["counter_gap"]
     assert _total_value(snapshot) == {"payload_bytes": "0", "messages": "0"}
-
-
-def test_large_download_chunk_identity_set_has_linear_size_without_prior_chunk_scans():
-    """Exercise a realistic large ledger without a wall-clock assertion.
-
-    LogicalSendContext uses a set of these keys. Its linear size and retry
-    membership are the non-flaky complexity assertion: no per-ref history is
-    scanned to create a later key.
-    """
-
-    tx = _Transaction(timeout=10.0, num_receivers=1)
-    ref = tx.add_object(MockDownloadable([b"data"]))
-    chunk_count = 20_000
-
-    keys = set()
-    for index in range(chunk_count):
-        keys.add(ref.accounting_chunk_key({"received_bytes": index * 2 * 1024 * 1024}))
-
-    assert len(keys) == chunk_count
-    for index in (0, chunk_count // 2, chunk_count - 1):
-        assert ref.accounting_chunk_key({"received_bytes": index * 2 * 1024 * 1024}) in keys
 
 
 def test_download_service_accounting_callback_failures_do_not_change_serving_or_settlement():

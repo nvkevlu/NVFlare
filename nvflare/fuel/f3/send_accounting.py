@@ -35,7 +35,10 @@ log = logging.getLogger(__name__)
 _CALL_FAILED = object()
 SOURCE_CONTRIBUTION_CONTEXT_KEY = "source_contribution_context"
 MAX_SOURCE_CONTRIBUTION_GROUPS = 256
-MAX_SOURCE_CONTRIBUTION_CHUNKS = 1_000_000
+# One logical send/result keeps at most this many small chunk identities and
+# delegated-consumer mappings. Saturation stops accounting, never delivery.
+MAX_ACCOUNTING_ENTRIES = 16_384
+_MAX_CONSUMER_NAME_LENGTH = 512
 _MAX_PAYLOAD_BYTES = (1 << 128) - 1
 
 
@@ -75,6 +78,7 @@ class _DestinationState:
     successful_transactions: set[str] = field(default_factory=set)
     inflight_contributions: set[Hashable] = field(default_factory=set)
     accepted_contributions: set[Hashable] = field(default_factory=set)
+    contribution_lengths: dict[Hashable, int] = field(default_factory=dict)
     queued_contributions: list[tuple[Hashable, int]] = field(default_factory=list)
     pending_external_contributions: set[Hashable] = field(default_factory=set)
 
@@ -156,6 +160,8 @@ class LogicalSendContext:
         self._external_source_handler: Optional[Callable] = None
         self._external_sources: set[tuple[str, str]] = set()
         self._external_results: dict[tuple[Hashable, str], tuple[int, bool]] = {}
+        self._metadata_count = 0
+        self._metadata_saturated = False
 
     def set_consumer_resolver(self, resolver: Callable) -> None:
         """Set a trusted consumer-to-logical-destination resolver, not a lifetime rule.
@@ -176,6 +182,11 @@ class LogicalSendContext:
             key = (transaction_id, consumer)
             receivers = self._transaction_receivers.get(transaction_id)
             destination = self._destination
+            state = self._destinations.get(destination)
+            if self._metadata_saturated or (
+                state is not None and (state.incomplete or state.abandoned or state.completed)
+            ):
+                return None
             resolver = self._consumer_resolver
         resolved = consumer if receivers is not None and consumer in receivers else None
         if resolved is None and receivers is not None and resolver is not None:
@@ -193,11 +204,25 @@ class LogicalSendContext:
         )
         with self._lock:
             cached = self._consumer_destinations.get(key)
-            if not valid or (cached is not None and cached != resolved):
+            state = self._destinations.get(destination)
+            if (
+                not valid
+                or len(consumer) > _MAX_CONSUMER_NAME_LENGTH
+                or (cached is not None and cached != resolved)
+                or self._metadata_saturated
+                or (state is not None and (state.incomplete or state.abandoned or state.completed))
+            ):
                 self._consumer_destinations.pop(key, None)
                 rejected = True
+            elif consumer != resolved and cached is None:
+                if self._metadata_count >= MAX_ACCOUNTING_ENTRIES:
+                    self._metadata_saturated = True
+                    rejected = True
+                else:
+                    self._consumer_destinations[key] = resolved
+                    self._metadata_count += 1
+                    rejected = False
             else:
-                self._consumer_destinations[key] = resolved
                 rejected = False
         if rejected:
             self.mark_counter_gap()
@@ -257,11 +282,18 @@ class LogicalSendContext:
             if key not in state.pending_external_contributions:
                 self._mark_incomplete(destination)
                 return
-            self._external_results[result_key] = result
+            if state.completed or state.abandoned or state.incomplete:
+                state.pending_external_contributions.discard(key)
+                return
             if not valid or not complete:
                 self._mark_incomplete(destination)
+                state.pending_external_contributions.discard(key)
                 return
             contribution_id = ("external", key)
+            if not self._reserve_contribution_locked(destination, state, contribution_id, payload_bytes):
+                state.pending_external_contributions.discard(key)
+                return
+            self._external_results[result_key] = result
             if state.admission is None:
                 state.queued_contributions.append((contribution_id, payload_bytes))
                 state.inflight_contributions.add(contribution_id)
@@ -348,10 +380,10 @@ class LogicalSendContext:
             state.admission = admission
         return True
 
-    def abandon_excluded_delivery(self, origin: str, destination: str) -> bool:
-        """Release a matching pre-admission for an excluded local delivery.
+    def abandon_before_send(self, origin: str, destination: str) -> bool:
+        """Release a matching pre-admission when transport will not begin.
 
-        Do not create an observation: a direct send with no pre-admission must
+        Do not create an observation: a send with no pre-admission must
         leave even a closed or frozen counter unchanged. The real stream and
         DownloadService transactions continue using their existing lifecycle.
         """
@@ -372,6 +404,11 @@ class LogicalSendContext:
             state.abandoned = True
             admission = state.admission
         return bool(self._safe_call("abandon", admission))
+
+    def abandon_excluded_delivery(self, origin: str, destination: str) -> bool:
+        """Release an unused pre-admission for an excluded local delivery."""
+
+        return self.abandon_before_send(origin, destination)
 
     def try_begin(self, origin: str, destination: str) -> Optional[_SendAttempt]:
         """Admit the main logical send once for this origin and destination."""
@@ -395,7 +432,7 @@ class LogicalSendContext:
                 return None
 
             state = self._destinations.setdefault(destination, _DestinationState())
-            if state.begun:
+            if state.begun or state.completed or state.abandoned:
                 return None
             state.begun = True
             owner_admission_attempted = state.owner_admission_attempted
@@ -512,7 +549,12 @@ class LogicalSendContext:
     ) -> Optional[_OobContributionContext]:
         """Create a byte-only context for one DownloadService data response."""
 
-        if isinstance(payload_bytes, bool) or not isinstance(payload_bytes, int) or payload_bytes < 0:
+        if (
+            isinstance(payload_bytes, bool)
+            or not isinstance(payload_bytes, int)
+            or not 0 <= payload_bytes <= _MAX_PAYLOAD_BYTES
+        ):
+            self.mark_oob_incomplete(destination)
             return None
         with self._lock:
             receivers = self._transaction_receivers.get(transaction_id)
@@ -581,7 +623,13 @@ class LogicalSendContext:
             if self._origin is None or self._origin != origin:
                 return None
             state = self._destinations.setdefault(destination, _DestinationState())
+            previous = state.contribution_lengths.get(contribution_id)
+            if previous is not None and previous != payload_bytes:
+                self._mark_incomplete(destination)
+                return None
             if state.completed or state.abandoned or state.incomplete:
+                return None
+            if not self._reserve_contribution_locked(destination, state, contribution_id, payload_bytes):
                 return None
             if contribution_id in state.accepted_contributions or contribution_id in state.inflight_contributions:
                 return None
@@ -591,6 +639,21 @@ class LogicalSendContext:
             accepted_cb=lambda _encoded_size: self._contribution_accepted(destination, contribution_id, payload_bytes),
             abandoned_cb=lambda: self._contribution_abandoned(destination, contribution_id),
         )
+
+    def _reserve_contribution_locked(self, destination, state, contribution_id, payload_bytes) -> bool:
+        previous = state.contribution_lengths.get(contribution_id)
+        if previous is not None:
+            if previous != payload_bytes:
+                self._mark_incomplete(destination)
+                return False
+            return True
+        if self._metadata_saturated or self._metadata_count >= MAX_ACCOUNTING_ENTRIES:
+            self._metadata_saturated = True
+            self._mark_incomplete(destination)
+            return False
+        state.contribution_lengths[contribution_id] = payload_bytes
+        self._metadata_count += 1
+        return True
 
     def _main_accepted(self, destination: str, payload_bytes: int) -> None:
         if isinstance(payload_bytes, bool) or not isinstance(payload_bytes, int) or payload_bytes < 0:
@@ -858,7 +921,7 @@ class SourceContributionAccumulator:
 
     def _begin(self, key, contribution_id, payload_bytes) -> Optional[_SendAttempt]:
         with self._lock:
-            if self._frozen is not None:
+            if self._frozen is not None or self._incomplete:
                 return None
             group = self._groups[key]
             previous = group.seen.get(contribution_id)
@@ -868,7 +931,7 @@ class SourceContributionAccumulator:
             if contribution_id in group.accepted or contribution_id in group.inflight:
                 return None
             if previous is None:
-                if self._chunk_count >= MAX_SOURCE_CONTRIBUTION_CHUNKS:
+                if self._chunk_count >= MAX_ACCOUNTING_ENTRIES:
                     self._incomplete = True
                     return None
                 group.seen[contribution_id] = payload_bytes

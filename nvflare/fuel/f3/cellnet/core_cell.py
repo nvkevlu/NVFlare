@@ -1394,6 +1394,14 @@ class CoreCell(MessageReceiver, EndpointMonitor):
                 except BaseException as ex:
                     self.logger.warning("logical-send accounting completion failed: %s", secure_format_exception(ex))
                     self._mark_accounting_gap(accounting_context)
+            elif err and accounting_enabled:
+                try:
+                    abandon = getattr(accounting_context, "abandon_before_send", None)
+                    if callable(abandon):
+                        abandon(self.my_info.fqcn, destination)
+                except BaseException:
+                    # Keep the original send result if optional cleanup fails.
+                    pass
         return err
 
     def _mark_accounting_gap(self, accounting_context) -> None:
