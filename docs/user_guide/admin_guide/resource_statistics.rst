@@ -4,8 +4,8 @@ Resource Statistics
 *******************
 
 After a job finishes, resource statistics shows its participants' CPU, memory,
-and GPU capacity, recorded CPU work, total run-directory file size, and selected
-application data sent between them. Use it to inspect one job, look more closely
+and GPU capacity, recorded CPU work, total run-directory file size, and message
+payload sent and received. Use it to inspect one job, look more closely
 at a participant, or compare retained jobs in a study.
 
 A participant is the server or a client site in the job. Reports are collected
@@ -57,8 +57,10 @@ own elapsed duration. In this example, site-1 used 180 CPU seconds over
 The CLI uses ``cores`` as a short label for these logical CPU units.
 
 The file and message table uses GiB, where 1 GiB is 1,073,741,824 bytes.
-``PAYLOAD SENT TO SITE`` is calculated from the other participants' sends;
-it is not a measurement of delivery at the receiving process.
+``PAYLOAD SENT`` and ``PAYLOAD RECEIVED`` are separate counters for the job's
+messaging processes. They include repeated transfers and control payloads,
+but not network headers. See :ref:`resource_statistics_message_traffic` for
+the measurement boundary.
 
 Derived capacity-time totals multiply each observed capacity by its covered
 duration. For example, two CUDA devices visible for ten minutes produce

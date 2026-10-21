@@ -16,7 +16,7 @@ When measurements are taken
        |
    Observe CPU, memory and CUDA capacity; start elapsed/CPU counters
        |
-   Run the application and count included message traffic
+   Run the application and count sent/received message payload
        |
    Finish counters; observe file-size total and filesystem capacity
        |
@@ -99,7 +99,7 @@ launches it, called its parent, reads temporary report data from:
 The parent supplies the job and participant identity, assembles the report
 before releasing resources, and sends it afterward. The temporary file is
 removed when consumed. The server follows its corresponding runner/parent
-path and also includes deployment messages sent by its parent process.
+path. Shared parent-process traffic is not included in a job's counters.
 
 Transport and validation
 ------------------------
@@ -115,9 +115,8 @@ Compact and pretty JSON are equivalent; numeric strings such as ``"2"``
 and ``"2.0"`` are normalized. Equivalent duplicate reports do not add
 measurements. A conflicting replacement is rejected.
 
-Callbacks and sends are allowed to finish within bounded shutdown waits
-before their counters close. Unresolved contributions leave partial data;
-statistics do not wait indefinitely for complete reports.
+Final collection reads the available message counters without adding a
+statistics-only shutdown wait. Later traffic is outside that snapshot.
 
 Record layout and units
 =======================
@@ -152,11 +151,11 @@ It uses the same format as a live participant report.
      - Point-in-time visible capacity of the workspace filesystem; participant detail only.
    * - ``retained_content.bytes``
      - Observed logical length of regular run-directory files.
-   * - ``message_traffic.sent_to[]``
-     - Destination ``participant_name``, accepted ``payload_bytes``, and logical ``messages``.
+   * - ``message_traffic.sent_bytes`` and ``message_traffic.received_bytes``
+     - Message payload counted in each direction by the job process and its managed trainers.
 
 Quantities are decimal strings so large byte totals are not rounded by JSON
-floating-point consumers. Bytes, device counts, and message counts are
+floating-point consumers. Bytes and device counts are
 integer-valued; CPU units and seconds can be fractional, with at most nine
 fractional digits. Unknown values are not ``null`` or inferred zero.
 
@@ -209,14 +208,11 @@ explanation, not the code:
      - Concrete examples
      - How to interpret the value
    * - ``observation_incomplete``
-     - A CPU/RAM limit could not be read; GPU counting failed; a file scan stopped at its limit; an earlier attempt's measurements are missing.
-     - Available values remain. Capacity can be too high after fallback; file totals can be too low after a stopped scan.
+     - A CPU/RAM limit could not be read; GPU counting failed; a file scan stopped; a required trainer counter snapshot or earlier attempt's measurements are missing.
+     - Available values remain. Fallback capacity can be too high; file or message totals can be too low.
    * - ``attribution_incomplete``
-     - Child-process CPU time was not accounted for, or a trainer's tensor transfer could not be tied to this participant.
-     - The recorded CPU work or message total may omit that contribution.
-   * - ``counter_gap``
-     - A transfer was unresolved at collection; an accounting callback failed; a custom download lacks stable chunk identifiers; tracking reached its limit; or one chunk identifier had conflicting byte lengths.
-     - Some accepted messages or payload bytes may be missing. Downloads continue normally.
+     - CPU time from a child process could not be accounted for.
+     - The recorded CPU work may omit that child process.
    * - ``unsupported``
      - The platform does not provide the measurement, or a multi-node launch cannot be represented by a local capacity observation.
      - No usable value is reported for that measurement. This is not zero.

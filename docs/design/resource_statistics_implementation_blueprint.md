@@ -49,9 +49,10 @@ authorized job/site/study query -> archive reader -> derived totals -> CLI
 The server job process has the corresponding runner/parent path. The shared
 site parent is not an extra compute-capacity participant. Several jobs can
 observe the same hardware; reports are not deduplicated into a host inventory.
-The client parent has no counter for the included application traffic; it
-passes the child's counters through. The server additionally includes its
-parent process's deployment sends.
+Each parent passes the child's message counters through. Shared parent-process
+connections can serve multiple jobs, so deployment and parent-relayed traffic
+are not assigned to an individual job. This is the measurement's scope, not
+an unexpected collection failure.
 
 The [collector](../../nvflare/private/fed/resource_stats/collector.py) is created
 after normal workspace preparation and before application construction in
@@ -198,48 +199,77 @@ one-second budget checked between entries. Keep a partial subtotal on traversal
 failure or a limit; observed empty is zero. A blocked filesystem call can
 exceed the budget. Neither the walk nor the self-report is an atomic snapshot.
 
-## Application communication
+## Message communication
 
-Generic [send accounting](../../nvflare/fuel/f3/send_accounting.py) measures
-accepted originating logical sends, not every transport hop. Trusted local
-call sites select job deployment, actual task response, and task result.
-Count serialized application-payload bytes before encryption, credited after local acceptance. A completed
-stream contributes once; frames, retransmissions, control/statistics traffic,
-empty polling, and final same-process direct delivery do not become extra
-application messages. Known rejected sends contribute nothing. Instrumentation
-failures and unresolved accounting contributions leave a gap.
+CellNet owns simple per-neighbor byte counters; the resource-statistics
+collector owns report assembly and job/study aggregation. No application
+traffic class, job registry, logical-send token, or download reconciliation
+belongs in the messaging layer.
 
-Stream bytes come from the successful transfer's actual byte count, not its
-declared size. A hierarchical client's task result is addressed to its consuming
-parent participant; a relay prefix is routing information, not a participant name.
+### Exact transport boundary
 
-The reporting integration starts the job-scoped counters and drains them before
-using their snapshots in reports. Generic communication hooks are passive when
-no accounting context is supplied: they do not start counters or add shutdown
-waits on their own.
+[`CoreCell`](../../nvflare/fuel/f3/cellnet/core_cell.py) records
+`buffer_len(message.payload)` at the transport boundary. The buffer is already
+encoded and, when enabled, payload-encrypted. The send amount is captured
+before `communicator.send` can mutate the buffer and credited after that call
+returns without error. An asynchronous driver can still report a later failure;
+the counter is not delivery proof. Receive bytes are measured on arrival,
+before filters, forwarding, decryption, or application decoding.
 
-Download accounting uses the producer's `accounting_chunk_key` to distinguish
-retries from different chunks. Built-in producers return bounded integer tuples,
-such as byte ranges; arbitrary request-state objects are not retained as keys.
-A custom `Downloadable` without a stable key leaves `counter_gap`. The same
-issue covers conflicting byte lengths for one key or exhaustion of the fixed
-16,384-entry tracking budget per logical send/source contribution. Further
-bookkeeping stops, not delivery. Accepted subtotals remain; no extra issue code
-or status is introduced.
+Use the actual neighboring endpoint identity, not the message's origin or final
+destination headers. Each transported hop counts independently. Retries,
+control payloads, streamed frames, and separately downloaded tensors all use
+the same boundary. No specialized downloader hook or stable chunk identifier
+is required. A declared stream size is not used. Empty payloads add zero;
+CellNet headers and TCP/TLS framing are outside the byte measure.
 
-Managed trainers can serve tensors directly. The bounded optional contribution
-on the existing `RESULT_SOURCE_SETTLED` path joins those bytes to the one task
-result. Separately served tensor bytes do not create another logical message.
-The [trainer bridge guide](client_api_resource_transfer_bridge.md) explains
-the source association and existing site credentials. Missing proof or accounting
-does not reject valid downloads or alter source cleanup, cancellation, or retries.
-Site credentials identify the site, not an independently verified trainer
-process. No credential or private transfer reference is saved in reports.
+The same-process direct-call path is excluded. Connections between separate
+processes count, including loopback connections on the same machine. There
+is no inference that two cells share a machine from their names.
 
-Use `message_traffic.sent_to` in participant JSON for accepted bytes/messages.
-The CLI derives bytes sent to a participant from other participants' reports;
-it is not measured receipt. Missing senders leave inbound incomplete. Counters
-close before report construction so reports cannot count themselves.
+[`PeerTrafficCounters`](../../nvflare/fuel/f3/traffic_stats.py) keeps integer
+sent/received amounts with a lock and returns copied snapshots. Its fixed
+4,096-peer bound retains existing peers; excess or unusable peer identities
+go into an unattributed byte bucket. Those bytes remain included in the local
+cell total. No counter thread, reset, drain, or operator setting is needed.
+
+### Report scope and totals
+
+The reporting collector reads `cell.get_traffic_stats()` and sums its peer
+and unattributed buckets into:
+
+```json
+{"message_traffic": {"sent_bytes": "1073741824", "received_bytes": "536870912"}}
+```
+
+These are cumulative job-cell counts at final collection, not a count limited
+to training tasks or the capacity clock's interval. The counter snapshot adds
+no wait for callbacks or in-flight transfers. Later traffic is outside that
+report. A successful observed zero is `"0"`; failed collection is not zero.
+
+Add each direction separately for job and study views. Do not derive receive
+bytes from other senders or require their totals to match. Summing sent and
+received would count many transfers twice. A relay adds transport work rather
+than being deduplicated into one logical message. Shared parents' deployment
+and relay counters are not allocated among simultaneous jobs. Custom processes
+and non-CellNet traffic are not automatically included.
+
+### Managed external trainers
+
+Managed trainers can download and serve tensors directly, bypassing the job
+cell. The existing `RESULT_SOURCE_SETTLED` exchange and `SHUTDOWN` reply return
+the trainer's cumulative counters through its authenticated client/job connection.
+The reporting integration keeps the latest snapshot for each managed trainer
+and adds those disjoint cell counters to the participant's job-cell counters.
+Repeated snapshots replace earlier values; they are not added as new traffic.
+The cutoff is the latest returned snapshot, before the message carrying it sends.
+
+If a required snapshot is absent or malformed, retain valid job-cell and
+trainer observations and use `partial` with `observation_incomplete`. Do not
+reject downloads, change transfer completion, or add shutdown waits for
+statistics. The exchange uses existing authentication; no extra trainer
+credentials, private transfer identifiers, or raw peer identities are stored
+in the public participant report.
 
 ## Completion notification and server storage
 
@@ -282,9 +312,8 @@ beside affected data; users do not need to interpret raw issue codes.
 
 | Issue code | Concrete cause | Consequence |
 | --- | --- | --- |
-| `observation_incomplete` | An unreadable CPU/RAM limit, failed GPU observation, interrupted file scan, or missing earlier attempt. | Keep usable values. Fallback capacity may be too high; a stopped file scan may be too low. |
-| `attribution_incomplete` | Missing waited-child CPU time or an unassociated trainer transfer. | Some CPU work or message bytes may be missing. |
-| `counter_gap` | An unresolved transfer, failed accounting callback, custom download without stable chunk identifiers, exhausted tracking budget, or conflicting byte lengths for one chunk identifier. | Some accepted message bytes/counts may be missing. Downloads continue normally. |
+| `observation_incomplete` | An unreadable CPU/RAM limit, failed GPU observation, interrupted file scan, missing trainer snapshot, or missing earlier attempt. | Keep usable values. Fallback capacity may be too high; file or message totals may be too low. |
+| `attribution_incomplete` | Missing waited-child CPU time. | Some CPU work may be missing. |
 | `unsupported` | A platform or multi-node arrangement cannot supply this measurement. | No usable value; do not substitute zero. |
 | `malformed_source` | A malformed numeric value or measurement object in the child handoff. | Discard the invalid value; keep independent valid measurements and contributions. |
 
@@ -302,24 +331,11 @@ job permissions before archives, rows, totals, or coverage counts. The
 totals from participant measurements. Job names come from existing metadata, not stored
 resource reports. Applicable MIG detail is shown only when relevant.
 
-Only the reporting integration adds the pre-publication drains. When an actual
-publication callback will write the report, command callbacks may drain for up
-to five seconds before that callback; in-flight child send accounting can use
-up to five seconds. A failed callback drain can use a further five-second
-fallback after the messaging endpoint stops. Failed-client deferred cleanup
-has already attempted report publication: it stops transport before waiting for
-callbacks and adds no pre-publication wait. Publication errors still pass through
-the existing cleanup owner.
-
-Already-settled work does not sleep for these bounds. Parent counter freeze
-adds no wait. These are separate bounds, not one overall deadline; unresolved
-contributions become partial data. The server uses its normal client-outcome
-wait rather than an additional statistics-only wait.
-
-If restoring a server job fails before it enters `running_jobs`, discard only
-the counter newly registered by that restore attempt. Keep pre-existing counters.
-Once `running_jobs` owns the job, normal completion owns counter cleanup even
-if restoring scheduler state fails afterward.
+Resource statistics reads available counters at its existing final-collection
+point. It adds no statistics-only callback drain, transfer wait, or parent
+registry. Keep normal messaging teardown and resource-release ownership.
+Publication errors still pass through the existing cleanup owner, and normal
+workspace archival proceeds even when an optional report cannot be published.
 
 ## Validation and review
 

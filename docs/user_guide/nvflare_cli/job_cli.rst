@@ -618,8 +618,8 @@ Job Resources
 
 ``nvflare job resources`` reads saved resource reports after a job has
 finished and the server has finalized them. It shows observed capacity,
-recorded CPU work, total run-directory file size, and selected application
-payload. For the collection methods and interpretation, start with
+recorded CPU work, total run-directory file size, and message payload sent
+and received. For the collection methods and interpretation, start with
 :ref:`resource_statistics`.
 
 Commands

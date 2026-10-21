@@ -2,7 +2,7 @@
 
 Resource statistics gives users a best-effort record of the resources a job
 could see, its recorded CPU work, total size of files in its run directory, and
-selected application data sent between participants. It uses NVFlare's existing
+message payload sent and received by job processes. It uses NVFlare's existing
 access and dependencies. It requires no extra privileges, mounts, services,
 operator settings, or changes to Python startup and imports.
 
@@ -11,7 +11,7 @@ operator settings, or changes to Python startup and imports.
 ```text
 Prepare the normal job workspace
   -> observe CPU, RAM and CUDA capacity once
-  -> record elapsed time, CPU work and included application sends
+  -> record elapsed time, CPU work and sent/received payload bytes
   -> finish measurements and total the remaining file sizes
   -> pass the report to the client parent
   -> release compute resources, then attach the report to the existing completion notification
@@ -34,7 +34,7 @@ workspace preparation. These are site self-reports, not tamper-proof evidence.
 | CPU work | User and system CPU time for the process and descendants accounted for after waiting, with its own elapsed duration. Arbitrary un-waited descendants are not guaranteed covered. |
 | Workspace filesystem | Visible total capacity of the filesystem containing the existing run directory, not storage owned by the job. |
 | Run-directory file size | Bounded sum of regular-file lengths under the run directory, excluding symlinks and the top-level report directory. Only the total is stored, not filenames. |
-| Application data | Accepted payload bytes and logical messages for job deployment, actual task responses, and task results, grouped by destination. Not network-interface traffic or proof of receipt. |
+| Message traffic | Sent and received payload bytes for the job cell and its managed trainers, including control payloads and repeated transfers. Excludes shared parent-process traffic and network headers. |
 
 The report keeps capacities and seconds separately. This illustrative excerpt
 means two CPU units, 2 GiB of RAM, and one CUDA device over ten covered seconds:
@@ -56,6 +56,13 @@ derive 20 CPU-unit seconds, 20 GiB-seconds, and 10 CUDA-device seconds. Shared
 hardware may appear in several participants' observations; adding their
 capacity-time does not establish exclusive ownership. Filesystem capacity is
 never multiplied by time or summed across participants.
+
+Message counters keep `sent_bytes` and `received_bytes` separately. Sends
+count after the local send call returns without error; receives count at the
+receiving cell. A successful send is not proof of delivery. Each direction
+is summed separately for job and study views, not combined into a unique-byte
+total. Shared parent connections can carry several jobs, so deployment and
+parent relay traffic stay outside an individual job's report.
 
 ## Missing information
 

@@ -1,67 +1,59 @@
 .. _resource_statistics_message_traffic:
 
-Application Message Traffic
-***************************
+Message Traffic
+***************
 
-Message traffic records selected application payload accepted for sending.
-It shows how much data was sent by each participant and how much was addressed
-to each participant. It is not a network-interface byte counter or proof
-that the receiving application processed the data.
+Message traffic records payload bytes sent and received by the job's messaging
+processes. It is a communication-cost proxy, not a network-interface counter
+or a guarantee that the receiving application processed the data.
 
 What is counted
 ===============
 
-NVFlare counts payload for three operations:
+The counters include task data, separately transferred tensors, control
+payloads, and repeated transfers. A retried chunk counts again because it
+requires another transfer. Payload encryption is included when enabled;
+CellNet headers and TCP/TLS overhead are not.
 
-* The server deploys a job application to a client.
-* The server sends a task to a client.
-* A client sends a task result to the server or, in a hierarchical deployment,
-  its parent client.
+The report covers the server or client's job cell and its managed external
+trainers. A cell is NVFlare's messaging endpoint within a process. Transfers
+between processes count even when both processes run on one machine. Direct
+calls between cells in the same Python process do not count.
 
-The bytes include serialized application data and associated separately
-transferred tensors. One operation to one destination counts as one message;
-tensor transfers add bytes to that message.
-
-Registration, heartbeats, control requests, empty task polling, statistics
-reports, and unrelated custom traffic are excluded. Encryption and transport
-overhead are not included.
+Shared parent-process traffic, such as application deployment and parent
+relaying, is not assigned to an individual job. Arbitrary custom processes
+and communication outside CellNet are also outside this measurement.
 
 Read the output
 ===============
 
-``PAYLOAD SENT GiB`` is the participant's accepted sends.
-``PAYLOAD SENT TO SITE GiB`` is calculated from the other participants'
-reports of sends addressed to that site. It is not a separate receive counter.
-
-Inspect these values with:
+``PAYLOAD SENT GiB`` and ``PAYLOAD RECEIVED GiB`` show the two directions
+independently. Inspect them with:
 
 .. code-block:: shell
 
    nvflare job resources --job JOB_ID
    nvflare job resources --job JOB_ID --site site-1 --format json
 
-A participant stores sends by destination:
+A participant stores both counters:
 
 .. code-block:: json
 
    {
      "message_traffic": {
-       "sent_to": [
-         {
-           "participant_name": "server",
-           "payload_bytes": "1073741824",
-           "messages": "5"
-         }
-       ]
+       "sent_bytes": "1073741824",
+       "received_bytes": "536870912"
      }
    }
 
-This is 1 GiB across five included messages addressed to the server.
-``messages`` does not count network packets.
+This participant sent 1 GiB and received 0.5 GiB during collection.
+A successful zero counter is written as ``"0"``. Missing observations are
+not assumed to be zero.
 
-Job and study totals add sent bytes once. Do not add the sent-to-site view
-to the sent view: both describe the same addressed traffic. Missing or partial
-sender reports also make the sent-to-site view incomplete.
+Job and study views sum each direction separately. Do not add sent and
+received totals to estimate unique transferred data: a transfer can appear
+at both its sending and receiving participant. Relayed data can cross more
+than one counted connection.
 
 Collection details
 ==================
@@ -69,62 +61,44 @@ Collection details
 When bytes are counted
 ----------------------
 
-NVFlare measures serialized payload before encryption and credits it after
-local send acceptance or the associated completed stream transfer. A rejected
-send contributes nothing. Local acceptance does not prove remote receipt.
-For a stream, the byte count comes from successful completion, even when its
-size was unknown before sending.
+CellNet counts the actual encoded payload passed to each neighboring endpoint,
+after payload encryption when enabled. A send contributes after the local
+send call returns without an error. Transport drivers can report failures
+later, so this is not proof of remote delivery. The receive counter observes
+payload arriving at the receiving cell, before application decoding.
 
-For example, a 1 KiB result envelope with 64 MiB of transferred tensors
-contributes 67,109,888 payload bytes and one message.
+Stream frames and download chunks use these same counters. Their actual
+payload lengths count, including retries; no declared model size or logical
+message count is needed. Empty payloads contribute zero, even though their
+headers still have a transport cost.
 
-Forwarding hops and transport frames do not become additional messages.
-Final delivery between endpoints in the same Python process is excluded;
-a local relay on the way to a remote destination is not the final delivery.
+The report takes one snapshot of the counters during final collection. It
+does not wait for transfers to finish solely for statistics. Traffic after
+that snapshot is outside the report, so sent and received values need not
+match across participants.
 
-NVFlare selects the included operations at its own application call sites.
-A received header cannot declare arbitrary traffic countable. Unresolved
-transfers or a collection failure keep a partial subtotal rather than
-silently treating missing bytes as zero. An empty ``sent_to`` list without
-an exception means observed zero included traffic.
+Managed external trainers
+-------------------------
 
-Chunked downloads
------------------
+A managed trainer can transfer tensors directly without passing them through
+the client's job process. Its existing result-completion and shutdown exchanges
+return its cumulative sent and received counters. The reporting code adds the latest
+snapshot from each managed trainer to the job-process counters; repeated
+snapshots replace earlier ones rather than being added again.
+Trainer traffic after its latest returned snapshot is outside the report,
+including the message that carries that snapshot.
 
-Each chunk needs a stable identifier so a retried chunk is not counted twice.
-The built-in producers supply one. A custom ``Downloadable`` can provide it
-through ``accounting_chunk_key``; otherwise its byte accounting is incomplete.
-
-The ``counter_gap`` issue also covers a transfer still pending when the report
-is collected, a failed accounting callback, too many tracking entries, or the
-same chunk identifier appearing with conflicting byte lengths. These conditions
-affect statistics only: downloads keep their normal behavior.
-
-External trainers
------------------
-
-A managed external trainer can transfer tensors directly to the server.
-NVFlare combines those bytes with the client's task result so the tensors
-are neither omitted nor counted as a second message.
-
-The existing download-completion request carries the source's byte
-contribution. To associate a transfer with its client, job, and task, NVFlare
-uses the authenticated connection or the site's existing delegated credentials.
-No additional authentication setup is required. Those credentials establish
-a site identity, not independent proof of which trainer process holds them.
-
-Missing or unmatched contributions make the statistics partial. They do not
-reject an otherwise valid download or change its completion, cancellation,
-or cleanup. Credentials and private transfer identifiers are not saved.
-
-Custom communication outside the included operations is not automatically
-measured. A successful training result does not by itself establish complete
-traffic statistics.
+The existing authenticated exchange associates the trainer with its client
+and job. No new credential or operator configuration is required. If a
+required trainer snapshot is unavailable, the report retains the available
+counts and marks them incomplete. This does not reject downloads or change
+transfer cleanup.
 
 Source reference
 ----------------
 
-The :github_nvflare_link:`transport hooks <nvflare/fuel/f3/send_accounting.py>`,
-:github_nvflare_link:`job bindings <nvflare/private/fed/resource_stats/f3_bindings.py>`,
-and :github_nvflare_link:`external-trainer binding <nvflare/private/fed/resource_stats/external_transfer.py>`
-implement these rules.
+The :github_nvflare_link:`peer counters <nvflare/fuel/f3/traffic_stats.py>`
+and :github_nvflare_link:`CellNet transport boundary <nvflare/fuel/f3/cellnet/core_cell.py>`
+record bytes. The
+:github_nvflare_link:`resource collector <nvflare/private/fed/resource_stats/collector.py>`
+assembles the participant report outside CellNet.
