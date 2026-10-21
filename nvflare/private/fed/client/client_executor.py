@@ -155,8 +155,6 @@ def _build_participant_resource_report(
             job_id=str(job_id),
             participant_name=participant_name,
             child_handoff=handoff,
-            # Included client traffic originates in the job process, not this parent.
-            parent_f3={"sent_to": []},
         )
         if prior_attempt_incomplete:
             # These are job/participant totals, not current-attempt totals.

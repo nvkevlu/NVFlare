@@ -7,12 +7,12 @@ SITE    TIME  CPU VISIBLE (cores)  AVG CPU USED (cores)  MEM GiB  CUDA DEVICES  
 site-1  —     —                    0.3000                —        —             —
 
 Recorded files and message payload
-SITE    RUN-DIR FILES GiB  PAYLOAD SENT GiB  PAYLOAD SENT TO SITE GiB
+SITE    RUN-DIR FILES GiB  PAYLOAD SENT GiB  PAYLOAD RECEIVED GiB
 site-1  0.0000             0.0000            0.0000
 
 Derived capacity-time totals
   CPU visible — | Memory visible — | CUDA devices available — | Verified full GPUs —
-  CPU time used 0.0500 core-h | Run-dir files 0.0000 GiB | Message payload sent 0.0000 GiB
+  CPU time used 0.0500 core-h | Run-dir files 0.0000 GiB | Payload sent 0.0000 GiB | Payload received 0.0000 GiB
 
 Data gaps:
   site-1: visible capacity unavailable (not supported here)

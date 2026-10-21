@@ -74,8 +74,7 @@ def _worker_runtime(workspace_root, runner, mock_upload=True):
             "register_ext_decomposers",
             "configure_logging",
             "JobResourceCollector",
-            "start_job_f3_counter",
-            "get_job_f3_counter",
+            "snapshot_message_traffic",
             "write_terminal_handoff",
         ):
             stack.enter_context(patch.object(worker_process, name))
@@ -132,8 +131,7 @@ def test_statistics_gap_failure_does_not_skip_existing_error_publication(tmp_pat
     with (
         _worker_runtime(tmp_path, runner) as (args, client),
         patch.object(worker_process, "JobResourceCollector", return_value=collector),
-        patch.object(worker_process, "start_job_f3_counter"),
-        patch.object(worker_process, "get_job_f3_counter", return_value=None),
+        patch.object(worker_process, "snapshot_message_traffic", return_value=None),
         patch.object(worker_process, "write_terminal_handoff"),
         patch("nvflare.private.fed.app.job_process_cleanup.shutdown_f3_streaming"),
         patch("nvflare.private.fed.app.job_process_cleanup.security_close"),

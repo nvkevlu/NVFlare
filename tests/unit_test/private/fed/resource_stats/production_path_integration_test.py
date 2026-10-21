@@ -31,11 +31,13 @@ from zipfile import ZIP_DEFLATED, ZipFile
 from nvflare.apis.job_def import JobMetaKey, RunStatus
 from nvflare.apis.job_def_manager_spec import JobDefManagerSpec
 from nvflare.fuel.f3.cellnet.defs import MessageHeaderKey
+from nvflare.fuel.f3.traffic_stats import PeerTrafficCounters
 from nvflare.private.defs import CellMessageHeaderKeys, JobFailureMsgKey, new_cell_message
 from nvflare.private.fed.resource_stats.collector import JobResourceCollector, assemble_participant_summary
 from nvflare.private.fed.resource_stats.contract import canonical_json_bytes, derive_job_totals
 from nvflare.private.fed.resource_stats.coordinator import ResourceStatsCoordinator
 from nvflare.private.fed.resource_stats.handoff import read_terminal_handoff, write_terminal_handoff
+from nvflare.private.fed.resource_stats.message_traffic import snapshot_message_traffic
 from nvflare.private.fed.server.fed_server import FederatedServer
 from nvflare.private.fed.server.job_cmds import JobCommandModule
 from nvflare.private.fed.server.job_runner import JobRunner
@@ -77,9 +79,7 @@ def _workspace_zip(run_dir):
     return stream.getvalue()
 
 
-def _terminal_handoff(
-    run_dir, *, seconds, cpu_units, memory_bytes, gpu_count, f3_bytes=0, f3_messages=0, recipient_name="server"
-):
+def _terminal_handoff(run_dir, *, seconds, cpu_units, memory_bytes, gpu_count, sent_bytes=0, received_bytes=0):
     start_ns = 8_000_000_000_000_000_000
     elapsed_ns = int(seconds * 1_000_000_000)
     ticks = iter((start_ns, start_ns + elapsed_ns))
@@ -107,18 +107,20 @@ def _terminal_handoff(
             },
         },
     )
-    write_terminal_handoff(
-        run_dir,
-        collector.finish(
-            child_f3={
-                "sent_to": (
-                    [{"participant_name": recipient_name, "payload_bytes": str(f3_bytes), "messages": str(f3_messages)}]
-                    if f3_messages
-                    else []
-                ),
-            }
-        ),
-    )
+
+    # Exercise the real primitive and report adapter. Received bytes come from
+    # the local receive counter, never a peer's claim about bytes it sent.
+    class JobCell:
+        def __init__(self):
+            self.traffic = PeerTrafficCounters()
+
+        def get_traffic_stats(self):
+            return {"cell": "job-cell", **self.traffic.snapshot()}
+
+    cell = JobCell()
+    cell.traffic.record_sent("adjacent-peer", sent_bytes)
+    cell.traffic.record_received("adjacent-peer", received_bytes)
+    write_terminal_handoff(run_dir, collector.finish(message_traffic=snapshot_message_traffic(cell)))
     return read_terminal_handoff(run_dir)
 
 
@@ -138,10 +140,9 @@ def test_authenticated_report_to_workspace_query_and_human_output(tmp_path):
             cpu_units=8,
             memory_bytes=64 * 2**30,
             gpu_count=2,
-            f3_bytes=5_000_000,
-            f3_messages=4,
+            sent_bytes=5_000_000,
+            received_bytes=3_000_000,
         ),
-        parent_f3={"sent_to": []},
     )
     participant_bytes = canonical_json_bytes(client_report)
 
@@ -187,9 +188,8 @@ def test_authenticated_report_to_workspace_query_and_human_output(tmp_path):
         cpu_units=2,
         memory_bytes=16 * 2**30,
         gpu_count=0,
-        f3_bytes=3_000_000,
-        f3_messages=2,
-        recipient_name="site-1",
+        sent_bytes=3_000_000,
+        received_bytes=4_500_000,
     )
     fl_ctx = MagicMock()
     fl_ctx.get_workspace.return_value.get_run_dir.return_value = str(run_dir)
@@ -197,9 +197,6 @@ def test_authenticated_report_to_workspace_query_and_human_output(tmp_path):
         job_runner,
         job_id,
         fl_ctx,
-        parent_f3={
-            "sent_to": [{"participant_name": "site-1", "payload_bytes": "500000", "messages": "1"}],
-        },
     )
 
     finalized = coordinator.finalize_job(job_id)
@@ -257,18 +254,17 @@ def test_authenticated_report_to_workspace_query_and_human_output(tmp_path):
     assert totals["resource_time"]["measured_seconds"] == "4463.5"
     assert all("status" not in entry["cpu_consumed"] for entry in finalized["participants"])
     assert "status" not in totals["cpu_consumed"]
-    assert client_report["message_traffic"] == {
-        "sent_to": [{"participant_name": "server", "payload_bytes": "5000000", "messages": "4"}],
-    }
-    assert totals["message_traffic"] == {
-        "sent": {"payload_bytes": "8500000", "messages": "7"},
-    }
+    assert client_report["message_traffic"] == {"sent_bytes": "5000000", "received_bytes": "3000000"}
+    assert totals["message_traffic"] == {"sent_bytes": "8000000", "received_bytes": "7500000"}
 
     output = render_job_resources(finalized, result["participant_summary"], job_name=result["job_name"])
     assert "showing site-1" in output
     assert "AVG CPU USED (cores)" in output
     assert "AMD EPYC 9654 (x86_64)" in output
     assert "NVIDIA A100 80GB" in output
+    assert "PAYLOAD SENT GiB" in output
+    assert "PAYLOAD RECEIVED GiB" in output
+    assert "SENT TO SITE" not in output
     assert "8000000000000000000" not in participant_bytes.decode()
     assert client_report["resource_capacity"] == {
         "measured_seconds": "2223.5",

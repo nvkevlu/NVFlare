@@ -54,7 +54,7 @@ def _reports():
         "cpu_consumed": {"seconds": "2"},
         "workspace_filesystem": {"capacity_bytes": "4096"},
         "retained_content": {"bytes": "20"},
-        "message_traffic": {"sent_to": []},
+        "message_traffic": {"sent_bytes": "0", "received_bytes": "0"},
     }
     summary = {
         "schema_version": SCHEMA_VERSION,

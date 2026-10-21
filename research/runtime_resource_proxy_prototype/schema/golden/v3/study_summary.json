@@ -18,10 +18,8 @@
           "seconds": "300"
         },
         "message_traffic": {
-          "sent": {
-            "messages": "10",
-            "payload_bytes": "2147483648"
-          }
+          "received_bytes": "3221225472",
+          "sent_bytes": "3221225472"
         },
         "resource_time": {
           "cpu": {
@@ -67,10 +65,8 @@
           "seconds": "150"
         },
         "message_traffic": {
-          "sent": {
-            "messages": "10",
-            "payload_bytes": "2147483648"
-          }
+          "received_bytes": "3221225472",
+          "sent_bytes": "3221225472"
         },
         "resource_time": {
           "cpu": {
@@ -124,10 +120,8 @@
       "seconds": "450"
     },
     "message_traffic": {
-      "sent": {
-        "messages": "20",
-        "payload_bytes": "4294967296"
-      }
+      "received_bytes": "6442450944",
+      "sent_bytes": "6442450944"
     },
     "resource_time": {
       "cpu": {

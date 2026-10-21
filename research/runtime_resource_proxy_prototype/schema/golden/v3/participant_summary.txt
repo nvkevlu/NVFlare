@@ -7,8 +7,8 @@ SITE    TIME   CPU VISIBLE (cores)  AVG CPU USED (cores)  MEM GiB  CUDA DEVICES 
 site-1  10m0s  32.0000              0.3000                64.0000  2.0000        2.0000
 
 Recorded files and message payload
-SITE    RUN-DIR FILES GiB  PAYLOAD SENT GiB  PAYLOAD SENT TO SITE GiB
-site-1  0.0000             1.0000            1.0000
+SITE    RUN-DIR FILES GiB  PAYLOAD SENT GiB  PAYLOAD RECEIVED GiB
+site-1  0.0000             1.0000            2.0000
 
 Hardware detail for site-1
 

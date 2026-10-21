@@ -30,8 +30,12 @@ from nvflare.fuel.common.exit_codes import ProcessExitCode
 from nvflare.fuel.utils.config_service import ConfigService
 from nvflare.fuel.utils.zip_utils import get_all_file_paths
 from nvflare.private.admin_defs import Message, MsgHeader, ReturnCode
-from nvflare.private.fed.resource_stats.f3_counter import F3_PARENT_DRAIN_TIMEOUT_SECONDS
-from nvflare.private.fed.resource_stats.f3_registry import F3CounterRegistry
+from nvflare.private.fed.resource_stats.handoff import (
+    INTERNAL_HANDOFF_KIND,
+    INTERNAL_HANDOFF_VERSION,
+    terminal_handoff_path,
+    write_terminal_handoff,
+)
 from nvflare.private.fed.server.job_runner import JobRunner, _FinishedJobState
 from nvflare.private.fed.server.message_send import ClientReply
 from nvflare.private.fed.utils.job_cert_utils import write_job_cert
@@ -1120,11 +1124,6 @@ def test_job_complete_process_contains_resource_stats_finalization_write_failure
     runner.resource_stats.has_job = MagicMock(return_value=True)
     runner.resource_stats.finalize_job = MagicMock(side_effect=OSError("disk full"))
     runner.resource_stats.discard_job_artifacts = MagicMock()
-    runner.f3_counters.close_and_freeze = MagicMock(
-        return_value={
-            "sent_to": [],
-        }
-    )
 
     engine = MagicMock()
     engine.run_processes = {}
@@ -1140,14 +1139,12 @@ def test_job_complete_process_contains_resource_stats_finalization_write_failure
     def _stop_after_first_pass(_):
         runner.ask_to_stop = True
 
-    with _patch_job_runner_sleep(_stop_after_first_pass):
+    with _patch_job_runner_sleep(_stop_after_first_pass) as clock:
         runner._job_complete_process(engine)
 
     runner.resource_stats.finalize_job.assert_called_once_with("job-1")
-    runner.f3_counters.close_and_freeze.assert_called_once_with(
-        "job-1",
-        drain_timeout_seconds=F3_PARENT_DRAIN_TIMEOUT_SECONDS,
-    )
+    clock.sleep.assert_called_once_with(1.0)
+    runner._accept_server_resource_report.assert_called_once_with("job-1", completion_ctx)
     runner.resource_stats.discard_job_artifacts.assert_called_once_with("job-1")
     runner._save_workspace.assert_called_once_with(completion_ctx, ANY, "job-1")
     job_manager.set_status.assert_called_once_with("job-1", RunStatus.FINISHED_ABORTED, completion_ctx)
@@ -1528,28 +1525,17 @@ def test_deploy_failed_client_renders_disabled_not_missing(mock_get_bool, mock_c
     assert site2["status"] == "disabled"
 
 
-def test_job_runner_owns_an_f3_counter_registry():
+def test_job_runner_does_not_create_shared_parent_traffic_counters():
     runner = JobRunner(workspace_root="/tmp")
 
-    assert isinstance(runner.f3_counters, F3CounterRegistry)
+    assert not hasattr(runner, "f3_counters")
 
 
-def test_zero_traffic_job_f3_counter_is_reported_not_missing():
-    # Mirrors the exact call sequence run()/_job_complete_process perform: start
-    # the SP counter before deployment, close+freeze it before finalization. A
-    # job that has no accepted included traffic must still produce a clean
-    # "reported" zero snapshot, not a missing/gap contribution.
-    runner = JobRunner(workspace_root="/tmp")
-
-    runner.f3_counters.start_job("job-1")
-    snapshot = runner.f3_counters.close_and_freeze("job-1")
-
-    assert snapshot == {
-        "sent_to": [],
-    }
-
-
-def test_server_handoff_is_bound_and_accepted_before_finalization(tmp_path):
+@pytest.mark.parametrize(
+    "traffic",
+    [None, {"sent_bytes": "0", "received_bytes": "0"}, {"sent_bytes": "1024", "received_bytes": "512"}],
+)
+def test_server_handoff_is_bound_and_accepted_before_finalization(tmp_path, traffic):
     runner = JobRunner(workspace_root=str(tmp_path))
     run_dir = tmp_path / "run_job-1"
     runner.resource_stats.start_job("job-1", ["site-1"], run_dir)
@@ -1557,24 +1543,38 @@ def test_server_handoff_is_bound_and_accepted_before_finalization(tmp_path):
     workspace.get_run_dir.return_value = str(run_dir)
     fl_ctx = MagicMock()
     fl_ctx.get_workspace.return_value = workspace
+    if traffic is not None:
+        write_terminal_handoff(
+            run_dir,
+            {
+                "internal_version": INTERNAL_HANDOFF_VERSION,
+                "kind": INTERNAL_HANDOFF_KIND,
+                "resource_capacity": {
+                    "measured_seconds": "10",
+                    "cpu": {"groups": [{"units": "2"}]},
+                    "memory": {"bytes": "4096"},
+                    "gpu": {"groups": []},
+                },
+                "cpu_consumed": {"seconds": "0", "measured_seconds": "10"},
+                "workspace_filesystem": {"capacity_bytes": "1024"},
+                "retained_content": {"bytes": "0"},
+                "message_traffic": traffic,
+            },
+        )
 
-    runner._accept_server_resource_report(
-        "job-1",
-        fl_ctx,
-        parent_f3={
-            "sent_to": [],
-        },
-    )
+    runner._accept_server_resource_report("job-1", fl_ctx)
     summary = runner.resource_stats.finalize_job("job-1")
 
     server = next(entry for entry in summary["participants"] if entry["participant_name"] == "server")
     assert "status" not in server
-    assert server["resource_capacity"] == {"status": "unavailable", "issues": ["observation_incomplete"]}
-    assert server["message_traffic"] == {
-        "status": "partial",
-        "issues": ["attribution_incomplete"],
-        "sent_to": [],
-    }
+    if traffic is None:
+        assert server["resource_capacity"] == {"status": "unavailable", "issues": ["observation_incomplete"]}
+        assert server["message_traffic"] == {"status": "unavailable", "issues": ["observation_incomplete"]}
+    else:
+        assert server["resource_capacity"]["measured_seconds"] == "10"
+        assert server["message_traffic"] == traffic
+    assert not terminal_handoff_path(run_dir).exists()
+    assert not hasattr(runner, "f3_counters")
 
 
 def test_restore_running_job_registers_resource_participants_before_server_start(tmp_path):
@@ -1624,7 +1624,7 @@ def _make_restore_inputs(tmp_path):
 
 
 @pytest.mark.parametrize("raise_on_start", (False, True))
-def test_failed_restore_discards_new_counter_before_running_ownership(tmp_path, raise_on_start):
+def test_failed_restore_does_not_claim_running_ownership(tmp_path, raise_on_start):
     runner, fl_ctx, engine, _job, clients = _make_restore_inputs(tmp_path)
     if raise_on_start:
         engine.start_app_on_server.side_effect = RuntimeError("launch failed")
@@ -1633,53 +1633,49 @@ def test_failed_restore_discards_new_counter_before_running_ownership(tmp_path, 
 
     runner.restore_running_job("job-1", clients, None, fl_ctx)
 
-    assert runner.f3_counters.get("job-1") is None
     assert "job-1" not in runner.running_jobs
     runner.scheduler.restore_scheduled_job.assert_not_called()
     runner.log_error.assert_called_once()
 
 
 @pytest.mark.parametrize("already_running", (False, True))
-def test_failed_restore_does_not_discard_existing_counter(tmp_path, already_running):
+def test_failed_restore_preserves_existing_running_job(tmp_path, already_running):
     runner, fl_ctx, engine, job, clients = _make_restore_inputs(tmp_path)
-    existing_counter = runner.f3_counters.start_job("job-1")
     if already_running:
         runner.running_jobs["job-1"] = job
     engine.start_app_on_server.return_value = "launch failed"
 
     runner.restore_running_job("job-1", clients, None, fl_ctx)
 
-    assert runner.f3_counters.get("job-1") is existing_counter
     assert ("job-1" in runner.running_jobs) is already_running
+    if already_running:
+        assert runner.running_jobs["job-1"] is job
+    runner.scheduler.restore_scheduled_job.assert_not_called()
     runner.log_error.assert_called_once()
 
 
-def test_scheduler_restore_failure_keeps_running_counter_owned(tmp_path):
+def test_scheduler_restore_failure_keeps_running_job_owned(tmp_path):
     runner, fl_ctx, _engine, job, clients = _make_restore_inputs(tmp_path)
     runner.scheduler.restore_scheduled_job.side_effect = RuntimeError("scheduler restore failed")
 
     runner.restore_running_job("job-1", clients, None, fl_ctx)
 
     assert runner.running_jobs["job-1"] is job
-    assert runner.f3_counters.get("job-1") is not None
+    assert runner._pending_client_outcomes["job-1"] == {"site-1"}
     runner.log_error.assert_called_once()
 
 
-@pytest.mark.parametrize("existing", (False, True))
-def test_counter_registration_failure_only_discards_new_counter(tmp_path, existing):
+def test_restore_continues_when_optional_resource_report_setup_fails(tmp_path):
     runner, fl_ctx, _engine, job, clients = _make_restore_inputs(tmp_path)
-    existing_counter = runner.f3_counters.start_job("job-1") if existing else None
-    start_job = runner.f3_counters.start_job
-
-    def register_then_fail(*args, **kwargs):
-        start_job(*args, **kwargs)
-        raise RuntimeError("counter setup failed")
-
-    runner.f3_counters.start_job = register_then_fail
+    runner.resource_stats.start_job.side_effect = RuntimeError("report setup failed")
+    runner.resource_stats.forget_job = MagicMock()
 
     runner.restore_running_job("job-1", clients, None, fl_ctx)
 
     assert runner.running_jobs["job-1"] is job
-    assert runner.f3_counters.get("job-1") is existing_counter
+    runner.resource_stats.start_job.assert_called_once_with(
+        "job-1", ["site-1"], str(tmp_path / "run_job-1"), reset_existing=True
+    )
+    runner.resource_stats.forget_job.assert_called_once_with("job-1")
     runner.scheduler.restore_scheduled_job.assert_called_once_with("job-1")
     runner.log_warning.assert_called_once()

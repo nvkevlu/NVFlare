@@ -7,12 +7,12 @@ SITE    TIME    CPU VISIBLE (cores)  AVG CPU USED (cores)  MEM GiB   CUDA DEVICE
 site-1  10m0s*  32.0000*             0.3000                64.0000*  2.0000*       2.0000*
 
 Recorded files and message payload
-SITE    RUN-DIR FILES GiB  PAYLOAD SENT GiB  PAYLOAD SENT TO SITE GiB
+SITE    RUN-DIR FILES GiB  PAYLOAD SENT GiB  PAYLOAD RECEIVED GiB
 site-1  0.0000             0.0000            0.0000
 
 Derived capacity-time totals
   CPU visible 5.3333* core-h | Memory visible 10.6667* GiB-h | CUDA devices available 0.3333* device-h | Verified full GPUs 0.3333* GPU-h
-  CPU time used 0.0500 core-h | Run-dir files 0.0000 GiB | Message payload sent 0.0000 GiB
+  CPU time used 0.0500 core-h | Run-dir files 0.0000 GiB | Payload sent 0.0000 GiB | Payload received 0.0000 GiB
 
 Data gaps:
   site-1: visible capacity: some limits or earlier observations could not be checked; capacity may be overstated

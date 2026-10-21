@@ -55,7 +55,7 @@ def _participant_summary(job_id="job-1", participant_name="site-1", reported_at=
         "cpu_consumed": {"seconds": "0"},
         "workspace_filesystem": {"capacity_bytes": "1024"},
         "retained_content": {"status": "unavailable", "issues": ["unsupported"]},
-        "message_traffic": {"status": "unavailable", "issues": ["unsupported"]},
+        "message_traffic": {"status": "unavailable", "issues": ["observation_incomplete"]},
     }
 
 
@@ -111,7 +111,7 @@ def test_unreleased_feature_rejects_other_formats_for_all_readers(version):
 def test_success_statuses_and_issues_are_absent_from_complete_measurements():
     report = _participant_summary()
     report["retained_content"] = {"bytes": "0"}
-    report["message_traffic"] = {"sent_to": []}
+    report["message_traffic"] = {"sent_bytes": "0", "received_bytes": "0"}
     validate_record(report)
 
     for field in ("resource_capacity", "cpu_consumed", "workspace_filesystem", "retained_content", "message_traffic"):
@@ -138,40 +138,41 @@ def test_cpu_consumed_is_required_in_unpublished_schema():
         validate_record(report)
 
 
-def test_validate_record_accepts_only_sender_confirmed_destination_groups():
+def test_validate_record_accepts_independent_sent_and_received_bytes():
     reported = _participant_summary()
     reported["message_traffic"] = {
-        "sent_to": [{"participant_name": "server", "payload_bytes": str(2**128 - 1), "messages": "1"}],
+        "sent_bytes": str(2**128 - 1),
+        "received_bytes": "0",
     }
     validate_record(reported)
 
     partial = _participant_summary()
     partial["message_traffic"] = {
         "status": "partial",
-        "issues": ["counter_gap"],
-        "sent_to": [{"participant_name": "server", "payload_bytes": "1", "messages": "1"}],
+        "issues": ["observation_incomplete"],
+        "sent_bytes": "1",
+        "received_bytes": "3",
     }
     validate_record(partial)
 
     old_bucket = _participant_summary()
-    old_bucket["message_traffic"] = {
-        "remote_accepted": {"payload_bytes": "1", "messages": "1"},
-        "local_delivered": {"payload_bytes": "0", "messages": "0"},
-    }
+    old_bucket["message_traffic"] = {"sent_to": []}
     with pytest.raises(ContractError):
         validate_record(old_bucket)
 
     missing_issue = _participant_summary()
     missing_issue["message_traffic"] = {
         "status": "partial",
-        "sent_to": [{"participant_name": "server", "payload_bytes": "1", "messages": "1"}],
+        "sent_bytes": "1",
+        "received_bytes": "1",
     }
     with pytest.raises(ContractError):
         validate_record(missing_issue)
 
     too_large = _participant_summary()
     too_large["message_traffic"] = {
-        "sent_to": [{"participant_name": "server", "payload_bytes": str(2**128), "messages": "1"}],
+        "sent_bytes": str(2**128),
+        "received_bytes": "1",
     }
     with pytest.raises(ContractError):
         validate_record(too_large)
@@ -181,47 +182,50 @@ def test_validate_record_accepts_only_sender_confirmed_destination_groups():
     validate_record(error)
 
 
-def test_validate_record_accepts_unordered_but_rejects_duplicate_or_self_destinations():
+@pytest.mark.parametrize("field", ["sent_bytes", "received_bytes"])
+@pytest.mark.parametrize("value", ["-1", "0.5", str(2**128), 1, True, None])
+def test_validate_record_rejects_invalid_directional_bytes(field, value):
     report = _participant_summary()
-    report["message_traffic"] = {
-        "sent_to": [
-            {"participant_name": "server", "payload_bytes": "1", "messages": "1"},
-            {"participant_name": "site-2", "payload_bytes": "2", "messages": "1"},
-        ],
-    }
-    validate_record(report)
-
-    report["message_traffic"]["sent_to"].reverse()
-    validate_record(report)
-    assert normalize_record(report)["message_traffic"]["sent_to"][0]["participant_name"] == "server"
-
-    report["message_traffic"]["sent_to"] = [
-        {"participant_name": "server", "payload_bytes": "1", "messages": "1"},
-        {"participant_name": "server", "payload_bytes": "2", "messages": "1"},
-    ]
-    with pytest.raises(ContractError, match="unique"):
-        validate_record(report)
-
-    report["message_traffic"]["sent_to"] = [{"participant_name": "site-1", "payload_bytes": "1", "messages": "1"}]
-    with pytest.raises(ContractError, match="sending participant"):
+    report["message_traffic"] = {"sent_bytes": "0", "received_bytes": "0"}
+    report["message_traffic"][field] = value
+    with pytest.raises(ContractError):
         validate_record(report)
 
 
-def test_derive_job_totals_rejects_unknown_destination_and_sums_known_destinations():
+@pytest.mark.parametrize("missing", ["sent_bytes", "received_bytes"])
+def test_directional_bytes_are_required_together(missing):
+    report = _participant_summary()
+    report["message_traffic"] = {"sent_bytes": "0", "received_bytes": "0"}
+    del report["message_traffic"][missing]
+    with pytest.raises(ContractError, match="missing"):
+        validate_record(report)
+
+
+def test_derive_job_totals_sums_directions_without_inventing_matching_receipts():
     site = _accepted_entry(participant_name="site-1")
     site["message_traffic"] = {
-        "sent_to": [{"participant_name": "server", "payload_bytes": "100", "messages": "2"}],
+        "sent_bytes": "100",
+        "received_bytes": "60",
     }
     server = _accepted_entry(participant_name="server", role="server")
     server["message_traffic"] = {
-        "sent_to": [{"participant_name": "site-1", "payload_bytes": "200", "messages": "3"}],
+        "sent_bytes": "200",
+        "received_bytes": "80",
     }
     totals = derive_job_totals([site, server])
-    assert totals["message_traffic"] == {"sent": {"payload_bytes": "300", "messages": "5"}}
+    assert totals["message_traffic"] == {"sent_bytes": "300", "received_bytes": "140"}
 
-    site["message_traffic"]["sent_to"][0]["participant_name"] = "site-unknown"
-    with pytest.raises(ContractError, match="expected participant"):
-        derive_job_totals([site, server])
+
+@pytest.mark.parametrize("field", ["sent_bytes", "received_bytes"])
+def test_directional_aggregate_bounds_are_enforced_independently(field):
+    first = _accepted_entry(participant_name="site-1")
+    second = _accepted_entry(participant_name="site-2")
+    first["message_traffic"] = {"sent_bytes": "0", "received_bytes": "0"}
+    second["message_traffic"] = {"sent_bytes": "0", "received_bytes": "0"}
+    first["message_traffic"][field] = str(2**128 - 1)
+    second["message_traffic"][field] = "1"
+    with pytest.raises(ContractError, match="128-bit"):
+        derive_job_totals([first, second])
 
 
 def test_validate_record_rejects_unknown_kind():
@@ -612,15 +616,12 @@ def test_reordered_issues_and_hardware_groups_have_identical_normalized_output()
         {"kind": "full_gpu", "count": "2", "memory_bytes": "1024"},
         {"kind": "mig_compute_instance", "count": "2", "memory_bytes": "512"},
     ]
-    report["message_traffic"] = {
-        "status": "partial",
-        "issues": ["counter_gap", "observation_incomplete"],
-        "sent_to": [],
-    }
+    report["resource_capacity"].update(status="partial", issues=["attribution_incomplete", "observation_incomplete"])
+    report["message_traffic"] = {"sent_bytes": "0", "received_bytes": "0"}
     reordered = deepcopy(report)
     reordered["resource_capacity"]["cpu"]["groups"].reverse()
     reordered["resource_capacity"]["gpu"]["groups"].reverse()
-    reordered["message_traffic"]["issues"].reverse()
+    reordered["resource_capacity"]["issues"].reverse()
 
     validate_record(reordered)
     assert normalize_record(reordered) == report
@@ -636,28 +637,25 @@ def test_duplicate_groups_and_issues_remain_invalid_after_normalization():
     with pytest.raises(ContractError, match="unique"):
         normalize_record(report)
     report = _participant_summary()
-    report["message_traffic"] = {"status": "partial", "issues": ["counter_gap", "counter_gap"], "sent_to": []}
+    report["message_traffic"] = {
+        "status": "partial",
+        "issues": ["observation_incomplete", "observation_incomplete"],
+        "sent_bytes": "0",
+        "received_bytes": "0",
+    }
     with pytest.raises(ContractError, match="unique"):
         normalize_record(report)
 
 
-def test_traffic_helper_normalizes_without_losing_count_or_destination_checks():
-    traffic = {
-        "sent_to": [
-            {"participant_name": "site-z", "payload_bytes": "02.00", "messages": "1.0"},
-            {"participant_name": "site-a", "payload_bytes": "1", "messages": "1"},
-        ]
-    }
-    assert normalize_message_traffic(traffic)["sent_to"] == [
-        {"participant_name": "site-a", "payload_bytes": "1", "messages": "1"},
-        {"participant_name": "site-z", "payload_bytes": "2", "messages": "1"},
-    ]
-    traffic["sent_to"][0]["messages"] = "0.0"
+def test_traffic_helper_normalizes_integer_spelling_and_rejects_fractional_bytes():
+    traffic = {"sent_bytes": "02.00", "received_bytes": "1.0"}
+    assert normalize_message_traffic(traffic) == {"sent_bytes": "2", "received_bytes": "1"}
+    traffic["received_bytes"] = "0.5"
     with pytest.raises(ContractError):
         normalize_message_traffic(traffic)
 
 
-@pytest.mark.parametrize("issue", ["not_bound", "dependency_missing", "permission_denied"])
+@pytest.mark.parametrize("issue", ["not_bound", "dependency_missing", "permission_denied", "counter_gap"])
 def test_obsolete_exception_codes_are_not_accepted(issue):
     report = _participant_summary()
     report["retained_content"] = {

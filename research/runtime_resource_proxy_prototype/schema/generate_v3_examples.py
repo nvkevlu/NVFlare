@@ -54,7 +54,7 @@ def participant(name="site-1", job_id="synthetic-capacity-normal"):
         "cpu_consumed": {"seconds": "180", "measured_seconds": "600"},
         "workspace_filesystem": {"capacity_bytes": str(1024 * GIB)},
         "retained_content": {"bytes": "0"},
-        "message_traffic": {"sent_to": [{"participant_name": "server", "payload_bytes": str(GIB), "messages": "5"}]},
+        "message_traffic": {"sent_bytes": str(GIB), "received_bytes": str(2 * GIB)},
     }
 
 
@@ -68,7 +68,7 @@ def server(job_id="synthetic-capacity-normal"):
     )
     value["cpu_consumed"] = {"seconds": "120", "measured_seconds": "610"}
     value["retained_content"] = {"bytes": str(64 * 1024**2)}
-    value["message_traffic"] = {"sent_to": [{"participant_name": "site-1", "payload_bytes": str(GIB), "messages": "5"}]}
+    value["message_traffic"] = {"sent_bytes": str(2 * GIB), "received_bytes": str(GIB)}
     return value
 
 
@@ -119,10 +119,10 @@ def examples():
     partial["cpu_consumed"].update(status="partial", issues=["attribution_incomplete"])
     fallback = participant(job_id="synthetic-capacity-fallback")
     fallback["resource_capacity"].update(status="partial", issues=["observation_incomplete"])
-    fallback["message_traffic"] = {"sent_to": []}
+    fallback["message_traffic"] = {"sent_bytes": "0", "received_bytes": "0"}
     unavailable = participant(job_id="synthetic-capacity-unavailable")
     unavailable["resource_capacity"] = {"status": "unavailable", "issues": ["unsupported"]}
-    unavailable["message_traffic"] = {"sent_to": []}
+    unavailable["message_traffic"] = {"sent_bytes": "0", "received_bytes": "0"}
     changed = participant(job_id="synthetic-capacity-changes")
     first = copy.deepcopy(changed["resource_capacity"])
     first["measured_seconds"] = "300"
@@ -131,7 +131,7 @@ def examples():
     second["memory"]["bytes"] = str(32 * GIB)
     second["gpu"]["groups"][0]["count"] = "1"
     changed["resource_capacity"] = {"measured_seconds": "600", "intervals": [first, second]}
-    changed["message_traffic"] = {"sent_to": []}
+    changed["message_traffic"] = {"sent_bytes": "0", "received_bytes": "0"}
     large = participant(job_id="synthetic-capacity-large")
     large["resource_capacity"].update(
         measured_seconds="9007199254740993",
@@ -141,7 +141,7 @@ def examples():
     )
     large["cpu_consumed"] = {"seconds": "9007199254740993", "measured_seconds": "9007199254740993"}
     large["retained_content"] = {"bytes": str(2**64 + 1)}
-    large["message_traffic"] = {"sent_to": []}
+    large["message_traffic"] = {"sent_bytes": "0", "received_bytes": "0"}
     records = {
         "participant_summary": normal,
         "participant_summary_server": normal_server,

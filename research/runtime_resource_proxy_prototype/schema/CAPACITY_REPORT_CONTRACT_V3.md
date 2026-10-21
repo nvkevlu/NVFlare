@@ -1,6 +1,6 @@
 # Participant capacity reports
 
-Updated October 19, 2026. Schema 3.0 stores the resource capacities observed by
+Updated October 21, 2026. Schema 3.0 stores the resource capacities observed by
 the participant's job process, rather than storing capacity multiplied by
 elapsed seconds. A normal report therefore exposes CPU units, memory bytes,
 and CUDA-device counts directly. Job and study queries calculate capacity-time
@@ -103,8 +103,47 @@ and are not copied into stored participant or job-summary records.
 
 For the example above, a query can derive 320 CPU-unit seconds, 687,194,767,360
 memory byte-seconds, and 20 CUDA-device seconds. It never sums filesystem
-capacity or calculates filesystem capacity-time. Retained-file bytes,
-communication counters, and actual CPU seconds retain their existing meanings.
+capacity or calculates filesystem capacity-time. Retained-file bytes and
+actual CPU seconds use their independent observations.
+
+## Message counters
+
+Participant reports and query-derived totals use the same two numeric fields:
+
+```json
+{"message_traffic": {"sent_bytes": "1073741824", "received_bytes": "536870912"}}
+```
+
+Both are nonnegative integer-valued decimal strings, bounded by the unsigned
+128-bit limit. A successful measurement includes both fields and omits status
+and issues. An incomplete snapshot keeps usable counters with `partial` and
+`observation_incomplete`; an unavailable measurement contains status and issues
+without numeric values. `attribution_incomplete` describes CPU work, not message
+traffic. The message measurement contains no destination group or message count.
+
+CellNet counts actual encoded payload, including payload encryption when
+enabled. Send bytes are captured before the transport call and credited when
+it returns without error. This is not delivery proof: drivers can report
+asynchronous failures later. Receive bytes are measured at the receiving cell
+before application decoding. Each neighboring transport hop counts separately,
+including control payloads, retries, stream frames, tensor downloads, and
+cross-process loopback traffic. Same-process direct calls, CellNet headers,
+and TCP/TLS framing do not contribute.
+
+The reporting integration sums the job cell's counters and the latest
+cumulative snapshot from each managed external trainer. Repeated trainer
+snapshots replace earlier snapshots, not add to them. A required missing
+trainer snapshot leaves the available subtotal incomplete. Shared parent
+connections, including deployment and parent relaying, are intentionally not
+allocated to individual jobs. Arbitrary custom cells and non-CellNet traffic
+are outside the measurement. No peer names or internal trainer identities
+are saved in the public message measurement.
+
+The snapshot requires no statistics-only shutdown wait. It covers cumulative
+traffic at that collection point, not the capacity measurement's elapsed
+interval; later traffic is outside the report. Job and study queries sum sent
+and received independently. They never infer receive bytes from senders,
+require the directions to match, or add them into a unique-byte total.
 
 ## One supported format
 

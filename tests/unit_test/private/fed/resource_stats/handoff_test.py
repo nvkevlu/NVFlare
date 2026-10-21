@@ -27,7 +27,7 @@ def _handoff():
         "cpu_consumed": {"status": "unavailable", "issues": ["observation_incomplete"]},
         "workspace_filesystem": {"capacity_bytes": "1024"},
         "retained_content": {"status": "unavailable", "issues": ["unsupported"]},
-        "child_f3": {"status": "unavailable", "issues": ["observation_incomplete"]},
+        "message_traffic": {"status": "unavailable", "issues": ["observation_incomplete"]},
     }
 
 
@@ -44,7 +44,7 @@ def _complete_handoff():
         "cpu_consumed": {"seconds": "2", "measured_seconds": "10"},
         "workspace_filesystem": {"capacity_bytes": "1024"},
         "retained_content": {"bytes": "128"},
-        "child_f3": {"sent_to": [{"participant_name": "server", "payload_bytes": "512", "messages": "1"}]},
+        "message_traffic": {"sent_bytes": "512", "received_bytes": "128"},
     }
 
 
@@ -84,7 +84,7 @@ def test_atomic_writer_round_trip_and_replacement_without_leftover_temp_files(tm
 
 
 @pytest.mark.parametrize(
-    "measurement", ["resource_capacity", "cpu_consumed", "workspace_filesystem", "retained_content", "child_f3"]
+    "measurement", ["resource_capacity", "cpu_consumed", "workspace_filesystem", "retained_content", "message_traffic"]
 )
 def test_reader_isolates_a_malformed_measurement_without_erasing_other_values(tmp_path, measurement):
     original = _complete_handoff()
@@ -124,6 +124,8 @@ def test_reader_normalizes_numeric_values_at_the_parent_boundary(tmp_path):
     handoff["resource_capacity"]["measured_seconds"] = "10.000"
     handoff["resource_capacity"]["cpu"]["groups"][0]["units"] = "2.0"
     handoff["cpu_consumed"]["seconds"] = "2.000000000"
+    handoff["message_traffic"]["sent_bytes"] = "0512.00"
+    handoff["message_traffic"]["received_bytes"] = "0128.0"
     path.write_bytes(module.canonical_json_bytes(handoff))
 
     assert module.read_terminal_handoff(tmp_path) == _complete_handoff()

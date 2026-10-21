@@ -101,7 +101,7 @@ def _summary(job_id):
                 },
                 "cpu_consumed": {"seconds": "0"},
                 "retained_content": {"bytes": "3"},
-                "message_traffic": {"sent_to": []},
+                "message_traffic": {"sent_bytes": "0", "received_bytes": "0"},
             }
         ],
     }

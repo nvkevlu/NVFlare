@@ -106,3 +106,13 @@ def test_public_guide_does_not_ask_users_to_import_private_helpers():
     pages = [PUBLIC.with_suffix(".rst"), *PUBLIC.glob("*.rst")]
     for page in pages:
         assert not re.search(r"^\s*(?:from|import) nvflare\.private\b", page.read_text(), flags=re.MULTILINE), page
+
+
+def test_public_traffic_example_uses_independently_recorded_directions():
+    blocks = list(_code_blocks(PUBLIC / "message_traffic.rst", "json"))
+    assert blocks
+    for block in blocks:
+        traffic = json.loads(block)["message_traffic"]
+        assert {"sent_bytes", "received_bytes"} <= traffic.keys()
+        assert "sent_to" not in traffic
+        assert "messages" not in traffic

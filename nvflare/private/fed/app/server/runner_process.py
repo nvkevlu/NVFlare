@@ -34,10 +34,8 @@ from nvflare.private.fed.app.fl_conf import FLServerStarterConfiger
 from nvflare.private.fed.app.job_process_cleanup import shutdown_job_process_runtime
 from nvflare.private.fed.app.utils import monitor_parent_process
 from nvflare.private.fed.resource_stats.collector import JobResourceCollector
-from nvflare.private.fed.resource_stats.external_transfer import load_task_token_verifier
-from nvflare.private.fed.resource_stats.f3_counter import F3_DRAIN_TIMEOUT_SECONDS
-from nvflare.private.fed.resource_stats.f3_job_counter import get_job_f3_counter, start_job_f3_counter
 from nvflare.private.fed.resource_stats.handoff import write_terminal_handoff
+from nvflare.private.fed.resource_stats.message_traffic import snapshot_message_traffic
 from nvflare.private.fed.server.server_app_runner import ServerAppRunner
 from nvflare.private.fed.server.server_state import HotState
 from nvflare.private.fed.utils.fed_utils import (
@@ -85,18 +83,11 @@ def main(args):
     except Exception:
         # Resource reporting is observational and must never change the job outcome.
         pass
-    try:
-        # Start independently from the capacity collector so failure in one
-        # observation path cannot disable the other.
-        f3_counter = start_job_f3_counter()
-        if args.snapshot:
-            f3_counter.mark_prior_history_incomplete()
-    except Exception:
-        pass
     set_stats_pool_config_for_job(workspace, args.job_id)
 
     server = None
     logger = None
+    message_traffic_incomplete = bool(args.snapshot) or kv_list.get("resource_prior_attempt_incomplete") is True
     try:
         os.chdir(args.workspace)
         fobs_initialize(workspace=workspace, job_id=args.job_id)
@@ -126,13 +117,6 @@ def main(args):
             # create the FL server
             server_config, server = deployer.create_fl_server(args, secure_train=secure_train)
 
-            # Verification uses only the existing parent's public certificate.
-            # Missing proof affects statistics, never task delivery or startup.
-            server.resource_stats_token_verifier = (
-                load_task_token_verifier(conf.site_certificate_file)
-                if secure_train is True and get_job_f3_counter() is not None
-                else None
-            )
             server.cell = server.create_job_cell(
                 args.job_id, args.root_url, args.parent_url, secure_train, server_config
             )
@@ -166,19 +150,13 @@ def main(args):
             cell = getattr(server, "cell", None)
 
             def _archive_results():
-                child_f3 = None
-                counter = get_job_f3_counter()
-                if counter:
-                    try:
-                        counter.close_and_drain(F3_DRAIN_TIMEOUT_SECONDS)
-                        child_f3 = counter.freeze()
-                    except Exception:
-                        child_f3 = None
                 if resource_collector:
                     try:
                         write_terminal_handoff(
                             workspace.get_run_dir(args.job_id),
-                            resource_collector.finish(child_f3=child_f3),
+                            resource_collector.finish(
+                                message_traffic=snapshot_message_traffic(cell, incomplete=message_traffic_incomplete)
+                            ),
                         )
                     except Exception as e:
                         if logger:
@@ -192,11 +170,10 @@ def main(args):
                 upload_results_on_shutdown(args, secure_train, log=logger)
 
             def _mark_callback_drain_incomplete():
+                nonlocal message_traffic_incomplete
+                message_traffic_incomplete = True
                 if resource_collector:
                     resource_collector.mark_cpu_consumption_incomplete()
-                counter = get_job_f3_counter()
-                if counter:
-                    counter.mark_counter_gap()
 
             try:
                 shutdown_job_process_runtime(

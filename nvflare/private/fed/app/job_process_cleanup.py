@@ -40,43 +40,31 @@ def shutdown_job_process_runtime(
             if logger:
                 logger.warning(f"failed to stop {name}: {secure_format_exception(e)}")
 
-    def _wait_for_callbacks(*, before_publication: bool) -> bool:
-        try:
-            drained = wait_for_command_callbacks(_COMMAND_CALLBACK_DRAIN_TIMEOUT)
-            if not drained and logger:
-                suffix = " before resource-statistics publication" if before_publication else ""
-                logger.warning(
-                    f"timed out after {_COMMAND_CALLBACK_DRAIN_TIMEOUT} seconds waiting for command callbacks{suffix}"
-                )
-            return drained
-        except Exception as e:
-            if logger:
-                suffix = " before resource-statistics publication" if before_publication else ""
-                logger.warning(f"failed to drain command callbacks{suffix}: {secure_format_exception(e)}")
-            return False
-
-    # Publication needs a settled snapshot while transport is still usable.
-    # Without publication (including deferred failure cleanup), stop transport
-    # first so its joins do not start behind a statistics-only callback wait.
     _run_stage("command admission", stop_command_admission)
-    callbacks_drained = wait_for_command_callbacks is None
     if before_streaming_shutdown and wait_for_command_callbacks:
-        callbacks_drained = _wait_for_callbacks(before_publication=True)
+        # Check coverage without delaying the existing publication/teardown order.
+        try:
+            callbacks_drained = wait_for_command_callbacks(0.0)
+        except Exception:
+            callbacks_drained = False
         if not callbacks_drained:
-            _run_stage("F3 callback completeness", mark_callback_drain_incomplete)
+            _run_stage("resource-statistics coverage", mark_callback_drain_incomplete)
 
-    # Publication uses the process-global F3 pools, so it must complete before
-    # those pools are irreversibly stopped. Teardown still runs if publication
-    # raises, and the original publication error remains visible to the caller.
     try:
         if before_streaming_shutdown:
             before_streaming_shutdown()
     finally:
-        # Stop transport so any callback blocked on Cell communication wakes.
-        # If the live-transport drain did not finish, retain the existing
-        # bounded post-stop wait before closing audit/security state.
         _run_stage("F3 streaming", shutdown_f3_streaming)
         _run_stage("Cell", stop_cell)
-        if wait_for_command_callbacks and not callbacks_drained:
-            _wait_for_callbacks(before_publication=False)
+        # Keep the existing post-stop callback wait; statistics adds no wait.
+        if wait_for_command_callbacks:
+            try:
+                drained = wait_for_command_callbacks(_COMMAND_CALLBACK_DRAIN_TIMEOUT)
+                if not drained and logger:
+                    logger.warning(
+                        f"timed out after {_COMMAND_CALLBACK_DRAIN_TIMEOUT} seconds waiting for command callbacks"
+                    )
+            except Exception as e:
+                if logger:
+                    logger.warning(f"failed to drain command callbacks: {secure_format_exception(e)}")
         _run_stage("security services", security_close)

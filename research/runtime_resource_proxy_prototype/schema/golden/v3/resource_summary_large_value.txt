@@ -7,9 +7,9 @@ SITE    TIME                  CPU VISIBLE (cores)  AVG CPU USED (cores)  MEM GiB
 site-1  2501999792983h36m33s  1048576.0000         1.0000                17179869184.0000  4096.0000     0.0000              4096.0000
 
 Recorded files and message payload
-SITE    RUN-DIR FILES GiB  PAYLOAD SENT GiB  PAYLOAD SENT TO SITE GiB
+SITE    RUN-DIR FILES GiB  PAYLOAD SENT GiB  PAYLOAD RECEIVED GiB
 site-1  17179869184.0000   0.0000            0.0000
 
 Derived capacity-time totals
   CPU visible 2623536934927580965.5467 core-h | Memory visible 42984029141853486537186.4178 GiB-h | CUDA devices available 10248191152060863.1467 device-h | Verified full GPUs 0.0000 GPU-h | Type-unverified CUDA devices 10248191152060863.1467 device-h
-  CPU time used 2501999792983.6092 core-h | Run-dir files 17179869184.0000 GiB | Message payload sent 0.0000 GiB
+  CPU time used 2501999792983.6092 core-h | Run-dir files 17179869184.0000 GiB | Payload sent 0.0000 GiB | Payload received 0.0000 GiB

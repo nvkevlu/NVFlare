@@ -8,13 +8,8 @@
         "seconds": "180"
       },
       "message_traffic": {
-        "sent_to": [
-          {
-            "messages": "5",
-            "participant_name": "server",
-            "payload_bytes": "1073741824"
-          }
-        ]
+        "received_bytes": "2147483648",
+        "sent_bytes": "1073741824"
       },
       "participant_name": "site-1",
       "received_at": "2026-10-12T12:00:00Z",
@@ -59,13 +54,8 @@
         "seconds": "120"
       },
       "message_traffic": {
-        "sent_to": [
-          {
-            "messages": "5",
-            "participant_name": "site-1",
-            "payload_bytes": "1073741824"
-          }
-        ]
+        "received_bytes": "1073741824",
+        "sent_bytes": "2147483648"
       },
       "participant_name": "server",
       "received_at": "2026-10-12T12:00:00Z",

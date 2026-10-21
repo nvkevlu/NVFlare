@@ -42,7 +42,6 @@ from nvflare.private.fed.client.client_executor import (
 )
 from nvflare.private.fed.client.client_status import ClientStatus
 from nvflare.private.fed.client.communicator import Communicator
-from nvflare.private.fed.resource_stats.f3_counter import F3Counter, F3TrafficClass
 from nvflare.private.fed.resource_stats.handoff import (
     INTERNAL_HANDOFF_KIND,
     INTERNAL_HANDOFF_VERSION,
@@ -73,8 +72,9 @@ def test_build_participant_resource_report_binds_parent_identity_and_removes_han
         "cpu_consumed": {"seconds": "12.5"},
         "workspace_filesystem": {"capacity_bytes": "1099511627776"},
         "retained_content": {"status": "unavailable", "issues": ["unsupported"]},
-        "child_f3": {
-            "sent_to": [{"participant_name": "server", "payload_bytes": "1200", "messages": "2"}],
+        "message_traffic": {
+            "sent_bytes": "1200",
+            "received_bytes": "800",
         },
     }
     write_terminal_handoff(run_dir, handoff)
@@ -92,7 +92,8 @@ def test_build_participant_resource_report_binds_parent_identity_and_removes_han
     assert report["workspace_filesystem"]["capacity_bytes"] == "1099511627776"
     assert report["cpu_consumed"] == {"seconds": "12.5"}
     assert report["message_traffic"] == {
-        "sent_to": [{"participant_name": "server", "payload_bytes": "1200", "messages": "2"}],
+        "sent_bytes": "1200",
+        "received_bytes": "800",
     }
     assert not terminal_handoff_path(run_dir).exists()
 
@@ -108,7 +109,7 @@ def test_client_relaunch_preserves_unavailable_observations_without_inventing_va
             "cpu_consumed": {"seconds": "12.5"},
             "workspace_filesystem": {"status": "unavailable", "issues": ["observation_incomplete"]},
             "retained_content": {"status": "unavailable", "issues": ["observation_incomplete"]},
-            "child_f3": {"status": "unavailable", "issues": ["observation_incomplete"]},
+            "message_traffic": {"status": "unavailable", "issues": ["observation_incomplete"]},
         },
     )
     data = _build_participant_resource_report(
@@ -125,11 +126,7 @@ def test_client_relaunch_preserves_unavailable_observations_without_inventing_va
         "seconds": "12.5",
     }
     assert report["resource_capacity"]["status"] == "unavailable"
-    assert report["message_traffic"] == {
-        "status": "partial",
-        "issues": ["attribution_incomplete", "observation_incomplete"],
-        "sent_to": [],
-    }
+    assert report["message_traffic"] == {"status": "unavailable", "issues": ["observation_incomplete"]}
 
 
 @pytest.mark.parametrize("already_partial", [False, True])
@@ -142,10 +139,11 @@ def test_client_relaunch_marks_capacity_cpu_and_traffic_observations_incomplete(
         "gpu": {"groups": [{"kind": "cuda_device_unclassified", "count": "1"}]},
     }
     consumed = {"seconds": "12.5"}
-    child_f3 = {"sent_to": [{"participant_name": "server", "payload_bytes": "1200", "messages": "2"}]}
+    message_traffic = {"sent_bytes": "1200", "received_bytes": "800"}
     if already_partial:
-        for measurement in (resource_capacity, consumed, child_f3):
+        for measurement in (resource_capacity, consumed):
             measurement.update(status="partial", issues=["attribution_incomplete"])
+        message_traffic.update(status="partial", issues=["observation_incomplete"])
     write_terminal_handoff(
         run_dir,
         {
@@ -155,7 +153,7 @@ def test_client_relaunch_marks_capacity_cpu_and_traffic_observations_incomplete(
             "cpu_consumed": consumed,
             "workspace_filesystem": {"capacity_bytes": "1099511627776"},
             "retained_content": {"bytes": "1024"},
-            "child_f3": child_f3,
+            "message_traffic": message_traffic,
         },
     )
 
@@ -171,27 +169,26 @@ def test_client_relaunch_marks_capacity_cpu_and_traffic_observations_incomplete(
     expected_issues = (
         ["attribution_incomplete", "observation_incomplete"] if already_partial else ["observation_incomplete"]
     )
-    for name in ("resource_capacity", "cpu_consumed", "message_traffic"):
+    for name in ("resource_capacity", "cpu_consumed"):
         assert report[name]["status"] == "partial"
         assert report[name]["issues"] == expected_issues
+    assert report["message_traffic"]["status"] == "partial"
+    assert report["message_traffic"]["issues"] == ["observation_incomplete"]
     assert report["resource_capacity"]["measured_seconds"] == "10"
     assert report["resource_capacity"]["cpu"] == resource_capacity["cpu"]
     assert report["resource_capacity"]["memory"] == resource_capacity["memory"]
     assert report["resource_capacity"]["gpu"] == resource_capacity["gpu"]
     assert "resource_time" not in report
     assert report["cpu_consumed"]["seconds"] == "12.5"
-    assert report["message_traffic"]["sent_to"] == child_f3["sent_to"]
+    assert report["message_traffic"]["sent_bytes"] == message_traffic["sent_bytes"]
+    assert report["message_traffic"]["received_bytes"] == message_traffic["received_bytes"]
     assert report["workspace_filesystem"] == {"capacity_bytes": "1099511627776"}
     assert report["retained_content"] == {"bytes": "1024"}
     assert not terminal_handoff_path(run_dir).exists()
 
 
 @pytest.mark.parametrize("prior_attempt_incomplete", [False, True])
-def test_client_report_preserves_child_accepted_traffic_with_known_zero_parent(tmp_path, prior_attempt_incomplete):
-    child_counter = F3Counter()
-    child_result = child_counter.try_begin(F3TrafficClass.TASK_RESULT, "server")
-    assert child_counter.complete_remote_accepted(child_result, 1200)
-    assert child_counter.close_and_drain(0.0)
+def test_client_report_preserves_job_process_traffic_without_parent_counters(tmp_path, prior_attempt_incomplete):
     run_dir = Workspace._join_under_root(str(tmp_path), WorkspaceConstants.WORKSPACE_PREFIX + "job-1")
     write_terminal_handoff(
         run_dir,
@@ -202,7 +199,7 @@ def test_client_report_preserves_child_accepted_traffic_with_known_zero_parent(t
             "cpu_consumed": {"seconds": "12.5"},
             "workspace_filesystem": {"capacity_bytes": "1099511627776"},
             "retained_content": {"bytes": "1024"},
-            "child_f3": child_counter.freeze(),
+            "message_traffic": {"sent_bytes": "1200", "received_bytes": "800"},
         },
     )
 
@@ -215,7 +212,7 @@ def test_client_report_preserves_child_accepted_traffic_with_known_zero_parent(t
     )
 
     report = json.loads(data)
-    expected_traffic = {"sent_to": [{"participant_name": "server", "payload_bytes": "1200", "messages": "1"}]}
+    expected_traffic = {"sent_bytes": "1200", "received_bytes": "800"}
     expected_consumed = {"seconds": "12.5"}
     if prior_attempt_incomplete:
         for measurement in (expected_traffic, expected_consumed):
@@ -1070,7 +1067,7 @@ def test_wait_child_process_reports_terminal_return_code(return_code, process_st
     engine.fire_event.assert_called_once_with(EventType.JOB_COMPLETED, fl_ctx)
 
 
-def test_wait_child_process_assembles_known_zero_client_parent_contribution():
+def test_wait_child_process_assembles_only_the_child_handoff():
     client = MagicMock()
     client.client_name = "site-1"
     client.send_request_before_shutdown.return_value.get_header.return_value = ReturnCode.OK
@@ -1110,7 +1107,7 @@ def test_wait_child_process_assembles_known_zero_client_parent_contribution():
             fl_ctx=fl_ctx,
         )
 
-    assert captured["parent_f3"] == {"sent_to": []}
+    assert "parent_f3" not in captured
     assert not hasattr(job_executor, "f3_counters")
 
 

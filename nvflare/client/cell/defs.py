@@ -20,12 +20,6 @@ CHANNEL = "client_api"
 # managed external-process sessions. HELLO carries it for future negotiation.
 PROTOCOL_VERSION = 1
 
-# Optional negotiated extension. V1's required fields, topics and lifecycle
-# remain unchanged; absence or an unsupported value means no accounting bridge.
-RESOURCE_TRANSFER_BRIDGE_VERSION = 1
-RESOURCE_TRANSFER_MAX_BYTES = 64 * 1024
-RESOURCE_TRANSFER_MAX_GROUPS = 256
-
 # Session-scale budget shared by trainer control requests and backend result-source reaping.
 SESSION_CONTROL_TIMEOUT = 30.0
 
@@ -80,9 +74,6 @@ class MsgKey:
     TRAINER_FQCN = "trainer_fqcn"
     RANK = "rank"
     PROTOCOL_VERSION = "protocol_version"
-    RESOURCE_TRANSFER_VERSION = "resource_transfer_version"
-    RESOURCE_TRANSFER = "resource_transfer"
-    RESOURCE_TRANSFER_RECIPIENTS = "resource_transfer_recipients"
     PROOF = "proof"
     REASON = "reason"
     ATTACH_ID = "attach_id"
@@ -108,6 +99,8 @@ class MsgKey:
     # True while send() owns an accepted source, including the RESULT_ACCEPTED race;
     # SHUTDOWN may stop the process only after this becomes False.
     RESULT_SOURCE_LIVE = "result_source_live"
+    # Optional cumulative payload-byte totals from a managed trainer.
+    MESSAGE_TRAFFIC = "message_traffic"
     # A zero timeout disables heartbeat lease enforcement for legacy compatibility.
     HEARTBEAT_INTERVAL = "heartbeat_interval"
     HEARTBEAT_TIMEOUT = "heartbeat_timeout"

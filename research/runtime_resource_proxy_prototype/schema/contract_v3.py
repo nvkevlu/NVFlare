@@ -26,7 +26,6 @@ from nvflare.private.fed.resource_stats.contract import (  # noqa: F401
     MAX_CAPACITY_INTERVALS,
     MAX_CPU_UNITS,
     MAX_GPU_GROUPS,
-    MAX_MESSAGE_DESTINATIONS,
     MAX_RECORD_BYTES,
     MAX_STUDY_JOBS,
     RECORD_KINDS,

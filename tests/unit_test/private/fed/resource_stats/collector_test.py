@@ -22,7 +22,6 @@ from nvflare.private.fed.resource_stats.accumulator import ClockOrderError, Reso
 from nvflare.private.fed.resource_stats.collector import (
     JobResourceCollector,
     assemble_participant_summary,
-    merge_f3_snapshots,
     observe_retained_content,
 )
 from nvflare.private.fed.resource_stats.contract import (
@@ -503,13 +502,12 @@ def test_probe_fallback_remains_partial_through_handoff_and_public_summary(monke
     monkeypatch.setattr(gpu_nvidia, "probe_gpu", lambda: {"groups": []})
     ticks = iter([0, 10_000_000_000])
     job_collector = JobResourceCollector(tmp_path, clock_ns=lambda: next(ticks))
-    write_terminal_handoff(tmp_path, job_collector.finish(child_f3={"sent_to": []}))
+    write_terminal_handoff(tmp_path, job_collector.finish(message_traffic={"sent_bytes": "0", "received_bytes": "0"}))
 
     report = assemble_participant_summary(
         job_id="job-1",
         participant_name="site-1",
         child_handoff=read_terminal_handoff(tmp_path),
-        parent_f3={"sent_to": []},
     )
 
     assert report["resource_capacity"] == {
@@ -520,7 +518,7 @@ def test_probe_fallback_remains_partial_through_handoff_and_public_summary(monke
         "memory": {"bytes": "4096"},
         "gpu": {"groups": []},
     }
-    assert report["message_traffic"] == {"sent_to": []}
+    assert report["message_traffic"] == {"sent_bytes": "0", "received_bytes": "0"}
 
 
 def test_handoff_to_public_report_round_trip(tmp_path):
@@ -537,11 +535,7 @@ def test_handoff_to_public_report_round_trip(tmp_path):
 
     path = write_terminal_handoff(
         tmp_path,
-        job_collector.finish(
-            child_f3={
-                "sent_to": [{"participant_name": "server", "payload_bytes": "1200", "messages": "2"}],
-            }
-        ),
+        job_collector.finish(message_traffic={"sent_bytes": "1200", "received_bytes": "700"}),
     )
     assert path == terminal_handoff_path(tmp_path)
     handoff = read_terminal_handoff(tmp_path)
@@ -549,9 +543,6 @@ def test_handoff_to_public_report_round_trip(tmp_path):
         job_id="job-1",
         participant_name="site-1",
         child_handoff=handoff,
-        parent_f3={
-            "sent_to": [{"participant_name": "server", "payload_bytes": "300", "messages": "1"}],
-        },
     )
     encoded = canonical_json_bytes(report)
 
@@ -559,9 +550,7 @@ def test_handoff_to_public_report_round_trip(tmp_path):
     assert report["resource_capacity"]["measured_seconds"] == "2"
     assert "status" not in report["workspace_filesystem"]
     assert report["retained_content"] == {"bytes": "0"}
-    assert report["message_traffic"] == {
-        "sent_to": [{"participant_name": "server", "payload_bytes": "1500", "messages": "3"}],
-    }
+    assert report["message_traffic"] == {"sent_bytes": "1200", "received_bytes": "700"}
     assert "participant_key" not in encoded.decode()
 
 
@@ -870,9 +859,6 @@ def test_missing_handoff_is_explicitly_unavailable():
         job_id="job-1",
         participant_name="site-1",
         child_handoff=None,
-        parent_f3={
-            "sent_to": [{"participant_name": "server", "payload_bytes": "300", "messages": "1"}],
-        },
     )
 
     assert report["resource_capacity"] == {
@@ -880,66 +866,43 @@ def test_missing_handoff_is_explicitly_unavailable():
         "issues": ["observation_incomplete"],
     }
     assert report["message_traffic"] == {
+        "status": "unavailable",
+        "issues": ["observation_incomplete"],
+    }
+
+
+def test_final_handoff_preserves_partial_traffic_without_merging_parent_values(tmp_path):
+    handoff = _minimal_handoff()
+    handoff["message_traffic"] = {
         "status": "partial",
-        "issues": ["attribution_incomplete"],
-        "sent_to": [{"participant_name": "server", "payload_bytes": "300", "messages": "1"}],
+        "issues": ["observation_incomplete"],
+        "sent_bytes": "005.0",
+        "received_bytes": "9.00",
     }
-
-
-def test_merge_f3_snapshots_preserves_partial_issues_and_checks_u128():
-    assert merge_f3_snapshots(
-        {
-            "status": "partial",
-            "issues": ["counter_gap"],
-            "sent_to": [{"participant_name": "server", "payload_bytes": "5", "messages": "1"}],
-        },
-        {
-            "sent_to": [{"participant_name": "server", "payload_bytes": "7", "messages": "2"}],
-        },
-    ) == {
-        "status": "partial",
-        "issues": ["counter_gap"],
-        "sent_to": [{"participant_name": "server", "payload_bytes": "12", "messages": "3"}],
-    }
-
-    assert merge_f3_snapshots(
-        {
-            "sent_to": [{"participant_name": "server", "payload_bytes": str(2**128 - 1), "messages": "1"}],
-        },
-        {
-            "sent_to": [{"participant_name": "server", "payload_bytes": "1", "messages": "1"}],
-        },
-    ) == {"status": "unavailable", "issues": ["malformed_source"]}
-
-
-def test_merge_f3_snapshots_keeps_distinct_recipients_sorted_and_rejects_duplicate_source_groups():
-    child = {
-        "sent_to": [
-            {"participant_name": "site-1", "payload_bytes": "5", "messages": "1"},
-            {"participant_name": "site-2", "payload_bytes": "7", "messages": "2"},
-        ],
-    }
-    parent = {
-        "sent_to": [{"participant_name": "site-2", "payload_bytes": "3", "messages": "1"}],
-    }
-
-    assert merge_f3_snapshots(child, parent) == {
-        "sent_to": [
-            {"participant_name": "site-1", "payload_bytes": "5", "messages": "1"},
-            {"participant_name": "site-2", "payload_bytes": "10", "messages": "3"},
-        ],
-    }
-    assert merge_f3_snapshots({**child, "sent_to": list(reversed(child["sent_to"]))}, parent) == merge_f3_snapshots(
-        child, parent
+    write_terminal_handoff(tmp_path, handoff)
+    report = assemble_participant_summary(
+        job_id="job-1", participant_name="site-1", child_handoff=read_terminal_handoff(tmp_path)
     )
-    assert merge_f3_snapshots({**child, "status": []}, parent) == {
-        "status": "unavailable",
-        "issues": ["malformed_source"],
+    assert report["message_traffic"] == {
+        "status": "partial",
+        "issues": ["observation_incomplete"],
+        "sent_bytes": "5",
+        "received_bytes": "9",
     }
-    assert merge_f3_snapshots({**child, "status": "reported"}, parent) == {
-        "status": "unavailable",
-        "issues": ["malformed_source"],
-    }
+
+
+@pytest.mark.parametrize("field", ["sent_bytes", "received_bytes"])
+def test_invalid_traffic_is_isolated_from_other_handoff_measurements(tmp_path, field):
+    handoff = _minimal_handoff()
+    handoff["workspace_filesystem"] = {"capacity_bytes": "1024"}
+    handoff["message_traffic"] = {"sent_bytes": "5", "received_bytes": "7"}
+    handoff["message_traffic"][field] = str(2**128)
+    write_terminal_handoff(tmp_path, handoff)
+    report = assemble_participant_summary(
+        job_id="job-1", participant_name="site-1", child_handoff=read_terminal_handoff(tmp_path)
+    )
+    assert report["message_traffic"] == {"status": "unavailable", "issues": ["malformed_source"]}
+    assert report["workspace_filesystem"] == {"capacity_bytes": "1024"}
 
 
 def _minimal_handoff():
@@ -950,7 +913,7 @@ def _minimal_handoff():
         "cpu_consumed": {"status": "unavailable", "issues": ["observation_incomplete"]},
         "workspace_filesystem": {"status": "unavailable", "issues": ["observation_incomplete"]},
         "retained_content": {"status": "unavailable", "issues": ["unsupported"]},
-        "child_f3": {"status": "unavailable", "issues": ["observation_incomplete"]},
+        "message_traffic": {"status": "unavailable", "issues": ["observation_incomplete"]},
     }
 
 

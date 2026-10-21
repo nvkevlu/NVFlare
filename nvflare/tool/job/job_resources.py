@@ -26,7 +26,6 @@ _HOUR = Decimal(3600)
 _MISSING = "—"
 
 _ISSUE_LABELS = {
-    "counter_gap": "some messages may be missing",
     "observation_incomplete": "part of the measurement could not be collected",
     "attribution_incomplete": "some work could not be assigned to this participant",
     "unsupported": "not supported here",
@@ -107,44 +106,6 @@ def _sum_group(resource_time: dict, resource: str, field: str, kind: str | None 
     return sum(values, Decimal(0)) if values or resource in resource_time else None
 
 
-def _sent_bytes(value: dict):
-    traffic = value.get("message_traffic", {})
-    if "sent" in traffic:
-        return traffic["sent"]["payload_bytes"]
-    if "sent_to" in traffic:
-        return str(sum(int(Decimal(group["payload_bytes"])) for group in traffic["sent_to"]))
-    return None
-
-
-def _incoming_traffic(participants: list[dict]) -> tuple[dict[str, int], bool, set[str]]:
-    """Index addressed sends once for the per-site CLI table."""
-
-    sent_to: dict[str, int] = {}
-    has_numeric_source = False
-    incomplete_sources = set()
-    for source in participants:
-        traffic = source.get("message_traffic", {}) if _accepted(source) else {}
-        if not _accepted(source) or _metric_status(traffic) != "reported":
-            incomplete_sources.add(source["participant_name"])
-        if "sent_to" not in traffic:
-            continue
-        has_numeric_source = True
-        for group in traffic["sent_to"]:
-            name = group["participant_name"]
-            sent_to[name] = sent_to.get(name, 0) + int(Decimal(group["payload_bytes"]))
-    return sent_to, has_numeric_source, incomplete_sources
-
-
-def _sent_to_site_display(
-    sent_to: dict[str, int], has_numeric_source: bool, incomplete_sources: set[str], participant_name: str
-) -> str:
-    if not has_numeric_source:
-        return _MISSING
-    complete = not incomplete_sources or incomplete_sources == {participant_name}
-    shown = _number(str(sent_to.get(participant_name, 0)), _GIB)
-    return shown if complete else f"{shown}*"
-
-
 def _marked(value: str, status: str | None) -> str:
     return f"{value}*" if value != _MISSING and status == "partial" else value
 
@@ -211,7 +172,7 @@ def _has_retained_content(value: dict) -> bool:
 
 
 def _has_message_traffic(value: dict) -> bool:
-    return _sent_bytes(value) is not None
+    return value.get("message_traffic", {}).get("sent_bytes") is not None
 
 
 def _quantity(label: str, value: str, unit: str) -> str:
@@ -265,7 +226,6 @@ def _issue_detail(value: dict, field: str) -> str:
     elif field == "message_traffic":
         labels["observation_incomplete"] = "some message counters were unavailable"
         labels["attribution_incomplete"] = "some message traffic could not be assigned to this participant"
-        labels["counter_gap"] = "some accepted messages or tensor bytes may be missing"
     elif field == "workspace_filesystem":
         labels["observation_incomplete"] = "the workspace filesystem capacity could not be read"
     return "; ".join(labels.get(issue, issue.replace("_", " ")) for issue in issues)
@@ -353,11 +313,10 @@ def _total_other_quantities(totals: dict, show_retained: bool, show_message_traf
         )
     if show_message_traffic:
         traffic = totals["message_traffic"]
-        quantities.append(
-            _quantity(
-                "Message payload sent", _marked(_number(_sent_bytes(totals), _GIB), _metric_status(traffic)), "GiB"
+        for field, label in (("sent_bytes", "Payload sent"), ("received_bytes", "Payload received")):
+            quantities.append(
+                _quantity(label, _marked(_number(traffic.get(field), _GIB), _metric_status(traffic)), "GiB")
             )
-        )
     return quantities
 
 
@@ -394,7 +353,6 @@ def _hardware_detail(participant: dict) -> list[str]:
 
 def render_job_resources(summary: dict, participant: dict | None = None, *, job_name: str | None = None) -> str:
     participants = sorted(summary["participants"], key=lambda entry: (entry["role"], entry["participant_name"]))
-    sent_to, has_numeric_source, incomplete_sources = _incoming_traffic(participants)
     accepted = sum(_accepted(entry) for entry in participants)
     selected = participant.get("participant_name") if participant else None
     show_mig = (
@@ -407,9 +365,7 @@ def render_job_resources(summary: dict, participant: dict | None = None, *, job_
     )
     visible_entries = [entry for entry in participants if not selected or entry["participant_name"] == selected]
     show_retained = any(_accepted(entry) and _has_retained_content(entry) for entry in visible_entries)
-    # An addressed send from another participant remains useful even when the
-    # selected participant's own report (and outbound counter) is missing.
-    show_message_traffic = has_numeric_source
+    show_message_traffic = any(_accepted(entry) and _has_message_traffic(entry) for entry in visible_entries)
     title = f"job {_terminal_label(job_name)} (ID: {summary['job_id']})" if job_name else f"job ID {summary['job_id']}"
     lines = [f"Recorded resources for {title}.", f"GPU count basis: CUDA Driver (schema {SCHEMA_VERSION})."]
     coverage = f"Participants with data: {accepted}/{len(participants)}"
@@ -443,7 +399,7 @@ def render_job_resources(summary: dict, participant: dict | None = None, *, job_
         if show_retained:
             other_headers.append("RUN-DIR FILES GiB")
         if show_message_traffic:
-            other_headers.extend(["PAYLOAD SENT GiB", "PAYLOAD SENT TO SITE GiB"])
+            other_headers.extend(["PAYLOAD SENT GiB", "PAYLOAD RECEIVED GiB"])
         other_rows = []
         for entry in visible_entries:
             values = []
@@ -452,10 +408,8 @@ def render_job_resources(summary: dict, participant: dict | None = None, *, job_
                 values.append(_marked(_number(retained.get("bytes"), _GIB), retained.get("status")))
             if show_message_traffic:
                 traffic = entry.get("message_traffic", {}) if _accepted(entry) else {}
-                values.append(_marked(_number(_sent_bytes(entry) if traffic else None, _GIB), traffic.get("status")))
-                values.append(
-                    _sent_to_site_display(sent_to, has_numeric_source, incomplete_sources, entry["participant_name"])
-                )
+                for field in ("sent_bytes", "received_bytes"):
+                    values.append(_marked(_number(traffic.get(field), _GIB), traffic.get("status")))
             other_rows.append([entry["participant_name"], *values])
         lines.extend(["", "Recorded files and message payload", *_table(other_headers, other_rows)])
     if not selected:
@@ -558,7 +512,8 @@ def render_study_resources(summary: dict) -> str:
                 row_metrics.append(_marked(_number(retained.get("bytes"), _GIB), _metric_status(retained)))
             if show_message_traffic:
                 traffic = totals["message_traffic"]
-                row_metrics.append(_marked(_number(_sent_bytes(totals), _GIB), _metric_status(traffic)))
+                for field in ("sent_bytes", "received_bytes"):
+                    row_metrics.append(_marked(_number(traffic.get(field), _GIB), _metric_status(traffic)))
             incomplete = [
                 f"{label} {'incomplete' if _metric_status(totals[field]) == 'partial' else 'unavailable'}"
                 for field, label in _TOTAL_MEASUREMENT_LABELS.items()
@@ -568,7 +523,7 @@ def render_study_resources(summary: dict) -> str:
                 gaps.append(f"  {job['job_id']}: " + ", ".join(incomplete))
         else:
             row_metrics = [_MISSING] * (
-                5 + int(show_mig) + int(show_unclassified) + int(show_retained) + int(show_message_traffic)
+                5 + int(show_mig) + int(show_unclassified) + int(show_retained) + 2 * int(show_message_traffic)
             )
             reason = (
                 "no valid resource summary" if job["resource_data"] == "unavailable" else "not finalized (excluded)"
@@ -591,7 +546,7 @@ def render_study_resources(summary: dict) -> str:
     if show_retained:
         metric_headers.append("RUN-DIR GiB")
     if show_message_traffic:
-        metric_headers.append("PAYLOAD SENT GiB")
+        metric_headers.extend(["PAYLOAD SENT GiB", "PAYLOAD RECEIVED GiB"])
     lines.extend(_table(["JOB ID", "NAME", "JOB STATUS", *metric_headers], rows))
     lines.extend(["", "Derived capacity-time totals"])
     if any(job["resource_data"] == "included" for job in summary["jobs"]):

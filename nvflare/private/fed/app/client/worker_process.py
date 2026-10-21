@@ -33,9 +33,8 @@ from nvflare.private.fed.app.utils import monitor_parent_process
 from nvflare.private.fed.client.client_app_runner import ClientAppRunner
 from nvflare.private.fed.client.client_status import ClientStatus
 from nvflare.private.fed.resource_stats.collector import JobResourceCollector
-from nvflare.private.fed.resource_stats.f3_counter import F3_DRAIN_TIMEOUT_SECONDS
-from nvflare.private.fed.resource_stats.f3_job_counter import get_job_f3_counter, start_job_f3_counter
 from nvflare.private.fed.resource_stats.handoff import write_terminal_handoff
+from nvflare.private.fed.resource_stats.message_traffic import snapshot_message_traffic
 from nvflare.private.fed.utils.fed_utils import (
     create_stats_pool_files_for_job,
     fobs_initialize,
@@ -73,12 +72,6 @@ def main(args):
     except Exception:
         # Resource reporting is observational and must never change the job outcome.
         pass
-    try:
-        # Start independently from the capacity collector so failure in one
-        # observation path cannot disable the other.
-        start_job_f3_counter()
-    except Exception:
-        pass
     set_stats_pool_config_for_job(workspace, args.job_id)
 
     try:
@@ -103,6 +96,7 @@ def main(args):
     federated_client = None
     logger = None
     execution_failed = False
+    message_traffic_incomplete = False
 
     app_root = workspace.get_app_dir(str(args.job_id))
 
@@ -151,22 +145,15 @@ def main(args):
     finally:
 
         def _archive_results():
-            child_f3 = None
-            counter = get_job_f3_counter()
-            if counter:
-                try:
-                    # Application command admission is already closed here.
-                    # Close F3 admission too, then give accepted logical sends a
-                    # fixed, bounded interval to settle before writing the handoff.
-                    counter.close_and_drain(F3_DRAIN_TIMEOUT_SECONDS)
-                    child_f3 = counter.freeze()
-                except Exception:
-                    child_f3 = None
             if resource_collector:
                 try:
                     write_terminal_handoff(
                         workspace.get_run_dir(args.job_id),
-                        resource_collector.finish(child_f3=child_f3),
+                        resource_collector.finish(
+                            message_traffic=snapshot_message_traffic(
+                                getattr(federated_client, "cell", None), incomplete=message_traffic_incomplete
+                            )
+                        ),
                     )
                 except Exception as e:
                     if logger:
@@ -180,11 +167,10 @@ def main(args):
             upload_results_on_shutdown(args, secure_train, log=logger)
 
         def _mark_callback_drain_incomplete():
+            nonlocal message_traffic_incomplete
+            message_traffic_incomplete = True
             if resource_collector:
                 resource_collector.mark_cpu_consumption_incomplete()
-            counter = get_job_f3_counter()
-            if counter:
-                counter.mark_counter_gap()
 
         def _close_commands():
             try:

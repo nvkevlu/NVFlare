@@ -6,7 +6,8 @@
   "job_id": "synthetic-capacity-unavailable",
   "kind": "nvflare.resource_stats.participant_summary",
   "message_traffic": {
-    "sent_to": []
+    "received_bytes": "0",
+    "sent_bytes": "0"
   },
   "participant_name": "site-1",
   "reported_at": "2026-10-12T12:00:00Z",

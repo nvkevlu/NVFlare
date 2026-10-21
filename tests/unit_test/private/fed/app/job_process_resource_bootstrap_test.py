@@ -58,7 +58,6 @@ def test_snapshot_preserves_workspace_download_and_custom_path_refresh(monkeypat
     monkeypatch.setattr(module, "parse_vars", lambda _values: {})
     monkeypatch.setattr(module, "Workspace", _Workspace)
     monkeypatch.setattr(module, "JobResourceCollector", lambda run_dir, **_kwargs: events.append(("snapshot", run_dir)))
-    monkeypatch.setattr(module, "start_job_f3_counter", lambda: None)
     monkeypatch.setattr(module, "download_workspace", lambda *_args, **_kwargs: events.append(("download", None)))
     monkeypatch.setattr(
         module,
@@ -91,8 +90,7 @@ def test_snapshot_preserves_workspace_download_and_custom_path_refresh(monkeypat
         ),
     ],
 )
-@pytest.mark.parametrize("failed_component", ["JobResourceCollector", "start_job_f3_counter"])
-def test_observation_failure_keeps_existing_startup_and_import_environment(monkeypatch, module, args, failed_component):
+def test_observation_failure_keeps_existing_startup_and_import_environment(monkeypatch, module, args):
     events = []
     inherited_path = "/existing/platform/dependencies"
     monkeypatch.setenv("PYTHONPATH", inherited_path)
@@ -102,12 +100,11 @@ def test_observation_failure_keeps_existing_startup_and_import_environment(monke
     monkeypatch.setattr(module, "download_workspace", lambda *_args, **_kwargs: events.append("download"))
     monkeypatch.setattr(module, "refresh_custom_dir_import_path", lambda _path: events.append("refresh"))
     monkeypatch.setattr(module, "JobResourceCollector", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(module, "start_job_f3_counter", lambda: None)
 
     def unavailable(*_args, **_kwargs):
         raise OSError("optional observation unavailable")
 
-    monkeypatch.setattr(module, failed_component, unavailable)
+    monkeypatch.setattr(module, "JobResourceCollector", unavailable)
 
     def reached_normal_configuration(*_args, **_kwargs):
         events.append("configure")
@@ -142,11 +139,6 @@ def test_restored_server_marks_pre_restart_observation_incomplete(monkeypatch, b
     )
     monkeypatch.setattr(runner_process, "download_workspace", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(runner_process, "refresh_custom_dir_import_path", lambda _path: None)
-    monkeypatch.setattr(
-        runner_process,
-        "start_job_f3_counter",
-        lambda: SimpleNamespace(mark_prior_history_incomplete=lambda: None),
-    )
 
     def stop_after_bootstrap(*_args, **_kwargs):
         raise _StopAfterBootstrap

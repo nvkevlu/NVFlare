@@ -26,16 +26,8 @@ from pathlib import Path
 from typing import Any, Optional
 
 from . import accumulator, handoff
-from .contract import (
-    SCHEMA_VERSION,
-    U128_MAX,
-    ContractError,
-    normalize_measurement,
-    normalize_message_traffic,
-    validate_record,
-)
+from .contract import SCHEMA_VERSION, U128_MAX, normalize_measurement, validate_record
 from .cpu_consumed import CpuConsumedAccountant, install_cpu_accountant
-from .f3_counter import MAX_F3_SENT_TO_GROUPS
 from .probes import cgroup_linux, gpu_nvidia
 
 _SLURM_NODE_COUNT_ENV = "NVFL_NNODES"
@@ -249,7 +241,7 @@ class JobResourceCollector:
 
         self._cpu_consumed.mark_attribution_incomplete()
 
-    def finish(self, *, child_f3: Optional[Mapping[str, Any]] = None) -> dict[str, Any]:
+    def finish(self, *, message_traffic: Optional[Mapping[str, Any]] = None) -> dict[str, Any]:
         """Build the one private child handoff at process finalization."""
 
         cpu_consumed = self._cpu_consumed.finish()
@@ -266,78 +258,10 @@ class JobResourceCollector:
             "cpu_consumed": cpu_consumed,
             "workspace_filesystem": observe_workspace_filesystem(self.run_dir),
             "retained_content": observe_retained_content(self.run_dir),
-            "child_f3": deepcopy(child_f3) if child_f3 is not None else _unavailable("observation_incomplete"),
+            "message_traffic": (
+                deepcopy(message_traffic) if message_traffic is not None else _unavailable("observation_incomplete")
+            ),
         }
-
-
-def merge_f3_snapshots(
-    child_f3: Optional[Mapping[str, Any]],
-    parent_f3: Optional[Mapping[str, Any]],
-) -> dict[str, Any]:
-    """Merge the child and parent execution-environment F3 contributions.
-
-    A participant spans two processes today: its short-lived job process and
-    its long-lived parent.  Both are required for complete attribution.  A
-    missing side therefore produces a partial result when the other side has
-    numeric data, rather than silently presenting that subtotal as complete.
-    """
-
-    sent_to: dict[str, tuple[int, int]] = {}
-    numeric_count = 0
-    issues = set()
-    missing_contribution = False
-    for value in (child_f3, parent_f3):
-        if not isinstance(value, Mapping):
-            missing_contribution = True
-            continue
-        try:
-            value = normalize_message_traffic(value)
-        except ContractError:
-            return {"status": "unavailable", "issues": ["malformed_source"]}
-        status = value.get("status", "reported")
-        if status in {"reported", "partial"}:
-            for group in value["sent_to"]:
-                name = group["participant_name"]
-                payload_bytes = int(group["payload_bytes"])
-                messages = int(group["messages"])
-                if name not in sent_to and len(sent_to) >= MAX_F3_SENT_TO_GROUPS:
-                    issues.add("counter_gap")
-                    continue
-                old_payload, old_messages = sent_to.get(name, (0, 0))
-                if old_payload > U128_MAX - payload_bytes or old_messages > U128_MAX - messages:
-                    return {"status": "unavailable", "issues": ["malformed_source"]}
-                sent_to[name] = (old_payload + payload_bytes, old_messages + messages)
-            numeric_count += 1
-            if status == "partial":
-                issues.update(value["issues"])
-        else:
-            missing_contribution = True
-            if set(value["issues"]) & {"observation_incomplete", "malformed_source"}:
-                issues.add("observation_incomplete")
-            else:
-                issues.add("attribution_incomplete")
-
-    if not numeric_count:
-        issue = "observation_incomplete" if "observation_incomplete" in issues else "attribution_incomplete"
-        return {"status": "unavailable", "issues": [issue]}
-
-    payload_bytes = sum(value[0] for value in sent_to.values())
-    messages = sum(value[1] for value in sent_to.values())
-    if payload_bytes > U128_MAX or messages > U128_MAX:
-        return {"status": "unavailable", "issues": ["malformed_source"]}
-
-    result = {
-        "sent_to": [
-            {"participant_name": name, "payload_bytes": str(sent_to[name][0]), "messages": str(sent_to[name][1])}
-            for name in sorted(sent_to)
-        ],
-    }
-    if missing_contribution or issues:
-        if missing_contribution:
-            issues.add("attribution_incomplete")
-        result["status"] = "partial"
-        result["issues"] = sorted(issues)
-    return result
 
 
 def assemble_participant_summary(
@@ -345,20 +269,17 @@ def assemble_participant_summary(
     job_id: str,
     participant_name: str,
     child_handoff: Optional[Mapping[str, Any]],
-    parent_f3: Optional[Mapping[str, Any]] = None,
 ) -> dict[str, Any]:
     """Assemble a handoff already checked by read_terminal_handoff.
 
     The parent supplies identity. Final record validation also checks the
-    combined traffic contribution before anything is sent to the server.
+    measurements before anything is sent to the server.
     """
 
     measurements = {
         name: child_handoff[name] if child_handoff is not None else _unavailable("observation_incomplete")
-        for name in ("resource_capacity", "cpu_consumed", "workspace_filesystem", "retained_content")
+        for name in ("resource_capacity", "cpu_consumed", "workspace_filesystem", "retained_content", "message_traffic")
     }
-    child_f3 = child_handoff["child_f3"] if child_handoff is not None else None
-    message_traffic = merge_f3_snapshots(child_f3, parent_f3)
     report = {
         "schema_version": SCHEMA_VERSION,
         "kind": "nvflare.resource_stats.participant_summary",
@@ -366,7 +287,6 @@ def assemble_participant_summary(
         "participant_name": participant_name,
         "reported_at": utc_now(),
         **measurements,
-        "message_traffic": message_traffic,
     }
     validate_record(report)
     return report

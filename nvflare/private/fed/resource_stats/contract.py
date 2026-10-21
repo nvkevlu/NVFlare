@@ -33,9 +33,9 @@ from datetime import datetime, timezone
 from decimal import ROUND_FLOOR, ROUND_HALF_EVEN, Decimal, InvalidOperation, localcontext
 from typing import Any, Mapping, Sequence
 
-from .communication_limits import PARTICIPANT_NAME_PATTERN, U128_MAX
-
 SCHEMA_VERSION = "3.0"
+U128_MAX = 2**128 - 1
+PARTICIPANT_NAME_PATTERN = re.compile(r"^[A-Za-z0-9_-][A-Za-z0-9_.-]{0,127}$")
 
 KIND_PARTICIPANT_SUMMARY = "nvflare.resource_stats.participant_summary"
 KIND_RESOURCE_SUMMARY = "nvflare.resource_stats.resource_summary"
@@ -50,7 +50,6 @@ RECORD_KINDS = frozenset(
 
 ISSUE_CODES = frozenset(
     {
-        "counter_gap",
         "observation_incomplete",
         "attribution_incomplete",
         "unsupported",
@@ -70,7 +69,6 @@ SOURCE_UNAVAILABLE_ISSUES = frozenset(
     {"attribution_incomplete", "malformed_source", "observation_incomplete", "unsupported"}
 )
 CAPACITY_UNAVAILABLE_ISSUES = SOURCE_UNAVAILABLE_ISSUES
-PARTIAL_ISSUES = frozenset({"attribution_incomplete", "counter_gap", "observation_incomplete"})
 
 RESOURCE_TIME_STATUSES = frozenset({"partial", "unavailable"})
 MEASUREMENT_STATUSES = frozenset({"partial", "unavailable"})
@@ -83,7 +81,6 @@ LEGACY_TERMINAL_JOB_STATES = frozenset({"FINISHED_OK", "FINISHED_EXCEPTION", "AB
 
 MAX_ISSUES = 4
 MAX_PARTICIPANTS = 10_000
-MAX_MESSAGE_DESTINATIONS = 2_048
 MAX_STUDY_JOBS = 10_000
 MAX_GPU_GROUPS = 4_096
 MAX_CAPACITY_INTERVALS = 4_096
@@ -588,54 +585,25 @@ def _validate_retained_content(value: Any, path: str, *, aggregate: bool = False
             _issues(retained["issues"], SOURCE_UNAVAILABLE_ISSUES, f"{path}.issues")
 
 
-def _validate_counter(value: Any, path: str) -> None:
-    counter = _mapping(value, path)
-    _exact_keys(counter, {"payload_bytes", "messages"}, set(), path)
-    payload_bytes = _integer(counter["payload_bytes"], f"{path}.payload_bytes")
-    messages = _integer(counter["messages"], f"{path}.messages")
-    if messages == 0 and payload_bytes != 0:
-        _fail(path, "payload_bytes must be zero when messages is zero")
-
-
-def _validate_sent_to(value: Any, path: str) -> None:
-    if not isinstance(value, list) or len(value) > MAX_MESSAGE_DESTINATIONS:
-        _fail(path, f"must contain 0..{MAX_MESSAGE_DESTINATIONS} destinations")
-    names = []
-    for index, item in enumerate(value):
-        item_path = f"{path}[{index}]"
-        group = _mapping(item, item_path)
-        _exact_keys(group, {"participant_name", "payload_bytes", "messages"}, set(), item_path)
-        names.append(_identifier(group["participant_name"], PARTICIPANT_NAME_PATTERN, f"{item_path}.participant_name"))
-        _validate_counter({"payload_bytes": group["payload_bytes"], "messages": group["messages"]}, item_path)
-        if _integer(group["messages"], f"{item_path}.messages") == 0:
-            _fail(f"{item_path}.messages", "must be positive for a listed destination")
-    if len(names) != len(set(names)):
-        _fail(path, "must contain unique participant_name values")
-
-
 def _validate_message_traffic(value: Any, path: str, *, aggregate: bool = False) -> None:
     traffic = _mapping(value, path)
     statuses = TOTAL_STATUSES if aggregate else MEASUREMENT_STATUSES
     status = _optional_status(traffic, "reported", statuses, f"{path}.status")
-    if aggregate:
-        if status in {"reported", "partial"}:
-            _exact_keys(traffic, {"sent"} if status == "reported" else {"status", "sent"}, set(), path)
-            _validate_counter(traffic["sent"], f"{path}.sent")
-        else:
-            _exact_keys(traffic, {"status"}, set(), path)
-        return
-
     if status in {"reported", "partial"}:
-        required = {"sent_to"} if status == "reported" else {"status", "sent_to"}
+        required = {"sent_bytes", "received_bytes"}
         if status == "partial":
-            required.add("issues")
+            required.add("status")
+            if not aggregate:
+                required.add("issues")
         _exact_keys(traffic, required, set(), path)
-        if status == "partial":
-            _issues(traffic["issues"], PARTIAL_ISSUES, f"{path}.issues")
-        _validate_sent_to(traffic["sent_to"], f"{path}.sent_to")
+        if status == "partial" and not aggregate:
+            _issues(traffic["issues"], frozenset({"observation_incomplete"}), f"{path}.issues")
+        for field in ("sent_bytes", "received_bytes"):
+            _integer(traffic[field], f"{path}.{field}")
     else:
-        _exact_keys(traffic, {"status", "issues"}, set(), path)
-        _issues(traffic["issues"], SOURCE_UNAVAILABLE_ISSUES, f"{path}.issues")
+        _exact_keys(traffic, {"status"} if aggregate else {"status", "issues"}, set(), path)
+        if not aggregate:
+            _issues(traffic["issues"], frozenset({"malformed_source", "observation_incomplete"}), f"{path}.issues")
 
 
 def _validate_totals(value: Any, path: str) -> None:
@@ -668,8 +636,8 @@ _QUANTITY_FIELDS = frozenset(
         "capacity_bytes",
         "memory_bytes",
         "bytes",
-        "payload_bytes",
-        "messages",
+        "sent_bytes",
+        "received_bytes",
         "selected_jobs",
         "included_jobs",
         "unavailable_jobs",
@@ -692,7 +660,7 @@ def _normalize_tree(value: Any) -> Any:
                 result[key] = _canonical_decimal(Decimal(item))
             else:
                 result[key] = _normalize_tree(item)
-        for key in ("issues", "groups", "sent_to", "participants", "jobs"):
+        for key in ("issues", "groups", "participants", "jobs"):
             items = result.get(key)
             if not isinstance(items, list):
                 continue
@@ -704,7 +672,7 @@ def _normalize_tree(value: Any) -> Any:
                 elif key == "participants":
                     fields = ("role", "participant_name")
                 else:
-                    fields = ("participant_name",) if key == "sent_to" else ("job_id",)
+                    fields = ("job_id",)
                 if all(isinstance(item.get(field, ""), str) for item in items for field in fields):
                     result[key] = sorted(items, key=lambda item: tuple(item.get(field, "") for field in fields))
         return result
@@ -905,18 +873,13 @@ def _aggregate_message_traffic(
     numeric = [value for value in values if value.get("status", "reported") in {"reported", "partial"}]
     if not numeric:
         return {"status": "unavailable"}
-    counters = []
-    for value in numeric:
-        if "sent_to" in value:
-            counters.extend(value["sent_to"])
-        else:
-            counters.append(value["sent"])
-    payload = sum(int(group["payload_bytes"]) for group in counters)
-    messages = sum(int(group["messages"]) for group in counters)
-    if payload > U128_MAX or messages > U128_MAX:
-        _fail(f"{path}.sent", "aggregate exceeds the unsigned 128-bit bound")
+    result = {}
+    for field in ("sent_bytes", "received_bytes"):
+        amount = sum(int(value[field]) for value in numeric)
+        if amount > U128_MAX:
+            _fail(f"{path}.{field}", "aggregate exceeds the unsigned 128-bit bound")
+        result[field] = str(amount)
     reported = complete and len(numeric) == len(values) and all("status" not in value for value in values)
-    result = {"sent": {"payload_bytes": str(payload), "messages": str(messages)}}
     return result if reported else {"status": "partial", **result}
 
 
@@ -967,9 +930,6 @@ def _validate_participant_summary(record: Mapping[str, Any], path: str) -> None:
     _validate_workspace_filesystem(record["workspace_filesystem"], f"{path}.workspace_filesystem")
     _validate_retained_content(record["retained_content"], f"{path}.retained_content")
     _validate_message_traffic(record["message_traffic"], f"{path}.message_traffic")
-    for destination in record["message_traffic"].get("sent_to", []):
-        if destination["participant_name"] == record["participant_name"]:
-            _fail(f"{path}.message_traffic.sent_to", "cannot include the sending participant")
 
 
 def participant_measurements(participant_record: Mapping[str, Any]) -> dict[str, Any]:
@@ -1036,17 +996,6 @@ def _validate_participant_list(
         ordering.append((entry["role"], entry["participant_name"]))
     if len({item[1] for item in ordering}) != len(ordering):
         _fail(path, "participant_name values must be unique")
-    known_names = {item[1] for item in ordering}
-    for index, entry in enumerate(participants):
-        if "status" in entry:
-            continue
-        for destination in entry["message_traffic"].get("sent_to", []):
-            name = destination["participant_name"]
-            if name not in known_names or name == entry["participant_name"]:
-                _fail(
-                    f"{path}[{index}].message_traffic.sent_to",
-                    "destinations must name another expected participant",
-                )
     return resource_times
 
 

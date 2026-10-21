@@ -6,13 +6,8 @@
   "job_id": "synthetic-capacity-normal",
   "kind": "nvflare.resource_stats.participant_summary",
   "message_traffic": {
-    "sent_to": [
-      {
-        "messages": "5",
-        "participant_name": "site-1",
-        "payload_bytes": "1073741824"
-      }
-    ]
+    "received_bytes": "1073741824",
+    "sent_bytes": "2147483648"
   },
   "participant_name": "server",
   "reported_at": "2026-10-12T12:00:00Z",

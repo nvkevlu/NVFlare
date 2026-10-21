@@ -74,7 +74,7 @@ def _site_cell(output: str, header: str, site: str = "site-1") -> str:
 def test_cli_only_shows_a_short_legend_when_needed(scope, incomplete):
     participant = _participant()
     participant["retained_content"] = {"bytes": "0"}
-    participant["message_traffic"] = {"sent_to": []}
+    participant["message_traffic"] = {"sent_bytes": "0", "received_bytes": "0"}
     if incomplete:
         participant["resource_capacity"].update(status="partial", issues=["observation_incomplete"])
     summary = _job_summary(participant)
@@ -362,17 +362,19 @@ def test_run_directory_files_and_message_traffic_columns_are_only_shown_when_bou
     participant["retained_content"] = {"bytes": str(3 * 2**30)}
     participant["message_traffic"] = {
         "status": "partial",
-        "issues": ["counter_gap"],
-        "sent_to": [{"participant_name": "server", "payload_bytes": str(5 * 2**30), "messages": "10"}],
+        "issues": ["observation_incomplete"],
+        "sent_bytes": str(5 * 2**30),
+        "received_bytes": str(2 * 2**30),
     }
     summary = _with_missing_server(_job_summary(participant))
     output = render_job_resources(summary)
 
     assert "RUN-DIR FILES GiB" in output
     assert "PAYLOAD SENT GiB" in output
-    assert "PAYLOAD SENT TO SITE GiB" in output
+    assert "PAYLOAD RECEIVED GiB" in output
     assert "Run-dir files 3.0000* GiB" in output  # The server report is missing.
-    assert "5.0000*" in output  # Counter gap: useful subtotal, not a complete send total.
+    assert "5.0000*" in output  # Useful observed subtotal, not a complete send total.
+    assert "2.0000*" in output
     assert "RUN-DIR STATUS" not in output
     assert "MESSAGE TRAFFIC STATUS" not in output
     assert "Data gaps" in output
@@ -388,17 +390,20 @@ def test_run_directory_files_and_message_traffic_columns_are_only_shown_when_bou
     assert "RUN-DIR STATUS" not in partial_output
 
 
-def test_sender_confirmed_inbound_remains_visible_when_destination_report_is_missing():
+def test_missing_report_does_not_invent_received_bytes_from_another_sender():
     site = _participant()
     site["message_traffic"] = {
-        "sent_to": [{"participant_name": "server", "payload_bytes": str(2**30), "messages": "2"}],
+        "sent_bytes": str(2**30),
+        "received_bytes": str(3 * 2**30),
     }
     summary = _with_missing_server(_job_summary(site))
 
     output = render_job_resources(summary)
-    server_row = next(line for line in output.splitlines() if line.startswith("server") and "1.0000" in line)
-    assert "—" in server_row
-    assert "1.0000" in server_row
+    traffic_heading = next(index for index, line in enumerate(output.splitlines()) if "PAYLOAD RECEIVED GiB" in line)
+    server_row = next(line for line in output.splitlines()[traffic_heading + 1 :] if line.startswith("server"))
+    assert re.split(r"\s{2,}", server_row.strip()) == ["server", "—", "—"]
+    site_row = next(line for line in output.splitlines()[traffic_heading + 1 :] if line.startswith("site-1"))
+    assert re.split(r"\s{2,}", site_row.strip()) == ["site-1", "1.0000", "3.0000"]
     assert "Notes:" not in output
 
 
@@ -508,11 +513,13 @@ def test_unavailable_source_cause_is_shown_without_another_status_column():
 def test_job_renderer_sorts_participants_and_accepts_equivalent_integer_spelling():
     summary = _with_missing_server(_job_summary(_participant()))
     summary["participants"][0]["message_traffic"] = {
-        "sent_to": [{"participant_name": "server", "payload_bytes": "1073741824", "messages": "1"}]
+        "sent_bytes": "1073741824",
+        "received_bytes": "2147483648",
     }
     alternate = deepcopy(summary)
     alternate["participants"].reverse()
-    alternate["participants"][1]["message_traffic"]["sent_to"][0]["payload_bytes"] = "1073741824.0"
+    alternate["participants"][1]["message_traffic"]["sent_bytes"] = "1073741824.0"
+    alternate["participants"][1]["message_traffic"]["received_bytes"] = "2147483648.0"
 
     assert render_job_resources(alternate) == render_job_resources(summary)
 
@@ -570,11 +577,14 @@ def test_study_mig_column_is_shown_only_when_an_included_job_reports_mig():
 
     job_totals["message_traffic"] = {
         "status": "partial",
-        "sent": {"payload_bytes": str(5 * 2**30), "messages": "10"},
+        "sent_bytes": str(5 * 2**30),
+        "received_bytes": str(2 * 2**30),
     }
     output = render_study_resources(study)
     assert "PAYLOAD SENT GiB" in output
+    assert "PAYLOAD RECEIVED GiB" in output
     assert "5.0000*" in output
+    assert "2.0000*" in output
     assert "MESSAGE TRAFFIC STATUS" not in output
 
 

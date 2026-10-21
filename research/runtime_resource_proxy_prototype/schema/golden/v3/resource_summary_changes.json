@@ -8,7 +8,8 @@
         "seconds": "180"
       },
       "message_traffic": {
-        "sent_to": []
+        "received_bytes": "0",
+        "sent_bytes": "0"
       },
       "participant_name": "site-1",
       "received_at": "2026-10-12T12:00:00Z",

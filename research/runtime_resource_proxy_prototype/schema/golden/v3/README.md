@@ -6,13 +6,18 @@ illustrative; the large-value fixture is intentionally unrealistic to exercise
 exact decimal-string arithmetic beyond floating-point precision.
 
 `generate_v3_examples.py` builds raw-capacity participant records and job
-summaries, validates exact archive inventories, serializes them with the
+summaries, validates the known report files, serializes them with the
 production writer, reads an in-memory workspace ZIP with the production
 archive reader, and renders the production CLI views. The capacity-change
 example covers 300 seconds at two GPUs followed by 300 seconds at one GPU.
 Its query-derived GPU time is 900 device-seconds; those products are absent
 from participant and job-summary storage. Partial, unavailable and missing
 examples show independent coverage and counters.
+Message traffic contains separate `sent_bytes` and `received_bytes` values.
+These represent observed job-cell/managed-trainer payload transfers, including
+control payloads and retries, not logical message counts or a sender-derived
+inbound estimate. The examples are synthetic and do not establish deployment
+coverage or delivery guarantees.
 The fallback example keeps CPU, RAM, CUDA, and duration while marking that
 some limits or earlier observations could not be checked. Its CPU-used average
 remains independent; no per-resource status fields are added.

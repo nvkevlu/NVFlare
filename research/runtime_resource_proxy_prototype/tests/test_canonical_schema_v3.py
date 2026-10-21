@@ -53,7 +53,7 @@ def reject_both(record, schema):
 
 
 def test_synthetic_goldens_match_production_and_current_json_schema(schema_v3, generated):
-    assert len(generated) == 21
+    assert len(generated) == 24
     for name, data in generated.items():
         assert (SCHEMA_ROOT / "golden" / "v3" / name).read_bytes() == data
         if name.endswith(".json"):
@@ -257,6 +257,66 @@ def test_study_combines_current_capacity_reports_without_version_cohorts(schema_
     assert all("resource_schema_version" not in row for row in study["jobs"])
     text = generated["study_summary.txt"].decode()
     assert "schema 1.0" not in text and "schema 2.0" not in text
+
+
+@pytest.mark.parametrize(
+    "traffic",
+    [
+        {"sent_bytes": "0", "received_bytes": "0"},
+        {"sent_bytes": "002.00", "received_bytes": "7.0"},
+        {
+            "status": "partial",
+            "issues": ["observation_incomplete"],
+            "sent_bytes": "2",
+            "received_bytes": "3",
+        },
+        {"status": "unavailable", "issues": ["observation_incomplete"]},
+    ],
+)
+def test_directional_traffic_contract_matches_schema(schema_v3, traffic):
+    record = current()
+    record["message_traffic"] = traffic
+    schema_v3.validate(record)
+    contract_v3.validate_record(record)
+
+
+@pytest.mark.parametrize(
+    "traffic",
+    [
+        {"sent_to": []},
+        {"sent_bytes": "0"},
+        {"received_bytes": "0"},
+        {"sent_bytes": "0", "received_bytes": "1.5"},
+        {"sent_bytes": "0", "received_bytes": "-1"},
+        {"sent_bytes": "0", "received_bytes": 1},
+        {"status": "partial", "sent_bytes": "0", "received_bytes": "0"},
+        {"status": "partial", "issues": ["counter_gap"], "sent_bytes": "0", "received_bytes": "0"},
+        {"status": "partial", "issues": ["attribution_incomplete"], "sent_bytes": "0", "received_bytes": "0"},
+        {"status": "unavailable", "issues": ["attribution_incomplete"]},
+        {"status": "unavailable", "issues": ["unsupported"]},
+        {"sent_bytes": "0", "received_bytes": "0", "messages": "1"},
+    ],
+)
+def test_directional_traffic_rejects_obsolete_and_incomplete_shapes(schema_v3, traffic):
+    record = current()
+    record["message_traffic"] = traffic
+    reject_both(record, schema_v3)
+
+
+def test_generated_queries_keep_directions_separate(schema_v3, generated):
+    job = json.loads(generated["resource_summary.json"])
+    totals = contract_v3.derive_job_totals(job["participants"])
+    assert totals["message_traffic"] == {"sent_bytes": str(3 * examples.GIB), "received_bytes": str(3 * examples.GIB)}
+    study = json.loads(generated["study_summary.json"])
+    assert study["totals"]["message_traffic"] == {
+        "sent_bytes": str(6 * examples.GIB),
+        "received_bytes": str(6 * examples.GIB),
+    }
+    schema_v3.validate(study)
+    text = generated["study_summary.txt"].decode()
+    assert "PAYLOAD SENT GiB" in text
+    assert "PAYLOAD RECEIVED GiB" in text
+    assert "SENT TO SITE" not in text
 
 
 def test_large_capacity_example_derives_exact_products_above_float_precision(generated):

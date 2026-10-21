@@ -116,16 +116,16 @@ def _validate_handoff(value: Mapping[str, Any]) -> dict[str, Any]:
         "cpu_consumed",
         "workspace_filesystem",
         "retained_content",
-        "child_f3",
+        "message_traffic",
     }
     if not isinstance(value, Mapping) or set(value) != required:
         raise InvalidTerminalHandoff(f"terminal handoff fields must be {sorted(required)}")
     if value["internal_version"] != INTERNAL_HANDOFF_VERSION or value["kind"] != INTERNAL_HANDOFF_KIND:
         raise InvalidTerminalHandoff("terminal handoff has an unsupported version or kind")
     result = {"internal_version": INTERNAL_HANDOFF_VERSION, "kind": INTERNAL_HANDOFF_KIND}
-    for name in ("resource_capacity", "cpu_consumed", "workspace_filesystem", "retained_content", "child_f3"):
+    for name in ("resource_capacity", "cpu_consumed", "workspace_filesystem", "retained_content", "message_traffic"):
         try:
-            result[name] = normalize_measurement("message_traffic" if name == "child_f3" else name, value[name])
+            result[name] = normalize_measurement(name, value[name])
         except ContractError:
             result[name] = {"status": "unavailable", "issues": ["malformed_source"]}
     return result

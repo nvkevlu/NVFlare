@@ -9,14 +9,14 @@ site-3  —       —                    —                     —        — 
 server  10m10s  8.0000               0.1967                16.0000  0.0000        0.0000
 
 Recorded files and message payload
-SITE    RUN-DIR FILES GiB  PAYLOAD SENT GiB  PAYLOAD SENT TO SITE GiB
-site-1  0.0000             1.0000            1.0000*
-site-3  —                  —                 0.0000
-server  0.0625             1.0000            1.0000*
+SITE    RUN-DIR FILES GiB  PAYLOAD SENT GiB  PAYLOAD RECEIVED GiB
+site-1  0.0000             1.0000            2.0000
+site-3  —                  —                 —
+server  0.0625             2.0000            1.0000
 
 Derived capacity-time totals
   CPU visible 6.6889* core-h | Memory visible 13.3778* GiB-h | CUDA devices available 0.3333* device-h | Verified full GPUs 0.3333* GPU-h
-  CPU time used 0.0833* core-h | Run-dir files 0.0625* GiB | Message payload sent 2.0000* GiB
+  CPU time used 0.0833* core-h | Run-dir files 0.0625* GiB | Payload sent 3.0000* GiB | Payload received 3.0000* GiB
 
 Data gaps:
   site-3: missing report

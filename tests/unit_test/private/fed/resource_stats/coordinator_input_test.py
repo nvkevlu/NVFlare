@@ -47,7 +47,7 @@ def _participant():
         "cpu_consumed": {"seconds": "2", "measured_seconds": "10"},
         "workspace_filesystem": {"capacity_bytes": "1024"},
         "retained_content": {"bytes": "2"},
-        "message_traffic": {"sent_to": [{"participant_name": "server", "payload_bytes": "2", "messages": "1"}]},
+        "message_traffic": {"sent_bytes": "2", "received_bytes": "3"},
     }
 
 
@@ -59,7 +59,8 @@ def _alternate(record):
     alternate["resource_capacity"]["measured_seconds"] = "10.000"
     alternate["cpu_consumed"]["seconds"] = "2.0"
     alternate["retained_content"]["bytes"] = "2.000"
-    alternate["message_traffic"]["sent_to"][0]["messages"] = "1.0"
+    alternate["message_traffic"]["sent_bytes"] = "2.0"
+    alternate["message_traffic"]["received_bytes"] = "3.0"
     return dict(reversed(list(alternate.items())))
 
 

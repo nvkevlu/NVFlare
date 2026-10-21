@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Reporting integration owns communication activation, cutoff and publication."""
+"""Reporting samples counters without changing normal job lifecycle."""
 
 import os
 import sys
@@ -26,7 +26,6 @@ from nvflare.apis.job_def import RunStatus
 from nvflare.private.fed.app import job_process_cleanup
 from nvflare.private.fed.app.client import worker_process
 from nvflare.private.fed.app.server import runner_process
-from nvflare.private.fed.resource_stats.f3_counter import F3_DRAIN_TIMEOUT_SECONDS, F3Counter, F3TrafficClass
 from nvflare.private.fed.server import job_runner
 
 
@@ -35,77 +34,35 @@ class _StartupObserved(Exception):
 
 
 @pytest.mark.parametrize("module", [worker_process, runner_process])
-@pytest.mark.parametrize("counter_fails", [False, True])
-def test_counter_start_keeps_existing_workspace_and_import_order(module, counter_fails, tmp_path, monkeypatch):
+def test_collection_keeps_existing_workspace_and_import_order(module, tmp_path, monkeypatch):
     events = []
     args = SimpleNamespace(set=[], workspace=str(tmp_path), client_name="site-1", job_id="job-1")
     monkeypatch.setenv("PYTHONPATH", "existing-custom-import-path")
     original_path = sys.path[:]
     monkeypatch.setattr(module, "parse_vars", lambda _: {})
     monkeypatch.setattr(module, "Workspace", MagicMock())
-    monkeypatch.setattr(module, "JobResourceCollector", lambda *_, **__: None)
+    monkeypatch.setattr(module, "JobResourceCollector", lambda *_, **__: events.append("capacity"))
     monkeypatch.setattr(module, "download_workspace", lambda *_: events.append("download"))
     monkeypatch.setattr(module, "refresh_custom_dir_import_path", lambda *_: events.append("refresh"))
-
-    def start_counter():
-        events.append("counter")
-        if counter_fails:
-            raise RuntimeError("optional accounting unavailable")
-        return F3Counter()
 
     def normal_configuration(*_):
         events.append("configuration")
         raise _StartupObserved()
 
-    monkeypatch.setattr(module, "start_job_f3_counter", start_counter)
     monkeypatch.setattr(module, "set_stats_pool_config_for_job", normal_configuration)
-
     with pytest.raises(_StartupObserved):
         module.main(args)
 
-    assert events == ["download", "refresh", "counter", "configuration"]
+    assert events == ["download", "refresh", "capacity", "configuration"]
     assert sys.path == original_path
     assert os.environ["PYTHONPATH"] == "existing-custom-import-path"
 
 
-def test_restored_server_child_marks_missing_earlier_traffic(tmp_path, monkeypatch):
-    counter = F3Counter()
-    args = SimpleNamespace(set=[], workspace=str(tmp_path), job_id="job-1")
-    monkeypatch.setattr(runner_process, "parse_vars", lambda _: {"restore_snapshot": "snapshot"})
-    for name in ("download_workspace", "Workspace", "refresh_custom_dir_import_path"):
-        monkeypatch.setattr(runner_process, name, MagicMock())
-    monkeypatch.setattr(runner_process, "start_job_f3_counter", lambda: counter)
-    monkeypatch.setattr(runner_process, "JobResourceCollector", lambda *_, **__: None)
-    monkeypatch.setattr(runner_process, "set_stats_pool_config_for_job", MagicMock(side_effect=_StartupObserved))
-
-    with pytest.raises(_StartupObserved):
-        runner_process.main(args)
-
-    assert counter.snapshot() == {"status": "partial", "issues": ["attribution_incomplete"], "sent_to": []}
-
-
 @pytest.mark.parametrize("module", [worker_process, runner_process])
 @pytest.mark.parametrize("callbacks_drained", [False, True])
-def test_job_child_freezes_counter_before_existing_archive(module, callbacks_drained, tmp_path, monkeypatch):
+@pytest.mark.parametrize("restored", [False, True])
+def test_job_samples_actual_cell_before_existing_archive(module, callbacks_drained, restored, tmp_path, monkeypatch):
     events = []
-    counter = F3Counter()
-    close_counter, freeze_counter, mark_gap = counter.close_and_drain, counter.freeze, counter.mark_counter_gap
-
-    def close(timeout):
-        events.append("close_counter")
-        return close_counter(timeout)
-
-    def freeze():
-        events.append("freeze_counter")
-        return freeze_counter()
-
-    def gap():
-        events.append("gap")
-        return mark_gap()
-
-    monkeypatch.setattr(counter, "close_and_drain", MagicMock(side_effect=close))
-    monkeypatch.setattr(counter, "freeze", MagicMock(side_effect=freeze))
-    monkeypatch.setattr(counter, "mark_counter_gap", gap)
     args = SimpleNamespace(
         set=[],
         workspace=str(tmp_path),
@@ -123,9 +80,10 @@ def test_job_child_freezes_counter_before_existing_archive(module, callbacks_dra
     workspace = MagicMock()
     workspace.get_file_path_in_root.side_effect = lambda name: str(tmp_path / name)
     app_runner, server, client, config = MagicMock(), MagicMock(), MagicMock(), MagicMock()
-    monkeypatch.setattr(module, "parse_vars", lambda _: {"secure_train": False})
+    collector = MagicMock()
+    monkeypatch.setattr(module, "parse_vars", lambda _: {"secure_train": False, "restore_snapshot": restored})
     monkeypatch.setattr(module, "Workspace", lambda *_, **__: workspace)
-    monkeypatch.setattr(module, "JobResourceCollector", lambda *_, **__: None)
+    monkeypatch.setattr(module, "JobResourceCollector", lambda *_, **__: collector)
     monkeypatch.setattr(module.threading, "Thread", MagicMock())
     for name in (
         "download_workspace",
@@ -138,14 +96,24 @@ def test_job_child_freezes_counter_before_existing_archive(module, callbacks_dra
     ):
         monkeypatch.setattr(module, name, MagicMock())
     monkeypatch.setattr(module, "get_script_logger", MagicMock())
-    monkeypatch.setattr(module, "start_job_f3_counter", lambda: counter)
-    monkeypatch.setattr(module, "get_job_f3_counter", lambda: counter)
+    monkeypatch.setattr(module, "write_terminal_handoff", MagicMock())
     monkeypatch.setattr(module, "create_stats_pool_files_for_job", lambda *_: events.append("stats"))
     monkeypatch.setattr(module, "upload_results_on_shutdown", lambda *_, **__: events.append("upload"))
     monkeypatch.setattr(job_process_cleanup, "shutdown_f3_streaming", lambda: events.append("streams"))
     monkeypatch.setattr(job_process_cleanup, "security_close", lambda: events.append("security"))
 
-    def drain(_):
+    def snapshot(cell, *, incomplete):
+        assert cell is (client.cell if module is worker_process else server.cell)
+        assert incomplete is (not callbacks_drained or (restored and module is runner_process))
+        events.append("snapshot")
+        return {"sent_bytes": "7", "received_bytes": "11"}
+
+    monkeypatch.setattr(module, "snapshot_message_traffic", snapshot)
+
+    callback_timeouts = []
+
+    def drain(timeout):
+        callback_timeouts.append(timeout)
         events.append("callbacks")
         return callbacks_drained
 
@@ -170,50 +138,17 @@ def test_job_child_freezes_counter_before_existing_archive(module, callbacks_dra
 
     module.main(args)
 
-    expected = ["stop_commands", "callbacks"]
+    expected = ["stop_commands", "callbacks", "snapshot", "stats", "upload", "streams", "cell"]
     if not callbacks_drained:
-        expected.append("gap")
-    expected += ["close_counter", "freeze_counter", "stats", "upload", "streams", "cell"]
-    if not callbacks_drained:
-        expected.append("callbacks")
-    expected.append("security")
+        collector.mark_cpu_consumption_incomplete.assert_called_once_with()
+    expected += ["callbacks", "security"]
     assert events == expected
-    counter.close_and_drain.assert_called_once_with(F3_DRAIN_TIMEOUT_SECONDS)
-    counter.freeze.assert_called_once_with()
-    assert counter.snapshot() == (
-        {"sent_to": []} if callbacks_drained else {"status": "partial", "issues": ["counter_gap"], "sent_to": []}
-    )
-    assert counter.try_begin(F3TrafficClass.TASK_RESULT, "server") is None
-
-
-def test_restored_parent_starts_partial_registry_without_changing_restore(tmp_path):
-    runner = job_runner.JobRunner(str(tmp_path))
-    runner.scheduler = MagicMock()
-    runner.log_warning = MagicMock()
-    runner.log_error = MagicMock()
-    ctx, engine = MagicMock(), MagicMock()
-    ctx.get_engine.return_value = engine
-    ctx.get_workspace.return_value.get_run_dir.return_value = str(tmp_path)
-    engine.start_app_on_server.return_value = ""
-    job = SimpleNamespace(job_id="job-1", meta={})
-    engine.get_component.return_value.get_job.return_value = job
-    clients = {"token": SimpleNamespace(name="site-1")}
-    snapshot = object()
-
-    runner.restore_running_job("job-1", clients, snapshot, ctx)
-
-    counter = runner.f3_counters.get("job-1")
-    assert counter is not None
-    assert counter.snapshot() == {"status": "partial", "issues": ["attribution_incomplete"], "sent_to": []}
-    assert runner.running_jobs["job-1"] is job
-    engine.start_app_on_server.assert_called_once_with(
-        ctx, job=job, job_clients=clients, snapshot=snapshot, restored_attempt=True
-    )
-    runner.scheduler.restore_scheduled_job.assert_called_once_with("job-1")
+    assert callback_timeouts == [0.0, 5.0]
+    collector.finish.assert_called_once_with(message_traffic={"sent_bytes": "7", "received_bytes": "11"})
 
 
 @pytest.mark.parametrize("failure_stage", [None, "archive", "status"])
-def test_parent_freezes_without_wait_then_forgets_only_after_terminal_publication(failure_stage, tmp_path, monkeypatch):
+def test_parent_finalizes_before_archive_and_terminal_publication(failure_stage, tmp_path, monkeypatch):
     events = []
     runner = job_runner.JobRunner(str(tmp_path))
     runner._fire_job_lifecycle_event = MagicMock()
@@ -227,31 +162,21 @@ def test_parent_freezes_without_wait_then_forgets_only_after_terminal_publicatio
     engine.exception_run_processes = {}
     runner.running_jobs = {"job-1": SimpleNamespace(job_id="job-1", run_aborted=True)}
     runner.resource_stats.start_job("job-1", [], str(tmp_path))
-    counter = runner.f3_counters.start_job("job-1")
-    counter.try_begin(F3TrafficClass.JOB_APPLICATION, "site-1")  # Pending work must not hold parent cleanup.
-    original_freeze = runner.f3_counters.close_and_freeze
-    original_forget = runner.f3_counters.forget_job
+    original_finalize = runner.resource_stats.finalize_job
 
-    def freeze(job_id, *, drain_timeout_seconds):
-        events.append("freeze")
-        assert drain_timeout_seconds == 0.0
-        return original_freeze(job_id, drain_timeout_seconds=drain_timeout_seconds)
+    def finalize(job_id):
+        events.append("finalize")
+        return original_finalize(job_id)
 
     def archive(*_):
         events.append("archive")
-        assert counter.snapshot()["issues"] == ["counter_gap"]
         if failure_stage == "archive" and events.count("archive") == 1:
             raise OSError("archive not ready")
 
     def publish(*_):
         events.append("status")
-        assert runner.f3_counters.get("job-1") is counter
         if failure_stage == "status" and events.count("status") == 1:
             raise OSError("status store not ready")
-
-    def forget(job_id):
-        events.append("forget")
-        original_forget(job_id)
 
     passes = []
 
@@ -260,23 +185,19 @@ def test_parent_freezes_without_wait_then_forgets_only_after_terminal_publicatio
         if len(passes) == (2 if failure_stage else 1):
             runner.stop()
         else:
-            assert runner.f3_counters.get("job-1") is counter
             assert runner._finished_job_states["job-1"].resource_stats_finalized is True
 
-    monkeypatch.setattr(runner.f3_counters, "close_and_freeze", freeze)
-    monkeypatch.setattr(runner.f3_counters, "forget_job", forget)
+    monkeypatch.setattr(runner.resource_stats, "finalize_job", finalize)
     monkeypatch.setattr(runner, "_save_workspace", archive)
     manager.set_status.side_effect = publish
     monkeypatch.setattr(job_runner, "time", SimpleNamespace(sleep=next_pass, monotonic=lambda: 0.0))
-
     runner._job_complete_process(engine)
 
     expected = {
-        None: ["freeze", "archive", "status", "forget"],
-        "archive": ["freeze", "archive", "archive", "status", "forget"],
-        "status": ["freeze", "archive", "status", "status", "forget"],
+        None: ["finalize", "archive", "status"],
+        "archive": ["finalize", "archive", "archive", "status"],
+        "status": ["finalize", "archive", "status", "status"],
     }
     assert events == expected[failure_stage]
-    assert runner.f3_counters.get("job-1") is None
     assert "job-1" not in runner.running_jobs
     assert manager.set_status.call_args.args[1] is RunStatus.FINISHED_ABORTED

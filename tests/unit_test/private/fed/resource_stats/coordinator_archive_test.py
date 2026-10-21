@@ -48,7 +48,7 @@ def _participant(job_id="job-1", participant_name="site-1", reported_at="2026-09
         "cpu_consumed": {"status": "unavailable", "issues": ["observation_incomplete"]},
         "workspace_filesystem": {"status": "unavailable", "issues": ["observation_incomplete"]},
         "retained_content": {"status": "unavailable", "issues": ["unsupported"]},
-        "message_traffic": {"status": "unavailable", "issues": ["unsupported"]},
+        "message_traffic": {"status": "unavailable", "issues": ["observation_incomplete"]},
     }
 
 
@@ -498,7 +498,11 @@ def test_reader_rejects_participant_values_that_disagree_with_resource_summary(t
 
     participant_path = run_dir / "resource_stats" / "participants" / "site-1.json"
     participant = _participant()
-    participant[field] = {"status": "unavailable", "issues": ["attribution_incomplete"]}
+    participant[field] = (
+        {"sent_bytes": "1", "received_bytes": "2"}
+        if field == "message_traffic"
+        else {"status": "unavailable", "issues": ["attribution_incomplete"]}
+    )
     participant_data = canonical_json_bytes(participant)
     participant_path.write_bytes(participant_data)
 

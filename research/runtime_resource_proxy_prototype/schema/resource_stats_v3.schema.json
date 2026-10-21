@@ -22,8 +22,8 @@
     "byte_seconds": "byte-seconds",
     "capacity_bytes": "bytes",
     "bytes": "bytes",
-    "payload_bytes": "serialized application payload bytes",
-    "messages": "messages",
+    "sent_bytes": "encoded and encrypted CellNet payload bytes whose send returned without error",
+    "received_bytes": "encoded and encrypted CellNet payload bytes observed at transport ingress",
     "units": "logical CPU capacity units",
     "count": "CUDA Driver execution-visible devices"
   },
@@ -37,7 +37,9 @@
     "an empty GPU groups array is observed zero; missing Driver or count failure leaves GPU unavailable and does not erase known CPU/memory",
     "the CUDA Driver alone establishes count; optional NVML only classifies counted devices; raw masks/UUIDs/PCI IDs/host identifiers are forbidden",
     "query totals retain resource_time and multiply each capacity interval by its own duration with bounded decimal arithmetic; they do not sum filesystem capacity",
-    "accepted participant entries copy normalized capacity, CPU consumption, retained bytes and message counters exactly from accepted participant records",
+    "accepted participant entries copy normalized capacity, CPU consumption, retained bytes and directional payload counters exactly from accepted participant records",
+    "traffic includes control payloads, retries and relay hops observed by the job cell before its snapshot, but not shared parent traffic, CellNet headers or transport framing",
+    "sent_bytes and received_bytes are independently observed and summed independently; sends do not prove arrival, and receives do not prove application processing",
     "actual CPU consumption has its own measured duration; partial GPU capacity cannot invalidate a known CPU average",
     "input whitespace/order/equivalent decimal spellings do not affect validity; writers normalize numbers and deterministic collection order",
     "the server independently knows expected participants and classifies missing/invalid/disabled reports at cutoff",
@@ -165,8 +167,6 @@
     },
     "partial_issue": {
       "enum": [
-        "attribution_incomplete",
-        "counter_gap",
         "observation_incomplete"
       ]
     },
@@ -675,55 +675,19 @@
         }
       ]
     },
-    "counter": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "payload_bytes",
-        "messages"
-      ],
-      "properties": {
-        "payload_bytes": {
-          "$ref": "#/$defs/unsigned"
-        },
-        "messages": {
-          "$ref": "#/$defs/unsigned"
-        }
-      }
-    },
-    "sent_to_entry": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "participant_name",
-        "payload_bytes",
-        "messages"
-      ],
-      "properties": {
-        "participant_name": {
-          "$ref": "#/$defs/participant_name"
-        },
-        "payload_bytes": {
-          "$ref": "#/$defs/unsigned"
-        },
-        "messages": {
-          "$ref": "#/$defs/positive_unsigned"
-        }
-      }
-    },
     "message_traffic_complete": {
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "sent_to"
+        "sent_bytes",
+        "received_bytes"
       ],
       "properties": {
-        "sent_to": {
-          "type": "array",
-          "maxItems": 2048,
-          "items": {
-            "$ref": "#/$defs/sent_to_entry"
-          }
+        "sent_bytes": {
+          "$ref": "#/$defs/unsigned"
+        },
+        "received_bytes": {
+          "$ref": "#/$defs/unsigned"
         }
       }
     },
@@ -733,7 +697,8 @@
       "required": [
         "status",
         "issues",
-        "sent_to"
+        "sent_bytes",
+        "received_bytes"
       ],
       "properties": {
         "status": {
@@ -748,12 +713,11 @@
             "$ref": "#/$defs/partial_issue"
           }
         },
-        "sent_to": {
-          "type": "array",
-          "maxItems": 2048,
-          "items": {
-            "$ref": "#/$defs/sent_to_entry"
-          }
+        "sent_bytes": {
+          "$ref": "#/$defs/unsigned"
+        },
+        "received_bytes": {
+          "$ref": "#/$defs/unsigned"
         }
       }
     },
@@ -766,9 +730,34 @@
           "$ref": "#/$defs/message_traffic_partial"
         },
         {
-          "$ref": "#/$defs/source_unavailable"
+          "$ref": "#/$defs/message_traffic_unavailable"
         }
       ]
+    },
+    "message_traffic_unavailable": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "issues"
+      ],
+      "properties": {
+        "status": {
+          "const": "unavailable"
+        },
+        "issues": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 2,
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "malformed_source",
+              "observation_incomplete"
+            ]
+          }
+        }
+      }
     },
     "retained_total": {
       "oneOf": [
@@ -820,11 +809,15 @@
           "type": "object",
           "additionalProperties": false,
           "required": [
-            "sent"
+            "sent_bytes",
+            "received_bytes"
           ],
           "properties": {
-            "sent": {
-              "$ref": "#/$defs/counter"
+            "sent_bytes": {
+              "$ref": "#/$defs/unsigned"
+            },
+            "received_bytes": {
+              "$ref": "#/$defs/unsigned"
             }
           }
         },
@@ -833,14 +826,18 @@
           "additionalProperties": false,
           "required": [
             "status",
-            "sent"
+            "sent_bytes",
+            "received_bytes"
           ],
           "properties": {
             "status": {
               "const": "partial"
             },
-            "sent": {
-              "$ref": "#/$defs/counter"
+            "sent_bytes": {
+              "$ref": "#/$defs/unsigned"
+            },
+            "received_bytes": {
+              "$ref": "#/$defs/unsigned"
             }
           }
         },
