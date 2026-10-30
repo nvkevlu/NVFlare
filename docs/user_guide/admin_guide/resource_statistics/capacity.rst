@@ -4,11 +4,12 @@ CPU, Memory, and CUDA Capacity
 ******************************
 
 Capacity describes the resources a job process can see, not how much it uses.
-NVFlare captures CPU/RAM at startup and discovers CUDA capacity concurrently
-with application setup and execution, using the worker's inherited visibility.
-One observation is retained for the final report; later allocation changes are
-not tracked. Finalization can wait up to two seconds for GPU discovery; a very
-short cold job can still have partial capacity. Bounded helper cleanup follows.
+NVFlare captures CPU/RAM at startup. Resident jobs discover CUDA capacity
+alongside application setup and execution; finalization can wait up to two
+seconds for the count, followed by bounded helper cleanup. Task workers reuse
+CUDA initialization performed by the application and never start a discovery
+helper. An unavailable GPU count does not erase CPU/RAM observations. Later
+allocation changes are not tracked.
 
 CPU capacity
 ============
@@ -79,9 +80,12 @@ convert a MIG instance into a fraction of a full GPU. GPU-hours can be
 fractional: one visible GPU for half an hour contributes 0.5 GPU-hours.
 MIG detail appears only when applicable.
 
-A successful observation of no devices is zero. If the Driver cannot
-establish a count, the GPU observation is unavailable, not zero. Missing
-optional model or type information does not remove a counted device.
+A successful Driver count is authoritative, including zero. When CUDA is not
+initialized, an exactly empty ``CUDA_VISIBLE_DEVICES`` also establishes zero
+once the Driver library loads. Other mask strings are left to the Driver;
+collection never interprets them as counts. A missing Driver or failed count
+leaves GPU capacity unavailable, not zero. Missing optional model or type
+information does not remove or delay a verified count.
 
 Duration and totals
 ===================

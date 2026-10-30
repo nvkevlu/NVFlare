@@ -32,7 +32,7 @@
     "one terminal participant report and each accepted job-summary entry store resource_capacity, required resource_time, and resource_utilization",
     "CPU capacity is positive with a combined maximum of 1048576 units; memory bytes are positive unsigned 64-bit integers; GPU groups contain positive integer counts with a combined maximum of 4096",
     "an empty startup-capacity GPU groups array is observed zero devices; an empty capacity-time GPU groups array is zero device-seconds; missing Driver or count failure does not erase known CPU/memory",
-    "the CUDA Driver alone establishes count; optional NVML only classifies counted devices; raw masks/UUIDs/PCI IDs/host identifiers are forbidden",
+    "a successful CUDA Driver count is authoritative; otherwise an exactly empty CUDA_VISIBLE_DEVICES establishes zero after the Driver library loads when CUDA is uninitialized; optional NVML only classifies counted devices; raw masks/UUIDs/PCI IDs/host identifiers are forbidden",
     "accepted participant entries copy normalized startup capacity, explicit capacity-time, CPU consumption, retained bytes and directional payload counters exactly from accepted participant records",
     "traffic includes control payloads, retries and relay hops observed by the job cell before its snapshot, but not shared parent traffic, CellNet headers or transport framing",
     "sent_bytes and received_bytes are independently observed and summed independently; sends do not prove arrival, and receives do not prove application processing",

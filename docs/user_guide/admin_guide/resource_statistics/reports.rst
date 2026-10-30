@@ -29,9 +29,10 @@ When measurements are taken
    Queries read the saved reports from the normal workspace archive
 
 After workspace preparation, CPU/RAM are observed before application construction
-and GPU discovery starts in a separate helper. Discovery overlaps execution;
-finalization waits at most two seconds for an outstanding result within the
-remaining discovery budget.
+and resident jobs start GPU discovery in a separate helper. Discovery overlaps
+execution; resident-job finalization waits at most two seconds for a verified
+count within the remaining discovery budget. Task workers start no helper and
+reuse CUDA initialization performed by the application.
 One participant-level ``duration_seconds`` covers execution and supplies the
 duration for CPU averages, excluding the final discovery wait and helper cleanup. File-size and
 filesystem-capacity observations are taken at the end.

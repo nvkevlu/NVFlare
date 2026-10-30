@@ -144,8 +144,10 @@ measurement.
 CUDA count and optional descriptions
 ====================================
 
-On Linux, an execution-owned helper uses Python's ``ctypes`` to load the system
-``libcuda.so.1`` and call:
+On Linux, a resident execution's helper uses Python's ``ctypes`` to load the system
+``libcuda.so.1``. If ``CUDA_VISIBLE_DEVICES`` is exactly empty, it reports zero
+without initializing GPUs. Otherwise, including when the variable is unset,
+it calls:
 
 .. code-block:: text
 
@@ -154,20 +156,33 @@ On Linux, an execution-owned helper uses Python's ``ctypes`` to load the system
 
 The standalone helper inherits the execution's environment and resource limits,
 uses normal Python startup, and does not load NVFlare or a CUDA framework.
-Discovery runs alongside application setup and execution. Its result and GPU
-initialization are retained until the execution ends, avoiding a second cold
-initialization just because the probe finished.
+Discovery runs alongside application setup and execution. The helper publishes
+the verified count before collecting optional model and type information.
+Already-ready details replace that observation without changing the count;
+slow or failed classification leaves counted devices unclassified. Its result
+and GPU initialization are retained until the execution ends, avoiding a second
+cold initialization just because the probe finished.
 
-After freezing CPU work and duration, the collector reads the result, waiting
-for remaining discovery if necessary, then releases the helper. Discovery has
-a 30-second background failure deadline from launch. Finalization waits at most
-two additional seconds for the result within that budget, then stops an unfinished
-probe. Helper cleanup can add up to two seconds; kernel stalls can delay termination.
-Longer executions can overlap healthy cold initialization; a very short cold
-job may still have unavailable GPU capacity. Crashes and invalid results also
-leave GPU capacity unavailable while preserving CPU/RAM.
-Repeated reads reuse the same execution's result; fresh workers and containers
-query their own environment. Collection does not enable or require GPU persistence.
+Discovery has a 30-second background failure deadline from launch. After
+freezing CPU work and duration, resident-job collection waits at most two seconds
+for the count within that budget, then stops an unfinished probe. Optional
+classification never adds a discovery wait after a valid count arrives. Its helper
+cleanup can add up to two seconds.
+
+Task workers start no GPU helper. After freezing CPU work and duration, they
+query ``cuDeviceGetCount`` in the application process without calling ``cuInit``,
+collecting device metadata, or initializing NVML. An application that has
+initialized CUDA supplies its existing device count, reported as unclassified.
+If CUDA is uninitialized, an exactly empty mask establishes zero; otherwise the
+count is unavailable. A successful Driver result takes precedence over later
+mask changes. This avoids cold discovery and helper teardown inside the task's
+execution deadline. Launcher ownership, permissions and deadlines are unchanged.
+
+Longer executions can overlap healthy cold initialization. If no valid count
+arrives, GPU capacity is unavailable while CPU/RAM remain usable. A verified
+count survives failed or unfinished optional classification.
+Repeated reads reuse the same execution's result. Every observation belongs to
+its own worker or container; there is no cross-worker cache. Collection does not enable or require GPU persistence.
 A host ``nvidia-smi`` count is not a substitute for the worker's CUDA visibility.
 
 A successful count is the numeric authority. Successful zero and an explicit
@@ -192,8 +207,11 @@ NVML does not add devices or set the count. Missing NVML or identity leaves
 counted devices unclassified; it does not make the numeric observation fail.
 
 ``nvidia-smi`` lists management inventory and can differ from the devices
-selected for the process. ``CUDA_VISIBLE_DEVICES`` is not parsed for a count.
-Collection requires neither CUDA Runtime nor a training framework.
+selected for the process. Apart from the exact empty-mask shortcut,
+``CUDA_VISIBLE_DEVICES`` is not parsed for a count: numeric lists, UUIDs, whitespace,
+and invalid masks are left to the Driver. A missing Driver remains unavailable
+even with an empty mask. Collection requires neither CUDA Runtime nor a training
+framework.
 
 Hardware models
 ===============
