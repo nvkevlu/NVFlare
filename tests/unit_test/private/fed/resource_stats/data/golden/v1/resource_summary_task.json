@@ -1,0 +1,60 @@
+{
+  "job_id": "synthetic-task-rollup",
+  "kind": "nvflare.resource_stats.resource_summary",
+  "participants": [
+    {
+      "duration_seconds": "60",
+      "participant_name": "site-1",
+      "received_at": "2026-10-29T12:00:00Z",
+      "resource_capacity": {
+        "cpu": {
+          "groups": [
+            {
+              "units": "2"
+            }
+          ]
+        },
+        "gpu": {
+          "groups": []
+        },
+        "memory": {
+          "bytes": "2147483648"
+        }
+      },
+      "resource_time": {
+        "cpu": {
+          "groups": [
+            {
+              "unit_seconds": "150"
+            }
+          ]
+        },
+        "gpu": {
+          "groups": [
+            {
+              "instance_seconds": "15",
+              "kind": "cuda_device_unclassified"
+            }
+          ]
+        },
+        "memory": {
+          "byte_seconds": "161061273600"
+        }
+      },
+      "resource_utilization": {
+        "cpu_consumed": {
+          "cpu_seconds": "14"
+        },
+        "message_traffic": {
+          "received_bytes": "2147483648",
+          "sent_bytes": "1073741824"
+        },
+        "retained_content": {
+          "bytes": "0"
+        }
+      },
+      "role": "client"
+    }
+  ],
+  "schema_version": "1.0"
+}

@@ -1,0 +1,53 @@
+{
+  "duration_seconds": "610",
+  "job_id": "synthetic-capacity-normal",
+  "kind": "nvflare.resource_stats.participant_summary",
+  "participant_name": "server",
+  "reported_at": "2026-10-29T12:00:00Z",
+  "resource_capacity": {
+    "cpu": {
+      "groups": [
+        {
+          "units": "8"
+        }
+      ]
+    },
+    "gpu": {
+      "groups": []
+    },
+    "memory": {
+      "bytes": "17179869184"
+    }
+  },
+  "resource_time": {
+    "cpu": {
+      "groups": [
+        {
+          "unit_seconds": "4880"
+        }
+      ]
+    },
+    "gpu": {
+      "groups": []
+    },
+    "memory": {
+      "byte_seconds": "10479720202240"
+    }
+  },
+  "resource_utilization": {
+    "cpu_consumed": {
+      "cpu_seconds": "120"
+    },
+    "message_traffic": {
+      "received_bytes": "1073741824",
+      "sent_bytes": "2147483648"
+    },
+    "retained_content": {
+      "bytes": "67108864"
+    }
+  },
+  "schema_version": "1.0",
+  "workspace_filesystem": {
+    "capacity_bytes": "1099511627776"
+  }
+}

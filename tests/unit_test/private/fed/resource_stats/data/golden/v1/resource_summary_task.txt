@@ -1,0 +1,17 @@
+Recorded resources for job Synthetic capacity contract example (ID: synthetic-task-rollup).
+GPU count basis: CUDA Driver (schema 1.0).
+Participants with data: 1/1
+
+Recorded capacity-time per participant
+SITE    TIME  CPU VISIBLE core-h  MEM VISIBLE GiB-h  CUDA DEVICE-h  FULL GPU-h  TYPE-UNVERIFIED device-h
+site-1  1m0s  0.04                0.04               <0.01          0           <0.01
+
+Recorded resource utilization per participant
+SITE    AVG CPU USED (cores)  RUN-DIR FILES GiB  PAYLOAD SENT GiB  PAYLOAD RECEIVED GiB
+site-1  0.23                  0                  1                 2
+
+Recorded capacity-time totals
+  CPU visible 0.04 core-h | Memory visible 0.04 GiB-h | CUDA devices available <0.01 device-h | Verified full GPUs 0 GPU-h | Type-unverified CUDA devices <0.01 device-h
+
+Recorded resource utilization totals
+  CPU time used <0.01 core-h | Run-dir files 0 GiB | Payload sent 1 GiB | Payload received 2 GiB

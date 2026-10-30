@@ -1,0 +1,65 @@
+{
+  "job_id": "synthetic-capacity-large",
+  "kind": "nvflare.resource_stats.resource_summary",
+  "participants": [
+    {
+      "duration_seconds": "9007199254740993",
+      "participant_name": "site-1",
+      "received_at": "2026-10-29T12:00:00Z",
+      "resource_capacity": {
+        "cpu": {
+          "groups": [
+            {
+              "units": "1048576"
+            }
+          ]
+        },
+        "gpu": {
+          "groups": [
+            {
+              "count": "4096",
+              "kind": "cuda_device_unclassified"
+            }
+          ]
+        },
+        "memory": {
+          "bytes": "18446744073709551615"
+        }
+      },
+      "resource_time": {
+        "cpu": {
+          "groups": [
+            {
+              "unit_seconds": "9444732965739291475968"
+            }
+          ]
+        },
+        "gpu": {
+          "groups": [
+            {
+              "instance_seconds": "36893488147419107328",
+              "kind": "cuda_device_unclassified"
+            }
+          ]
+        },
+        "memory": {
+          "byte_seconds": "166153499473114502550712756989853695"
+        }
+      },
+      "resource_utilization": {
+        "cpu_consumed": {
+          "cpu_seconds": "9007199254740993"
+        },
+        "message_traffic": {
+          "received_bytes": "0",
+          "sent_bytes": "0"
+        },
+        "retained_content": {
+          "bytes": "18446744073709551617"
+        }
+      },
+      "role": "client"
+    }
+  ],
+  "schema_version": "1.0"
+}

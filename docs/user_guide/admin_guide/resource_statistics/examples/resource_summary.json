@@ -1,0 +1,121 @@
+{
+  "job_id": "synthetic-capacity-normal",
+  "kind": "nvflare.resource_stats.resource_summary",
+  "participants": [
+    {
+      "duration_seconds": "600",
+      "participant_name": "site-1",
+      "received_at": "2026-10-29T12:00:00Z",
+      "resource_capacity": {
+        "cpu": {
+          "groups": [
+            {
+              "architecture": "x86_64",
+              "model": "AMD EPYC 9654",
+              "units": "32"
+            }
+          ]
+        },
+        "gpu": {
+          "groups": [
+            {
+              "count": "2",
+              "kind": "full_gpu",
+              "memory_bytes": "85899345920",
+              "model": "NVIDIA A100"
+            }
+          ]
+        },
+        "memory": {
+          "bytes": "68719476736"
+        }
+      },
+      "resource_time": {
+        "cpu": {
+          "groups": [
+            {
+              "architecture": "x86_64",
+              "model": "AMD EPYC 9654",
+              "unit_seconds": "19200"
+            }
+          ]
+        },
+        "gpu": {
+          "groups": [
+            {
+              "instance_seconds": "1200",
+              "kind": "full_gpu",
+              "memory_bytes": "85899345920",
+              "model": "NVIDIA A100"
+            }
+          ]
+        },
+        "memory": {
+          "byte_seconds": "41231686041600"
+        }
+      },
+      "resource_utilization": {
+        "cpu_consumed": {
+          "cpu_seconds": "180"
+        },
+        "message_traffic": {
+          "received_bytes": "2147483648",
+          "sent_bytes": "1073741824"
+        },
+        "retained_content": {
+          "bytes": "0"
+        }
+      },
+      "role": "client"
+    },
+    {
+      "duration_seconds": "610",
+      "participant_name": "server",
+      "received_at": "2026-10-29T12:00:00Z",
+      "resource_capacity": {
+        "cpu": {
+          "groups": [
+            {
+              "units": "8"
+            }
+          ]
+        },
+        "gpu": {
+          "groups": []
+        },
+        "memory": {
+          "bytes": "17179869184"
+        }
+      },
+      "resource_time": {
+        "cpu": {
+          "groups": [
+            {
+              "unit_seconds": "4880"
+            }
+          ]
+        },
+        "gpu": {
+          "groups": []
+        },
+        "memory": {
+          "byte_seconds": "10479720202240"
+        }
+      },
+      "resource_utilization": {
+        "cpu_consumed": {
+          "cpu_seconds": "120"
+        },
+        "message_traffic": {
+          "received_bytes": "1073741824",
+          "sent_bytes": "2147483648"
+        },
+        "retained_content": {
+          "bytes": "67108864"
+        }
+      },
+      "role": "server"
+    }
+  ],
+  "schema_version": "1.0"
+}
