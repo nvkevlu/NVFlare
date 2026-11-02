@@ -129,9 +129,8 @@ completion handler passes the report to
 ``ResourceStatsCoordinator.accept_resource_report``.
 No separate reporting service or periodic sender is needed.
 
-Validation checks identity, fields, numeric bounds, and uniqueness.
-Compact and pretty JSON are equivalent; numeric strings such as ``"2"``
-and ``"2.0"`` are normalized. Equivalent duplicate reports do not add
+Validation checks identity, supported fields, finite numeric values, and record limits.
+Compact and pretty JSON are equivalent. Equivalent duplicate reports do not add
 measurements. A conflicting replacement is rejected.
 
 Final collection reads the available message counters without adding a
@@ -158,12 +157,12 @@ It uses the same format as a live participant report.
      - UTC time when the parent assembles the public report, not the start of measurement.
    * - ``duration_seconds``
      - Containing participant execution duration in seconds, including waiting; omitted without a known window covering all included work.
-   * - ``resource_capacity.cpu.groups[].units``
-     - Logical CPU capacity, possibly fractional; optional ``model`` and ``architecture`` describe a group.
+   * - ``resource_capacity.cpu.units``
+     - Logical CPU capacity, possibly fractional.
    * - ``resource_capacity.memory.bytes``
      - Visible RAM capacity in bytes.
-   * - ``resource_capacity.gpu.groups[]``
-     - Device ``count`` and verified/unverified ``kind``; optional ``model`` and per-device ``memory_bytes``.
+   * - ``resource_capacity.gpu.count``
+     - Integer CUDA-device count visible to the execution; it can include MIG instances.
    * - ``resource_time``
      - Sum of each execution's capacity times its own duration: CPU ``unit_seconds``, RAM ``byte_seconds``, and CUDA ``instance_seconds``.
    * - ``resource_utilization.cpu_consumed.cpu_seconds``
@@ -175,10 +174,11 @@ It uses the same format as a live participant report.
    * - ``resource_utilization.message_traffic.sent_bytes`` and ``resource_utilization.message_traffic.received_bytes``
      - Message payload counted in each direction by the job process and its managed trainers.
 
-Quantities are decimal strings so large byte totals are not rounded by JSON
-floating-point consumers. Bytes and device counts are
-integer-valued; CPU units and seconds can be fractional, with at most nine
-fractional digits. Unknown values are not ``null`` or inferred zero.
+Quantities use native JSON numbers. Byte totals and device counts are integers;
+CPU units, durations, CPU work and capacity-time can be fractional. Values must
+be finite and nonnegative. Large byte totals remain integers in Python; consumers
+using fixed-width or floating-point JSON number types must retain sufficient
+precision. Unknown values are not ``null`` or inferred zero.
 
 The :download:`job summary example <examples/resource_summary.json>` stores
 ``job_id`` and participant entries. Each accepted entry has ``participant_name``,
@@ -195,8 +195,9 @@ Job and study totals keep the same utilization group beside accumulated
 ``resource_time``. Utilization here means recorded work, content, and traffic;
 it does not claim GPU busy time or a utilization percentage.
 
-Hardware descriptions are optional. Raw GPU UUIDs, PCI addresses, environment
-values, credentials, and private transfer identifiers are not persisted.
+Reports contain no hardware-model descriptions or device-type groups. Raw GPU
+UUIDs, PCI addresses, environment values, credentials, and private transfer
+identifiers are not persisted.
 
 Missing and incomplete data
 ==============================================
@@ -264,14 +265,10 @@ unavailable GPU observation:
          "observation_incomplete"
        ],
        "cpu": {
-         "groups": [
-           {
-             "units": "2"
-           }
-         ]
+         "units": 2
        },
        "memory": {
-         "bytes": "2147483648"
+         "bytes": 2147483648
        }
      }
    }

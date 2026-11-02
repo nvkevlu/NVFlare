@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://nvflare.nvidia.com/schemas/resource_stats/v1/resource_stats.json",
   "title": "NVFlare participant resource-statistics record v1",
-  "description": "Closed schema 1.0 records separate job-process startup capacity, accumulated execution capacity-time, and grouped utilization. Numeric semantic bounds are enforced by the production validator.",
+  "description": "Schema 1.0 records separate scalar startup capacity, accumulated execution capacity-time, and grouped utilization. Quantities are native JSON numbers; byte and device counts are integers.",
   "oneOf": [
     {
       "$ref": "#/$defs/participant_summary"
@@ -16,7 +16,7 @@
   ],
   "x-nvflare-units": {
     "unit_seconds": "CPU-unit seconds",
-    "instance_seconds": "CUDA-device seconds; each Driver-counted device contributes to exactly one type group",
+    "instance_seconds": "CUDA-device seconds; CUDA visibility can include MIG instances without physical-GPU equivalence",
     "byte_seconds": "byte-seconds",
     "capacity_bytes": "bytes",
     "bytes": "bytes",
@@ -28,31 +28,23 @@
     "resource_utilization.cpu_consumed.cpu_seconds": "user plus system CPU seconds consumed by observed job execution processes"
   },
   "x-nvflare-cross-record-invariants": [
-    "live and archived records require schema 1.0; unsupported versions are not accepted",
-    "one terminal participant report and each accepted job-summary entry store resource_capacity, required resource_time, and resource_utilization",
-    "CPU capacity is positive with a combined maximum of 1048576 units; memory bytes are positive unsigned 64-bit integers; GPU groups contain positive integer counts with a combined maximum of 4096",
-    "an empty startup-capacity GPU groups array is observed zero devices; an empty capacity-time GPU groups array is zero device-seconds; missing Driver or count failure does not erase known CPU/memory",
-    "a successful CUDA Driver count is authoritative; otherwise an exactly empty CUDA_VISIBLE_DEVICES establishes zero after the Driver library loads when CUDA is uninitialized; optional NVML only classifies counted devices; raw masks/UUIDs/PCI IDs/host identifiers are forbidden",
-    "accepted participant entries copy normalized startup capacity, explicit capacity-time, CPU consumption, retained bytes and directional payload counters exactly from accepted participant records",
-    "traffic includes control payloads, retries and relay hops observed by the job cell before its snapshot, but not shared parent traffic, CellNet headers or transport framing",
-    "sent_bytes and received_bytes are independently observed and summed independently; sends do not prove arrival, and receives do not prove application processing",
-    "input whitespace/order/equivalent decimal spellings do not affect validity; writers normalize numbers and deterministic collection order",
-    "the server independently knows expected participants and classifies missing/invalid/disabled reports at cutoff",
-    "missing or incomplete expected reports make relevant totals partial; unavailable means no usable measurement",
-    "study totals combine included current-format jobs; coverage separately counts missing reports and nonterminal jobs",
-    "job_name is query-only existing metadata; participant/job storage identity remains job_id",
-    "the archive stores one participant file per accepted participant and writes resource_summary.json last",
-    "duration_seconds describes the containing participant window and supplies CPU averages; each execution uses its own duration for capacity-time",
-    "resource_capacity stores a single startup snapshot; nested durations and capacity interval lists are not accepted",
-    "a missing containing duration prevents CPU averages but does not erase recorded capacity-time or utilization",
-    "query totals sum CPU work and capacity-time quantities, not participant elapsed durations",
-    "capacity-time totals sum explicit resource_time and never multiply startup capacity by the participant duration again",
-    "task workers contribute once per physical execution scope; no task/worker inventory is public"
+    "All live and archived records require schema 1.0.",
+    "Quantities are finite nonnegative native JSON numbers; bytes/counts are integers and booleans or numeric strings are rejected.",
+    "Startup capacity is scalar cpu.units, memory.bytes and gpu.count; capacity-time is scalar cpu.unit_seconds, memory.byte_seconds and gpu.instance_seconds.",
+    "Observed zero CUDA capacity is count:0; missing Driver or failed counting does not erase independent CPU/RAM values.",
+    "Resident GPU discovery inherits finalized launcher visibility; later application mask changes do not revise that startup observation. Task workers reuse initialized CUDA state without initializing CUDA for statistics.",
+    "CUDA-visible counts can include MIG instances; capacity and capacity-time are availability observations, not GPU utilization or exclusive physical-GPU ownership.",
+    "Accepted participant entries copy measurements from the matching authenticated participant record.",
+    "Sent and received payload bytes are independently observed and summed; a send is not proof of arrival.",
+    "Missing/incomplete expected reports make relevant totals partial; unavailable means no usable value.",
+    "Study totals include readable finalized jobs; coverage counts excluded and nonterminal jobs separately.",
+    "Archive publication writes accepted participant files before resource_summary.json.",
+    "duration_seconds is one containing participant window, never the sum of worker durations.",
+    "Queries sum recorded per-execution resource_time without multiplying startup capacity again.",
+    "Each physical worker execution contributes once; no task/worker inventory or hardware grouping is public."
   ],
   "x-nvflare-privacy": [
-    "hardware models are optional and may be omitted",
-    "CPU groups are separated when normalized model or architecture labels differ",
-    "forbidden: raw cpuinfo, flags, topology, serials, UUIDs, PCI addresses, host identifiers, and raw CUDA mask values"
+    "No hardware descriptions, raw CPU topology, UUIDs, serials, PCI addresses, host identifiers or raw visibility masks are reported."
   ],
   "x-nvflare-deployment-constraints": [
     "collection uses the permissions, workspace, and message paths NVFlare already has",
@@ -88,54 +80,22 @@
       "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]{1,9})?Z$"
     },
     "unsigned": {
-      "type": "string",
-      "pattern": "^[0-9]{1,39}(?:\\.0{1,9})?$"
+      "type": "integer",
+      "minimum": 0
     },
     "positive_unsigned": {
-      "type": "string",
-      "pattern": "^(?!0+(?:\\.0+)?$)[0-9]{1,39}(?:\\.0{1,9})?$"
+      "type": "integer",
+      "exclusiveMinimum": 0
     },
     "decimal": {
-      "type": "string",
-      "pattern": "^[0-9]{1,39}(?:\\.[0-9]{1,9})?$"
+      "type": "number",
+      "minimum": 0,
+      "description": "Finite nonnegative JSON number."
     },
     "positive_decimal": {
-      "type": "string",
-      "pattern": "^(?!0+(?:\\.0+)?$)[0-9]{1,39}(?:\\.[0-9]{1,9})?$"
-    },
-    "model": {
-      "type": "string",
-      "minLength": 1,
-      "maxLength": 128,
-      "pattern": "^[A-Za-z0-9][A-Za-z0-9 ._()+/@-]{0,127}$",
-      "allOf": [
-        {
-          "not": {
-            "pattern": "(?:GPU|MIG|MIG-GPU)-[0-9A-Fa-f-]{16,}"
-          }
-        },
-        {
-          "not": {
-            "pattern": "(?:[0-9A-Fa-f]{4}:)?[0-9A-Fa-f]{2}:[0-9A-Fa-f]{2}\\.[0-7]"
-          }
-        },
-        {
-          "not": {
-            "pattern": "[Ss][Ee][Rr][Ii][Aa][Ll]|[Uu][Uu][Ii][Dd]|[Cc][Uu][Dd][Aa]_[Vv][Ii][Ss][Ii][Bb][Ll][Ee]_[Dd][Ee][Vv][Ii][Cc][Ee][Ss]|[Pp][Cc][Ii]_[Bb][Uu][Ss]_[Ii][Dd]|[Hh][Oo][Ss][Tt][Nn][Aa][Mm][Ee]"
-          }
-        }
-      ]
-    },
-    "architecture": {
-      "type": "string",
-      "minLength": 1,
-      "maxLength": 32,
-      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,31}$"
-    },
-    "mig_profile": {
-      "type": "string",
-      "maxLength": 32,
-      "pattern": "^[1-9][0-9]*g\\.[1-9][0-9]*gb(?:\\+me)?$"
+      "type": "number",
+      "exclusiveMinimum": 0,
+      "description": "Finite positive JSON number."
     },
     "study_name": {
       "type": "string",
@@ -252,7 +212,7 @@
         }
       ]
     },
-    "cpu_time_group": {
+    "cpu_time": {
       "type": "object",
       "additionalProperties": false,
       "required": [
@@ -261,29 +221,6 @@
       "properties": {
         "unit_seconds": {
           "$ref": "#/$defs/decimal"
-        },
-        "model": {
-          "$ref": "#/$defs/model"
-        },
-        "architecture": {
-          "$ref": "#/$defs/architecture"
-        }
-      }
-    },
-    "cpu_time": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "groups"
-      ],
-      "properties": {
-        "groups": {
-          "type": "array",
-          "minItems": 1,
-          "maxItems": 4096,
-          "items": {
-            "$ref": "#/$defs/cpu_time_group"
-          }
         }
       }
     },
@@ -299,100 +236,15 @@
         }
       }
     },
-    "full_gpu_time_group": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "kind",
-        "instance_seconds"
-      ],
-      "properties": {
-        "kind": {
-          "const": "full_gpu"
-        },
-        "instance_seconds": {
-          "$ref": "#/$defs/positive_decimal"
-        },
-        "model": {
-          "$ref": "#/$defs/model"
-        },
-        "memory_bytes": {
-          "$ref": "#/$defs/positive_unsigned"
-        }
-      }
-    },
-    "unclassified_gpu_time_group": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "kind",
-        "instance_seconds"
-      ],
-      "properties": {
-        "kind": {
-          "const": "cuda_device_unclassified",
-          "description": "CUDA Driver-counted device whose full-GPU or MIG type could not be verified."
-        },
-        "instance_seconds": {
-          "$ref": "#/$defs/positive_decimal"
-        },
-        "model": {
-          "$ref": "#/$defs/model"
-        },
-        "memory_bytes": {
-          "$ref": "#/$defs/positive_unsigned"
-        }
-      }
-    },
-    "mig_gpu_time_group": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "kind",
-        "instance_seconds"
-      ],
-      "properties": {
-        "kind": {
-          "const": "mig_compute_instance"
-        },
-        "instance_seconds": {
-          "$ref": "#/$defs/positive_decimal"
-        },
-        "model": {
-          "$ref": "#/$defs/model"
-        },
-        "memory_bytes": {
-          "$ref": "#/$defs/positive_unsigned"
-        },
-        "mig_profile": {
-          "$ref": "#/$defs/mig_profile"
-        }
-      }
-    },
     "gpu_time": {
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "groups"
+        "instance_seconds"
       ],
       "properties": {
-        "groups": {
-          "type": "array",
-          "maxItems": 4096,
-          "items": {
-            "oneOf": [
-              {
-                "$ref": "#/$defs/full_gpu_time_group"
-              },
-              {
-                "$ref": "#/$defs/mig_gpu_time_group"
-              },
-              {
-                "$ref": "#/$defs/unclassified_gpu_time_group"
-              }
-            ]
-          },
-          "description": "Driver-counted device-seconds: full_gpu and mig_compute_instance require NVML confirmation; type-unverified devices remain unclassified. An empty array is zero device-seconds."
+        "instance_seconds": {
+          "$ref": "#/$defs/decimal"
         }
       }
     },
@@ -1205,38 +1057,15 @@
         }
       }
     },
-    "cpu_capacity_group": {
+    "cpu_capacity": {
       "type": "object",
       "additionalProperties": false,
       "required": [
         "units"
       ],
       "properties": {
-        "model": {
-          "$ref": "#/$defs/model"
-        },
-        "architecture": {
-          "$ref": "#/$defs/architecture"
-        },
         "units": {
           "$ref": "#/$defs/positive_decimal"
-        }
-      }
-    },
-    "cpu_capacity": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "groups"
-      ],
-      "properties": {
-        "groups": {
-          "type": "array",
-          "minItems": 1,
-          "maxItems": 4096,
-          "items": {
-            "$ref": "#/$defs/cpu_capacity_group"
-          }
         }
       }
     },
@@ -1252,100 +1081,15 @@
         }
       }
     },
-    "full_gpu_capacity_group": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "kind",
-        "count"
-      ],
-      "properties": {
-        "kind": {
-          "const": "full_gpu"
-        },
-        "model": {
-          "$ref": "#/$defs/model"
-        },
-        "memory_bytes": {
-          "$ref": "#/$defs/positive_unsigned"
-        },
-        "count": {
-          "$ref": "#/$defs/positive_unsigned"
-        }
-      }
-    },
-    "unclassified_gpu_capacity_group": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "kind",
-        "count"
-      ],
-      "properties": {
-        "kind": {
-          "const": "cuda_device_unclassified",
-          "description": "CUDA Driver-counted device whose full-GPU or MIG type could not be verified."
-        },
-        "model": {
-          "$ref": "#/$defs/model"
-        },
-        "memory_bytes": {
-          "$ref": "#/$defs/positive_unsigned"
-        },
-        "count": {
-          "$ref": "#/$defs/positive_unsigned"
-        }
-      }
-    },
-    "mig_gpu_capacity_group": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "kind",
-        "count"
-      ],
-      "properties": {
-        "kind": {
-          "const": "mig_compute_instance"
-        },
-        "model": {
-          "$ref": "#/$defs/model"
-        },
-        "memory_bytes": {
-          "$ref": "#/$defs/positive_unsigned"
-        },
-        "mig_profile": {
-          "$ref": "#/$defs/mig_profile"
-        },
-        "count": {
-          "$ref": "#/$defs/positive_unsigned"
-        }
-      }
-    },
     "gpu_capacity": {
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "groups"
+        "count"
       ],
       "properties": {
-        "groups": {
-          "type": "array",
-          "maxItems": 4096,
-          "items": {
-            "oneOf": [
-              {
-                "$ref": "#/$defs/full_gpu_capacity_group"
-              },
-              {
-                "$ref": "#/$defs/mig_gpu_capacity_group"
-              },
-              {
-                "$ref": "#/$defs/unclassified_gpu_capacity_group"
-              }
-            ]
-          },
-          "description": "Driver-counted devices: full_gpu and mig_compute_instance require NVML confirmation; type-unverified devices remain unclassified. An empty array is an authoritative observed zero."
+        "count": {
+          "$ref": "#/$defs/unsigned"
         }
       }
     },

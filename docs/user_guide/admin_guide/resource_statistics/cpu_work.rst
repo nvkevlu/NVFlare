@@ -17,10 +17,10 @@ The report stores CPU work and one shared participant duration:
 .. code-block:: json
 
    {
-     "duration_seconds": "600",
+     "duration_seconds": 600,
      "resource_utilization": {
        "cpu_consumed": {
-         "cpu_seconds": "180"
+         "cpu_seconds": 180
        }
      }
    }

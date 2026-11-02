@@ -21,7 +21,7 @@ Commands
    # One job in a named study
    nvflare resources --job JOB_ID --study STUDY_NAME
 
-   # Add one participant's hardware and workspace-filesystem detail
+   # Add one participant's startup capacity and workspace-filesystem detail
    nvflare resources --job JOB_ID --site site-1
 
    # Structured job or participant output
@@ -36,7 +36,7 @@ Arguments
 - ``--job``: job ID to inspect, in the default study unless ``--study`` is given.
 - ``--study``: select the study containing ``--job``, or query the study when
   ``--job`` is omitted.
-- ``--site``: include one participant's report, hardware models, and visible
+- ``--site``: include one participant's report, startup capacity and visible
   workspace-filesystem capacity. Requires ``--job``.
 - ``--format json``: return structured output for automation.
 - ``--schema``: print the command schema without connecting to a server.
@@ -52,7 +52,7 @@ Human and automation modes
 Use the same command for people and agents: default text for reading,
 ``--format json`` for the standard JSON envelope, and ``--schema`` for argument
 and behavior discovery. No separate ``nvflare agent resources`` command is
-needed. JSON retains the report's numeric strings and precision; display
+needed. JSON retains the report's native numbers and precision; display
 rounding applies only to text. This command does not stream JSON Lines.
 
 Read the result
@@ -61,8 +61,8 @@ Read the result
 The capacity table shows observed CPU, memory, and CUDA-device capacity.
 A separate utilization table groups average CPU use, retained file bytes, and
 message payload. Job and study totals keep the same separation.
-GPU and MIG device counts are integers. CPU capacity and average CPU use may
-be fractional; device-hours and GPU-hours may also be fractional. Text uses
+CUDA-device counts are integers. CPU capacity and average CPU use may
+be fractional; device-hours may also be fractional. Text uses
 at most two decimal places without trailing zeros; positive values below
 0.01 display as ``<0.01`` rather than zero.
 ``AVG CPU USED`` divides ``resource_utilization.cpu_consumed.cpu_seconds`` by the shared participant
@@ -92,7 +92,7 @@ Structured output and errors
 For a job, the JSON envelope contains ``data.selection`` and ``data.summary``,
 plus ``data.participant`` when ``--site`` is requested. A study envelope contains
 ``data.selection`` and ``data.summary`` with its job rows and computed totals. Reports and archive
-readers support only the current schema ``3.0``. The format and example files
+readers support only the current schema ``1.0``. The format and example files
 are described in :ref:`resource_statistics_reports`.
 
 An unknown job returns ``JOB_NOT_FOUND``. A job not yet finalized returns

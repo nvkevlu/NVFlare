@@ -103,7 +103,7 @@ Use :meth:`get_job_resources<nvflare.fuel.flare_api.flare_api.Session.get_job_re
 :meth:`get_study_resources<nvflare.fuel.flare_api.flare_api.Session.get_study_resources>`
 to retrieve recorded capacity, CPU work, total run-directory file size, and
 selected message traffic for a finished job's participants. Job and study
-queries derive capacity-time totals from the stored capacities and durations:
+queries sum the recorded per-execution capacity-time values:
 
 .. code-block:: python
 

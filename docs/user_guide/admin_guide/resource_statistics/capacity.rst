@@ -65,56 +65,23 @@ and explains the gap. Only an observation with no usable value is unavailable.
 An absent controller or unlimited limit is not a failed measurement. Missing GPU
 information does not remove CPU or memory data.
 
-CUDA devices and GPU memory
-===========================
+CUDA devices
+============
 
-The CUDA Driver counts the devices available to the job process. The report
-can also include each group's GPU model and memory per device or instance.
-Seeing a device does not establish that the job used it.
+The CUDA Driver counts devices visible in the execution environment. The count
+can include visible MIG compute instances; it is not a count of physical GPUs,
+a fraction of a full GPU, or a measurement of GPU use. Reports contain only this
+integer count, without model, memory, or device-type breakdowns.
 
-Device type is optional. A counted device can be a verified full GPU, a
-verified Multi-Instance GPU (MIG) instance, or a device whose type could not
-be verified. All three contribute to the total CUDA-device count exactly
-once. Counts are integers, including MIG-instance counts; the report does not
-convert a MIG instance into a fraction of a full GPU. GPU-hours can be
-fractional: one visible GPU for half an hour contributes 0.5 GPU-hours.
-MIG detail appears only when applicable.
+The resident probe inherits the environment after the launcher has applied its
+GPU assignment. The startup observation retains that visibility even if the
+application later narrows its own CUDA mask. Task workers instead reuse an
+application-initialized CUDA count when available, without initializing CUDA
+for reporting. Missing observations remain unavailable.
 
-A successful Driver count is authoritative, including zero. When CUDA is not
-initialized, an exactly empty ``CUDA_VISIBLE_DEVICES`` also establishes zero
-once the Driver library loads. Other mask strings are left to the Driver;
-collection never interprets them as counts. A missing Driver or failed count
-leaves GPU capacity unavailable, not zero. Missing optional model or type
-information does not remove or delay a verified count.
+An observed count of zero is ``"gpu": {"count": 0}``. A missing Driver or
+failed count is unavailable rather than zero. Startup capacity and device-hours
+describe availability, not GPU utilization or exclusive allocation.
 
-Duration and totals
-===================
-
-The report stores the job-process startup capacity and accumulated
-``resource_time``. Each execution multiplies capacity by its own duration;
-the participant report combines those products once.
-For example, two CUDA devices observed for 600 seconds contribute
-1,200 device-seconds, or one-third of a device-hour. A task worker visible for
-ten seconds contributes ten seconds of its capacity, not the coordinator's
-whole lifetime. Queries add the recorded products.
-
-Several participants can see the same hardware, so adding their capacity-time
-does not count unique machines.
-
-Inspect a participant's saved capacities and hardware details with:
-
-.. code-block:: shell
-
-   nvflare resources --job JOB_ID --site site-1
-   nvflare resources --job JOB_ID --site site-1 --format json
-
-Collection reference
-====================
-
-The reference below gives the exact queries, limit files, and selection rules.
-It is not required reading to use the reports.
-
-.. toctree::
-   :maxdepth: 1
-
-   capacity_collection
+See :ref:`collection details <resource_statistics_capacity_collection>` for the
+probe and container-limit rules.

@@ -26,7 +26,7 @@ inventory. For example:
    {
      "resource_utilization": {
        "retained_content": {
-         "bytes": "1073741824"
+         "bytes": 1073741824
        }
      }
    }
@@ -62,7 +62,7 @@ For example:
 
    {
      "workspace_filesystem": {
-       "capacity_bytes": "1099511627776"
+       "capacity_bytes": 1099511627776
      }
    }
 

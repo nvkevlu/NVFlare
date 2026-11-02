@@ -141,86 +141,36 @@ CPU and RAM use these Linux interfaces. An unsupported platform leaves the
 affected observation unavailable rather than substituting an unrelated
 measurement.
 
-CUDA count and optional descriptions
-====================================
+CUDA count
+==========
 
-On Linux, a resident execution's helper uses Python's ``ctypes`` to load the system
-``libcuda.so.1``. If ``CUDA_VISIBLE_DEVICES`` is exactly empty, it reports zero
-without initializing GPUs. Otherwise, including when the variable is unset,
-it calls:
+On Linux, resident discovery loads the system ``libcuda.so.1`` in a fresh helper
+that inherits the launcher's final environment, namespaces and limits. After
+loading the Driver, an exactly empty ``CUDA_VISIBLE_DEVICES`` yields zero without
+initialization. Otherwise the helper calls ``cuInit(0)`` and ``cuDeviceGetCount``.
+The Driver interprets device indices, UUIDs and MIG visibility; the collector does
+not parse masks or substitute a host inventory count.
 
-.. code-block:: text
+Discovery overlaps application execution and retains its result and initialization
+until owner cleanup. It has a 30-second background failure deadline. After CPU
+and duration are frozen, resident finalization waits at most two seconds for a
+count within the remaining budget, followed by bounded helper cleanup. There is
+no model/memory lookup, UUID matching, NVML classification, or framework import.
+The startup observation is unchanged by later application mask changes.
 
-   cuInit(0)
-   cuDeviceGetCount(&count)
+Task workers start no GPU helper. They query ``cuDeviceGetCount`` against CUDA
+state already initialized by the application, without calling ``cuInit``. A
+successful result takes precedence over later environment changes. If CUDA is
+uninitialized, an exactly empty mask establishes zero after the Driver loads;
+otherwise the count is unavailable. This reuse does not establish what an
+application's earlier, uninitialized mask would have exposed.
 
-The standalone helper inherits the execution's environment and resource limits,
-uses normal Python startup, and does not load NVFlare or a CUDA framework.
-Discovery runs alongside application setup and execution. The helper publishes
-the verified count before collecting optional model and type information.
-Already-ready details replace that observation without changing the count;
-slow or failed classification leaves counted devices unclassified. Its result
-and GPU initialization are retained until the execution ends, avoiding a second
-cold initialization just because the probe finished.
-
-Discovery has a 30-second background failure deadline from launch. After
-freezing CPU work and duration, resident-job collection waits at most two seconds
-for the count within that budget, then stops an unfinished probe. Optional
-classification never adds a discovery wait after a valid count arrives. Its helper
-cleanup can add up to two seconds.
-
-Task workers start no GPU helper. After freezing CPU work and duration, they
-query ``cuDeviceGetCount`` in the application process without calling ``cuInit``,
-collecting device metadata, or initializing NVML. An application that has
-initialized CUDA supplies its existing device count, reported as unclassified.
-If CUDA is uninitialized, an exactly empty mask establishes zero; otherwise the
-count is unavailable. A successful Driver result takes precedence over later
-mask changes. This avoids cold discovery and helper teardown inside the task's
-execution deadline. Launcher ownership, permissions and deadlines are unchanged.
-
-Longer executions can overlap healthy cold initialization. If no valid count
-arrives, GPU capacity is unavailable while CPU/RAM remain usable. A verified
-count survives failed or unfinished optional classification.
-Repeated reads reuse the same execution's result. Every observation belongs to
-its own worker or container; there is no cross-worker cache. Collection does not enable or require GPU persistence.
-A host ``nvidia-smi`` count is not a substitute for the worker's CUDA visibility.
-
-A successful count is the numeric authority. Successful zero and an explicit
-``CUDA_ERROR_NO_DEVICE`` mean zero. A missing Driver, missing required symbol,
-or other initialization/count error means unavailable. Unlike CPU/RAM, a
-host inventory count is not a fallback for the process's CUDA-device count.
-
-``cuDeviceGet`` obtains each counted device handle.
-``cuDeviceGetName`` and ``cuDeviceTotalMem_v2`` supply optional model and
-total CUDA memory per device or instance, not memory in use or the group's
-combined memory. Failed metadata queries leave the numeric count intact.
-
-The optional NVIDIA Management Library (NVML) classifies counted devices.
-NVFlare obtains a private ``cuDeviceGetUuid_v2`` identity, matches an NVML
-handle by UUID, then calls ``nvmlDeviceIsMigDeviceHandle``:
-
-* Verified non-MIG: ``full_gpu``.
-* Verified Multi-Instance GPU (MIG) instance: ``mig_compute_instance``.
-* No reliable classification: ``cuda_device_unclassified``.
-
-NVML does not add devices or set the count. Missing NVML or identity leaves
-counted devices unclassified; it does not make the numeric observation fail.
-
-``nvidia-smi`` lists management inventory and can differ from the devices
-selected for the process. Apart from the exact empty-mask shortcut,
-``CUDA_VISIBLE_DEVICES`` is not parsed for a count: numeric lists, UUIDs, whitespace,
-and invalid masks are left to the Driver. A missing Driver remains unavailable
-even with an empty mask. Collection requires neither CUDA Runtime nor a training
-framework.
-
-Hardware models
-===============
-
-CPU models come from ``/proc/cpuinfo`` for the affinity-selected CPUs, with
-architecture from ``platform.machine()``. Different known models can form
-separate groups. If a quota spans different models, NVFlare keeps the numeric
-capacity without guessing how to divide it between models. Missing
-descriptions do not remove a usable count.
+A successful zero or explicit ``CUDA_ERROR_NO_DEVICE`` is observed zero. A
+missing Driver, failed native call or invalid count is unavailable, preserving
+usable CPU/RAM values. Repeated reads reuse the execution's observation. The
+collector does not change persistence settings, permissions, launcher ownership
+or task deadlines. CUDA-visible counts can include MIG instances; they do not
+measure physical-GPU ownership or GPU utilization.
 
 Duration
 ========

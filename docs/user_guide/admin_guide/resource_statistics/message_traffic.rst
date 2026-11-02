@@ -42,8 +42,8 @@ A participant stores both counters:
    {
      "resource_utilization": {
        "message_traffic": {
-         "sent_bytes": "1073741824",
-         "received_bytes": "536870912"
+         "sent_bytes": 1073741824,
+         "received_bytes": 536870912
        }
      }
    }

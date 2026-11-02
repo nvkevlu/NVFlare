@@ -19,7 +19,7 @@ Start with a command
    # All participants in one finished job
    nvflare resources --job JOB_ID
 
-   # Add one participant's hardware and filesystem detail
+   # Add one participant's startup capacity and filesystem detail
    nvflare resources --job JOB_ID --site site-1
 
    # Return the structured report
@@ -56,7 +56,7 @@ shared participant duration. In this example, site-1 used 180 CPU seconds over
 600 seconds, averaging 0.3 CPUs despite having 32 logical CPU units visible.
 The CLI uses ``cores`` as a short label for logical CPU units. CPU capacity can
 be fractional when a CPU-time quota applies. The ``--site`` detail shows the
-job-process startup capacity and hardware descriptions; in task mode this is
+job-process startup capacity; in task mode this is
 the coordinator, not its workers. GPU counts there are integers; capacity-time
 can be fractional. Text shows at most two decimal places without
 trailing zeros, and positive values below 0.01 as ``<0.01``. JSON keeps full
