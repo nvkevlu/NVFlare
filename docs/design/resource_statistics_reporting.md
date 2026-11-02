@@ -42,78 +42,63 @@ The following participant record uses a placeholder for the schema version:
   "job_id": "job-42",
   "participant_name": "site-1",
   "reported_at": "2026-10-29T12:00:10Z",
-  "duration_seconds": "10",
+  "duration_seconds": 10,
   "resource_capacity": {
-    "cpu": {"groups": [{"units": "2"}]},
-    "memory": {"bytes": "2147483648"},
-    "gpu": {"groups": [{"kind": "cuda_device_unclassified", "count": "1"}]}
+    "cpu": {
+      "units": 2
+    },
+    "memory": {
+      "bytes": 2147483648
+    },
+    "gpu": {
+      "count": 1
+    }
   },
   "resource_time": {
-    "cpu": {"groups": [{"unit_seconds": "20"}]},
-    "memory": {"byte_seconds": "21474836480"},
-    "gpu": {"groups": [{"kind": "cuda_device_unclassified", "instance_seconds": "10"}]}
+    "cpu": {
+      "unit_seconds": 20
+    },
+    "memory": {
+      "byte_seconds": 21474836480
+    },
+    "gpu": {
+      "instance_seconds": 10
+    }
   },
   "resource_utilization": {
-    "cpu_consumed": {"cpu_seconds": "2"},
-    "retained_content": {"bytes": "1024"},
-    "message_traffic": {"sent_bytes": "2048", "received_bytes": "4096"}
+    "cpu_consumed": {
+      "cpu_seconds": 2
+    },
+    "retained_content": {
+      "bytes": 1024
+    },
+    "message_traffic": {
+      "sent_bytes": 2048,
+      "received_bytes": 4096
+    }
   },
-  "workspace_filesystem": {"capacity_bytes": "107374182400"}
+  "workspace_filesystem": {
+    "capacity_bytes": 107374182400
+  }
 }
 ```
 
 ### Value and quality rules
 
-Quantities are unsigned plain decimal **strings**, not JSON numbers. They may
-have at most 39 integer digits and nine fractional digits; signs, exponents, NaN,
-and infinity are not accepted. Byte and device counts must be integers, while
-capacity-time products such as `byte_seconds` may be fractional. Canonical output
-removes trailing fractional zeros, for example converting `"2.0"` to `"2"`.
+Quantities use native JSON numbers. Bytes and CUDA-device counts are integers;
+CPU units, durations, CPU work and capacity-time may be fractional. Numbers must
+be finite and nonnegative; boolean values and numeric strings are not measurements.
+Integer products and sums remain Python integers. Mixed arithmetic uses floating
+point and rejects nonfinite results rather than clamping them. The wire format
+adds no fixed decimal precision or artificial integer-width limit.
 
-Products and sums use decimal arithmetic rather than binary floating-point.
-Values and sums cannot exceed `2^128 - 1`; capacity-memory, per-device-memory,
-and filesystem bytes are limited to `2^64 - 1`. CPU quota ratios are rounded down
-to nine fractional digits so that rounding cannot enlarge a capacity bound. At
-serialization, other fractional quantities are quantized to nine digits using
-round-half-even, trailing fractional zeros are removed, and the result is checked
-again.
-
-A group is a category of capacity with compatible hardware descriptions. It
-preserves distinctions when observations from different executions are combined.
-For example, suppose two participants report these observations:
-
-| Participant | CPU capacity | CUDA capacity | Duration |
-| --- | --- | --- | ---: |
-| Site A | 4 units of CPU model A | 1 full GPU | 60 seconds |
-| Site B | 8 units of CPU model B | 1 MIG compute instance | 10 seconds |
-
-The job total keeps a separate capacity-time group for each kind of hardware:
-
-| Hardware group | Capacity-time calculation | Result |
-| --- | --- | ---: |
-| CPU model A | 4 units × 60 seconds | 240 CPU-unit-seconds |
-| CPU model B | 8 units × 10 seconds | 80 CPU-unit-seconds |
-| Full GPU | 1 device × 60 seconds | 60 device-seconds |
-| MIG compute instance | 1 instance × 10 seconds | 10 instance-seconds |
-
-The CPU groups show which models supplied the observed capacity-time; a single
-320 CPU-unit-second total hides that distinction. This grouping assumes each CPU
-capacity is attributable to its model. When a shared quota cannot be attributed by
-model, the report keeps an aggregate group instead. The GPU groups remain separate:
-a MIG instance is not treated as equivalent to a full GPU. An operator comparing
-this job with another that observed one full GPU for 10 seconds can see that this
-job observed a full GPU for longer and select it for further investigation. These
-values do not measure CPU or GPU busy time or prove exclusive allocation.
-
-CPU groups may include `model` and `architecture`. GPU groups use
-`kind: "full_gpu"|"mig_compute_instance"|"cuda_device_unclassified"` and may
-include `model` and `memory_bytes`; only MIG groups may include `mig_profile`.
-CPU groups are consolidated by `(model, architecture)`, and GPU groups by
-`(kind, model, memory_bytes, mig_profile)`. A missing description remains
-distinct from a known one, so the implementation does not guess the hardware
-class. A successful observation of zero visible GPUs is represented as
-`"gpu": {"groups": []}`, rather than as unavailable or as a group with a zero
-count.
+Capacity and capacity-time are scalar objects:
+`cpu.units`, `memory.bytes`, `gpu.count`, and respectively `cpu.unit_seconds`,
+`memory.byte_seconds`, `gpu.instance_seconds`. There are no CPU-model or GPU-type
+groups, device-memory fields, or hardware descriptions. An observed zero is
+`"gpu": {"count": 0}`; zero capacity-time is `"gpu": {"instance_seconds": 0}`.
+CUDA-visible counts can include MIG instances and do not measure GPU utilization
+or establish equivalent physical-GPU capacity.
 
 Successful measurement objects omit `status` and `issues`; explicit success
 strings such as `reported` or `accepted` are not serialized. Incomplete or
@@ -135,7 +120,13 @@ without the required source-quality fields.
 For example, a bounded file scan that stopped early can retain its subtotal:
 
 ```json
-{"status": "partial", "issues": ["observation_incomplete"], "bytes": "1024"}
+{
+  "status": "partial",
+  "issues": [
+    "observation_incomplete"
+  ],
+  "bytes": 1024
+}
 ```
 
 The issue codes are `observation_incomplete`, `attribution_incomplete`,
@@ -190,15 +181,14 @@ Validate in this order:
 2. Check the wrapper and raw byte limit before decoding. Decode UTF-8 JSON,
    rejecting duplicate keys, nonfinite constants, wrong kind/version and excess
    nesting. Unknown fields are rejected, not silently ignored.
-3. Validate identifiers, units, quality/value combinations, group uniqueness and
-   numeric bounds; require body job/site identity to match the bound slot.
-4. Normalize decimal spellings, object keys and set-like group/issue ordering.
+3. Validate identifiers, units, quality/value combinations and
+   finite numeric values; require body job/site identity to match the bound slot.
+4. Normalize object keys and issue ordering without converting numbers to strings.
    Recheck the canonical byte limit and compare with any accepted record.
 5. Under the per-job lock, recheck that acceptance is still open and the slot is
    eligible. Retain immutable canonical bytes and server-owned receipt time.
 
-Hardware descriptions are controlled labels rather than host identifiers.
-Reports must not emit hostnames, addresses, serials, UUIDs, PCI identifiers, CUDA
+Hardware descriptions are not collected. Reports must not emit hostnames, addresses, serials, UUIDs, PCI identifiers, CUDA
 visibility masks, raw CPU topology, or raw cgroup paths. Validation limits
 disclosure and rejects malformed input, but it cannot attest to the accuracy of
 a site's self-report.
@@ -216,8 +206,6 @@ them independently.
 | Job or study summary JSON | 64 MiB |
 | JSON nesting | 32 levels |
 | Expected participants per job; selected jobs per study query | 10,000 each |
-| CPU or GPU groups per object; visible GPU instances | 4,096 each |
-| Total CPU capacity units in a snapshot | 1,048,576 |
 | ZIP metadata reads while constructing the member index | 4 MiB |
 
 One immutable accepted record occupies a `(job_id, participant_name)` slot:
@@ -337,8 +325,8 @@ slot while that query continues on the server.
 
 Job totals are derived from accepted entries independently for each measurement.
 They sum stored `resource_time` and utilization without multiplying startup
-capacity by participant duration again. CPU groups and GPU/MIG kinds retain their
-grouping keys. Startup capacity, filesystem capacity, and participant durations
+capacity by participant duration again. All resource quantities are scalar totals.
+Startup capacity, filesystem capacity, and participant durations
 are not summed. Any expected gap makes a usable job subtotal partial; if there are
 no usable contributors, the result is unavailable rather than zero. Average CPU
 use is a participant's CPU seconds divided by its positive containing duration,
@@ -347,16 +335,14 @@ not a percentage of host capacity.
 A study row contains `job_id`, `job_name`, `job_status`, and
 `resource_data: "included"|"unavailable"|"nonterminal"`. Only included rows have
 derived `totals`. Coverage records `selected_jobs`, `included_jobs`,
-`unavailable_jobs`, and `nonterminal_jobs` as numeric strings. The study
+`unavailable_jobs`, and `nonterminal_jobs` as integers. The study
 `selection` contains `study_name`, and `generated_at` is the query time. Study
 totals sum only included-job totals and preserve their per-field quality.
 Unavailable and nonterminal jobs remain explicit coverage gaps, so the
 **included-jobs subtotal** is not a claim about all selected jobs.
 
 Numeric overflow is never clamped or represented as infinity. During collection,
-valid independent subtotals are retained and gaps are marked. If a requested job
-or study sum exceeds the contract, the derived result is rejected rather than
-published as a misleading complete total.
+valid independent subtotals are retained and gaps are marked. Nonfinite derived values are rejected rather than published as complete totals.
 
 The CLI uses the existing success/error envelope. Job JSON data contains
 `selection: {job_id, site}`, `summary`, and an optional `participant`; study JSON
@@ -364,7 +350,7 @@ data contains `selection: {study}` and `summary`. The CLI rejects `--site` witho
 `--job`; a job query may also specify its study. The `--schema` option describes
 the command interface, not the report-format schema. Authorization,
 nonterminal-job, and unavailable-data errors remain distinguishable. Text output
-rounds only for display; JSON retains the numeric strings and quality markers
+rounds only for display; JSON retains the native numbers and quality markers
 described above.
 
 ## Compatibility and failure boundary

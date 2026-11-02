@@ -79,61 +79,41 @@ and limits changed after startup cannot be reconstructed. These snapshots descri
 the visible environment, which may be shared with other jobs. They are neither
 exclusive allocations nor an integral of changing limits.
 
-Optional architecture and model descriptions cannot invalidate numeric capacity.
-The probe splits heterogeneous affinity-visible CPU models only when every
-selected CPU is identified and no tighter shared quota needs to be allocated
-among models. Otherwise, it retains aggregate units without inventing per-model
-fractions. Non-Linux probes require tested equivalents; without them, affected
-dimensions are reported as unsupported rather than guessed from a host-wide count.
+CPU and GPU hardware descriptions are not collected. CPU/RAM probes expose
+scalar capacity values. Non-Linux probes require tested equivalents; without
+them, affected dimensions are unsupported rather than guessed.
 
-## CUDA visibility and classification
+## CUDA visibility
 
-A fresh helper process calls the system CUDA Driver, inheriting the execution's
-final environment, namespaces, cgroup membership, and affinity. The probe does
-not initialize CUDA in the application process, import PyTorch, use a CUDA Runtime
-bundled with a job package, run `nvidia-smi`, or count tokens in
-`CUDA_VISIBLE_DEVICES`. The Driver applies visibility and enumeration rules.
+Resident discovery calls the system CUDA Driver in a fresh helper with the
+execution's finalized launcher environment and limits. After loading
+`libcuda.so.1`, an exactly empty `CUDA_VISIBLE_DEVICES` yields zero without
+initializing CUDA. Otherwise `cuInit` and `cuDeviceGetCount` provide the integer
+CUDA-visible count. The Driver interprets indices, UUIDs and MIG visibility.
+There is no model/memory query, UUID matching, NVML classification, or framework
+import. Counts can include visible MIG instances, without claiming that an
+instance equals a physical GPU or an exclusive allocation.
 
-On Linux, the helper loads the versioned system Driver library, calls `cuInit`,
-and then calls `cuDeviceGetCount`. A successful zero count, including the explicit
-no-device result, is an observed zero and produces an empty GPU group list. A
-missing library, another initialization or enumeration failure, an invalid count,
-or a timeout makes the measurement unavailable rather than zero. Enumeration
-is bounded to 4,096 ordinals. Every counted ordinal is retained exactly once,
-even if all optional metadata calls fail.
+Discovery overlaps the application and retains its result and initialization
+until execution cleanup. A later application mask change does not revise the
+resident startup snapshot. The helper has a 30-second background failure deadline;
+after freezing CPU and duration, resident collection waits at most two seconds
+for its count within that budget, followed by bounded cleanup. Output is bounded.
+A valid zero or explicit no-device result is zero; missing Driver or failed
+count is unavailable and does not erase CPU/RAM observations.
 
-The helper reads the optional model and total device memory for each ordinal. It
-uses the MIG-aware Driver UUID entry point when available to match an NVML handle.
-NVML may classify that handle as a full GPU or MIG compute instance; it cannot
-add devices or substitute a host-wide count. Type must not be inferred from a
-UUID prefix, model name, memory size, or environment string. Missing or ambiguous
-UUID mappings, permission errors, and older APIs retain `cuda_device_unclassified`
-counts. UUIDs and host identifiers remain private and are discarded after matching.
+Task workers start no helper and never call `cuInit` for reporting. After freezing
+their CPU/duration window they reuse `cuDeviceGetCount` from application-initialized
+CUDA state. A successful native count takes precedence over later mask changes.
+For an uninitialized Driver, an exactly empty mask establishes zero; other cases
+are unavailable. This observation does not reconstruct an earlier mask changed
+before application initialization. Statistics preserves task deadlines and
+runtime ownership.
 
-CUDA-visible MIG enumeration depends on Driver/runtime capabilities and policy;
-it does not necessarily include every configured instance on the host. An ordinal
-does not prove exclusive allocation, actual kernels, GPU busy time, or an equal
-fraction of a full GPU. Full-GPU, MIG, and unclassified groups remain distinct,
-and only equivalent known descriptions are grouped. Missing classification cannot
-erase a successful count or fabricate hardware equivalence.
-
-The helper has a two-second observation wait and bounded one-second reap waits
-after a kill, including a final cleanup attempt. The collector accepts at most
-64 KiB of JSON output; oversized, invalid, or failed output makes only the GPU measurement
-unavailable. The helper consolidates overlarge optional descriptions into counts
-by kind. Output is captured in a temporary file rather than an unbounded in-memory
-pipe. The read limit is not a hard disk-write quota if interpreter startup itself
-writes output. There is no sampling loop, framework import, or change to the
-application's CUDA initialization. Helper startup is a fixed per-execution cost
-and can be significant for short tasks.
-
-This approach differs from copying [PyTorch's discovery implementation](https://github.com/pytorch/pytorch/blob/v2.9.0/torch/cuda/__init__.py#L894-L966):
-NVFlare does not need framework device caching or its NVML-based count and
-fallback machinery. The system Driver is the numeric authority inside the same
-execution environment; NVML only enriches already counted ordinals. The helper
-isolates Driver initialization without adding PyTorch as a dependency. It must
-inherit deployed container and scheduler visibility, because a host NVML count
-cannot substitute for observation inside the execution environment.
+A host NVML or `nvidia-smi` inventory cannot substitute for execution-visible
+CUDA devices. The helper isolates initialization from the application while
+preserving the launcher's visibility decisions. There is no cross-execution cache
+or change to persistence settings.
 
 ## CPU work and disjoint execution scopes
 
@@ -164,7 +144,7 @@ observable failed or aborted work. The reducer retains accepted scope identities
 it does not deduplicate by task name, result identity, PID alone, or hardware UUID
 across sessions. Missing artifacts leave known subtotals with incomplete quality.
 The ledger cannot establish lifecycle ownership. Its retention is capped at
-10,000 scopes, 128 aggregate groups, and 4 MiB of encoded state, with at most
+10,000 scopes and 4 MiB of encoded state, with at most
 8 MiB of outstanding worker artifacts and 64 KiB per accepted artifact. On
 exhaustion, accepted subtotals are frozen and marked incomplete; replay keys are
 never evicted to admit duplicate work. These bounds limit serialized state, not
@@ -173,24 +153,24 @@ total Python heap.
 ## Duration, capacity-time, and aggregation
 
 Let execution `e` have monotonic interval `[s_e, f_e]`, duration `d_e`, CPU
-capacity group `c_e,g`, RAM capacity `m_e`, and GPU group count `n_e,g`. The
+capacity `c_e`, RAM capacity `m_e`, and CUDA-device count `n_e`. The
 following values are computed before physical executions are reduced into a
 participant:
 
 ```text
 d_e = (finish_monotonic_ns - start_monotonic_ns) / 1,000,000,000
-CPU unit_seconds[g] = sum_e(c_e,g * d_e)
+CPU unit_seconds = sum_e(c_e * d_e)
 RAM byte_seconds = sum_e(m_e * d_e)
-GPU instance_seconds[g] = sum_e(n_e,g * d_e)
+GPU instance_seconds = sum_e(n_e * d_e)
 cpu_seconds = sum_disjoint_scopes(delta_user + delta_system)
 average logical CPUs = cpu_seconds / participant duration_seconds
 ```
 
-Calculations use checked decimal arithmetic. Values are nonnegative numeric
-strings no greater than the unsigned 128-bit maximum. Seconds and CPU quantities
-allow at most nine fractional digits, while bytes and device counts are integers.
-Precision is retained until the serialization boundary without binary floating-point
-multiplication. The reporting contract defines field bounds and rounding.
+Values are native JSON numbers. Byte/count values are integers; durations,
+CPU units/work and capacity-time may be fractional. Integer products and sums
+remain exact Python integers; mixed arithmetic uses floating point and rejects
+nonfinite results. There is no decimal-string conversion or fixed fractional
+precision. An invalid dimension does not erase independent valid subtotals.
 
 `duration_seconds` is one participant elapsed window, not the sum of worker
 durations. Coordinator and worker capacity-time uses their own physical windows;
@@ -199,14 +179,12 @@ worker capacity is not applied to coordinator waiting time. Startup
 successive workers' capacities. Job and study totals add already computed
 `resource_time`; they do not multiply startup capacity by duration again.
 
-CPU and GPU capacity-time is grouped by compatible kind and optional descriptions,
-with unknown descriptions distinct from known ones. RAM byte-seconds add directly.
-A full-GPU equivalent is not derived from heterogeneous or MIG groups. Multi-rank
+CPU-unit-seconds, RAM byte-seconds and CUDA device-seconds are summed as scalar
+quantities, without model/type grouping or physical-GPU equivalents. Multi-rank
 adapters expose disjoint CPU scopes but only one capacity observation per shared
-execution environment; rank count cannot multiply shared GPU or node-wide CPU or
-RAM capacity. Multiple nodes require node-local observations rather than rank-zero
-capacity multiplied by node count. Coverage that cannot be attributed is marked
-as a gap.
+execution environment. Rank count cannot multiply shared GPU or node-wide CPU/RAM
+capacity. Multiple nodes require node-local observations rather than multiplying
+rank-zero capacity by node count. Unattributable coverage remains a gap.
 
 If lifecycle evidence cannot place every included execution inside the participant
 window, the duration and CPU average are omitted while valid work and capacity-time
@@ -304,8 +282,7 @@ Consider these disjoint executions, all within one 60-second participant window:
 | Worker A | 10 s | 2 units | 4 GiB | 1 | 8 CPU s |
 | Worker B | 5 s | 2 units | 4 GiB | 1 | 4 CPU s |
 
-Assuming compatible CPU and GPU descriptions, the participant records 150
-CPU-unit seconds, 180 GiB-seconds (`193273528320` byte-seconds), 15 GPU-instance-seconds,
+The participant records 150 CPU-unit seconds, 180 GiB-seconds (`193273528320` byte-seconds), 15 GPU-instance-seconds,
 and 14 CPU seconds. Its duration remains 60 seconds and average CPU use is
 14/60, about 0.23 logical CPUs. Its startup snapshot remains 2 CPU units, 2 GiB
 RAM, and zero GPUs. Workers need not run consecutively: overlap changes neither

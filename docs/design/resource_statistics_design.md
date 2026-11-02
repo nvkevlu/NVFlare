@@ -1,8 +1,5 @@
 # Resource statistics design
 
-> **Design notice:** The CLI and Session interfaces described here are proposed
-> and are not yet available on the main branch.
-
 ## Purpose
 
 Resource statistics provides a final, best-effort account of the resources visible
@@ -31,26 +28,44 @@ rollup, a shared `duration_seconds`, and separate capacity and utilization
 measurements. `resource_capacity` is the job-process startup snapshot.
 `resource_time` rolls up capacity multiplied by each execution's own duration;
 it uses the same representation as job/study totals. Worker records stay internal.
-The following abbreviated example for a resident job omits identity and optional
-descriptions:
+The following abbreviated example for a resident job omits identity:
 
 ```json
 {
-  "duration_seconds": "10",
+  "duration_seconds": 10,
   "resource_capacity": {
-    "cpu": {"groups": [{"units": "2"}]},
-    "memory": {"bytes": "2147483648"},
-    "gpu": {"groups": [{"kind": "cuda_device_unclassified", "count": "1"}]}
+    "cpu": {
+      "units": 2
+    },
+    "memory": {
+      "bytes": 2147483648
+    },
+    "gpu": {
+      "count": 1
+    }
   },
   "resource_time": {
-    "cpu": {"groups": [{"unit_seconds": "20"}]},
-    "memory": {"byte_seconds": "21474836480"},
-    "gpu": {"groups": [{"kind": "cuda_device_unclassified", "instance_seconds": "10"}]}
+    "cpu": {
+      "unit_seconds": 20
+    },
+    "memory": {
+      "byte_seconds": 21474836480
+    },
+    "gpu": {
+      "instance_seconds": 10
+    }
   },
   "resource_utilization": {
-    "cpu_consumed": {"cpu_seconds": "2"},
-    "retained_content": {"bytes": "1024"},
-    "message_traffic": {"sent_bytes": "2048", "received_bytes": "4096"}
+    "cpu_consumed": {
+      "cpu_seconds": 2
+    },
+    "retained_content": {
+      "bytes": 1024
+    },
+    "message_traffic": {
+      "sent_bytes": 2048,
+      "received_bytes": 4096
+    }
   }
 }
 ```
@@ -59,17 +74,17 @@ The example describes one resident participant. Capacity is observed at job-proc
 startup; work and traffic are measured over their respective collection boundaries,
 and retained content is scanned at finalization. In task mode, capacity-time also
 includes worker windows, while startup capacity still describes the job process.
-Numeric strings preserve precision.
+Quantities use native finite JSON numbers; byte and device counts are integers.
 
 | Field | Meaning, scope, and collection |
 | --- | --- |
 | `duration_seconds` | Elapsed seconds in the participant's observation window, including waiting. A monotonic clock measures the window from the start of CPU accounting to its final snapshot. |
-| `resource_capacity.cpu.groups[].units` | Logical CPU capacity visible to the job process at startup, based on its CPU affinity and readable quota limits. Units can be fractional. |
+| `resource_capacity.cpu.units` | Logical CPU capacity visible to the job process at startup, based on its CPU affinity and readable quota limits. Units can be fractional. |
 | `resource_capacity.memory.bytes` | Host physical RAM capacity in bytes, reduced by readable memory limits, as observed by the job process at startup. It is not free memory or peak usage. |
-| `resource_capacity.gpu.groups[].kind` and `count` | The category and integer count of CUDA devices visible to the job process at startup. The example's device is unclassified; visibility does not establish use or exclusive allocation. |
-| `resource_time.cpu.groups[].unit_seconds` | The sum of each included execution's CPU capacity multiplied by its duration, in CPU-unit-seconds. In this resident example, 2 CPU units × 10 seconds = 20 CPU-unit-seconds. |
+| `resource_capacity.gpu.count` | The integer CUDA-device count visible under the resident process's launch-time mask. It can include MIG instances; visibility does not establish use or exclusive allocation. |
+| `resource_time.cpu.unit_seconds` | The sum of each included execution's CPU capacity multiplied by its duration, in CPU-unit-seconds. In this resident example, 2 CPU units × 10 seconds = 20 CPU-unit-seconds. |
 | `resource_time.memory.byte_seconds` | The sum of each included execution's RAM capacity in bytes multiplied by its duration in seconds. Here, 2,147,483,648 bytes × 10 seconds = 21,474,836,480 byte-seconds. |
-| `resource_time.gpu.groups[].kind` and `instance_seconds` | The GPU category and the sum of each included execution's visible device count multiplied by its duration, in device-seconds. The example records one unclassified device for 10 seconds. |
+| `resource_time.gpu.instance_seconds` | The sum of each included execution's visible CUDA-device count multiplied by its duration, in device-seconds. The example records one device for 10 seconds. |
 | `resource_utilization.cpu_consumed.cpu_seconds` | Total user and system CPU work in seconds across included, disjoint process scopes and normally waited descendants, measured from CPU counters over their execution windows; arbitrary unwaited descendants are not guaranteed covered. One CPU working for two seconds and two CPUs working for one second both contribute two CPU-seconds. |
 | `resource_utilization.retained_content.bytes` | Logical length in bytes of regular files retained in the participant's run directory at finalization, measured by a bounded scan. Symlinks and the top-level report directory are excluded. It is not physical disk occupancy or peak storage. |
 | `resource_utilization.message_traffic.sent_bytes` and `received_bytes` | Payload bytes counted separately at the participant's job Cell and included worker and managed-trainer endpoints, from their observed traffic through their final snapshots. Control payloads and repeated transfers are included; shared parent traffic and network headers are excluded. |
@@ -88,7 +103,7 @@ startup capacity by duration again. The example yields 20 CPU-unit seconds and
 10 device-seconds; average CPU use is 2/10 = 0.2 logical CPUs. Capacity-time
 can compare the visible capacity and durations of retained jobs: for example, it
 can distinguish a job that observed one GPU for 60 seconds from one that observed
-a compatible GPU for 10 seconds. It does not measure GPU busy time. Shared
+one GPU for 10 seconds. It does not measure GPU busy time. Shared
 hardware can be visible to several executions, so totals are observations, not
 unique hardware, reservations or billing. Filesystem capacity is never
 summed or multiplied by duration.
@@ -113,13 +128,16 @@ are finalized during cleanup, so application construction or execution failures
 can still produce statistics. Collection does not change normal Python startup,
 resource assignment, or process ownership. CPU
 and memory probes use existing affinity and visible cgroup limits. CUDA
-enumeration uses the system Driver; optional NVML only improves device
-classification. No mandatory PyTorch dependency is added.
+enumeration uses the system Driver and reports only a count. No NVML or PyTorch
+dependency is added.
 
 Driver enumeration can initialize CUDA in its calling process. To avoid altering
 the application's CUDA initialization, it runs in a fresh helper process with a
 bounded lifetime under the existing process owner. The helper inherits the
-execution's finalized visibility and limits.
+execution's finalized visibility and limits. A later application mask change does
+not alter this resident startup observation. Task workers instead reuse an
+application-initialized CUDA count without initializing CUDA for statistics; an
+unavailable count is retained as a gap. Capacity is availability, not GPU use.
 
 The parent supplies participant identity and attaches the report to the existing
 `REPORT_JOB_OUTCOME` request. It releases resources through the normal lifecycle
@@ -220,7 +238,8 @@ the selected-site view. Participant detail labels the raw snapshot **Job-process
 this is coordinator capacity, not a worker inventory. GPU counts are integers;
 CPU quotas, average CPU use and capacity-time may be fractional. Text uses at
 most two decimals without trailing zeros, with `<0.01` for small positive values.
-JSON preserves precision and existing measurement quality markers.
+JSON uses native numbers and preserves the measurement quality markers; text
+rounding does not change stored values.
 
 ## Related architecture
 
