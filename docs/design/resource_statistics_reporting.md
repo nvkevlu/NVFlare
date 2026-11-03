@@ -168,8 +168,12 @@ The parent reads one bounded terminal handoff, validates individual measurements
 adds the job and site identity, and serializes the participant record once.
 Invalid child measurements become `unavailable` with `malformed_source`;
 malformed identity or envelope data is not repaired to produce an accepted
-participant. The private handoff is `resource_stats/staging/terminal_handoff.json`
-with internal version `"4"`. It is consumed and removed before public archival.
+participant. Each launch owns a private
+`resource_stats/staging/terminal_handoff.<generation>.json` file with internal
+version `"4"`. Its bounded generation token is checked before consumption and
+never enters public records. Cleanup removes only that generation's file, so an
+older writer or failed launch cannot replace or remove a newer handoff. Private
+staging must be empty before public archival.
 
 The parent binds each handoff to the launch generation it owns, establishing the
 association before launch. It rejects stale or unverifiable handoffs, even when a
