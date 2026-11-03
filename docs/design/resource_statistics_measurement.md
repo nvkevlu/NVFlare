@@ -260,14 +260,16 @@ each source is retired once, with missing-source quality preserved independently
 
 Successful measurements omit `status`. A `partial` measurement retains usable
 values with `observation_incomplete` or `attribution_incomplete`; an `unavailable`
-measurement has no usable value and carries a supported issue such as `unsupported`
-or `malformed_source`. Only reporting-contract issue codes are used, never raw
+measurement has no usable value. Its owning scope records a supported issue such
+as `unsupported` or `malformed_source`, tagged with the affected metric. Only
+reporting-contract issue codes are used, never raw
 paths, native errors, or host data. Missing fields are not zero. Capacity and time
 quality belongs to their owning objects rather than individual dimensions, so
 known CPU and RAM values are retained when GPU measurement fails. CPU work,
 retained content, and traffic each own their quality; filesystem is complete or
-unavailable. Derived values inherit relevant gaps, not unrelated errors or missing
-labels.
+unavailable. A participant, worker, handoff or aggregate owns one `issues` list;
+metrics retain their own status. Complete scopes use an empty list. Derived totals
+describe their own coverage gaps rather than copying source issue details.
 
 For example, unreadable worker GPU capacity makes capacity-time partial while
 valid CPU work and traffic can remain complete. A wholly missing worker report

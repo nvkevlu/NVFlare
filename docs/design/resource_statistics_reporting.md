@@ -13,7 +13,7 @@ field.
 
 | Kind | Required top-level fields, in addition to version and kind | Owner |
 | --- | --- | --- |
-| `participant_summary` | `job_id`, `participant_name`, `reported_at`, `resource_capacity`, `resource_time`, `resource_utilization`, `workspace_filesystem`; optional `duration_seconds` | The participant's parent constructs identity and timestamp around the job process's observations. |
+| `participant_summary` | `job_id`, `participant_name`, `reported_at`, `resource_capacity`, `resource_time`, `resource_utilization`, `workspace_filesystem`, `issues`; optional `duration_seconds` | The participant's parent constructs identity and timestamp around the job process's observations. |
 | `resource_summary` | `job_id`, `participants` | The root server builds the expected participant roster and copies accepted measurements into it. |
 | `study_summary` | `selection`, `generated_at`, `coverage`, `jobs`, `totals` | The authorized query derives a view of accessible jobs; it is not a stored report. |
 
@@ -79,7 +79,8 @@ The following participant record uses a placeholder for the schema version:
   },
   "workspace_filesystem": {
     "capacity_bytes": 107374182400
-  }
+  },
+  "issues": []
 }
 ```
 
@@ -100,32 +101,40 @@ groups, device-memory fields, or hardware descriptions. An observed zero is
 CUDA-visible counts can include MIG instances and do not measure GPU utilization
 or establish equivalent physical-GPU capacity.
 
-Successful measurement objects omit `status` and `issues`; explicit success
-strings such as `reported` or `accepted` are not serialized. Incomplete or
-unavailable measurements use the following representations:
+Successful metrics omit `status`; exceptional metrics retain their own
+`status: "partial"` or `"unavailable"`. Explanations appear once in the owning
+scope's `issues` list as `{metric, code}` entries, sorted and deduplicated by
+metric then code. A complete scope has `issues: []`.
 
 | Measurement state | Representation |
 | --- | --- |
-| Complete | The required value fields are present and quality fields are omitted. A measured zero is valid. |
-| Partial | `status: "partial"` accompanies usable value fields and nonempty `issues`. |
-| Unavailable | `status: "unavailable"` and nonempty `issues` are present; usable value fields are omitted. |
+| Complete | Value fields are present and `status` is omitted. Zero is a valid observation. |
+| Partial | `status: "partial"` accompanies usable values; the owning scope names the metric's issues. |
+| Unavailable | `status: "unavailable"` replaces usable values; the owning scope names the metric's issues. |
 
-These rules apply to participant measurements, including copies in the job's
-participant list. Derived job and study **utilization totals** use `status`
-without `issues`; the explanations for their quality remain in participant
-measurements and coverage. Aggregated `resource_time` retains `issues`. An
-aggregate utilization object cannot be copied back into a participant report
-without the required source-quality fields.
+Each participant report and accepted participant row owns one source issue list.
+Worker records and terminal handoffs follow the same scope rule. Derived job
+and per-study-job totals own aggregate issue lists, and study totals own their
+list. Aggregate explanations describe aggregate coverage; they do not copy all
+participant source details. The persisted job summary and study response add no
+duplicate root list around their existing rows or totals.
 
 For example, a bounded file scan that stopped early can retain its subtotal:
 
 ```json
 {
-  "status": "partial",
+  "resource_utilization": {
+    "retained_content": {
+      "status": "partial",
+      "bytes": 1024
+    }
+  },
   "issues": [
-    "observation_incomplete"
-  ],
-  "bytes": 1024
+    {
+      "metric": "retained_content",
+      "code": "observation_incomplete"
+    }
+  ]
 }
 ```
 
@@ -183,7 +192,7 @@ Validate in this order:
    nesting. Unknown fields are rejected, not silently ignored.
 3. Validate identifiers, units, quality/value combinations and
    finite numeric values; require body job/site identity to match the bound slot.
-4. Normalize object keys and issue ordering without converting numbers to strings.
+4. Normalize object keys and sort/deduplicate issue tags without converting numbers to strings.
    Recheck the canonical byte limit and compare with any accepted record.
 5. Under the per-job lock, recheck that acceptance is still open and the slot is
    eligible. Retain immutable canonical bytes and server-owned receipt time.
@@ -247,9 +256,10 @@ OPEN: accept one record per trusted slot
 At closure, each roster entry contains either an accepted value or a gap. An
 accepted entry contains `participant_name`, server-owned `role` and `received_at`,
 optional `duration_seconds`, and copies of `resource_capacity`, `resource_time`,
-and `resource_utilization`. It omits a success status. The `reported_at` and
-`workspace_filesystem` fields remain only in participant detail. A gap contains
-the name, role, and `status: "missing"|"invalid"|"disabled"`; an invalid gap also
+and `resource_utilization`, plus its scope-level `issues` list. It omits a success
+status. The `reported_at` and `workspace_filesystem` fields and filesystem-only
+issue tags remain only in participant detail. A gap contains the name, role, and
+`status: "missing"|"invalid"|"disabled"`, with no issue list; an invalid gap also
 has `received_at`. Here, `disabled` means the parent knows the participant was
 not launched; it is not a new collection opt-out feature. Missing measurements
 must not be filled with zeros or inferred from requested resources.
@@ -350,8 +360,8 @@ data contains `selection: {study}` and `summary`. The CLI rejects `--site` witho
 `--job`; a job query may also specify its study. The `--schema` option describes
 the command interface, not the report-format schema. Authorization,
 nonterminal-job, and unavailable-data errors remain distinguishable. Text output
-rounds only for display; JSON retains the native numbers and quality markers
-described above.
+rounds only for display; JSON retains native numbers, per-metric status, and
+scope-level issues described above.
 
 ## Compatibility and failure boundary
 

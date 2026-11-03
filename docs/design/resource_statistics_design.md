@@ -66,7 +66,8 @@ The following abbreviated example for a resident job omits identity:
       "sent_bytes": 2048,
       "received_bytes": 4096
     }
-  }
+  },
+  "issues": []
 }
 ```
 
@@ -93,9 +94,10 @@ The workspace filesystem's visible capacity is also observed at finalization and
 appears in participant detail. It is not storage reserved for the job.
 
 `resource_utilization` groups recorded work, content, and traffic; it does not
-claim GPU busy time or RAM utilization. Measurement objects retain their own
-quality beside their values. For example, `retained_content.bytes` can carry a
-partial-scan explanation without affecting CPU results. Field names identify units.
+claim GPU busy time or RAM utilization. Each metric retains its own
+status beside its value. One scope-level `issues` list identifies affected metrics
+and codes, so a partial file scan does not affect CPU results. A complete scope
+uses `issues: []`. Field names identify units.
 
 The collector computes capacity-time for each execution and combines it in
 `resource_time`. Job/study queries sum those participant values without multiplying
