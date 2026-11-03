@@ -109,7 +109,9 @@ these directory operations report this measurement as unavailable/unsupported.
 The walk examines at most 100,000 entries, descends at most 64 directory
 levels, and checks a one-second budget between entries. These limits keep
 collection from scanning an unbounded tree. A blocked filesystem call can
-exceed that time budget.
+exceed that cooperative budget, so observation runs in a separate process with
+a bounded finalization wait. Completed observations are retained; unfinished
+ones are unavailable. Late results are ignored.
 
 Filesystem query
 ----------------

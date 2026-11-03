@@ -113,12 +113,13 @@ launches it, called its parent, reads temporary report data from:
 
 .. code-block:: text
 
-   resource_stats/staging/terminal_handoff.json
+   resource_stats/staging/terminal_handoff.<generation>.json
 
 The parent supplies the job and participant identity, assembles the report
 before releasing resources, and sends it afterward. The temporary file is
-removed when consumed. The server follows its corresponding runner/parent
-path. Shared parent-process traffic is not included in a job's counters.
+removed only by the parent that owns that launch generation. A missing terminal
+handoff remains unavailable even if an older launch's file survives. The server
+follows its corresponding runner/parent path. Shared parent-process traffic is not included in a job's counters.
 
 Transport and validation
 ------------------------
