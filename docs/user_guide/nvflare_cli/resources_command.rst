@@ -67,7 +67,9 @@ at most two decimal places without trailing zeros; positive values below
 0.01 display as ``<0.01`` rather than zero.
 ``AVG CPU USED`` divides ``resource_utilization.cpu_consumed.cpu_seconds`` by the shared participant
 ``duration_seconds``. Totals are calculated at query time. ``*`` marks incomplete values;
-``—`` means no usable value. See the output examples in
+``—`` means no usable value. Structured explanations appear once in the owning
+participant or totals object's ``issues`` list, tagged by metric and code.
+See the output examples in
 :ref:`resource_statistics` and the detailed explanations:
 
 - :ref:`resource_statistics_capacity`

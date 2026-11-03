@@ -183,17 +183,27 @@ precision. Unknown values are not ``null`` or inferred zero.
 The :download:`job summary example <examples/resource_summary.json>` stores
 ``job_id`` and participant entries. Each accepted entry has ``participant_name``,
 ``role``, server ``received_at`` time, optional shared ``duration_seconds``, and
-copies of ``resource_capacity``, ``resource_time`` and ``resource_utilization``. Filesystem
-capacity stays in participant detail. Queries derive totals from the summary.
+copies of ``resource_capacity``, ``resource_time`` and ``resource_utilization``,
+plus one scope-level ``issues`` list. Filesystem
+capacity and filesystem-only issues stay in participant detail. Missing, invalid
+and disabled rows have no measurements and carry no issue list. Queries derive
+totals from the summary.
 
-``resource_utilization`` groups CPU work, retained run-directory content, and
-message payload. Each child measurement keeps its own value, status, and
-issues. For example, ``retained_content.bytes`` stays inside its measurement
-object so a partial byte count can carry its own explanation. There is no
-shared utilization status that would obscure which measurement failed.
-Job and study totals keep the same utilization group beside accumulated
-``resource_time``. Utilization here means recorded work, content, and traffic;
-it does not claim GPU busy time or a utilization percentage.
+``resource_utilization`` groups CPU work, retained content and message payload.
+Each metric keeps its own value and exceptional ``status``. One ``issues`` list
+on the containing participant or totals object supplies the explanations as
+``{"metric": "retained_content", "code": "observation_incomplete"}`` entries.
+Entries are unique and sorted by metric, then code; a complete scope has
+``"issues": []``. The list does not replace per-metric status.
+
+Participant reports and accepted participant rows carry their source issues.
+Derived job totals, each study job's totals, and study totals carry their own
+aggregate issues. Source explanations stay with participants rather than being
+copied into aggregate lists. The stored job summary and study response do not
+add another root list around their rows or totals.
+
+Utilization means recorded work, content and traffic; it does not claim GPU busy
+time or a utilization percentage.
 
 Reports contain no hardware-model descriptions or device-type groups. Raw GPU
 UUIDs, PCI addresses, environment values, credentials, and private transfer
@@ -228,8 +238,8 @@ Exceptions identify what happened without changing another measurement's value:
      - Participant
      - The server knows this expected participant was not launched for the job.
 
-The JSON ``issues`` codes have the following meanings. The CLI shows the
-explanation, not the code:
+Each scope-level ``issues`` entry names an affected ``metric`` and a ``code``.
+The existing codes have the following meanings. The CLI shows the explanation:
 
 .. list-table:: Issue codes
    :header-rows: 1
@@ -261,16 +271,19 @@ unavailable GPU observation:
    {
      "resource_capacity": {
        "status": "partial",
-       "issues": [
-         "observation_incomplete"
-       ],
        "cpu": {
          "units": 2
        },
        "memory": {
          "bytes": 2147483648
        }
-     }
+     },
+     "issues": [
+       {
+         "metric": "resource_capacity",
+         "code": "observation_incomplete"
+       }
+     ]
    }
 
 The CLI translates gaps into readable explanations, marks incomplete numbers

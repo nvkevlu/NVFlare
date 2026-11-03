@@ -45,7 +45,8 @@ A participant stores both counters:
          "sent_bytes": 1073741824,
          "received_bytes": 536870912
        }
-     }
+     },
+     "issues": []
    }
 
 This participant sent 1 GiB and received 0.5 GiB during collection.

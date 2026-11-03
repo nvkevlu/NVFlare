@@ -22,7 +22,8 @@ The report stores CPU work and one shared participant duration:
        "cpu_consumed": {
          "cpu_seconds": 180
        }
-     }
+     },
+     "issues": []
    }
 
 The CLI calculates:

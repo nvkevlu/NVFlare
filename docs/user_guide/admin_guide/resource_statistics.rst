@@ -82,7 +82,9 @@ A number followed by ``*`` has incomplete information. For example, CPU
 capacity may use a best-effort count when a container limit cannot be read.
 An em dash (``—``) means no usable value. The ``Data gaps`` section explains
 the limitation, and ``--format json`` provides the structured details.
-Successful measurements have no status label in JSON.
+Successful measurements have no status label in JSON. Each participant or totals
+object has one shared ``issues`` list naming affected metrics; it is empty when
+that scope is complete.
 
 A participant may send a valid report with CPU data but no GPU observation.
 CPU averages can still be shown. A failed or missing report does not change the training

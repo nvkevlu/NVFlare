@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://nvflare.nvidia.com/schemas/resource_stats/v1/resource_stats.json",
   "title": "NVFlare participant resource-statistics record v1",
-  "description": "Schema 1.0 records separate scalar startup capacity, accumulated execution capacity-time, and grouped utilization. Quantities are native JSON numbers; byte and device counts are integers.",
+  "description": "Schema 1.0 scalar resource measurements use native numbers and per-metric status, with one scope-owned issues list tagged by metric and code.",
   "oneOf": [
     {
       "$ref": "#/$defs/participant_summary"
@@ -41,7 +41,12 @@
     "Archive publication writes accepted participant files before resource_summary.json.",
     "duration_seconds is one containing participant window, never the sum of worker durations.",
     "Queries sum recorded per-execution resource_time without multiplying startup capacity again.",
-    "Each physical worker execution contributes once; no task/worker inventory or hardware grouping is public."
+    "Each physical worker execution contributes once; no task/worker inventory or hardware grouping is public.",
+    "Metrics retain their own exceptional status but never contain nested issues arrays.",
+    "Participant reports, accepted participant rows, worker records and terminal handoffs own one issues list of unique {metric,code} entries sorted by metric then code; complete scopes use [].",
+    "Derived job totals, per-study-job totals and study totals own aggregate issue lists rather than copying participant source details.",
+    "The persisted job summary and study response do not add duplicate root issues lists around participant rows or totals.",
+    "Each noncomplete metric has meaningful scope issues; a complete metric has none. Scope/metric/code correlations are enforced by the production contract."
   ],
   "x-nvflare-privacy": [
     "No hardware descriptions, raw CPU topology, UUIDs, serials, PCI addresses, host identifiers or raw visibility masks are reported."
@@ -110,60 +115,15 @@
       "pattern": "^[A-Za-z0-9][A-Za-z0-9 ._:/+-]{0,63}$",
       "description": "Bounded underlying NVFlare job-lifecycle value; distinct from resource_data."
     },
-    "capacity_unavailable_issue": {
-      "enum": [
-        "attribution_incomplete",
-        "malformed_source",
-        "observation_incomplete",
-        "unsupported"
-      ]
-    },
-    "source_unavailable_issue": {
-      "enum": [
-        "attribution_incomplete",
-        "malformed_source",
-        "observation_incomplete",
-        "unsupported"
-      ]
-    },
-    "partial_issue": {
-      "enum": [
-        "observation_incomplete"
-      ]
-    },
-    "resource_time_partial_issue": {
-      "enum": [
-        "attribution_incomplete",
-        "observation_incomplete"
-      ]
-    },
-    "resource_time_unavailable_issue": {
-      "enum": [
-        "attribution_incomplete",
-        "malformed_source",
-        "observation_incomplete",
-        "unsupported"
-      ]
-    },
     "capacity_unavailable": {
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "status",
-        "issues"
+        "status"
       ],
       "properties": {
         "status": {
           "const": "unavailable"
-        },
-        "issues": {
-          "type": "array",
-          "minItems": 1,
-          "maxItems": 4,
-          "uniqueItems": true,
-          "items": {
-            "$ref": "#/$defs/capacity_unavailable_issue"
-          }
         }
       }
     },
@@ -171,21 +131,11 @@
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "status",
-        "issues"
+        "status"
       ],
       "properties": {
         "status": {
           "const": "unavailable"
-        },
-        "issues": {
-          "type": "array",
-          "minItems": 1,
-          "maxItems": 4,
-          "uniqueItems": true,
-          "items": {
-            "$ref": "#/$defs/source_unavailable_issue"
-          }
         }
       }
     },
@@ -272,21 +222,11 @@
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "status",
-        "issues"
+        "status"
       ],
       "properties": {
         "status": {
           "const": "partial"
-        },
-        "issues": {
-          "type": "array",
-          "minItems": 1,
-          "maxItems": 4,
-          "uniqueItems": true,
-          "items": {
-            "$ref": "#/$defs/resource_time_partial_issue"
-          }
         },
         "cpu": {
           "$ref": "#/$defs/cpu_time"
@@ -320,21 +260,11 @@
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "status",
-        "issues"
+        "status"
       ],
       "properties": {
         "status": {
           "const": "unavailable"
-        },
-        "issues": {
-          "type": "array",
-          "minItems": 1,
-          "maxItems": 4,
-          "uniqueItems": true,
-          "items": {
-            "$ref": "#/$defs/resource_time_unavailable_issue"
-          }
         }
       }
     },
@@ -368,24 +298,11 @@
       "additionalProperties": false,
       "required": [
         "status",
-        "issues",
         "cpu_seconds"
       ],
       "properties": {
         "status": {
           "const": "partial"
-        },
-        "issues": {
-          "type": "array",
-          "minItems": 1,
-          "maxItems": 4,
-          "uniqueItems": true,
-          "items": {
-            "enum": [
-              "attribution_incomplete",
-              "observation_incomplete"
-            ]
-          }
         },
         "cpu_seconds": {
           "$ref": "#/$defs/decimal"
@@ -466,24 +383,11 @@
       "additionalProperties": false,
       "required": [
         "status",
-        "issues",
         "bytes"
       ],
       "properties": {
         "status": {
           "const": "partial"
-        },
-        "issues": {
-          "type": "array",
-          "minItems": 1,
-          "maxItems": 4,
-          "uniqueItems": true,
-          "items": {
-            "enum": [
-              "attribution_incomplete",
-              "observation_incomplete"
-            ]
-          }
         },
         "bytes": {
           "$ref": "#/$defs/unsigned"
@@ -524,22 +428,12 @@
       "additionalProperties": false,
       "required": [
         "status",
-        "issues",
         "sent_bytes",
         "received_bytes"
       ],
       "properties": {
         "status": {
           "const": "partial"
-        },
-        "issues": {
-          "type": "array",
-          "minItems": 1,
-          "maxItems": 4,
-          "uniqueItems": true,
-          "items": {
-            "$ref": "#/$defs/partial_issue"
-          }
         },
         "sent_bytes": {
           "$ref": "#/$defs/unsigned"
@@ -566,24 +460,11 @@
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "status",
-        "issues"
+        "status"
       ],
       "properties": {
         "status": {
           "const": "unavailable"
-        },
-        "issues": {
-          "type": "array",
-          "minItems": 1,
-          "maxItems": 2,
-          "uniqueItems": true,
-          "items": {
-            "enum": [
-              "malformed_source",
-              "observation_incomplete"
-            ]
-          }
         }
       }
     },
@@ -688,7 +569,8 @@
       "additionalProperties": false,
       "required": [
         "resource_time",
-        "resource_utilization"
+        "resource_utilization",
+        "issues"
       ],
       "properties": {
         "resource_time": {
@@ -696,6 +578,9 @@
         },
         "resource_utilization": {
           "$ref": "#/$defs/resource_utilization_total"
+        },
+        "issues": {
+          "$ref": "#/$defs/total_issues"
         }
       }
     },
@@ -708,7 +593,8 @@
         "received_at",
         "resource_capacity",
         "resource_utilization",
-        "resource_time"
+        "resource_time",
+        "issues"
       ],
       "properties": {
         "participant_name": {
@@ -735,6 +621,9 @@
         },
         "resource_time": {
           "$ref": "#/$defs/resource_time"
+        },
+        "issues": {
+          "$ref": "#/$defs/participant_row_issues"
         }
       }
     },
@@ -952,7 +841,8 @@
         "resource_capacity",
         "workspace_filesystem",
         "resource_utilization",
-        "resource_time"
+        "resource_time",
+        "issues"
       ],
       "properties": {
         "schema_version": {
@@ -985,6 +875,9 @@
         },
         "resource_time": {
           "$ref": "#/$defs/resource_time"
+        },
+        "issues": {
+          "$ref": "#/$defs/scope_issues"
         }
       }
     },
@@ -1117,8 +1010,7 @@
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "status",
-        "issues"
+        "status"
       ],
       "properties": {
         "cpu": {
@@ -1132,15 +1024,6 @@
         },
         "status": {
           "const": "partial"
-        },
-        "issues": {
-          "type": "array",
-          "minItems": 1,
-          "maxItems": 4,
-          "uniqueItems": true,
-          "items": {
-            "$ref": "#/$defs/resource_time_partial_issue"
-          }
         }
       },
       "anyOf": [
@@ -1212,6 +1095,92 @@
         "retained_content": {
           "$ref": "#/$defs/retained_content"
         }
+      }
+    },
+    "scope_issue": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "metric",
+        "code"
+      ],
+      "properties": {
+        "metric": {
+          "enum": [
+            "resource_capacity",
+            "resource_time",
+            "workspace_filesystem",
+            "cpu_consumed",
+            "retained_content",
+            "message_traffic"
+          ]
+        },
+        "code": {
+          "enum": [
+            "observation_incomplete",
+            "attribution_incomplete",
+            "unsupported",
+            "malformed_source"
+          ]
+        }
+      }
+    },
+    "scope_issues": {
+      "type": "array",
+      "uniqueItems": true,
+      "maxItems": 24,
+      "items": {
+        "$ref": "#/$defs/scope_issue"
+      },
+      "description": "Scope-owned metric/code explanations, sorted by metric then code; [] when complete."
+    },
+    "participant_row_issues": {
+      "type": "array",
+      "uniqueItems": true,
+      "maxItems": 20,
+      "items": {
+        "allOf": [
+          {
+            "$ref": "#/$defs/scope_issue"
+          },
+          {
+            "properties": {
+              "metric": {
+                "enum": [
+                  "resource_capacity",
+                  "resource_time",
+                  "cpu_consumed",
+                  "retained_content",
+                  "message_traffic"
+                ]
+              }
+            }
+          }
+        ]
+      }
+    },
+    "total_issues": {
+      "type": "array",
+      "uniqueItems": true,
+      "maxItems": 16,
+      "items": {
+        "allOf": [
+          {
+            "$ref": "#/$defs/scope_issue"
+          },
+          {
+            "properties": {
+              "metric": {
+                "enum": [
+                  "resource_time",
+                  "cpu_consumed",
+                  "retained_content",
+                  "message_traffic"
+                ]
+              }
+            }
+          }
+        ]
       }
     }
   }

@@ -41,5 +41,6 @@
   "schema_version": "1.0",
   "workspace_filesystem": {
     "capacity_bytes": 1099511627776
-  }
+  },
+  "issues": []
 }

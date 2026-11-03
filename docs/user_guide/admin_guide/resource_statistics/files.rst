@@ -28,7 +28,8 @@ inventory. For example:
        "retained_content": {
          "bytes": 1073741824
        }
-     }
+     },
+     "issues": []
    }
 
 This records 1 GiB of file content. Job and study queries can add these totals.
@@ -63,7 +64,8 @@ For example:
    {
      "workspace_filesystem": {
        "capacity_bytes": 1099511627776
-     }
+     },
+     "issues": []
    }
 
 This reports 1 TiB of visible workspace-filesystem capacity, not 1 TiB of
