@@ -71,11 +71,13 @@ The following abbreviated example for a resident job omits identity:
 }
 ```
 
-The example describes one resident participant. Capacity is observed at job-process
-startup; work and traffic are measured over their respective collection boundaries,
-and retained content is scanned at finalization. In task mode, capacity-time also
-includes worker windows, while startup capacity still describes the job process.
-Quantities use native finite JSON numbers; byte and device counts are integers.
+The example describes one resident participant. CPU and RAM capacity are
+observed at job-process startup; GPU discovery runs alongside the application
+using the launch-time environment. Work and traffic follow their respective
+collection boundaries, and retained content is scanned at finalization. In task
+mode, capacity-time also includes worker windows, while participant startup
+capacity still describes the job process. Quantities use native finite JSON
+numbers; byte and device counts are integers.
 
 | Field | Meaning, scope, and collection |
 | --- | --- |
@@ -117,37 +119,42 @@ deduplicated network-byte total. Direct in-process delivery is excluded.
 ## Collection and delivery
 
 ```text
-Job process: prepare workspace -> observe capacity and open counters
-             -> run application -> finish counters and scan files
+Job process: prepare workspace -> probe CPU/RAM and start GPU discovery
+             -> open counters -> run application -> freeze CPU/duration
+             -> finish GPU observation and scan files
 Parent:      consume terminal handoff -> release resources -> report outcome
 Server:      validate participant report -> finalize workspace archive
 User:        authorized job/site/study query -> derive totals -> render
 ```
 
-Collection starts after existing workspace preparation and before
-application construction in the client/server job entry points. Observations
-are finalized during cleanup, so application construction or execution failures
-can still produce statistics. Collection does not change normal Python startup,
-resource assignment, or process ownership. CPU
-and memory probes use existing affinity and visible cgroup limits. CUDA
-enumeration uses the system Driver and reports only a count. No NVML or PyTorch
-dependency is added.
+Collection starts after existing workspace preparation and before application
+construction in the client/server job entry points. Observations are finalized
+during cleanup, so application construction or execution failures can still
+produce statistics. Collection does not change normal Python startup, resource
+assignment, or process ownership. CPU and memory probes use existing affinity
+and visible cgroup limits. CUDA enumeration uses the system Driver and reports
+only a count. No NVML or PyTorch dependency is added.
 
 Driver enumeration can initialize CUDA in its calling process. To avoid altering
 the application's CUDA initialization, it runs in a fresh helper process with a
 bounded lifetime under the existing process owner. The helper inherits the
-execution's finalized visibility and limits. A later application mask change does
-not alter this resident startup observation. Task workers instead reuse an
-application-initialized CUDA count without initializing CUDA for statistics; an
-unavailable count is retained as a gap. Capacity is availability, not GPU use.
+execution's finalized visibility and limits. A positive count retains the
+helper's initialization until release; zero and unavailable results exit without
+a hold. The helper monitors its owner throughout discovery and the hold. A later
+application mask change does not alter this resident startup observation. Task
+workers instead observe application-initialized CUDA state after CPU and
+duration are frozen, without initializing CUDA for statistics. An unavailable
+count remains a gap. Capacity describes visibility, not GPU use.
 
 The parent supplies participant identity and attaches the report to the existing
 `REPORT_JOB_OUTCOME` request. It releases resources through the normal lifecycle
-even if statistics are missing, invalid, or delayed. The server retains accepted reports until
-finalization, writes participant files and then `resource_summary.json` under
-`resource_stats/`, and includes them in the normal workspace archive. Queries
-use existing per-job authorization. There is no separate statistics database,
-periodic sender, or live resource-monitoring service.
+even if statistics are missing, invalid, or delayed. An error during resource
+release is logged without suppressing the terminal outcome report. The server
+retains accepted reports until finalization, writes participant files and then
+`resource_summary.json` under `resource_stats/`, and includes them in the normal
+workspace archive. Queries use existing per-job authorization. There is no
+separate statistics database, periodic sender, or live resource-monitoring
+service.
 
 ## Quality, failure, and cost
 
@@ -172,28 +179,29 @@ average uses the terminal generation's containing duration as its denominator,
 when that duration is valid; it does not use elapsed time across restarts.
 Retained content comes from the final workspace scan. The parent accepts only a
 handoff bound to the terminal launch generation; missing terminal observations
-remain gaps even if an earlier generation's file survives.
+remain gaps even if an earlier generation's file survives. Scheduling retries
+alone do not establish that an earlier execution occurred.
 
 Filesystem observations run in isolation with a bounded finalization wait, so a
 blocked optional probe does not hold up job cleanup or resource release
-indefinitely. Captured
-measurements are preserved, unfinished observations become unavailable, and late
-results are ignored. Requested archive members and ZIP indexing have separate
-decoded-data and metadata-read bounds. Remote job stores may still transfer the whole
-workspace archive to answer a small query. Query latency and temporary storage
-can therefore depend on the archive size, not just the statistics size. Each server
-admits one archive-backed job or study query at a time and rejects concurrent
-requests with `resource query busy; retry later`. This bounds concurrency only;
-the [reporting design](resource_statistics_reporting.md) describes the remaining
-transfer-size, disk-space, and execution-time limitations.
+indefinitely. Captured measurements are preserved, unfinished observations
+become unavailable, and late results are ignored. Requested archive members and
+ZIP indexing have separate decoded-data and metadata-read bounds. Remote job
+stores may still transfer the whole workspace archive to answer a small query.
+Query latency and temporary storage can therefore depend on the archive size,
+not just the statistics size. Each server admits one archive-backed job or study
+query at a time and rejects concurrent requests with `resource query busy; retry
+later`. This bounds concurrency only; the [reporting
+design](resource_statistics_reporting.md) describes the remaining transfer-size,
+disk-space, and execution-time limitations.
 
 ## Task lifetime
 
 With `execution_lifetime="task"`, the resident Client Job coordinates workers
 whose resources and lifetimes can differ from its own. Statistics are collected
-inside each worker's actual environment and rolled into the participant's existing
-CPU-work and traffic fields. Retained content is scanned once at finalization.
-There is no public task or worker list.
+inside each worker's actual environment and rolled into the participant's
+existing CPU-work, capacity-time, and traffic fields. Retained content is
+scanned once at finalization. There is no public task or worker list.
 
 For example, a 60-second coordinator with zero GPUs and 2 CPU seconds launches
 one-GPU workers lasting 10 and 5 seconds, using 8 and 4 CPU seconds. The participant
@@ -215,10 +223,12 @@ report omits participant duration and CPU average because containment in the
 participant window cannot be established. Valid CPU and capacity-time totals remain
 useful. Statistics does not authorize publication, retry, recovery or cleanup.
 
-Resource statistics uses a common accounting path across supported launchers.
-External/attach, grouped, and distributed execution use this path when their
-runtime integrations provide execution identity, attributable measurement scopes,
-artifact access, and lifecycle ownership.
+Resource statistics follows the admitted singleton task-worker path across
+supported launchers. External/attach, grouped, and distributed execution require
+runtime-owned execution identities, attributable measurement scopes, artifact
+access, and lifecycle evidence. Rank-zero observations alone do not describe a
+multi-node Slurm job: its capacity is unavailable and CPU attribution is
+incomplete.
 
 ## User interface
 
@@ -236,12 +246,13 @@ nvflare resources --schema
 
 A job query searches the default study unless `--study` specifies another study.
 The command presents capacity-time and utilization per participant, including in
-the selected-site view. Participant detail labels the raw snapshot **Job-process startup capacity**; for task jobs
-this is coordinator capacity, not a worker inventory. GPU counts are integers;
-CPU quotas, average CPU use and capacity-time may be fractional. Text uses at
-most two decimals without trailing zeros, with `<0.01` for small positive values.
-JSON uses native numbers and preserves the measurement quality markers; text
-rounding does not change stored values.
+the selected-site view. Participant detail labels the raw snapshot **Job-process
+startup capacity**. For task jobs, this describes the coordinator rather than an
+inventory of its workers. GPU counts are integers; CPU quotas, average CPU use
+and capacity-time may be fractional. Text uses at most two decimals without
+trailing zeros, with `<0.01` for small positive values. JSON uses native numbers
+and preserves the measurement quality markers; text rounding does not change
+stored values.
 
 ## Related architecture
 

@@ -15,15 +15,19 @@ The collector starts after that preparation and before configuration constructs
 user components. It does not run in the persistent site or server parent, change
 Python startup, or count the initial workspace download as job Cell traffic.
 
-For each physical execution, the collector first probes capacity, then opens a
-monotonic duration window and records baseline CPU counters. For the job process,
-it closes the CPU and duration window and freezes traffic at the existing
-pre-streaming-shutdown publication boundary. If known callbacks or managed
-trainers can outlive that snapshot, the affected coverage is partial; a later
-callback drain does not extend the observation window retroactively. The collector
-scans retained files once per participant, before report files and the final
-archive are written. Probe and scan overhead is outside the CPU window, and there
-is no sampling thread or periodic report sender.
+For each physical execution, CPU and RAM capacity are probed before the
+monotonic duration window and CPU counters start. Resident GPU discovery runs in
+a separate helper alongside application execution. At the job process's
+pre-streaming-shutdown publication boundary, the collector freezes CPU,
+duration, and traffic before reading the GPU result or reaping its helper. If
+known callbacks or managed trainers can outlive that snapshot, the affected
+coverage is partial; a later callback drain does not extend the observation
+window retroactively. The collector scans retained files once per participant,
+before report files and the final archive are written. Final GPU result reading,
+helper cleanup, and file scanning occur after CPU and duration are frozen. The
+GPU helper remains unreaped during the window, so its CPU work is excluded from
+the job's waited-child counters. There is no sampling thread or periodic report
+sender.
 
 Task collection runs inside the actual worker environment after launcher limits
 and visibility are established. The existing [worker](https://github.com/NVIDIA/NVFlare/blob/main/nvflare/private/fed/task_worker/worker.py)
@@ -67,11 +71,10 @@ are not capacity bounds.
 For RAM, the probe takes the minimum of physical page count times page size and
 finite, readable ancestor limits: v2 `memory.max` or v1 `memory.limit_in_bytes`.
 It recognizes the kernel's v1 page-aligned unlimited sentinel rather than
-reporting it as usable RAM, and rejects malformed or nonpositive limits and
-overflow. It does not substitute `memory.high`, swap limits, free memory,
-resident set size, or GPU memory. A readable physical bound remains usable with
-partial quality when a cgroup limit is unreadable; if no bound is usable, the
-dimension is unavailable.
+reporting it as usable RAM, and rejects malformed or nonpositive limits. It does
+not substitute `memory.high`, swap limits, free memory, resident set size, or
+GPU memory. A readable physical bound remains usable with partial quality when a
+cgroup limit is unreadable; if no bound is usable, the dimension is unavailable.
 
 An absent controller is different from inaccessible discovery or required files:
 an absent optional controller does not itself imply failure. Hidden ancestors
@@ -86,21 +89,29 @@ them, affected dimensions are unsupported rather than guessed.
 ## CUDA visibility
 
 Resident discovery calls the system CUDA Driver in a fresh helper with the
-execution's finalized launcher environment and limits. After loading
-`libcuda.so.1`, an exactly empty `CUDA_VISIBLE_DEVICES` yields zero without
-initializing CUDA. Otherwise `cuInit` and `cuDeviceGetCount` provide the integer
-CUDA-visible count. The Driver interprets indices, UUIDs and MIG visibility.
-There is no model/memory query, UUID matching, NVML classification, or framework
-import. Counts can include visible MIG instances, without claiming that an
-instance equals a physical GPU or an exclusive allocation.
+execution's finalized launcher environment and limits. On Linux it loads
+`libcuda.so.1`. With a loadable Driver, an exactly empty `CUDA_VISIBLE_DEVICES`
+yields zero without initializing CUDA. Otherwise `cuInit` and `cuDeviceGetCount`
+provide the integer CUDA-visible count. The Driver interprets indices, UUIDs and
+MIG visibility. There is no model/memory query, UUID matching, NVML
+classification, or framework import. Counts can include visible MIG instances,
+without claiming that an instance equals a physical GPU or an exclusive
+allocation.
 
-Discovery overlaps the application and retains its result and initialization
-until execution cleanup. A later application mask change does not revise the
-resident startup snapshot. The helper has a 30-second background failure deadline;
-after freezing CPU and duration, resident collection waits at most two seconds
-for its count within that budget, followed by bounded cleanup. Output is bounded.
-A valid zero or explicit no-device result is zero; missing Driver or failed
-count is unavailable and does not erase CPU/RAM observations.
+Discovery overlaps application execution. A positive count retains the helper's
+initialization until the owner releases it; zero and unavailable results exit
+without a hold. The helper monitors its owning process during both discovery and
+the hold, even if another process inherits the control pipe. A later application
+mask change does not revise the resident startup observation.
+
+The helper has a 30-second discovery deadline. After freezing CPU and duration,
+resident collection waits at most two seconds for unfinished discovery within
+that deadline. An already completed result remains readable after a longer job.
+Output is limited to 128 bytes. Cleanup allows a one-second exit wait and, if
+needed, a kill followed by one further one-second reap wait. A kernel-delayed
+exit is reaped asynchronously without extending that wait. A valid zero or
+explicit no-device result is zero; a missing Driver or failed count is
+unavailable and does not erase CPU or RAM observations.
 
 Task workers start no helper and never call `cuInit` for reporting. After freezing
 their CPU/duration window they reuse `cuDeviceGetCount` from application-initialized
@@ -211,10 +222,10 @@ unavailable rather than falling back to a followable path walk.
 
 The scan budgets are 100,000 visited entries, depth 64, and one second of
 monotonic traversal, checked between entries. Iterators are depth-bounded rather
-than materializing directory listings. A limit, permission error, vanishing entry,
-or overflow retains a partial subtotal. Failure before observing either an entry
-or an empty directory is unavailable; a successfully observed empty directory
-is zero. File contents are not opened.
+than materializing directory listings. A limit, permission error, or vanishing
+entry retains a partial subtotal. Failure before observing either an entry or an
+empty directory is unavailable; a successfully observed empty directory is zero.
+File contents are not opened.
 
 The scan is non-atomic: concurrent writes and renames, as well as ordinary mounted
 subtrees, affect it. The result measures logical retained content, not peak storage,
@@ -223,12 +234,16 @@ directory observes visible filesystem capacity without walking mounts or adding
 capacities.
 
 Filesystem observations run in an isolated process behind a bounded finalization
-wait. The cooperative scan deadline limits ordinary traversal; the outer wait also
-covers startup and filesystem calls that do not return. At expiry, cleanup proceeds
-with any safely captured measurement and marks unfinished observations unavailable.
-A captured scan subtotal retains partial quality. Late results are ignored. The
-runtime owns observer termination and cleanup, and job termination and resource
-release do not wait indefinitely for the observer.
+wait of two seconds, including helper startup, followed by at most 0.25 seconds
+of synchronous reaping. The cooperative scan deadline limits ordinary traversal;
+the outer wait also covers filesystem calls that do not return. At expiry,
+cleanup proceeds with any safely captured measurement and marks unfinished
+observations unavailable. A captured scan subtotal retains partial quality. Late
+results are ignored. The runtime owns observer termination and cleanup. A
+late-starting observer is also abandoned, and the helper monitors its owner
+process and control pipe. Job termination and resource release do not wait
+indefinitely for the observer. These bounds apply to optional filesystem
+observations, not to handoff or archive I/O.
 
 ## Message payload accounting
 
@@ -259,17 +274,18 @@ each source is retired once, with missing-source quality preserved independently
 ## Quality propagation and worked example
 
 Successful measurements omit `status`. A `partial` measurement retains usable
-values with `observation_incomplete` or `attribution_incomplete`; an `unavailable`
-measurement has no usable value. Its owning scope records a supported issue such
-as `unsupported` or `malformed_source`, tagged with the affected metric. Only
-reporting-contract issue codes are used, never raw
-paths, native errors, or host data. Missing fields are not zero. Capacity and time
+values with `observation_incomplete` or `attribution_incomplete`; an
+`unavailable` measurement has no usable value. Its owning scope records a
+supported issue such as `unsupported` or `malformed_source`, tagged with the
+affected metric. Only reporting-contract issue codes are used, never raw paths,
+native errors, or host data. Missing fields are not zero. Capacity and time
 quality belongs to their owning objects rather than individual dimensions, so
 known CPU and RAM values are retained when GPU measurement fails. CPU work,
 retained content, and traffic each own their quality; filesystem is complete or
 unavailable. A participant, worker, handoff or aggregate owns one `issues` list;
-metrics retain their own status. Complete scopes use an empty list. Derived totals
-describe their own coverage gaps rather than copying source issue details.
+metrics retain their own status. Complete scopes use an empty list. Derived
+totals describe their own coverage gaps rather than copying source issue
+details.
 
 For example, unreadable worker GPU capacity makes capacity-time partial while
 valid CPU work and traffic can remain complete. A wholly missing worker report
@@ -284,11 +300,12 @@ Consider these disjoint executions, all within one 60-second participant window:
 | Worker A | 10 s | 2 units | 4 GiB | 1 | 8 CPU s |
 | Worker B | 5 s | 2 units | 4 GiB | 1 | 4 CPU s |
 
-The participant records 150 CPU-unit seconds, 180 GiB-seconds (`193273528320` byte-seconds), 15 GPU-instance-seconds,
-and 14 CPU seconds. Its duration remains 60 seconds and average CPU use is
-14/60, about 0.23 logical CPUs. Its startup snapshot remains 2 CPU units, 2 GiB
-RAM, and zero GPUs. Workers need not run consecutively: overlap changes neither
-the addition rule nor the meaning of observed capacity-time.
+The participant records 150 CPU-unit seconds, 180 GiB-seconds (`193273528320`
+byte-seconds), 15 GPU-instance-seconds, and 14 CPU seconds. Its duration remains
+60 seconds and average CPU use is 14/60, about 0.23 logical CPUs. Its startup
+snapshot remains 2 CPU units, 2 GiB RAM, and zero GPUs. Workers need not run
+consecutively: overlap changes neither the addition rule nor the meaning of
+observed capacity-time.
 
 If Worker B is settled but its report is missing, the coordinator and A subtotals
 are retained with incomplete quality, along with the known containing duration.
