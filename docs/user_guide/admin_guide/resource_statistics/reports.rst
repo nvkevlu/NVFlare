@@ -14,11 +14,11 @@ When measurements are taken
 
    Prepare the job workspace
        |
-   Capture CPU/RAM; start GPU discovery and elapsed/CPU counters
+   Capture CPU/RAM and GPU count; start elapsed/CPU counters
        |
    Run the application and count sent/received message payload
        |
-   Finish counters; resolve GPU discovery and close its helper
+   Finish elapsed/CPU and message counters
        |
    Observe file-size total and filesystem capacity
        |
@@ -28,14 +28,12 @@ When measurements are taken
        |
    Queries read the saved reports from the normal workspace archive
 
-After workspace preparation, CPU/RAM are observed before application construction
-and resident jobs start GPU discovery in a separate helper. Discovery overlaps
-execution; resident-job finalization waits at most two seconds for a verified
-count within the remaining discovery budget. Task workers start no helper and
-reuse CUDA initialization performed by the application.
+After workspace preparation, CPU/RAM and the GPU inventory are observed before
+application construction. GPU counting uses the same integer-index rules as
+NVFlare's resource manager, with a two-second inventory-command timeout.
 One participant-level ``duration_seconds`` covers execution and supplies the
-duration for CPU averages, excluding the final discovery wait and helper cleanup. File-size and
-filesystem-capacity observations are taken at the end.
+duration for CPU averages. Capacity probes are outside that window; file-size
+and filesystem-capacity observations are taken at the end.
 
 In task mode, the Client Job coordinates separately launched workers. Each worker
 records capacity and CPU work over its own execution window. Its capacity-time,
@@ -163,9 +161,9 @@ It uses the same format as a live participant report.
    * - ``resource_capacity.memory.bytes``
      - Visible RAM capacity in bytes.
    * - ``resource_capacity.gpu.count``
-     - Integer CUDA-device count visible to the execution; it can include MIG instances.
+     - Integer count of verified NVIDIA inventory IDs selected by the execution's visibility mask.
    * - ``resource_time``
-     - Sum of each execution's capacity times its own duration: CPU ``unit_seconds``, RAM ``byte_seconds``, and CUDA ``instance_seconds``.
+     - Sum of each execution's capacity times its own duration: CPU ``unit_seconds``, RAM ``byte_seconds``, and GPU ``instance_seconds`` (GPU-seconds).
    * - ``resource_utilization.cpu_consumed.cpu_seconds``
      - Recorded CPU work in ``cpu_seconds``; averages use the participant duration.
    * - ``workspace_filesystem.capacity_bytes``

@@ -1,9 +1,9 @@
 Recorded resources for job Synthetic capacity contract example (ID: synthetic-capacity-normal).
-GPU count basis: CUDA Driver (schema 1.0).
+GPU count basis: NVIDIA inventory and integer mask (schema 1.0).
 Participants with data: 2/2
 
 Recorded capacity-time per participant
-SITE    TIME    CPU VISIBLE core-h  MEM VISIBLE GiB-h  CUDA DEVICE-h
+SITE    TIME    CPU VISIBLE core-h  MEM VISIBLE GiB-h  GPU-h
 site-1  10m0s   5.33                10.67              0.33
 server  10m10s  1.36                2.71               0
 
@@ -13,7 +13,7 @@ site-1  0.3                   0                  1                 2
 server  0.2                   0.06               2                 1
 
 Recorded capacity-time totals
-  CPU visible 6.69 core-h | Memory visible 13.38 GiB-h | CUDA devices available 0.33 device-h
+  CPU visible 6.69 core-h | Memory visible 13.38 GiB-h | GPUs available 0.33 GPU-h
 
 Recorded resource utilization totals
   CPU time used 0.08 core-h | Run-dir files 0.06 GiB | Payload sent 3 GiB | Payload received 3 GiB

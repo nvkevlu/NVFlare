@@ -1,15 +1,13 @@
 .. _resource_statistics_capacity:
 
-CPU, Memory, and CUDA Capacity
-******************************
+CPU, Memory, and GPU Capacity
+*****************************
 
-Capacity describes the resources a job process can see, not how much it uses.
-NVFlare captures CPU/RAM at startup. Resident jobs discover CUDA capacity
-alongside application setup and execution; finalization can wait up to two
-seconds for the count, followed by bounded helper cleanup. Task workers reuse
-CUDA initialization performed by the application and never start a discovery
-helper. An unavailable GPU count does not erase CPU/RAM observations. Later
-allocation changes are not tracked.
+Capacity describes the resources available to the job process, not how much it
+uses. NVFlare captures CPU/RAM and the GPU count at startup. The GPU count
+uses the same integer-index selection rules as NVFlare's GPU resource manager.
+An unavailable GPU observation does not erase CPU/RAM data. Later allocation
+changes are not tracked.
 
 CPU capacity
 ============
@@ -65,23 +63,22 @@ and explains the gap. Only an observation with no usable value is unavailable.
 An absent controller or unlimited limit is not a failed measurement. Missing GPU
 information does not remove CPU or memory data.
 
-CUDA devices
-============
+GPU count
+==============
 
-The CUDA Driver counts devices visible in the execution environment. The count
-can include visible MIG compute instances; it is not a count of physical GPUs,
-a fraction of a full GPU, or a measurement of GPU use. Reports contain only this
-integer count, without model, memory, or device-type breakdowns.
+The GPU count is the number of verified integer GPU IDs selected by the
+execution's ``CUDA_VISIBLE_DEVICES`` mask. With no mask, it uses the verified
+``nvidia-smi`` inventory. An empty mask establishes zero without running the
+command. Unsupported selectors, including GPU UUIDs, are unavailable.
 
-The resident probe inherits the environment after the launcher has applied its
-GPU assignment. The startup observation retains that visibility even if the
-application later narrows its own CUDA mask. Task workers instead reuse an
-application-initialized CUDA count when available, without initializing CUDA
-for reporting. Missing observations remain unavailable.
+The probe runs after the launcher establishes the execution's environment,
+before its measurement window. Its inventory command has a two-second timeout.
+Missing, malformed, empty, or failed inventory remains unavailable rather than
+becoming zero. An explicit empty pool is ``"gpu": {"count": 0}``.
 
-An observed count of zero is ``"gpu": {"count": 0}``. A missing Driver or
-failed count is unavailable rather than zero. Startup capacity and device-hours
-describe availability, not GPU utilization or exclusive allocation.
+Reports contain only the integer count of selected inventory IDs, without model, memory, or
+device-type breakdowns. GPU-seconds and GPU-hours describe this pool's capacity
+over time, not GPU utilization or exclusive allocation.
 
 See :ref:`collection details <resource_statistics_capacity_collection>` for the
 probe and container-limit rules.

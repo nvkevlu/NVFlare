@@ -47,8 +47,8 @@ This example uses synthetic data to demonstrate the CLI format.
    :language: text
 
 The capacity-time table combines each execution's visible resources and duration.
-For example, two CUDA devices visible for ten minutes contribute one-third of
-a device-hour. CPU and memory use core-hours and GiB-hours. These values describe
+For example, a GPU count of two over ten minutes contributes one-third of
+a GPU-hour. CPU and memory use core-hours and GiB-hours. These values describe
 available capacity over time, not how busy those resources were.
 
 ``AVG CPU USED`` is different: it divides recorded CPU work by the

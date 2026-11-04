@@ -71,10 +71,9 @@ Each provides user and system CPU seconds:
             + change in waited-child user + system time
 
 The participant's ``duration_seconds`` is the shared elapsed measurement window,
-including application waiting. It starts after CPU/RAM probing and GPU helper
-launch, and ends with the CPU counter read. GPU discovery overlaps execution;
-any remaining discovery wait and helper cleanup occur after this window. The
-helper is not reaped before the CPU snapshot, so its CPU work is excluded. Workers have their own internal windows. Their work is summed,
+including application waiting. It starts after CPU/RAM and GPU probing,
+and ends with the CPU counter read. Workers have their own internal windows.
+Their work is summed,
 but their durations are not added to the participant duration.
 A missing or zero containing duration prevents calculation of an average;
 recorded ``cpu_seconds`` remains usable.

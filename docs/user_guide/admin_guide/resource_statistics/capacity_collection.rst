@@ -141,36 +141,28 @@ CPU and RAM use these Linux interfaces. An unsupported platform leaves the
 affected observation unavailable rather than substituting an unrelated
 measurement.
 
-CUDA count
-==========
+GPU count
+==============
 
-On Linux, resident discovery loads the system ``libcuda.so.1`` in a fresh helper
-that inherits the launcher's final environment, namespaces and limits. After
-loading the Driver, an exactly empty ``CUDA_VISIBLE_DEVICES`` yields zero without
-initialization. Otherwise the helper calls ``cuInit(0)`` and ``cuDeviceGetCount``.
-The Driver interprets device indices, UUIDs and MIG visibility; the collector does
-not parse masks or substitute a host inventory count.
+The statistics probe and ``GPUResourceManager`` share
+``gpu_utils.get_visible_gpu_ids``. The pool uses ``nvidia-smi`` integer GPU IDs,
+with ``CUDA_VISIBLE_DEVICES`` selecting which IDs are available in the reporting
+environment. Integer selectors preserve order, remove duplicates, and stop at the
+first negative or absent host index. With no mask, the verified host inventory
+is used. An empty mask establishes zero without running the command.
 
-Discovery overlaps application execution and retains its result and initialization
-until owner cleanup. It has a 30-second background failure deadline. After CPU
-and duration are frozen, resident finalization waits at most two seconds for a
-count within the remaining budget, followed by bounded helper cleanup. There is
-no model/memory lookup, UUID matching, NVML classification, or framework import.
-The startup observation is unchanged by later application mask changes.
+Unsupported noninteger selectors, including GPU UUIDs, make the statistics
+observation unavailable without querying inventory. Host-backed resource-manager
+pools reject those masks. Externally managed pools retain their ``ignore_host`` behavior.
 
-Task workers start no GPU helper. They query ``cuDeviceGetCount`` against CUDA
-state already initialized by the application, without calling ``cuInit``. A
-successful result takes precedence over later environment changes. If CUDA is
-uninitialized, an exactly empty mask establishes zero after the Driver loads;
-otherwise the count is unavailable. This reuse does not establish what an
-application's earlier, uninitialized mask would have exposed.
+The statistics inventory query uses ``get_host_gpu_ids(timeout=2.0)``. A missing
+command, command failure, timeout, malformed output, or empty inventory makes the
+GPU observation unavailable. These failures preserve independent CPU/RAM values.
+Collection uses the execution's existing permissions and does not initialize
+application CUDA, retain a CUDA context, import a framework, or change assignments.
 
-A successful zero or explicit ``CUDA_ERROR_NO_DEVICE`` is observed zero. A
-missing Driver, failed native call or invalid count is unavailable, preserving
-usable CPU/RAM values. Repeated reads reuse the execution's observation. The
-collector does not change persistence settings, permissions, launcher ownership
-or task deadlines. CUDA-visible counts can include MIG instances; they do not
-measure physical-GPU ownership or GPU utilization.
+The count is an integer. ``gpu.instance_seconds`` records the pool count times
+execution seconds, expressed as GPU-seconds; it does not measure GPU utilization.
 
 Duration
 ========
@@ -193,6 +185,6 @@ Further reading
 * `Linux CPU bandwidth control <https://docs.kernel.org/scheduler/sched-bwc.html>`_
   explains quota and period.
 * The :github_nvflare_link:`CPU/RAM collector <nvflare/private/fed/resource_stats/probes/cgroup_linux.py>`,
-  :github_nvflare_link:`CUDA collector <nvflare/private/fed/resource_stats/probes/gpu_nvidia.py>`,
+  :github_nvflare_link:`GPU collector <nvflare/private/fed/resource_stats/probes/gpu_nvidia.py>`,
   and :github_nvflare_link:`capacity recorder <nvflare/private/fed/resource_stats/accumulator.py>`
   contain the collection logic.
