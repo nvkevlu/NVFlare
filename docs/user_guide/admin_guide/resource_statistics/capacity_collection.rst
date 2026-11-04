@@ -151,9 +151,9 @@ environment. Integer selectors preserve order, remove duplicates, and stop at th
 first negative or absent host index. With no mask, the verified host inventory
 is used. An empty mask establishes zero without running the command.
 
-Unsupported noninteger selectors, including GPU UUIDs, make the statistics
-observation unavailable without querying inventory. Host-backed resource-manager
-pools reject those masks. Externally managed pools retain their ``ignore_host`` behavior.
+A noninteger selector reached before selection stops makes the statistics
+observation unavailable. Resource-manager pools validated against local GPUs
+reject those selectors. Externally managed pools retain their ``ignore_host`` behavior.
 
 The statistics inventory query uses ``get_host_gpu_ids(timeout=2.0)``. A missing
 command, command failure, timeout, malformed output, or empty inventory makes the
