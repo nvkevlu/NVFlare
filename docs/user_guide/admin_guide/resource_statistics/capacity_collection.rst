@@ -102,7 +102,8 @@ The process's membership and mount locations come from
 ``/proc/self/cgroup`` and ``/proc/self/mountinfo``. CPU and memory controls
 can be in different directories. Readable parent limits also apply: a
 container's own directory can say unlimited while its parent limits the
-whole group.
+whole group. For v1 memory, a parent's limit applies only while its
+``memory.use_hierarchy`` is ``1``; ``0`` ends that chain.
 
 For an optional inspection from a shell in the same environment:
 
@@ -134,8 +135,8 @@ Physical RAM comes from:
 The reported bytes are the smallest usable value among physical RAM and
 finite readable memory limits. An unlimited value is not a cap. A failed
 limit read retains physical RAM or a smaller readable bound and marks the
-capacity observation partial. If no positive byte value is available, memory
-capacity is unavailable.
+capacity observation partial. Zero is a valid hard memory limit. If no usable
+byte value is available, memory capacity is unavailable.
 
 CPU and RAM use these Linux interfaces. An unsupported platform leaves the
 affected observation unavailable rather than substituting an unrelated
@@ -152,8 +153,9 @@ first negative or absent host index. With no mask, the verified host inventory
 is used. An empty mask establishes zero without running the command.
 
 A noninteger selector reached before selection stops makes the statistics
-observation unavailable. Resource-manager pools validated against local GPUs
-reject those selectors. Externally managed pools retain their ``ignore_host`` behavior.
+observation unavailable. The host-backed resource manager retains its fallback
+to host inventory for unsupported masks. Externally managed pools retain their
+``ignore_host`` behavior.
 
 The statistics inventory query uses ``get_host_gpu_ids(timeout=2.0)``. A missing
 command, command failure, timeout, malformed output, or empty inventory makes the

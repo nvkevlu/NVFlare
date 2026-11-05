@@ -58,11 +58,11 @@ rounding applies only to text. This command does not stream JSON Lines.
 Read the result
 ================
 
-The capacity table shows observed CPU, memory, and CUDA-device capacity.
+The capacity table shows observed CPU, memory, and GPU capacity.
 A separate utilization table groups average CPU use, retained file bytes, and
 message payload. Job and study totals keep the same separation.
-CUDA-device counts are integers. CPU capacity and average CPU use may
-be fractional; device-hours may also be fractional. Text uses
+GPU counts are integers. CPU capacity and average CPU use may
+be fractional; GPU-hours may also be fractional. Text uses
 at most two decimal places without trailing zeros; positive values below
 0.01 display as ``<0.01`` rather than zero.
 ``AVG CPU USED`` divides ``resource_utilization.cpu_consumed.cpu_seconds`` by the shared participant

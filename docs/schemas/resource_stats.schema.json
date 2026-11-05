@@ -970,7 +970,7 @@
       ],
       "properties": {
         "bytes": {
-          "$ref": "#/$defs/positive_unsigned"
+          "$ref": "#/$defs/unsigned"
         }
       }
     },
