@@ -303,6 +303,6 @@ The :github_nvflare_link:`collector <nvflare/private/fed/resource_stats/collecto
 :github_nvflare_link:`coordinator <nvflare/private/fed/resource_stats/coordinator.py>`,
 and :github_nvflare_link:`archive reader <nvflare/private/fed/resource_stats/archive_reader.py>`
 implement the flow above. The
-:github_nvflare_link:`semantic contract <nvflare/private/fed/resource_stats/contract.py>`
+:github_nvflare_link:`report reader <nvflare/private/fed/resource_stats/report_reader.py>`
 and :github_nvflare_link:`JSON Schema <docs/schemas/resource_stats.schema.json>`
 define required fields, accepted values, privacy checks, and bounds.
