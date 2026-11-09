@@ -188,5 +188,5 @@ Further reading
   explains quota and period.
 * The :github_nvflare_link:`CPU/RAM collector <nvflare/private/fed/resource_stats/probes/cgroup_linux.py>`,
   :github_nvflare_link:`GPU collector <nvflare/private/fed/resource_stats/probes/gpu_nvidia.py>`,
-  and :github_nvflare_link:`capacity recorder <nvflare/private/fed/resource_stats/accumulator.py>`
+  and :github_nvflare_link:`startup capacity collection <nvflare/private/fed/resource_stats/collector.py>`
   contain the collection logic.
