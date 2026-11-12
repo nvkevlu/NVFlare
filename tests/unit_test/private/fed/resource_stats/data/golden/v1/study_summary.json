@@ -1,9 +1,9 @@
 {
   "coverage": {
-    "included_jobs": "2",
-    "nonterminal_jobs": "1",
-    "selected_jobs": "4",
-    "unavailable_jobs": "1"
+    "included_jobs": 2,
+    "nonterminal_jobs": 1,
+    "selected_jobs": 4,
+    "unavailable_jobs": 1
   },
   "generated_at": "2026-10-29T12:00:00Z",
   "jobs": [
@@ -13,43 +13,25 @@
       "job_status": "FINISHED:COMPLETED",
       "resource_data": "included",
       "totals": {
+        "issues": [],
         "resource_time": {
           "cpu": {
-            "groups": [
-              {
-                "unit_seconds": "4880"
-              },
-              {
-                "architecture": "x86_64",
-                "model": "AMD EPYC 9654",
-                "unit_seconds": "19200"
-              }
-            ]
+            "unit_seconds": 24080
           },
           "gpu": {
-            "groups": [
-              {
-                "instance_seconds": "1200",
-                "kind": "full_gpu",
-                "memory_bytes": "85899345920",
-                "model": "NVIDIA A100"
-              }
-            ]
+            "instance_seconds": 1200
           },
           "memory": {
-            "byte_seconds": "51711406243840"
+            "byte_seconds": 51711406243840
           }
         },
         "resource_utilization": {
           "cpu_consumed": {
-            "cpu_seconds": "300"
+            "cpu_seconds": 300
           },
           "message_traffic": {
-            "received_bytes": "3221225472",
-            "sent_bytes": "3221225472"
-          },
-          "retained_content": {
-            "bytes": "67108864"
+            "received_bytes": 3221225472,
+            "sent_bytes": 3221225472
           }
         }
       }
@@ -60,38 +42,25 @@
       "job_status": "FINISHED:COMPLETED",
       "resource_data": "included",
       "totals": {
+        "issues": [],
         "resource_time": {
           "cpu": {
-            "groups": [
-              {
-                "unit_seconds": "7280"
-              }
-            ]
+            "unit_seconds": 7280
           },
           "gpu": {
-            "groups": [
-              {
-                "instance_seconds": "600",
-                "kind": "full_gpu",
-                "memory_bytes": "85899345920",
-                "model": "NVIDIA A100"
-              }
-            ]
+            "instance_seconds": 600
           },
           "memory": {
-            "byte_seconds": "15633680957440"
+            "byte_seconds": 15633680957440
           }
         },
         "resource_utilization": {
           "cpu_consumed": {
-            "cpu_seconds": "150"
+            "cpu_seconds": 150
           },
           "message_traffic": {
-            "received_bytes": "3221225472",
-            "sent_bytes": "3221225472"
-          },
-          "retained_content": {
-            "bytes": "67108864"
+            "received_bytes": 3221225472,
+            "sent_bytes": 3221225472
           }
         }
       }
@@ -115,43 +84,25 @@
     "study_name": "synthetic-capacity-examples"
   },
   "totals": {
+    "issues": [],
     "resource_time": {
       "cpu": {
-        "groups": [
-          {
-            "unit_seconds": "12160"
-          },
-          {
-            "architecture": "x86_64",
-            "model": "AMD EPYC 9654",
-            "unit_seconds": "19200"
-          }
-        ]
+        "unit_seconds": 31360
       },
       "gpu": {
-        "groups": [
-          {
-            "instance_seconds": "1800",
-            "kind": "full_gpu",
-            "memory_bytes": "85899345920",
-            "model": "NVIDIA A100"
-          }
-        ]
+        "instance_seconds": 1800
       },
       "memory": {
-        "byte_seconds": "67345087201280"
+        "byte_seconds": 67345087201280
       }
     },
     "resource_utilization": {
       "cpu_consumed": {
-        "cpu_seconds": "450"
+        "cpu_seconds": 450
       },
       "message_traffic": {
-        "received_bytes": "6442450944",
-        "sent_bytes": "6442450944"
-      },
-      "retained_content": {
-        "bytes": "134217728"
+        "received_bytes": 6442450944,
+        "sent_bytes": 6442450944
       }
     }
   }

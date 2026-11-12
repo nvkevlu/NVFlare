@@ -12,9 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Keep published resource-statistics examples aligned with production readers."""
+"""Keep published resource examples aligned with production readers and rendering."""
 
-import ast
 import json
 import re
 from copy import deepcopy
@@ -22,20 +21,29 @@ from pathlib import Path
 
 import pytest
 
-from nvflare.private.fed.resource_stats.contract import (
-    SCHEMA_VERSION,
-    load_and_validate,
-    participant_measurements,
-    validate_record,
-)
-from nvflare.tool.resources.resources_output import render_job_resources, render_study_resources
+from dev_tools.generate_resource_stats_examples import examples
+from nvflare.private.fed.resource_stats.measurements import SCHEMA_VERSION, canonical_json_bytes
+from nvflare.private.fed.resource_stats.report_reader import read_resource_report
 
 ROOT = Path(__file__).resolve().parents[5]
 PUBLIC = ROOT / "docs/user_guide/admin_guide/resource_statistics"
 GOLDEN = ROOT / "tests/unit_test/private/fed/resource_stats/data/golden/v1"
 
 
-def test_maintained_schema_requires_explicit_time_for_participants():
+def test_published_examples_match_production_generation():
+    outputs = examples()
+    for name, data in outputs.items():
+        assert (GOLDEN / name).read_bytes() == data, name
+    for published, golden in (
+        ("participant_summary.json", "participant_summary.json"),
+        ("resource_summary.json", "resource_summary.json"),
+        ("job_resources.out", "resource_summary.txt"),
+        ("study_resources.out", "study_summary.txt"),
+    ):
+        assert (PUBLIC / "examples" / published).read_bytes() == outputs[golden]
+
+
+def test_schema_has_current_version_and_required_capacity_time():
     schema = json.loads((ROOT / "docs/schemas/resource_stats.schema.json").read_text())
     assert schema["$defs"]["schema_version"]["const"] == SCHEMA_VERSION == "1.0"
     for definition in ("participant_summary", "accepted_participant_entry"):
@@ -44,100 +52,25 @@ def test_maintained_schema_requires_explicit_time_for_participants():
         assert fields["properties"]["resource_time"] == {"$ref": "#/$defs/resource_time"}
 
 
-@pytest.mark.parametrize(
-    "name", ["participant_summary", "participant_summary_task", "resource_summary_task", "study_summary"]
-)
-def test_maintained_golden_records_use_the_production_reader(name):
-    record = load_and_validate((GOLDEN / f"{name}.json").read_bytes())
-    assert record["schema_version"] == SCHEMA_VERSION == "1.0"
+def _json_blocks(path):
+    text = path.read_text()
+    for match in re.finditer(r"\.\. code-block:: json\n\n((?:   .*\n|\n)+)", text):
+        yield json.loads("\n".join(line[3:] for line in match[1].splitlines()))
 
 
-@pytest.mark.parametrize(
-    "published,golden",
-    [
-        ("participant_summary.json", "participant_summary.json"),
-        ("resource_summary.json", "resource_summary.json"),
-        ("job_resources.out", "resource_summary.txt"),
-        ("study_resources.out", "study_summary.txt"),
-    ],
-)
-def test_published_examples_match_current_goldens(published, golden):
-    assert (PUBLIC / "examples" / published).read_bytes() == (GOLDEN / golden).read_bytes()
-
-
-def test_published_records_reconcile_without_filesystem_capacity_in_job_summary():
-    participant = load_and_validate((PUBLIC / "examples/participant_summary.json").read_bytes())
-    summary = load_and_validate((PUBLIC / "examples/resource_summary.json").read_bytes())
-    entry = next(
-        item for item in summary["participants"] if item["participant_name"] == participant["participant_name"]
-    )
-    assert summary["job_id"] == participant["job_id"]
-    for key, value in participant_measurements(participant).items():
-        assert entry[key] == value
-    assert "workspace_filesystem" in participant
-    assert all("workspace_filesystem" not in item for item in summary["participants"])
-
-
-def test_published_job_output_is_produced_by_current_renderer():
-    summary = load_and_validate((PUBLIC / "examples/resource_summary.json").read_bytes())
-    actual = render_job_resources(summary, job_name="Synthetic capacity contract example")
-    assert actual + "\n" == (PUBLIC / "examples/job_resources.out").read_text()
-
-
-def test_published_study_output_is_produced_by_current_renderer():
-    study = load_and_validate((GOLDEN / "study_summary.json").read_bytes())
-    assert render_study_resources(study) + "\n" == (PUBLIC / "examples/study_resources.out").read_text()
-
-
-def _code_blocks(path, language):
-    lines = path.read_text().splitlines()
-    for index, line in enumerate(lines):
-        if line != f".. code-block:: {language}":
-            continue
-        start = index + 1
-        while start < len(lines) and not lines[start].strip():
-            start += 1
-        end = start
-        while end < len(lines) and (lines[end].startswith("   ") or not lines[end].strip()):
-            end += 1
-        yield "\n".join(line[3:] for line in lines[start:end])
-
-
-@pytest.mark.parametrize("page", ["cpu_work", "files", "message_traffic", "reports"])
-def test_json_measurement_excerpts_fit_current_record(page):
-    participant = load_and_validate((PUBLIC / "examples/participant_summary.json").read_bytes())
-    blocks = list(_code_blocks(PUBLIC / f"{page}.rst", "json"))
+@pytest.mark.parametrize("page", ["cpu_work", "message_traffic", "reports"])
+def test_json_excerpts_fit_the_public_report(page):
+    record = json.loads((PUBLIC / "examples/participant_summary.json").read_bytes())
+    blocks = list(_json_blocks(PUBLIC / f"{page}.rst"))
     assert blocks
-    for block in blocks:
-        example = deepcopy(participant)
-        excerpt = json.loads(block)
+    for excerpt in blocks:
+        value = deepcopy(record)
         utilization = excerpt.pop("resource_utilization", {})
-        example.update(excerpt)
-        example["resource_utilization"].update(utilization)
-        validate_record(example)
+        value.update(excerpt)
+        value["resource_utilization"].update(utilization)
+        read_resource_report(canonical_json_bytes(value))
 
 
-@pytest.mark.parametrize("page", ["cpu_work", "files"])
-def test_diagnostic_python_snippets_are_syntactically_valid(page):
-    scripts = []
-    for block in _code_blocks(PUBLIC / f"{page}.rst", "shell"):
-        scripts.extend(re.findall(r"<<'PY'\n(.*?)\nPY", block, flags=re.DOTALL))
-    assert scripts
-    for script in scripts:
-        ast.parse(script)
-
-
-def test_public_guide_does_not_ask_users_to_import_private_helpers():
-    pages = [PUBLIC.with_suffix(".rst"), *PUBLIC.glob("*.rst")]
-    for page in pages:
+def test_guide_uses_public_interfaces():
+    for page in [PUBLIC.with_suffix(".rst"), *PUBLIC.glob("*.rst")]:
         assert not re.search(r"^\s*(?:from|import) nvflare\.private\b", page.read_text(), flags=re.MULTILINE), page
-
-
-def test_public_traffic_example_uses_independently_recorded_directions():
-    blocks = list(_code_blocks(PUBLIC / "message_traffic.rst", "json"))
-    assert blocks
-    for block in blocks:
-        traffic = json.loads(block)["resource_utilization"]["message_traffic"]
-        assert {"sent_bytes", "received_bytes"} <= traffic.keys()
-        assert "sent_to" not in traffic
-        assert "messages" not in traffic

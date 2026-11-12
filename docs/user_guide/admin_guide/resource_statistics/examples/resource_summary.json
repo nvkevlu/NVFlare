@@ -4,6 +4,7 @@
   "participants": [
     {
       "duration_seconds": 600,
+      "issues": [],
       "participant_name": "site-1",
       "received_at": "2026-10-29T12:00:00Z",
       "resource_capacity": {
@@ -35,16 +36,13 @@
         "message_traffic": {
           "received_bytes": 2147483648,
           "sent_bytes": 1073741824
-        },
-        "retained_content": {
-          "bytes": 0
         }
       },
-      "role": "client",
-      "issues": []
+      "role": "client"
     },
     {
       "duration_seconds": 610,
+      "issues": [],
       "participant_name": "server",
       "received_at": "2026-10-29T12:00:00Z",
       "resource_capacity": {
@@ -76,13 +74,9 @@
         "message_traffic": {
           "received_bytes": 1073741824,
           "sent_bytes": 2147483648
-        },
-        "retained_content": {
-          "bytes": 67108864
         }
       },
-      "role": "server",
-      "issues": []
+      "role": "server"
     }
   ],
   "schema_version": "1.0"

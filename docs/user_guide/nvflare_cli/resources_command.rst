@@ -6,7 +6,7 @@ Resources
 
 ``nvflare resources`` reads saved resource reports after a job has
 finished and the server has finalized them. It shows observed capacity,
-recorded CPU work, total run-directory file size, and message payload sent
+recorded CPU work and message payload sent
 and received. For the collection methods and interpretation, start with
 :ref:`resource_statistics`.
 
@@ -21,7 +21,7 @@ Commands
    # One job in a named study
    nvflare resources --job JOB_ID --study STUDY_NAME
 
-   # Add one participant's startup capacity and workspace-filesystem detail
+   # Add one participant's startup capacity
    nvflare resources --job JOB_ID --site site-1
 
    # Structured job or participant output
@@ -36,8 +36,7 @@ Arguments
 - ``--job``: job ID to inspect, in the default study unless ``--study`` is given.
 - ``--study``: select the study containing ``--job``, or query the study when
   ``--job`` is omitted.
-- ``--site``: include one participant's report, startup capacity and visible
-  workspace-filesystem capacity. Requires ``--job``.
+- ``--site``: include one participant's report and startup capacity. Requires ``--job``.
 - ``--format json``: return structured output for automation.
 - ``--schema``: print the command schema without connecting to a server.
 
@@ -59,7 +58,7 @@ Read the result
 ================
 
 The capacity table shows observed CPU, memory, and GPU capacity.
-A separate utilization table groups average CPU use, retained file bytes, and
+A separate utilization table groups average CPU use and
 message payload. Job and study totals keep the same separation.
 GPU counts are integers. CPU capacity and average CPU use may
 be fractional; GPU-hours may also be fractional. Text uses
@@ -74,7 +73,6 @@ See the output examples in
 
 - :ref:`resource_statistics_capacity`
 - :ref:`resource_statistics_cpu_work`
-- :ref:`resource_statistics_files`
 - :ref:`resource_statistics_message_traffic`
 - :ref:`resource_statistics_reports`
 

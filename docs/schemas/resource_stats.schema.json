@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://nvflare.nvidia.com/schemas/resource_stats/v1/resource_stats.json",
-  "title": "NVFlare participant resource-statistics record v1",
+  "title": "NVFlare resource-statistics reports",
   "description": "Schema 1.0 scalar resource measurements use native numbers and per-metric status, with one scope-owned issues list tagged by metric and code.",
   "oneOf": [
     {
@@ -13,48 +13,6 @@
     {
       "$ref": "#/$defs/study_summary"
     }
-  ],
-  "x-nvflare-units": {
-    "unit_seconds": "CPU-unit seconds",
-    "instance_seconds": "GPU-seconds: integer selected GPU count multiplied by execution seconds",
-    "byte_seconds": "byte-seconds",
-    "capacity_bytes": "bytes",
-    "bytes": "bytes",
-    "sent_bytes": "encoded and encrypted CellNet payload bytes whose send returned without error",
-    "received_bytes": "encoded and encrypted CellNet payload bytes observed at transport ingress",
-    "units": "logical CPU capacity units",
-    "count": "integer NVIDIA inventory IDs selected by the execution's visibility mask",
-    "duration_seconds": "elapsed seconds in the shared participant measurement window",
-    "resource_utilization.cpu_consumed.cpu_seconds": "user plus system CPU seconds consumed by observed job execution processes"
-  },
-  "x-nvflare-cross-record-invariants": [
-    "All live and archived records require schema 1.0.",
-    "Quantities are finite nonnegative native JSON numbers; bytes/counts are integers and booleans or numeric strings are rejected.",
-    "Startup capacity is scalar cpu.units, memory.bytes and gpu.count; capacity-time is scalar cpu.unit_seconds, memory.byte_seconds and gpu.instance_seconds.",
-    "An explicit empty GPU pool is count:0; unavailable or invalid inventory does not erase independent CPU/RAM values.",
-    "GPU counting uses NVFlare's shared integer-index visibility parser and verified nvidia-smi inventory in each execution's established environment; its command timeout is two seconds.",
-    "GPU capacity and capacity-time describe verified inventory selections, not GPU utilization or exclusive hardware ownership.",
-    "Accepted participant entries copy measurements from the matching authenticated participant record.",
-    "Sent and received payload bytes are independently observed and summed; a send is not proof of arrival.",
-    "Missing/incomplete expected reports make relevant totals partial; unavailable means no usable value.",
-    "Study totals include readable finalized jobs; coverage counts excluded and nonterminal jobs separately.",
-    "Archive publication writes accepted participant files before resource_summary.json.",
-    "duration_seconds is one containing participant window, never the sum of worker durations.",
-    "Queries sum recorded per-execution resource_time without multiplying startup capacity again.",
-    "Each physical worker execution contributes once; no task/worker inventory or hardware grouping is public.",
-    "Metrics retain their own exceptional status but never contain nested issues arrays.",
-    "Participant reports, accepted participant rows, worker records and terminal handoffs own one issues list of unique {metric,code} entries sorted by metric then code; complete scopes use [].",
-    "Derived job totals, per-study-job totals and study totals own aggregate issue lists rather than copying participant source details.",
-    "The persisted job summary and study response do not add duplicate root issues lists around participant rows or totals.",
-    "Each noncomplete metric has meaningful scope issues; a complete metric has none. Scope/metric/code correlations are enforced by the production contract."
-  ],
-  "x-nvflare-privacy": [
-    "No hardware descriptions, raw CPU topology, UUIDs, serials, PCI addresses, host identifiers or raw visibility masks are reported."
-  ],
-  "x-nvflare-deployment-constraints": [
-    "collection uses the permissions, workspace, and message paths NVFlare already has",
-    "collection requires no root access, privileged container, host service, monitoring sidecar container, Docker socket, additional Kubernetes RBAC permission, cloud permission, or Slurm administrator access",
-    "collection requires no new mount, launcher argument, environment variable, job setting, operator setting, or deployment setup"
   ],
   "$defs": {
     "schema_version": {
@@ -82,7 +40,7 @@
       "type": "string",
       "format": "date-time",
       "maxLength": 40,
-      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]{1,9})?Z$"
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T(?:[01][0-9]|2[0-3]):[0-9]{2}:[0-9]{2}(?:\\.[0-9]{1,9})?Z$"
     },
     "unsigned": {
       "type": "integer",
@@ -92,12 +50,12 @@
       "type": "integer",
       "exclusiveMinimum": 0
     },
-    "decimal": {
+    "number": {
       "type": "number",
       "minimum": 0,
       "description": "Finite nonnegative JSON number."
     },
-    "positive_decimal": {
+    "positive_number": {
       "type": "number",
       "exclusiveMinimum": 0,
       "description": "Finite positive JSON number."
@@ -115,18 +73,6 @@
       "pattern": "^[A-Za-z0-9][A-Za-z0-9 ._:/+-]{0,63}$",
       "description": "Bounded underlying NVFlare job-lifecycle value; distinct from resource_data."
     },
-    "capacity_unavailable": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "status"
-      ],
-      "properties": {
-        "status": {
-          "const": "unavailable"
-        }
-      }
-    },
     "source_unavailable": {
       "type": "object",
       "additionalProperties": false,
@@ -139,29 +85,6 @@
         }
       }
     },
-    "workspace_filesystem_complete": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "capacity_bytes"
-      ],
-      "properties": {
-        "capacity_bytes": {
-          "$ref": "#/$defs/positive_unsigned",
-          "description": "Final visible capacity of the filesystem containing the existing NVFlare job workspace."
-        }
-      }
-    },
-    "workspace_filesystem": {
-      "oneOf": [
-        {
-          "$ref": "#/$defs/workspace_filesystem_complete"
-        },
-        {
-          "$ref": "#/$defs/capacity_unavailable"
-        }
-      ]
-    },
     "cpu_time": {
       "type": "object",
       "additionalProperties": false,
@@ -170,7 +93,7 @@
       ],
       "properties": {
         "unit_seconds": {
-          "$ref": "#/$defs/decimal"
+          "$ref": "#/$defs/number"
         }
       }
     },
@@ -182,7 +105,7 @@
       ],
       "properties": {
         "byte_seconds": {
-          "$ref": "#/$defs/decimal"
+          "$ref": "#/$defs/number"
         }
       }
     },
@@ -194,7 +117,7 @@
       ],
       "properties": {
         "instance_seconds": {
-          "$ref": "#/$defs/decimal"
+          "$ref": "#/$defs/number"
         }
       }
     },
@@ -289,7 +212,7 @@
       ],
       "properties": {
         "cpu_seconds": {
-          "$ref": "#/$defs/decimal"
+          "$ref": "#/$defs/number"
         }
       }
     },
@@ -305,7 +228,7 @@
           "const": "partial"
         },
         "cpu_seconds": {
-          "$ref": "#/$defs/decimal"
+          "$ref": "#/$defs/number"
         }
       }
     },
@@ -332,7 +255,7 @@
           ],
           "properties": {
             "cpu_seconds": {
-              "$ref": "#/$defs/decimal"
+              "$ref": "#/$defs/number"
             }
           }
         },
@@ -348,7 +271,7 @@
               "const": "partial"
             },
             "cpu_seconds": {
-              "$ref": "#/$defs/decimal"
+              "$ref": "#/$defs/number"
             }
           }
         },
@@ -363,47 +286,6 @@
               "const": "unavailable"
             }
           }
-        }
-      ]
-    },
-    "retained_numeric": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "bytes"
-      ],
-      "properties": {
-        "bytes": {
-          "$ref": "#/$defs/unsigned"
-        }
-      }
-    },
-    "retained_partial": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "status",
-        "bytes"
-      ],
-      "properties": {
-        "status": {
-          "const": "partial"
-        },
-        "bytes": {
-          "$ref": "#/$defs/unsigned"
-        }
-      }
-    },
-    "retained_content": {
-      "oneOf": [
-        {
-          "$ref": "#/$defs/retained_numeric"
-        },
-        {
-          "$ref": "#/$defs/retained_partial"
-        },
-        {
-          "$ref": "#/$defs/source_unavailable"
         }
       ]
     },
@@ -467,50 +349,6 @@
           "const": "unavailable"
         }
       }
-    },
-    "retained_total": {
-      "oneOf": [
-        {
-          "type": "object",
-          "additionalProperties": false,
-          "required": [
-            "bytes"
-          ],
-          "properties": {
-            "bytes": {
-              "$ref": "#/$defs/unsigned"
-            }
-          }
-        },
-        {
-          "type": "object",
-          "additionalProperties": false,
-          "required": [
-            "status",
-            "bytes"
-          ],
-          "properties": {
-            "status": {
-              "const": "partial"
-            },
-            "bytes": {
-              "$ref": "#/$defs/unsigned"
-            }
-          }
-        },
-        {
-          "type": "object",
-          "additionalProperties": false,
-          "required": [
-            "status"
-          ],
-          "properties": {
-            "status": {
-              "const": "unavailable"
-            }
-          }
-        }
-      ]
     },
     "message_traffic_total": {
       "oneOf": [
@@ -613,7 +451,7 @@
           "$ref": "#/$defs/resource_capacity"
         },
         "duration_seconds": {
-          "$ref": "#/$defs/decimal",
+          "$ref": "#/$defs/number",
           "description": "Shared elapsed measurement duration for this participant, including waiting. Omitted if timing is unavailable."
         },
         "resource_utilization": {
@@ -623,7 +461,7 @@
           "$ref": "#/$defs/resource_time"
         },
         "issues": {
-          "$ref": "#/$defs/participant_row_issues"
+          "$ref": "#/$defs/scope_issues"
         }
       }
     },
@@ -839,7 +677,6 @@
         "participant_name",
         "reported_at",
         "resource_capacity",
-        "workspace_filesystem",
         "resource_utilization",
         "resource_time",
         "issues"
@@ -860,14 +697,11 @@
         "reported_at": {
           "$ref": "#/$defs/timestamp"
         },
-        "workspace_filesystem": {
-          "$ref": "#/$defs/workspace_filesystem"
-        },
         "resource_capacity": {
           "$ref": "#/$defs/resource_capacity"
         },
         "duration_seconds": {
-          "$ref": "#/$defs/decimal",
+          "$ref": "#/$defs/number",
           "description": "Shared elapsed measurement duration for this participant, including waiting. Omitted if timing is unavailable."
         },
         "resource_utilization": {
@@ -958,7 +792,7 @@
       ],
       "properties": {
         "units": {
-          "$ref": "#/$defs/positive_decimal"
+          "$ref": "#/$defs/positive_number"
         }
       }
     },
@@ -970,7 +804,7 @@
       ],
       "properties": {
         "bytes": {
-          "$ref": "#/$defs/unsigned"
+          "$ref": "#/$defs/positive_unsigned"
         }
       }
     },
@@ -1062,8 +896,7 @@
       "additionalProperties": false,
       "required": [
         "cpu_consumed",
-        "message_traffic",
-        "retained_content"
+        "message_traffic"
       ],
       "properties": {
         "cpu_consumed": {
@@ -1071,9 +904,6 @@
         },
         "message_traffic": {
           "$ref": "#/$defs/message_traffic_total"
-        },
-        "retained_content": {
-          "$ref": "#/$defs/retained_total"
         }
       }
     },
@@ -1082,8 +912,7 @@
       "additionalProperties": false,
       "required": [
         "cpu_consumed",
-        "message_traffic",
-        "retained_content"
+        "message_traffic"
       ],
       "properties": {
         "cpu_consumed": {
@@ -1091,9 +920,6 @@
         },
         "message_traffic": {
           "$ref": "#/$defs/message_traffic"
-        },
-        "retained_content": {
-          "$ref": "#/$defs/retained_content"
         }
       }
     },
@@ -1109,9 +935,7 @@
           "enum": [
             "resource_capacity",
             "resource_time",
-            "workspace_filesystem",
             "cpu_consumed",
-            "retained_content",
             "message_traffic"
           ]
         },
@@ -1128,41 +952,16 @@
     "scope_issues": {
       "type": "array",
       "uniqueItems": true,
-      "maxItems": 24,
+      "maxItems": 16,
       "items": {
         "$ref": "#/$defs/scope_issue"
       },
       "description": "Scope-owned metric/code explanations, sorted by metric then code; [] when complete."
     },
-    "participant_row_issues": {
-      "type": "array",
-      "uniqueItems": true,
-      "maxItems": 20,
-      "items": {
-        "allOf": [
-          {
-            "$ref": "#/$defs/scope_issue"
-          },
-          {
-            "properties": {
-              "metric": {
-                "enum": [
-                  "resource_capacity",
-                  "resource_time",
-                  "cpu_consumed",
-                  "retained_content",
-                  "message_traffic"
-                ]
-              }
-            }
-          }
-        ]
-      }
-    },
     "total_issues": {
       "type": "array",
       "uniqueItems": true,
-      "maxItems": 16,
+      "maxItems": 6,
       "items": {
         "allOf": [
           {
@@ -1174,8 +973,13 @@
                 "enum": [
                   "resource_time",
                   "cpu_consumed",
-                  "retained_content",
                   "message_traffic"
+                ]
+              },
+              "code": {
+                "enum": [
+                  "observation_incomplete",
+                  "attribution_incomplete"
                 ]
               }
             }

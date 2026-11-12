@@ -1,308 +1,128 @@
 .. _resource_statistics_reports:
 
-Collection, Reports, and Storage
-********************************
+Reports, quality and queries
+***************************
 
-Each participant sends one final report. The server saves the available
-participant measurements together in a job summary. Job and study queries
-read that summary and calculate the requested totals.
+Collection and ownership
+========================
 
-When measurements are taken
-===========================
+Resource statistics starts after workspace preparation and before application
+construction. Each execution observes startup capacity before starting CPU and
+monotonic-duration counters. At completion, it freezes the counters and sends
+its measurements through the existing job outcome path. Reporting failures do
+not replace the application outcome.
 
-.. code-block:: text
+In task mode, the coordinator counts its own CPU and adds settled workers' CPU,
+capacity-time and traffic once. Saved-result retransmission does not add compute.
+Unsettled workers leave coverage gaps and omit the participant duration when a
+containing observation window cannot be established. The runtime owns launch,
+cancellation, results and settlement; statistics does not change those rules.
 
-   Prepare the job workspace
-       |
-   Capture CPU/RAM and GPU count; start elapsed/CPU counters
-       |
-   Run the application and count sent/received message payload
-       |
-   Finish elapsed/CPU and message counters
-       |
-   Observe file-size total and filesystem capacity
-       |
-   Send the final participant report with the job completion notification
-       |
-   Server saves participant reports and the job summary
-       |
-   Queries read the saved reports from the normal workspace archive
+When a job process restarts, the parent reads only the terminal launch's private
+handoff and checks its launch-generation token. It never substitutes a surviving
+report from an earlier launch. Missing earlier observations mark the available
+subtotal partial. Scheduling retries without execution do not create a gap.
 
-After workspace preparation, CPU/RAM and the GPU inventory are observed before
-application construction. GPU counting uses the same integer-index rules as
-NVFlare's resource manager, with a two-second inventory-command timeout.
-One participant-level ``duration_seconds`` covers execution and supplies the
-duration for CPU averages. Capacity probes are outside that window; file-size
-and filesystem-capacity observations are taken at the end.
+Aborted or server-failed jobs allow up to 20 seconds after server exit for
+expected clients to report, ending early when all reports arrive. A shorter
+configured client outcome timeout still applies. Cancellation starts immediately
+and other jobs continue processing. Final status, archive availability and release
+of that job's scheduler slot follow report closure.
 
-In task mode, the Client Job coordinates separately launched workers. Each worker
-records capacity and CPU work over its own execution window. Its capacity-time,
-CPU work and final traffic counters are folded once into the participant report.
-The public duration covers the participant, not a sum of worker durations.
-Failed work still contributes; sending a saved result again does not repeat
-its compute contribution. Missing worker observations remain gaps.
+Stored reports
+==============
 
-Reports are available after server finalization. They are not a live
-monitoring stream. Missing statistics do not change the training job's
-success or failure.
-
-How the server combines reports
-===============================
-
-When starting a job, the server records the expected server and client
-participants. The completion-request handler identifies the registered
-client and passes its report to the resource-statistics coordinator.
-
-The coordinator validates the report and keeps one accepted record for each
-participant. It copies those measurements into the job summary; it does not
-infer that participants own separate hardware. When queried, the CLI adds
-the available measurements according to each metric's rules.
-
-At finalization, participants without a valid report remain visible as gaps.
-The server writes participant files first and the job summary last. A report
-arriving after finalization does not change the saved result.
-
-Where the reports are stored
-============================
-
-The server's normal job workspace contains:
+The server accepts reports only from the expected participants of the job and
+writes the accepted measurements into the normal workspace archive:
 
 .. code-block:: text
 
    resource_stats/
+     participants/server.json
+     participants/site-1.json
      resource_summary.json
-     participants/
-       server.json
-       site-1.json
 
-The normal workspace archive includes these files. A job or study query
-needs only ``resource_summary.json``. A ``--site`` query also reads the named
-participant's report, including its workspace-filesystem capacity.
+The summary contains participant measurements and missing-report entries. Job
+and study queries derive totals from these recorded values. A site query also
+reads the selected participant detail. The ZIP reader opens only requested
+members, bounds metadata and decoded report sizes, and does not extract files.
+A missing detail file does not prevent reading the job summary.
 
-The summary remains usable if an optional detail file is missing.
-A requested detail file must match the job summary. Extra unrelated files
-in the archive do not invalidate the report.
+Statistics are self-reported. Job code can alter observations in memory or on
+disk. Server checks enforce attribution, bounded input and usable numeric
+structure, not measurement authenticity. Local producers do not repeat those
+measurement checks. File operations retain path and size protections, and local
+handoffs retain stale-launch protection.
 
-Archive queries allow at most 4 MiB of metadata reads while constructing the
-ZIP member index, including end records and archive comments. A larger index
-makes that job's resource view unavailable. This is independent of the size
-of model files or the entire archive; requested report bodies have their own
-schema size limits. Unrequested member bodies are not read.
+Queries use existing job access controls. A study query checks authorization for
+each job before reading it. Each server admits one archive-backed query at a
+time; concurrent requests receive ``resource query busy; retry later``. A remote
+job store may download the entire workspace archive to answer a small query, so
+query time and temporary disk use can depend on archive size. A client timeout
+does not cancel ongoing server storage I/O.
 
-Failure limits
-==============
+JSON fields
+===========
 
-Reports are best effort. The server initially holds accepted reports in
-memory; a crash before final files are written can lose them. A job-process
-crash can also leave no final report. These cases remain gaps rather than
-being filled with zero.
+Public reports use schema version ``1.0`` and native JSON numbers. Counts and
+bytes are integers; CPU capacity, seconds and capacity-time may be fractional.
 
-The server checks sender identity and report contents, but does not
-independently verify the participant's hardware measurements.
-
-Collection reference
-====================
-
-Child process and parent
-------------------------
-
-The job process collects measurements. The existing client process that
-launches it, called its parent, reads temporary report data from:
-
-.. code-block:: text
-
-   resource_stats/staging/terminal_handoff.<generation>.json
-
-The parent supplies the job and participant identity, assembles the report
-before releasing resources, and sends it afterward. The temporary file is
-removed only by the parent that owns that launch generation. A missing terminal
-handoff remains unavailable even if an older launch's file survives. The server
-follows its corresponding runner/parent path. Shared parent-process traffic is not included in a job's counters.
-
-Transport and validation
-------------------------
-
-The final report is attached to the existing ``REPORT_JOB_OUTCOME`` CellNet
-request. CellNet is NVFlare's process-to-process messaging layer. The
-completion handler passes the report to
-``ResourceStatsCoordinator.accept_resource_report``.
-No separate reporting service or periodic sender is needed.
-
-Validation checks identity, supported fields, finite numeric values, and record limits.
-Compact and pretty JSON are equivalent. Equivalent duplicate reports do not add
-measurements. A conflicting replacement is rejected.
-
-Final collection reads the available message counters without adding a
-statistics-only shutdown wait. Later traffic is outside that snapshot.
-
-Record layout and units
-=======================
-
-The following synthetic participant example is downloadable as
-:download:`participant_summary.json <examples/participant_summary.json>`.
-It uses the same format as a live participant report.
-
-.. list-table:: Participant fields
+.. list-table:: Measurements
    :header-rows: 1
-   :widths: 37 63
+   :widths: 40 60
 
    * - Field
      - Meaning
-   * - ``schema_version`` and ``kind``
-     - Identify the current ``1.0`` record format and participant record type.
-   * - ``job_id`` and ``participant_name``
-     - Identify the job and readable server/site name. CLI display names for jobs come from existing job metadata.
-   * - ``reported_at``
-     - UTC time when the parent assembles the public report, not the start of measurement.
-   * - ``duration_seconds``
-     - Containing participant execution duration in seconds, including waiting; omitted without a known window covering all included work.
-   * - ``resource_capacity.cpu.units``
-     - Logical CPU capacity, possibly fractional.
-   * - ``resource_capacity.memory.bytes``
-     - Visible RAM capacity in bytes.
-   * - ``resource_capacity.gpu.count``
-     - Integer count of verified NVIDIA inventory IDs selected by the execution's visibility mask.
+   * - ``resource_capacity``
+     - Startup CPU ``units``, RAM ``bytes`` and selected GPU ``count``.
    * - ``resource_time``
-     - Sum of each execution's capacity times its own duration: CPU ``unit_seconds``, RAM ``byte_seconds``, and GPU ``instance_seconds`` (GPU-seconds).
+     - Accumulated CPU ``unit_seconds``, RAM ``byte_seconds`` and GPU ``instance_seconds``.
+   * - ``duration_seconds``
+     - Participant containing duration; omitted when unavailable. Worker durations are internal.
    * - ``resource_utilization.cpu_consumed.cpu_seconds``
-     - Recorded CPU work in ``cpu_seconds``; averages use the participant duration.
-   * - ``workspace_filesystem.capacity_bytes``
-     - Point-in-time visible capacity of the workspace filesystem; participant detail only.
-   * - ``resource_utilization.retained_content.bytes``
-     - Observed logical length of regular run-directory files.
-   * - ``resource_utilization.message_traffic.sent_bytes`` and ``resource_utilization.message_traffic.received_bytes``
-     - Message payload counted in each direction by the job process and its managed trainers.
+     - CPU work across disjoint observed execution scopes.
+   * - ``resource_utilization.message_traffic``
+     - Separate integer ``sent_bytes`` and ``received_bytes`` payload totals.
+   * - ``issues``
+     - One ordered, deduplicated list of affected metrics and issue codes for the scope.
 
-Quantities use native JSON numbers. Byte totals and device counts are integers;
-CPU units, durations, CPU work and capacity-time can be fractional. Values must
-be finite and nonnegative. Large byte totals remain integers in Python; consumers
-using fixed-width or floating-point JSON number types must retain sufficient
-precision. Unknown values are not ``null`` or inferred zero.
-
-The :download:`job summary example <examples/resource_summary.json>` stores
-``job_id`` and participant entries. Each accepted entry has ``participant_name``,
-``role``, server ``received_at`` time, optional shared ``duration_seconds``, and
-copies of ``resource_capacity``, ``resource_time`` and ``resource_utilization``,
-plus one scope-level ``issues`` list. Filesystem
-capacity and filesystem-only issues stay in participant detail. Missing, invalid
-and disabled rows have no measurements and carry no issue list. Queries derive
-totals from the summary.
-
-``resource_utilization`` groups CPU work, retained content and message payload.
-Each metric keeps its own value and exceptional ``status``. One ``issues`` list
-on the containing participant or totals object supplies the explanations as
-``{"metric": "retained_content", "code": "observation_incomplete"}`` entries.
-Entries are unique and sorted by metric, then code; a complete scope has
-``"issues": []``. The list does not replace per-metric status.
-
-Participant reports and accepted participant rows carry their source issues.
-Derived job totals, each study job's totals, and study totals carry their own
-aggregate issues. Source explanations stay with participants rather than being
-copied into aggregate lists. The stored job summary and study response do not
-add another root list around their rows or totals.
-
-Utilization means recorded work, content and traffic; it does not claim GPU busy
-time or a utilization percentage.
-
-Reports contain no hardware-model descriptions or device-type groups. Raw GPU
-UUIDs, PCI addresses, environment values, credentials, and private transfer
-identifiers are not persisted.
-
-Missing and incomplete data
-==============================================
-
-A normal participant entry and successful measurement omit ``status``.
-Exceptions identify what happened without changing another measurement's value:
-
-.. list-table:: Exception statuses
-   :header-rows: 1
-   :widths: 24 28 48
-
-   * - Status
-     - Applies to
-     - Meaning
-   * - ``partial``
-     - Measurement
-     - Usable values remain; the explanation describes what could not be measured or checked.
-   * - ``unavailable``
-     - Measurement
-     - No usable value; do not substitute zero.
-   * - ``missing``
-     - Participant
-     - No valid report was available when the job was finalized.
-   * - ``invalid``
-     - Participant
-     - A received report could not be accepted as valid data.
-   * - ``disabled``
-     - Participant
-     - The server knows this expected participant was not launched for the job.
-
-Each scope-level ``issues`` entry names an affected ``metric`` and a ``code``.
-The existing codes have the following meanings. The CLI shows the explanation:
-
-.. list-table:: Issue codes
-   :header-rows: 1
-   :widths: 25 45 30
-
-   * - Code
-     - Concrete examples
-     - How to interpret the value
-   * - ``observation_incomplete``
-     - A CPU/RAM limit could not be read; GPU counting failed; a file scan stopped; a required trainer counter snapshot or earlier attempt's measurements are missing.
-     - Available values remain. Fallback capacity can be too high; file or message totals can be too low.
-   * - ``attribution_incomplete``
-     - CPU time from a child process could not be accounted for.
-     - The recorded CPU work may omit that child process.
-   * - ``unsupported``
-     - The platform does not provide the measurement, or a multi-node launch cannot be represented by a local capacity observation.
-     - No usable value is reported for that measurement. This is not zero.
-   * - ``malformed_source``
-     - A child hands its parent a negative byte count, invalid number, or incorrectly shaped measurement.
-     - The invalid value is discarded; independent valid measurements and contributions remain usable.
-
-The report does not identify the exact CPU/RAM limit that could not be read.
-
-For example, a capacity block may retain CPU and RAM while omitting an
-unavailable GPU observation:
+A complete measurement omits ``status``. A partial measurement keeps usable
+values and explicitly sets ``status: "partial"``. An unavailable measurement
+contains ``status: "unavailable"`` without an invented zero. For example:
 
 .. code-block:: json
 
    {
-     "resource_capacity": {
-       "status": "partial",
-       "cpu": {
-         "units": 2
-       },
-       "memory": {
-         "bytes": 2147483648
-       }
+     "resource_utilization": {
+       "cpu_consumed": {"status": "partial", "cpu_seconds": 12.5}
      },
-     "issues": [
-       {
-         "metric": "resource_capacity",
-         "code": "observation_incomplete"
-       }
-     ]
+     "issues": [{"metric": "cpu_consumed", "code": "attribution_incomplete"}]
    }
 
-The CLI translates gaps into readable explanations, marks incomplete numbers
-with ``*``, and shows ``—`` for unavailable values.
+Partial CPU work does not make independently complete traffic incomplete.
+An unavailable GPU dimension leaves known CPU/RAM capacity usable. Zero GPU
+capacity, zero byte counters and zero RAM limits remain observed zeros.
 
-Full participant example
-========================
+Issue codes are ``observation_incomplete``, ``attribution_incomplete``,
+``unsupported`` and ``malformed_source``. They describe missing observations,
+incomplete ownership coverage, unavailable platform support or unusable input.
+Derived totals describe their own coverage gaps without repeating every source
+diagnostic. Job summaries keep source issues on participant rows; study responses
+keep them on totals, without duplicate root-level issue lists.
+
+Duplicate participant reports do not add measurements. A changed replacement is
+rejected after a report is accepted. Missing, invalid and disabled participant
+reports remain explicit gaps. A server crash before publication can lose the
+in-memory reports; this is not a durable delivery or billing system.
+
+Schema and examples
+===================
+
+The :download:`JSON Schema <../../../schemas/resource_stats.schema.json>`
+describes participant, job and study reports. These examples use synthetic data:
 
 .. literalinclude:: examples/participant_summary.json
    :language: json
 
-Source reference
-================
-
-The :github_nvflare_link:`collector <nvflare/private/fed/resource_stats/collector.py>`,
-:github_nvflare_link:`client completion path <nvflare/private/fed/client/client_executor.py>`,
-:github_nvflare_link:`server completion handler <nvflare/private/fed/server/fed_server.py>`,
-:github_nvflare_link:`coordinator <nvflare/private/fed/resource_stats/coordinator.py>`,
-and :github_nvflare_link:`archive reader <nvflare/private/fed/resource_stats/archive_reader.py>`
-implement the flow above. The
-:github_nvflare_link:`report reader <nvflare/private/fed/resource_stats/report_reader.py>`
-and :github_nvflare_link:`JSON Schema <docs/schemas/resource_stats.schema.json>`
-define required fields, accepted values, privacy checks, and bounds.
+.. literalinclude:: examples/resource_summary.json
+   :language: json

@@ -4,7 +4,7 @@ Resource Statistics
 *******************
 
 After a job finishes, resource statistics shows its participants' CPU, memory,
-and GPU capacity, recorded CPU work, total run-directory file size, and message
+and GPU capacity, recorded CPU work and message
 payload sent and received. Use it to inspect one job, look more closely
 at a participant, or compare retained jobs in a study.
 
@@ -19,7 +19,7 @@ Start with a command
    # All participants in one finished job
    nvflare resources --job JOB_ID
 
-   # Add one participant's startup capacity and filesystem detail
+   # Add one participant's startup capacity
    nvflare resources --job JOB_ID --site site-1
 
    # Return the structured report
@@ -62,8 +62,8 @@ can be fractional. Text shows at most two decimal places without
 trailing zeros, and positive values below 0.01 as ``<0.01``. JSON keeps full
 report precision.
 
-The utilization table groups average CPU use, files, and message payload;
-capacity-time is shown separately. File and message quantities use GiB, where 1 GiB is 1,073,741,824 bytes.
+The utilization table groups average CPU use and message payload;
+capacity-time is shown separately. Message quantities use GiB, where 1 GiB is 1,073,741,824 bytes.
 ``PAYLOAD SENT`` and ``PAYLOAD RECEIVED`` are separate counters for the job's
 messaging processes. They include repeated transfers and control payloads,
 but not network headers. See :ref:`resource_statistics_message_traffic` for
@@ -73,7 +73,7 @@ Reports retain startup capacity and accumulated execution capacity-time.
 Queries add the recorded capacity-time, without multiplying it again by the
 participant duration. Several participants or jobs
 can see the same physical hardware, so their sums are not an inventory of
-unique machines. Filesystem capacity is never multiplied by time or summed.
+unique machines.
 
 Incomplete information
 ======================
@@ -101,7 +101,6 @@ details follow for readers who need them.
 
    resource_statistics/capacity
    resource_statistics/cpu_work
-   resource_statistics/files
    resource_statistics/message_traffic
    resource_statistics/reports
 

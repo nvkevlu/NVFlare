@@ -50,7 +50,7 @@ A participant stores both counters:
    }
 
 This participant sent 1 GiB and received 0.5 GiB during collection.
-A successful zero counter is written as ``"0"``. Missing observations are
+A successful zero counter is written as ``0``. Missing observations are
 not assumed to be zero.
 
 Job and study views sum each direction separately. Do not add sent and
