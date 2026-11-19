@@ -16,6 +16,6 @@ Recorded resource utilization totals
   CPU time used 0.05 core-h | Payload sent 0 GiB | Payload received 0 GiB
 
 Data gaps:
-  site-1: capacity-time unavailable (not supported here)
+  site-1: capacity-time unavailable
 
 * = incomplete; — = unavailable.

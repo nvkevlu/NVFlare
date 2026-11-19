@@ -23,7 +23,7 @@ import pytest
 
 from dev_tools.generate_resource_stats_examples import examples
 from nvflare.private.fed.resource_stats.measurements import SCHEMA_VERSION, canonical_json_bytes
-from nvflare.private.fed.resource_stats.report_reader import read_resource_report
+from nvflare.private.fed.resource_stats.report_reader import KIND_PARTICIPANT_SUMMARY, read_resource_report
 
 ROOT = Path(__file__).resolve().parents[5]
 PUBLIC = ROOT / "docs/user_guide/admin_guide/resource_statistics"
@@ -48,7 +48,7 @@ def test_schema_has_current_version_and_required_capacity_time():
     assert schema["$defs"]["schema_version"]["const"] == SCHEMA_VERSION == "1.0"
     for definition in ("participant_summary", "accepted_participant_entry"):
         fields = schema["$defs"][definition]
-        assert "resource_time" in fields["required"]
+        assert {"reported_at", "resource_time"} <= set(fields["required"])
         assert fields["properties"]["resource_time"] == {"$ref": "#/$defs/resource_time"}
 
 
@@ -68,7 +68,7 @@ def test_json_excerpts_fit_the_public_report(page):
         utilization = excerpt.pop("resource_utilization", {})
         value.update(excerpt)
         value["resource_utilization"].update(utilization)
-        read_resource_report(canonical_json_bytes(value))
+        read_resource_report(canonical_json_bytes(value), KIND_PARTICIPANT_SUMMARY)
 
 
 def test_guide_uses_public_interfaces():

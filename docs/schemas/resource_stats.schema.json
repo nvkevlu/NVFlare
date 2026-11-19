@@ -428,6 +428,7 @@
       "required": [
         "participant_name",
         "role",
+        "reported_at",
         "received_at",
         "resource_capacity",
         "resource_utilization",
@@ -443,6 +444,9 @@
             "client",
             "server"
           ]
+        },
+        "reported_at": {
+          "$ref": "#/$defs/timestamp"
         },
         "received_at": {
           "$ref": "#/$defs/timestamp"

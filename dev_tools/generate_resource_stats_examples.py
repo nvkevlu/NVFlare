@@ -20,12 +20,12 @@
 from __future__ import annotations
 
 import argparse
-import io
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from zipfile import ZIP_DEFLATED, ZipFile
 
 from nvflare.private.fed.resource_stats import measurements, report_reader
-from nvflare.private.fed.resource_stats.archive_reader import WorkspaceResourceStatsReader
+from nvflare.private.fed.resource_stats.archive_reader import RESOURCE_SUMMARY_MEMBER, WorkspaceResourceStatsReader
 from nvflare.tool.resources.resources_output import render_job_resources, render_study_resources
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -78,7 +78,8 @@ def entry(record):
     return {
         "participant_name": record["participant_name"],
         "role": "server" if record["participant_name"] == "server" else "client",
-        "received_at": AT,
+        "reported_at": record["reported_at"],
+        "received_at": "2026-10-29T12:00:01Z",
         **measurements.participant_measurements(record),
     }
 
@@ -113,23 +114,15 @@ def summary(records, *, missing=False):
         "job_id": records[0]["job_id"],
         "participants": entries,
     }
-    return report_reader.read_resource_report(measurements.canonical_json_bytes(value))
-
-
-def archive_read(records, *, missing=False):
-    """Validate summary and detail through the production ZIP reader."""
-    value = summary(records, missing=missing)
-    bodies = {record["participant_name"]: record for record in records}
-    files = {f"participants/{name}.json": measurements.canonical_json_bytes(record) for name, record in bodies.items()}
-    files["resource_summary.json"] = measurements.canonical_json_bytes(value)
-    stream = io.BytesIO()
-    with ZipFile(stream, "w", compression=ZIP_DEFLATED) as archive:
-        for name, data in files.items():
-            archive.writestr("resource_stats/" + name, data)
-    reader = WorkspaceResourceStatsReader(stream.getvalue())
-    decoded = reader.read_resource_summary()
-    decoded_records = {name: reader.read_participant_summary(name) for name in bodies}
-    return decoded, decoded_records
+    with TemporaryDirectory() as tmp:
+        path = Path(tmp) / "workspace.zip"
+        with ZipFile(path, "w", compression=ZIP_DEFLATED) as archive:
+            archive.writestr(RESOURCE_SUMMARY_MEMBER, measurements.canonical_json_bytes(value))
+        reader = WorkspaceResourceStatsReader(path)
+        decoded = reader.read_resource_summary()
+        for record in records:
+            assert reader.read_participant_summary(record["participant_name"]) == record
+        return decoded
 
 
 def examples():
@@ -179,7 +172,7 @@ def examples():
         ("resource_summary_large_value", [large], False),
         ("resource_summary_task", [task], False),
     ):
-        summaries[label], _bodies = archive_read(members, missing=missing)
+        summaries[label] = summary(members, missing=missing)
     second_job = participant(job_id="synthetic-capacity-second-job")
     second_job["duration_seconds"] = 300
     second_job["resource_capacity"].update(cpu={"units": 16}, memory={"bytes": 32 * GIB})
@@ -187,7 +180,7 @@ def examples():
     second_server = server(job_id=second_job["job_id"])
     second_server["duration_seconds"] = 310
     second_server["resource_utilization"]["cpu_consumed"] = {"cpu_seconds": 60}
-    second_summary, _ = archive_read([second_job, second_server])
+    second_summary = summary([second_job, second_server])
     rows = []
     for value in [summaries["resource_summary"], second_summary]:
         rows.append(
@@ -228,9 +221,10 @@ def examples():
     records["study_summary"] = study
     outputs = {}
     for name, record in records.items():
-        if record["kind"] != report_reader.KIND_STUDY_SUMMARY:
-            report_reader.read_resource_report(measurements.canonical_json_bytes(record))
-        outputs[name + ".json"] = measurements.canonical_json_bytes(record)
+        data = measurements.canonical_json_bytes(record)
+        if record["kind"] == report_reader.KIND_PARTICIPANT_SUMMARY:
+            report_reader.read_resource_report(data, report_reader.KIND_PARTICIPANT_SUMMARY)
+        outputs[name + ".json"] = data
     for name, value in summaries.items():
         outputs[name + ".txt"] = (
             render_job_resources(value, job_name="Synthetic capacity contract example") + "\n"

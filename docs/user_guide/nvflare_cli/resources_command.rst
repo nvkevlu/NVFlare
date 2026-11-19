@@ -41,7 +41,7 @@ Arguments
 - ``--schema``: print the command schema without connecting to a server.
 
 Bare ``nvflare resources`` displays help; in JSON mode, a missing selector
-returns an ``INVALID_ARGUMENT`` error envelope. Use the standard startup-kit
+returns an ``INVALID_ARGS`` error envelope. Use the standard startup-kit
 selection described in :ref:`job_cli`; no feature-specific setup is required.
 A job name comes from existing job metadata and does not replace its ID.
 
@@ -81,10 +81,8 @@ access, rows, totals, or coverage counts. Nonterminal jobs and jobs without a
 readable final summary do not contribute to numeric totals. The view covers
 only jobs still retained in the job store.
 
-Resource queries use a five-minute default command wait because they read
-workspace archives. A query returns as soon as its result is ready; a timeout
-does not cancel the server's archive read. Other commands retain their existing
-timeouts.
+The default wait for resource queries is 300 seconds. A client timeout leaves
+the server's archive read running.
 
 Structured output and errors
 ============================
@@ -95,12 +93,11 @@ plus ``data.participant`` when ``--site`` is requested. A study envelope contain
 readers support only the current schema ``1.0``. The format and example files
 are described in :ref:`resource_statistics_reports`.
 
-An unknown job returns ``JOB_NOT_FOUND``. A job not yet finalized returns
-``JOB_NOT_FINALIZED``; retry after completion. ``--site`` without ``--job``
-returns ``INVALID_ARGUMENT``. A requested participant-detail file must exist
-and agree with the job summary. Missing detail does not invalidate a summary-only
-job or study query. Archive metadata limits still apply; see
-:ref:`resource_statistics_reports`.
+An unknown job returns ``JOB_NOT_FOUND``. For ``JOB_NOT_FINALIZED``, retry after
+the job finishes. Using ``--site`` without ``--job`` returns ``INVALID_ARGS``.
+If the selected site has no accepted report, the command returns
+``RESOURCE_DATA_UNAVAILABLE``. Repeat the same job query without ``--site`` to see
+which participants reported. The job summary still includes their measurements.
 
 For live system resource information, use ``nvflare system resources``.
 For running-job training statistics, use ``nvflare job stats``. The same saved

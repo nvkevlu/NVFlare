@@ -6,7 +6,8 @@
       "duration_seconds": 9007199254740993,
       "issues": [],
       "participant_name": "site-1",
-      "received_at": "2026-10-29T12:00:00Z",
+      "received_at": "2026-10-29T12:00:01Z",
+      "reported_at": "2026-10-29T12:00:00Z",
       "resource_capacity": {
         "cpu": {
           "units": 1048576

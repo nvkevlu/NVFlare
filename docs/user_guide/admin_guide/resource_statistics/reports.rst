@@ -1,7 +1,7 @@
 .. _resource_statistics_reports:
 
 Reports, quality and queries
-***************************
+****************************
 
 Collection and ownership
 ========================
@@ -32,21 +32,16 @@ of that job's scheduler slot follow report closure.
 Stored reports
 ==============
 
-The server accepts reports only from the expected participants of the job and
-writes the accepted measurements into the normal workspace archive:
+The server stores one file, ``resource_stats/resource_summary.json``, per job.
+It lists every expected participant. Each accepted entry contains the measurements,
+the participant's report time (``reported_at``) and the server's receipt time
+(``received_at``). Job and study queries use those entries to calculate totals.
+A site query returns the selected participant's measurements and original report
+time from the same entry.
 
-.. code-block:: text
-
-   resource_stats/
-     participants/server.json
-     participants/site-1.json
-     resource_summary.json
-
-The summary contains participant measurements and missing-report entries. Job
-and study queries derive totals from these recorded values. A site query also
-reads the selected participant detail. The ZIP reader opens only requested
-members, bounds metadata and decoded report sizes, and does not extract files.
-A missing detail file does not prevent reading the job summary.
+Queries look in the workspace archive first. If the summary is absent and the
+job stored outputs separately, they look in the outputs archive. The ZIP reader
+limits the size of archive metadata and the summary it reads.
 
 Statistics are self-reported. Job code can alter observations in memory or on
 disk. Server checks enforce attribution, bounded input and usable numeric
@@ -56,10 +51,11 @@ handoffs retain stale-launch protection.
 
 Queries use existing job access controls. A study query checks authorization for
 each job before reading it. Each server admits one archive-backed query at a
-time; concurrent requests receive ``resource query busy; retry later``. A remote
-job store may download the entire workspace archive to answer a small query, so
-query time and temporary disk use can depend on archive size. A client timeout
-does not cancel ongoing server storage I/O.
+time. Concurrent requests receive ``resource query busy; retry later``. A study
+query reads one job at a time. Filesystem storage seeks directly to the summary
+after reading the ZIP index. Other stores may stage a whole archive, so query
+time and temporary disk use can depend on archive size. A client timeout does
+not cancel the scan.
 
 JSON fields
 ===========
